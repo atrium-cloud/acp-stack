@@ -1,3 +1,8 @@
 fn main() {
-    println!("acps {}", env!("CARGO_PKG_VERSION"));
+    acp_stack::tracing_init::init();
+
+    if let Err(error) = acp_stack::cli::run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 }
