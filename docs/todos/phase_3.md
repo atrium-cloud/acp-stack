@@ -1,0 +1,77 @@
+# Phase 3 Todo - Portable Logging And Analytics
+
+## References
+
+- [project-spec](../specs/project-spec.md)
+- [api](../specs/api/api.md)
+- [acpctl](../specs/acpctl/acpctl.md)
+- [roadmap](../mgmt/roadmap.md)
+
+## External Logging Schema
+
+- [ ] Define the logical migration sequence shared by SQLite and PostgreSQL-compatible sinks.
+- [ ] Add schema for sessions, turns, events, commands, permissions, security events, lifecycle records, and derived metrics.
+- [ ] Document required indexes for local query performance and Supabase/PostgreSQL mirrors.
+- [ ] Add migration compatibility tests between SQLite and PostgreSQL DDL where practical.
+
+## Supabase Logging Sink
+
+- [ ] Add `[logging.supabase]` config validation.
+- [ ] Resolve `service_role_key_ref` from the secret store only when external logging is enabled.
+- [ ] Batch or stream normalized events to Supabase.
+- [ ] Retry transient sink failures without blocking local SQLite writes.
+- [ ] Persist sink delivery status and failure summaries locally.
+- [ ] Ensure external sink payloads never include secret values.
+
+## Metrics
+
+- [ ] Derive session duration metrics.
+- [ ] Derive turn counts.
+- [ ] Capture token usage when reported by the agent.
+- [ ] Capture context window usage when reported by the agent.
+- [ ] Derive command counts and command durations.
+- [ ] Derive permission response times.
+- [ ] Derive API connection summaries.
+- [ ] Derive WebSocket connection summaries.
+- [ ] Derive security event summaries.
+- [ ] Implement `GET /v1/metrics/summary`.
+
+## Log Query UX
+
+- [ ] Add query filters for time range, source, session ID, command ID, permission ID, and event kind.
+- [ ] Add pagination for event, command, permission, security, and session logs.
+- [ ] Implement `acps logs query --since <duration>`.
+- [ ] Implement `acps logs query --session <session-id>`.
+- [ ] Implement `acps logs query --kind <kind>`.
+
+## Local Agent CLI
+
+- [ ] Implement `acpctl status`.
+- [ ] Implement `acpctl security check`.
+- [ ] Implement `acpctl deps check`.
+- [ ] Implement `acpctl logs query --since <duration>`.
+- [ ] Implement `acpctl workspace list <path>`.
+- [ ] Implement `acpctl workspace read <path>`.
+- [ ] Implement `acpctl workspace write <path>`.
+- [ ] Implement `acpctl command run <command>`.
+- [ ] Implement `acpctl config export`.
+- [ ] Implement `acpctl permissions pending`.
+- [ ] Ensure `acpctl` uses a local capability mechanism rather than public session/admin API keys.
+- [ ] Ensure `acpctl` actions are logged with source `local`.
+
+## Local MCP Introspection
+
+- [ ] Implement `acpctl mcp serve`.
+- [ ] Expose status, dependency, log, workspace, command, config export, and pending-permission tools.
+- [ ] Enforce the same permission and logging rules as the `acpctl` CLI.
+- [ ] Prevent agents from reading secret values through the local MCP interface.
+- [ ] Prevent agents from rotating API keys through the local MCP interface.
+- [ ] Prevent agents from disabling permissions, rate limits, origin checks, or security logging.
+
+## Acceptance
+
+- [ ] SQLite remains the local source of truth when external logging is enabled.
+- [ ] Supabase logging can be enabled and inspected.
+- [ ] Derived session, turn, token, context, command, duration, permission, API, WebSocket, and security metrics are queryable.
+- [ ] Agents can use `acpctl` for constrained local inspection.
+- [ ] `acpctl mcp serve` exposes the same constrained local interface through MCP.

@@ -1,0 +1,117 @@
+# Phase 1 Todo - Local Runtime Foundation
+
+## References
+
+- [project-spec](../specs/project-spec.md)
+- [api](../specs/api/api.md)
+- [acp-bridge](../specs/acp/acp-bridge.md)
+- [architecture](../mgmt/architecture.md)
+- [roadmap](../mgmt/roadmap.md)
+
+## Runtime And Project Skeleton
+
+- [x] Create the Rust workspace and primary `acps` binary.
+- [ ] Add config, API, auth, state, agent bridge, workspace, command, logs, and supervisor modules.
+- [ ] Add structured tracing initialization.
+- [ ] Add baseline error type and response-envelope mapping.
+- [ ] Add unit/integration test harness.
+
+## Config
+
+- [ ] Define `acp-stack.toml` schema for API, auth, workspace, logging, and agent settings.
+- [ ] Implement config load from `~/.config/acp-stack/acp-stack.toml`.
+- [ ] Implement config validation with typed errors.
+- [ ] Implement `acps config validate [path]`.
+- [ ] Implement `acps config export [--output path]`.
+- [ ] Implement `acps config export --base64`.
+- [ ] Implement `acps config import <path>`.
+- [ ] Implement `acps config import --base64 <code>`.
+
+## State
+
+- [ ] Create SQLite migration runner.
+- [ ] Add tables for sessions, events, commands, agent lifecycle records, auth failures, and installer runs.
+- [ ] Add repository layer for appending and querying runtime records.
+- [ ] Ensure state is stored under `~/.local/share/acp-stack/state.sqlite`.
+
+## Auth
+
+- [ ] Generate session and admin API keys during `acps init`.
+- [ ] Store API key material through secret references, not plaintext config.
+- [ ] Implement constant-time API key comparison.
+- [ ] Enforce session-key vs admin-key route authorization.
+- [ ] Log failed authentication attempts without storing attempted key values.
+- [ ] Implement `acps auth regenerate-session-key`.
+- [ ] Ensure the admin key is generated only once during init and is not regenerable.
+
+## HTTP And WebSocket API
+
+- [ ] Serve all public routes under `/v1`.
+- [ ] Implement the standard success/error response envelope.
+- [ ] Add request body size limits from config.
+- [ ] Implement status routes.
+- [ ] Implement config API routes.
+- [ ] Implement agent lifecycle API routes.
+- [ ] Implement session API route stubs wired to the ACP bridge.
+- [ ] Implement workspace file API routes.
+- [ ] Implement command API routes.
+- [ ] Implement log query API routes.
+- [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs.
+
+## ACP Agent Bridge
+
+- [ ] Launch one configured ACP agent per runtime.
+- [ ] Set agent cwd to `agent.cwd` or `workspace.root`.
+- [ ] Inject only environment variables referenced by `[agent].env`.
+- [ ] Send ACP `initialize` and persist returned capabilities.
+- [ ] Map session create/load/resume/close/prompt/cancel to ACP session methods where supported.
+- [ ] Forward ACP `session/update` notifications to WebSocket and SQLite.
+- [ ] Return typed unsupported-capability errors instead of emulating missing ACP features.
+
+## Agent Installation
+
+- [ ] Implement declared shell installer execution.
+- [ ] Check `creates` before and after install.
+- [ ] Capture installer stdout, stderr, exit status, and timestamps.
+- [ ] Implement `acps agent install`.
+- [ ] Implement `acps agent start`.
+- [ ] Implement `acps agent stop`.
+- [ ] Implement `acps agent status`.
+- [ ] Verify expected binary hash when `expected_sha256` is configured.
+
+## Workspace And Commands
+
+- [ ] Resolve all relative workspace paths under `workspace.root`.
+- [ ] Reject path traversal.
+- [ ] Reject symlink escapes by default.
+- [ ] Implement bounded file reads.
+- [ ] Implement explicit binary downloads.
+- [ ] Implement atomic writes where practical.
+- [ ] Implement file upload and delete.
+- [ ] Implement daemon-mediated shell command execution.
+- [ ] Capture command stdout, stderr, exit status, and timing.
+- [ ] Stream command output over WebSocket.
+
+## CLI Surface
+
+- [ ] Implement `acps init`.
+- [ ] Implement `acps serve`.
+- [ ] Implement `acps status`.
+- [ ] Implement `acps sessions list`.
+- [ ] Implement `acps sessions new`.
+- [ ] Implement `acps sessions prompt <session-id>`.
+- [ ] Implement `acps sessions cancel <session-id>`.
+- [ ] Implement `acps sessions close <session-id>`.
+- [ ] Implement `acps logs tail`.
+- [ ] Implement `acps logs query`.
+
+## Acceptance
+
+- [ ] A user can initialize config and state with `acps init`.
+- [ ] A user can start the daemon with `acps serve`.
+- [ ] A direct-key ACP agent can be installed or configured.
+- [ ] A session can be created through CLI or HTTP.
+- [ ] A prompt can be sent and streamed over WebSocket.
+- [ ] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.
+- [ ] A mediated shell command can be run and logged.
+- [ ] Durable logs can be queried from SQLite.
