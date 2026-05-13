@@ -12,18 +12,18 @@
 
 - [x] Create the Rust workspace and primary `acps` binary.
 - [ ] Add config, API, auth, state, agent bridge, workspace, command, logs, and supervisor modules.
-- [ ] Add structured tracing initialization.
+- [x] Add structured tracing initialization.
 - [ ] Add baseline error type and response-envelope mapping.
-- [ ] Add unit/integration test harness.
+- [x] Add unit/integration test harness.
 
 ## Config
 
-- [ ] Define `acp-stack.toml` schema for API, auth, workspace, logging, and agent settings.
-- [ ] Implement config load from `~/.config/acp-stack/acp-stack.toml`.
-- [ ] Implement config validation with typed errors.
-- [ ] Implement `acps config validate [path]`.
-- [ ] Implement `acps config export [--output path]`.
-- [ ] Implement `acps config export --base64`.
+- [x] Define `acp-stack.toml` schema for API, auth, workspace, logging, and agent settings.
+- [x] Implement config load from `~/.config/acp-stack/acp-stack.toml`.
+- [x] Implement config validation with typed errors.
+- [x] Implement `acps config validate [path]`.
+- [x] Implement `acps config export [--output path]`.
+- [x] Implement `acps config export --base64`.
 - [ ] Implement `acps config import <path>`.
 - [ ] Implement `acps config import --base64 <code>`.
 

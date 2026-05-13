@@ -5,6 +5,8 @@ This document records the implementation technologies chosen for the standalone 
 ## Runtime Stack
 
 - `Rust` - single deployable binary and strong process/system programming fit.
+- `clap` - operator-facing CLI parsing.
+- `thiserror` - typed application errors.
 - `tokio` - async runtime.
 - `axum` - HTTP server and WebSocket upgrades.
 - `agentclientprotocol/rust-sdk` - ACP protocol implementation where suitable.
@@ -12,8 +14,9 @@ This document records the implementation technologies chosen for the standalone 
 - `sqlx` or `rusqlite` - SQLite state and migrations.
 - `tokio::process` - agent, MCP, and command execution.
 - `portable-pty` - optional PTY allocation for terminal-like command sessions.
-- `clap` - CLI.
 - `tracing` - structured logs.
+- `tracing-subscriber` - local tracing subscriber initialization.
+- `base64` - portable config export encoding.
 - `notify` - workspace file event streaming.
 - `age` or `rage` - age-compatible secret encryption.
 

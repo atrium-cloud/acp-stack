@@ -41,6 +41,8 @@ This document captures the management-level architecture for `acp-stack`. For co
 - `Permissions` - durable request/decision lifecycle for ACP permission requests and stack-mediated commands.
 - `Events` - normalizes WebSocket messages and durable event records.
 
+The current Rust crate exposes a library behind the `acps` binary. The implemented foundation includes focused `cli`, `config`, `error`, and `tracing_init` modules; API, auth, state, ACP bridge, workspace, command, secrets, and supervisor modules will be added with their first real behavior rather than as empty placeholders.
+
 ### Config vs State
 
 The config describes what the runtime should be.

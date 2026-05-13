@@ -92,6 +92,14 @@ Related commands are defined in [cli](cli.md):
 - `acps config import <path>`
 - `acps config import --base64 <code>`
 
+The initial 0.0.1 implementation supports validation and export first:
+
+- `acps config validate [path]` loads an explicit path or `~/.config/acp-stack/acp-stack.toml`.
+- `acps config export [--output path]` loads the default config and emits canonical TOML.
+- `acps config export --base64` emits the same canonical TOML as base64.
+- Validation rejects unknown fields, invalid enum values, relative workspace paths, missing `workspace.source`, incomplete `git` or `s3` source declarations, and fields that do not belong to the selected source type.
+- Mutating import and init flows are planned after the read-only config path is stable.
+
 ## Hardening
 
 Config import/export hardening belongs to the 0.0.4 line:
