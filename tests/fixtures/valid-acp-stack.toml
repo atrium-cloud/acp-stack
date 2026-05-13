@@ -1,0 +1,51 @@
+[api]
+bind = "127.0.0.1:7700"
+public_url = "https://agent.example.com"
+max_request_bytes = 104857600
+
+[auth]
+session_key_ref = "ACP_STACK_SESSION_KEY"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]
+max_request_bytes = 104857600
+rate_limit_per_minute = 120
+burst = 30
+auth_failures_per_minute = 5
+auth_block_duration = "15m"
+allowed_origins = ["https://agent.example.com"]
+trust_proxy_headers = false
+
+[workspace]
+root = "/workspace"
+uploads = "/workspace/uploads"
+default_shell = "/bin/bash"
+runtime_user = "acp"
+
+[workspace.source]
+type = "none"
+
+[logging]
+level = "info"
+local_retention_days = 30
+
+[logging.supabase]
+enabled = false
+url = "https://example.supabase.co"
+api_key_ref = "SUPABASE_SECRET_KEY"
+schema = "acp_stack"
+
+[agent]
+id = "opencode"
+name = "OpenCode"
+command = "opencode"
+args = ["--acp"]
+cwd = "/workspace"
+env = ["OPENCODE_API_KEY"]
+expected_sha256 = ""
+restart = "on-crash"
+
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"

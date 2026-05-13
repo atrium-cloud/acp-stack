@@ -68,3 +68,14 @@ Git sources may reference a credential secret for private repositories. S3 sourc
 ## Local Agent Interface
 
 `acpctl` is separate from `acps`. It is the constrained local, agent-facing interface described in [acpctl](acpctl/acpctl.md).
+
+## Current 0.0.1 Implementation Subset
+
+The first implemented CLI surface is intentionally read-only:
+
+- `acps --version`
+- `acps config validate [path]`
+- `acps config export [--output path]`
+- `acps config export --base64`
+
+When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-stack.toml`. Export currently reads the same default path and writes canonical TOML to stdout unless `--output` is provided.
