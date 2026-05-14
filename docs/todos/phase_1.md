@@ -39,7 +39,7 @@
 - [x] Generate session and admin API keys during `acps init`.
 - [x] Store API key material through secret references, not plaintext config.
 - [x] Implement constant-time API key comparison.
-- [ ] Enforce session-key vs admin-key route authorization.
+- [x] Enforce session-key vs admin-key route authorization.
 - [x] Log failed authentication attempts without storing attempted key values.
 - [x] Implement `acps auth regenerate-session-key`.
 - [x] Ensure the admin key is generated only once during init and is not regenerable.
@@ -59,16 +59,16 @@
 
 ## HTTP And WebSocket API
 
-- [ ] Serve all public routes under `/v1`.
-- [ ] Implement the standard success/error response envelope.
-- [ ] Add request body size limits from config.
-- [ ] Implement status routes.
+- [x] Serve all public routes under `/v1`.
+- [x] Implement the standard success/error response envelope.
+- [x] Add request body size limits from config.
+- [x] Implement status routes.
 - [ ] Implement config API routes.
 - [ ] Implement agent lifecycle API routes.
 - [ ] Implement session API route stubs wired to the ACP bridge.
 - [ ] Implement workspace file API routes.
 - [ ] Implement command API routes.
-- [ ] Implement log query API routes.
+- [x] Implement log query API routes.
 - [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs.
 
 ## ACP Agent Bridge
@@ -108,7 +108,7 @@
 ## CLI Surface
 
 - [x] Implement `acps init`.
-- [ ] Implement `acps serve`.
+- [x] Implement `acps serve`.
 - [x] Implement `acps status`.
 - [x] Implement `acps reset [--yes]`.
 - [ ] Implement `acps sessions list`.
@@ -122,7 +122,7 @@
 ## Acceptance
 
 - [x] A user can initialize config and state with `acps init`.
-- [ ] A user can start the daemon with `acps serve`.
+- [x] A user can start the daemon with `acps serve`.
 - [ ] A direct-key ACP agent can be installed or configured.
 - [ ] A session can be created through CLI or HTTP.
 - [ ] A prompt can be sent and streamed over WebSocket.

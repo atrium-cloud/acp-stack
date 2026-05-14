@@ -1,3 +1,4 @@
+use crate::api::{self, AppState};
 use crate::auth::generate_api_key;
 use crate::config::{self, Config};
 use crate::error::{Result, StackError};
@@ -7,6 +8,7 @@ use crate::fs_util::{
 };
 use crate::secrets::{SecretStore, age_key_path, secret_store_path};
 use crate::state::{EventFilter, StateStore, default_state_path};
+use crate::supervisor::ServerLifecycle;
 use base64::Engine;
 use clap::{Args, Parser, Subcommand};
 use std::io::BufRead as _;
@@ -29,6 +31,8 @@ enum Command {
     Init,
     Status,
     Reset(ResetArgs),
+    /// Run the HTTP daemon in the foreground. Blocks until SIGTERM or SIGINT.
+    Serve(ServeArgs),
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
@@ -45,6 +49,13 @@ enum Command {
         #[command(subcommand)]
         command: LogsCommand,
     },
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Override the `api.bind` address from config.
+    #[arg(long)]
+    bind: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +156,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Init => run_init(),
         Command::Status => run_status(),
         Command::Reset(args) => run_reset(args),
+        Command::Serve(args) => run_serve(args),
         Command::Auth { command } => run_auth_command(command),
         Command::Secrets { command } => run_secrets_command(command),
         Command::Config { command } => run_config_command(command),
@@ -519,6 +531,81 @@ fn run_status() -> Result<()> {
     println!("latest_event: {latest_event}");
 
     Ok(())
+}
+
+fn run_serve(args: ServeArgs) -> Result<()> {
+    let home = home_dir()?;
+    let config_path = config::default_config_path()?;
+    let config_dir = parent_dir(&config_path)?;
+    if config_dir.exists() {
+        set_owner_only_dir(config_dir)?;
+    }
+    if config_path.exists() {
+        set_owner_only_file(&config_path)?;
+    }
+    let config = Config::load_from_path(&config_path)?;
+
+    let state_path = default_state_path(&home);
+    let state_dir = parent_dir(&state_path)?;
+    create_dir_owner_only(state_dir)?;
+    pre_create_owner_only(&state_path)?;
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    set_owner_only_file(&state_path)?;
+
+    let secret_store = SecretStore::open(&home)?;
+    let session_ref = config.auth.session_key_ref.clone();
+    let admin_ref = config.auth.admin_key_ref.clone();
+    if !secret_store.contains(&session_ref) {
+        return Err(StackError::MissingSessionKey { name: session_ref });
+    }
+    if !secret_store.contains(&admin_ref) {
+        return Err(StackError::MissingAdminKey { name: admin_ref });
+    }
+    let session_key = secret_store.get(&session_ref)?.to_owned();
+    let admin_key = secret_store.get(&admin_ref)?.to_owned();
+
+    let bind = args.bind.unwrap_or_else(|| config.api.bind.clone());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+
+    runtime.block_on(async move {
+        // Bind first, then record `server.starting`. Recording before bind
+        // would leave a dangling start row whenever the address is already
+        // in use; pairing the lifecycle write with a successful bind keeps
+        // the durable trail truthful.
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .map_err(|source| StackError::ServeBind {
+                bind: bind.clone(),
+                source,
+            })?;
+        let local = listener
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| bind.clone());
+        let lifecycle = ServerLifecycle::starting(&store, &local)?;
+        let app_state =
+            AppState::with_effective_bind(config, store, session_key, admin_key, local.clone());
+        let state_handle = app_state.state.clone();
+        lifecycle.started(&state_handle, &local).await?;
+        eprintln!("acps serve: listening on {local}");
+        let serve_result = api::serve(app_state, listener).await;
+        let reason = match &serve_result {
+            Ok(()) => "signal",
+            Err(_) => "error",
+        };
+        // Always record stopped, even on error. Failures from the second
+        // lifecycle write are logged but do not mask the original serve error.
+        if let Err(err) = lifecycle.stopped(&state_handle, reason).await {
+            tracing::error!(error = %err, "failed to record server.stopped");
+        }
+        eprintln!("acps serve: stopped ({reason})");
+        serve_result
+    })
 }
 
 fn run_logs_command(command: LogsCommand) -> Result<()> {
