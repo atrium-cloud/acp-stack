@@ -1,14 +1,16 @@
-use crate::config::Config;
+use crate::auth::generate_api_key;
+use crate::config::{self, Config};
 use crate::error::{Result, StackError};
+use crate::fs_util::{
+    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
+    set_owner_only_dir, set_owner_only_file, write_new_file_owner_only,
+};
+use crate::secrets::{SecretStore, age_key_path, secret_store_path};
 use crate::state::{EventFilter, StateStore, default_state_path};
 use base64::Engine;
 use clap::{Args, Parser, Subcommand};
-use std::env;
-use std::fs::Permissions;
-use std::io::Write as _;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::io::BufRead as _;
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -26,6 +28,15 @@ pub struct Cli {
 enum Command {
     Init,
     Status,
+    Reset(ResetArgs),
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -36,15 +47,45 @@ enum Command {
     },
 }
 
+#[derive(Debug, Args)]
+struct ResetArgs {
+    /// Confirm deletion of config, state, age key, and secret store.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Generate a new session key and store it in the encrypted secret store.
+    /// The admin key is not regenerable; use `acps reset --yes` to rotate it.
+    RegenerateSessionKey,
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretsCommand {
+    /// List secret reference names. Values are never printed.
+    List,
+    /// Read a single line from stdin and store it as the named secret.
+    Set(SecretsSetArgs),
+    /// Remove the named secret from the store.
+    Delete(SecretsDeleteArgs),
+}
+
+#[derive(Debug, Args)]
+struct SecretsSetArgs {
+    name: String,
+}
+
+#[derive(Debug, Args)]
+struct SecretsDeleteArgs {
+    name: String,
+}
+
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
     Validate(ConfigValidateArgs),
     Export(ConfigExportArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum LogsCommand {
-    Query(LogsQueryArgs),
+    Import(ConfigImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -58,6 +99,23 @@ struct ConfigExportArgs {
     output: Option<PathBuf>,
     #[arg(long)]
     base64: bool,
+}
+
+#[derive(Debug, Args)]
+struct ConfigImportArgs {
+    /// Path to a TOML config file. Mutually exclusive with --base64.
+    path: Option<PathBuf>,
+    /// Base64-encoded canonical TOML. Mutually exclusive with `path`.
+    #[arg(long, conflicts_with = "path")]
+    base64: Option<String>,
+    /// Replace the existing config; without --force, import refuses to clobber.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum LogsCommand {
+    Query(LogsQueryArgs),
 }
 
 #[derive(Debug, Args)]
@@ -86,12 +144,21 @@ fn run_cli(cli: Cli) -> Result<()> {
     let result = match cli.command {
         Command::Init => run_init(),
         Command::Status => run_status(),
+        Command::Reset(args) => run_reset(args),
+        Command::Auth { command } => run_auth_command(command),
+        Command::Secrets { command } => run_secrets_command(command),
         Command::Config { command } => run_config_command(command),
         Command::Logs { command } => run_logs_command(command),
     };
 
     if let Err(error) = &result {
-        record_cli_error_message(&strip_ansi(&error.to_string()));
+        // `acps reset` dry-run intentionally returns this error to signal the
+        // operator must pass `--yes`. The dry-run contract is "exits without
+        // touching the filesystem" — recording a `cli.error` row into
+        // state.sqlite would violate that, so we skip the durable log for it.
+        if !matches!(error, StackError::ResetNotConfirmed) {
+            record_cli_error_message(&strip_ansi(&error.to_string()));
+        }
     }
 
     result
@@ -122,7 +189,200 @@ fn run_config_command(command: ConfigCommand) -> Result<()> {
 
             Ok(())
         }
+        ConfigCommand::Import(args) => run_config_import(args),
     }
+}
+
+fn run_config_import(args: ConfigImportArgs) -> Result<()> {
+    let raw_toml = match (args.path.as_deref(), args.base64.as_deref()) {
+        (None, None) => {
+            return Err(StackError::MissingField {
+                field: "config import requires either <path> or --base64",
+            });
+        }
+        (Some(_), Some(_)) => {
+            return Err(StackError::MissingField {
+                field: "config import accepts only one of <path> or --base64",
+            });
+        }
+        (Some(path), None) => {
+            std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+                path: path.to_path_buf(),
+                source,
+            })?
+        }
+        (None, Some(encoded)) => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|source| StackError::ImportBase64Decode { source })?;
+            String::from_utf8(decoded).map_err(|source| StackError::ImportUtf8 { source })?
+        }
+    };
+
+    let config = config::load_config_from_str(&raw_toml)?;
+    let canonical = config.to_canonical_toml()?;
+    let target = config::default_config_path()?;
+
+    let target_dir = parent_dir(&target)?;
+    create_dir_owner_only(target_dir)?;
+
+    if target.exists() {
+        if !args.force {
+            return Err(StackError::ConfigExists {
+                path: target.clone(),
+            });
+        }
+        // Refuse to change the auth-ref names through import. Allowing it
+        // would let an operator point `admin_key_ref` at a secret of their
+        // own choosing, effectively replacing the original admin key without
+        // going through `acps reset --yes` — bypassing the documented
+        // reset-only rotation path for the admin key.
+        let current = Config::load_from_path(&target)?;
+        if current.auth.session_key_ref != config.auth.session_key_ref {
+            return Err(StackError::ImportChangesAuthRef {
+                field: "session_key_ref",
+                current: current.auth.session_key_ref,
+                incoming: config.auth.session_key_ref,
+            });
+        }
+        if current.auth.admin_key_ref != config.auth.admin_key_ref {
+            return Err(StackError::ImportChangesAuthRef {
+                field: "admin_key_ref",
+                current: current.auth.admin_key_ref,
+                incoming: config.auth.admin_key_ref,
+            });
+        }
+        // Atomic replace via temp file + rename, with owner-only mode on both
+        // the temp and the final file. Avoids leaving a truncated config on
+        // crash mid-write, which would otherwise brick the next `acps` run.
+        atomic_write_owner_only(&target, canonical.as_bytes())?;
+        println!("imported config (replaced): {}", target.display());
+    } else {
+        write_new_file_owner_only(&target, canonical.as_bytes())?;
+        println!("imported config: {}", target.display());
+    }
+
+    Ok(())
+}
+
+fn run_auth_command(command: AuthCommand) -> Result<()> {
+    match command {
+        AuthCommand::RegenerateSessionKey => run_auth_regenerate_session_key(),
+    }
+}
+
+fn run_auth_regenerate_session_key() -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let mut store = SecretStore::open(&home)?;
+    let session_ref = config.auth.session_key_ref.clone();
+    let admin_ref = config.auth.admin_key_ref.clone();
+    // Mirror the init invariant: any operation on the auth secret pair must
+    // see both refs in the store. Otherwise rotation could silently create a
+    // new session secret in a half-initialized store where the admin key was
+    // separately deleted, papering over an anomaly that should require reset.
+    if !store.contains(&admin_ref) {
+        return Err(StackError::MissingAdminKey { name: admin_ref });
+    }
+    if !store.contains(&session_ref) {
+        return Err(StackError::MissingSessionKey { name: session_ref });
+    }
+    let new_key = generate_api_key();
+    store.set(&session_ref, &new_key)?;
+    println!("session key rotated");
+    println!("reference: {session_ref}");
+    println!("value: {new_key}");
+    println!("update any clients with the new value; the previous key is now invalid");
+    Ok(())
+}
+
+fn run_secrets_command(command: SecretsCommand) -> Result<()> {
+    let home = home_dir()?;
+    match command {
+        SecretsCommand::List => {
+            let store = SecretStore::open(&home)?;
+            for name in store.list_names() {
+                println!("{name}");
+            }
+            Ok(())
+        }
+        SecretsCommand::Set(args) => {
+            let config = Config::load_from_default_path()?;
+            reject_auth_ref_mutation(&args.name, &config)?;
+            // Read a single line from stdin; trailing CR/LF stripped. Values
+            // are single-line text by spec — multi-line input would silently
+            // store the rest of stdin, which is surprising.
+            let mut buffer = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut buffer)
+                .map_err(|source| StackError::StdinRead { source })?;
+            let value = buffer.trim_end_matches(['\n', '\r']);
+            let mut store = SecretStore::open(&home)?;
+            store.set(&args.name, value)?;
+            println!("set secret: {}", args.name);
+            Ok(())
+        }
+        SecretsCommand::Delete(args) => {
+            let config = Config::load_from_default_path()?;
+            reject_auth_ref_mutation(&args.name, &config)?;
+            let mut store = SecretStore::open(&home)?;
+            store.delete(&args.name)?;
+            println!("deleted secret: {}", args.name);
+            Ok(())
+        }
+    }
+}
+
+/// `acps secrets set/delete` must not touch the configured auth refs.
+/// Direct manipulation would bypass the regenerate-session-key flow and the
+/// "admin key never regenerable in place" invariant.
+fn reject_auth_ref_mutation(name: &str, config: &Config) -> Result<()> {
+    if name == config.auth.session_key_ref {
+        return Err(StackError::SecretReservedForAuth {
+            name: name.to_owned(),
+            kind: "session",
+        });
+    }
+    if name == config.auth.admin_key_ref {
+        return Err(StackError::SecretReservedForAuth {
+            name: name.to_owned(),
+            kind: "admin",
+        });
+    }
+    Ok(())
+}
+
+fn run_reset(args: ResetArgs) -> Result<()> {
+    let home = home_dir()?;
+    let config_path = config::default_config_path()?;
+    let state_path = default_state_path(&home);
+    let age_key = age_key_path(&home);
+    let store_path = secret_store_path(&home);
+
+    let targets = [&config_path, &state_path, &age_key, &store_path];
+
+    if !args.yes {
+        println!("acps reset would delete:");
+        for target in targets {
+            println!("  {}", target.display());
+        }
+        println!("re-run with --yes to confirm");
+        return Err(StackError::ResetNotConfirmed);
+    }
+
+    for target in targets {
+        if !target.exists() {
+            continue;
+        }
+        std::fs::remove_file(target).map_err(|source| StackError::FileRemove {
+            path: target.to_path_buf(),
+            source,
+        })?;
+    }
+
+    println!("reset acp-stack: removed config, state, age key, and secret store");
+    Ok(())
 }
 
 fn load_config(path: Option<PathBuf>) -> Result<Config> {
@@ -134,7 +394,7 @@ fn load_config(path: Option<PathBuf>) -> Result<Config> {
 
 fn run_init() -> Result<()> {
     let home = home_dir()?;
-    let config_path = crate::config::default_config_path()?;
+    let config_path = config::default_config_path()?;
     let state_path = default_state_path(&home);
     let config_dir = parent_dir(&config_path)?;
     let state_dir = parent_dir(&state_path)?;
@@ -158,18 +418,78 @@ fn run_init() -> Result<()> {
     let store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
+
+    let config = Config::load_from_path(&config_path)?;
+    let session_ref = config.auth.session_key_ref.clone();
+    let admin_ref = config.auth.admin_key_ref.clone();
+    let store_existed = secret_store_path(&home).exists();
+    let mut secret_store = SecretStore::open_or_create(&home)?;
+    let session_present = secret_store.contains(&session_ref);
+    let admin_present = secret_store.contains(&admin_ref);
+    let auth_status = if store_existed {
+        // Pre-existing store: both refs must be present. Half-initialized state
+        // (e.g. one ref deleted, or unrelated secrets but no auth refs) is an
+        // anomaly. Refuse to proceed — admin key is not regenerable in place;
+        // the documented recovery path is `acps reset --yes`.
+        if !admin_present {
+            return Err(StackError::MissingAdminKey { name: admin_ref });
+        }
+        if !session_present {
+            return Err(StackError::MissingSessionKey { name: session_ref });
+        }
+        "preserved existing API keys"
+    } else {
+        // Fresh store: generate both keys. Print the values BEFORE the durable
+        // event write, so a downstream failure in `append_event` cannot leave
+        // the persisted-but-never-revealed admin key unrecoverable.
+        let session_value = generate_api_key();
+        let admin_value = generate_api_key();
+        println!("---");
+        println!("session key ({session_ref}): {session_value}");
+        println!("admin key ({admin_ref}): {admin_value}");
+        println!(
+            "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
+        );
+        println!("---");
+        // Write both refs in one atomic persist so a mid-init failure cannot
+        // leave the store with one key set and the other missing, which the
+        // fail-fast logic would then treat as a corrupted state requiring
+        // reset.
+        secret_store.set_many([
+            (session_ref.as_str(), session_value.as_str()),
+            (admin_ref.as_str(), admin_value.as_str()),
+        ])?;
+        store.append_event(
+            "info",
+            "auth.keys_generated",
+            "generated session and admin API keys",
+            &serde_json::json!({
+                "session_key_ref": session_ref,
+                "admin_key_ref": admin_ref,
+            })
+            .to_string(),
+        )?;
+        "generated session and admin API keys"
+    };
+
+    // Record init.completed AFTER secret-store setup so a half-finished init
+    // (e.g. failed key generation) does not leave a misleading
+    // "initialized" event in the durable log.
     store.append_event("info", "init.completed", "initialized", "{}")?;
 
     println!("initialized acp-stack");
     println!("{config_status}: {}", config_path.display());
     println!("state: {}", state_path.display());
+    println!("secrets: {}", secret_store.store_path().display());
+    println!("age key: {}", age_key_path(&home).display());
+    println!("auth: {auth_status}");
 
     Ok(())
 }
 
 fn run_status() -> Result<()> {
     let home = home_dir()?;
-    let config_path = crate::config::default_config_path()?;
+    let config_path = config::default_config_path()?;
     let config_dir = parent_dir(&config_path)?;
     if config_dir.exists() {
         set_owner_only_dir(config_dir)?;
@@ -252,121 +572,6 @@ fn record_cli_error_message(error_message: &str) {
     if let Err(log_error) = store.append_event("error", "cli.error", "command failed", &payload) {
         eprintln!("failed to record CLI error: {log_error}");
     }
-}
-
-fn home_dir() -> Result<PathBuf> {
-    let home = env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .ok_or(StackError::HomeNotSet)?;
-    Ok(PathBuf::from(home))
-}
-
-fn parent_dir(path: &Path) -> Result<&Path> {
-    path.parent().ok_or_else(|| StackError::MissingParentDir {
-        path: path.to_path_buf(),
-    })
-}
-
-fn create_dir_owner_only(path: &Path) -> Result<()> {
-    if path.exists() {
-        return set_owner_only_dir(path);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| StackError::DirectoryCreate {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(path)
-            .map_err(|source| StackError::DirectoryCreate {
-                path: path.to_path_buf(),
-                source,
-            })
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(path).map_err(|source| StackError::DirectoryCreate {
-            path: path.to_path_buf(),
-            source,
-        })
-    }
-}
-
-fn write_new_file_owner_only(path: &Path, content: &[u8]) -> Result<()> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path).map_err(|source| StackError::FileCreate {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.write_all(content)
-        .map_err(|source| StackError::FileCreate {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-fn pre_create_owner_only(path: &Path) -> Result<()> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    match opts.open(path) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            // File survived from a previous run or an older binary. Repair the mode
-            // before any caller opens it, so writes never land while the file is
-            // still group/world-readable.
-            set_owner_only_file(path)
-        }
-        Err(source) => Err(StackError::FileCreate {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-#[cfg(unix)]
-fn set_owner_only_dir(path: &Path) -> Result<()> {
-    set_permissions(path, 0o700)
-}
-
-#[cfg(not(unix))]
-fn set_owner_only_dir(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_owner_only_file(path: &Path) -> Result<()> {
-    set_permissions(path, 0o600)
-}
-
-#[cfg(not(unix))]
-fn set_owner_only_file(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_permissions(path: &Path, mode: u32) -> Result<()> {
-    std::fs::set_permissions(path, Permissions::from_mode(mode)).map_err(|source| {
-        StackError::PermissionSet {
-            path: path.to_path_buf(),
-            source,
-        }
-    })
 }
 
 fn strip_ansi(input: &str) -> String {

@@ -9,14 +9,14 @@
 
 ## Secrets
 
-- [ ] Add age-compatible key generation during `acps init`.
-- [ ] Store the age private key at `~/.config/acp-stack/age.key`.
-- [ ] Store encrypted secret values at `~/.local/share/acp-stack/secrets.age`.
+- [x] Add age-compatible key generation during `acps init`.
+- [x] Store the age private key at `~/.config/acp-stack/age.key`.
+- [x] Store encrypted secret values at `~/.local/share/acp-stack/secrets.age`.
 - [ ] Implement secret references in config.
 - [ ] Implement scoped secret injection for agents, MCP servers, installers, and external logging.
-- [ ] Implement `acps secrets list`.
-- [ ] Implement `acps secrets set <name>`.
-- [ ] Implement `acps secrets delete <name>`.
+- [x] Implement `acps secrets list`.
+- [x] Implement `acps secrets set <name>`.
+- [x] Implement `acps secrets delete <name>`.
 - [ ] Implement admin-key Secrets API routes.
 - [ ] Ensure secret values are never returned through API, CLI logs, errors, metrics, or WebSocket events.
 
@@ -69,7 +69,7 @@
 
 ## Acceptance
 
-- [ ] A user can add, list, and delete secrets without plaintext storage.
+- [x] A user can add, list, and delete secrets without plaintext storage.
 - [ ] Agent and MCP processes receive only explicitly referenced secrets.
 - [ ] Dependency status can be queried through CLI and API.
 - [ ] Commands can require approval before execution.

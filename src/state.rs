@@ -1,6 +1,6 @@
 use crate::error::{Result, StackError};
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +20,11 @@ const MIGRATED_TABLES: &[&str] = &[
 
 const MANIFEST_TOML: &str = include_str!("../migrations/manifest.toml");
 const SQL_001_INIT: &str = include_str!("../migrations/001_init.sqlite.sql");
+const SQL_002_AUTH_FAILURES_SCHEMA: &str =
+    include_str!("../migrations/002_auth_failures_schema.sqlite.sql");
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static AUTH_FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
@@ -37,6 +40,22 @@ pub struct Event {
 pub struct EventFilter<'a> {
     pub limit: u32,
     pub level: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFailure {
+    pub id: String,
+    pub created_at: String,
+    pub key_kind: String,
+    pub reason: String,
+    pub client_ip: Option<String>,
+    pub route: Option<String>,
+    pub payload_json: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AuthFailureFilter {
+    pub limit: u32,
 }
 
 pub struct StateStore {
@@ -73,25 +92,31 @@ impl StateStore {
         self.reject_newer_schema_version()?;
         self.reject_unversioned_managed_tables()?;
         self.ensure_migrations_table()?;
+        if self.schema_version()? > 0 {
+            self.assert_required_tables_present()?;
+        }
 
         let manifest = parse_manifest()?;
         for entry in &manifest.migration {
-            if self.is_applied(entry.id)? {
+            // Migration DDL and the schema_migrations bookkeeping must commit together
+            // so a crash between them cannot leave managed tables without a version row,
+            // which would later trip reject_unversioned_managed_tables permanently.
+            //
+            // BEGIN IMMEDIATE acquires the write lock before checking applicability.
+            // Re-checking inside that lock prevents a second process from running
+            // destructive migration SQL after another process already committed it.
+            let transaction =
+                Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+            if migration_is_applied(&transaction, entry.id)? {
+                transaction.commit()?;
                 continue;
             }
             let sql = sqlite_sql_for(entry)?;
             let applied_at = current_timestamp();
-            // Migration DDL and the schema_migrations bookkeeping must commit together
-            // so a crash between them cannot leave managed tables without a version row,
-            // which would later trip reject_unversioned_managed_tables permanently.
-            let transaction = self.connection.unchecked_transaction()?;
             transaction.execute_batch(sql)?;
-            // OR IGNORE keeps concurrent acps invocations from clashing on the primary
-            // key: if a second process wins the race after our is_applied check, the
-            // schema_migrations row is already present and we no-op the insert.
             transaction.execute(
                 r#"
-                INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+                INSERT INTO schema_migrations (version, name, applied_at)
                 VALUES (?1, ?2, ?3)
                 "#,
                 params![entry.id, entry.name, applied_at],
@@ -190,6 +215,59 @@ impl StateStore {
         }
     }
 
+    pub fn append_auth_failure(
+        &self,
+        key_kind: &str,
+        reason: &str,
+        client_ip: Option<&str>,
+        route: Option<&str>,
+        payload_json: &str,
+    ) -> Result<AuthFailure> {
+        validate_auth_failure_payload(&self.connection, payload_json)?;
+        let failure = AuthFailure {
+            id: next_auth_failure_id(),
+            created_at: current_timestamp(),
+            key_kind: key_kind.to_owned(),
+            reason: reason.to_owned(),
+            client_ip: client_ip.map(str::to_owned),
+            route: route.map(str::to_owned),
+            payload_json: payload_json.to_owned(),
+        };
+
+        self.connection.execute(
+            r#"
+            INSERT INTO auth_failures
+                (id, created_at, key_kind, reason, client_ip, route, payload_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                failure.id,
+                failure.created_at,
+                failure.key_kind,
+                failure.reason,
+                failure.client_ip,
+                failure.route,
+                failure.payload_json,
+            ],
+        )?;
+
+        Ok(failure)
+    }
+
+    pub fn query_auth_failures(&self, filter: AuthFailureFilter) -> Result<Vec<AuthFailure>> {
+        let limit = i64::from(filter.limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, key_kind, reason, client_ip, route, payload_json
+            FROM auth_failures
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_auth_failure)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn latest_event_timestamp(&self) -> Result<Option<String>> {
         Ok(self
             .connection
@@ -213,15 +291,6 @@ impl StateStore {
             [],
         )?;
         Ok(())
-    }
-
-    fn is_applied(&self, id: i64) -> Result<bool> {
-        let count: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
     }
 
     fn reject_newer_schema_version(&self) -> Result<()> {
@@ -277,6 +346,15 @@ fn parse_manifest() -> Result<MigrationManifest> {
     Ok(manifest)
 }
 
+fn migration_is_applied(connection: &Connection, id: i64) -> Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 fn validate_manifest_order(manifest: &MigrationManifest) -> Result<()> {
     let mut previous: i64 = 0;
     for entry in &manifest.migration {
@@ -294,6 +372,7 @@ fn validate_manifest_order(manifest: &MigrationManifest) -> Result<()> {
 fn sqlite_sql_for(entry: &ManifestEntry) -> Result<&'static str> {
     match (entry.id, entry.sqlite_file.as_str()) {
         (1, "001_init.sqlite.sql") => Ok(SQL_001_INIT),
+        (2, "002_auth_failures_schema.sqlite.sql") => Ok(SQL_002_AUTH_FAILURES_SCHEMA),
         _ => Err(StackError::UnknownMigrationId { id: entry.id }),
     }
 }
@@ -320,6 +399,18 @@ fn validate_json_payload(connection: &Connection, payload_json: &str) -> Result<
     Err(StackError::InvalidEventPayload)
 }
 
+fn validate_auth_failure_payload(connection: &Connection, payload_json: &str) -> Result<()> {
+    let is_valid: i64 =
+        connection.query_row("SELECT json_valid(?1)", params![payload_json], |row| {
+            row.get(0)
+        })?;
+    if is_valid == 1 {
+        return Ok(());
+    }
+
+    Err(StackError::InvalidAuthFailurePayload)
+}
+
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
         id: row.get(0)?,
@@ -328,6 +419,18 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         kind: row.get(3)?,
         message: row.get(4)?,
         payload_json: row.get(5)?,
+    })
+}
+
+fn row_to_auth_failure(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthFailure> {
+    Ok(AuthFailure {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        key_kind: row.get(2)?,
+        reason: row.get(3)?,
+        client_ip: row.get(4)?,
+        route: row.get(5)?,
+        payload_json: row.get(6)?,
     })
 }
 
@@ -351,6 +454,13 @@ fn next_event_id() -> String {
     // on every process start.
     let pid = std::process::id();
     format!("evt_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+fn next_auth_failure_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = AUTH_FAILURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("af_{nanos:020}_{sequence:010}_{pid:010}")
 }
 
 #[cfg(test)]

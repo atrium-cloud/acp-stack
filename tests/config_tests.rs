@@ -331,3 +331,49 @@ fn rejects_short_expected_sha256() {
             .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
     );
 }
+
+#[test]
+fn rejects_aliased_auth_refs() {
+    // session and admin key references must be distinct; aliasing collapses
+    // the session/admin boundary because regenerate-session-key would also
+    // rotate whatever is stored under the admin name.
+    let aliased = VALID_CONFIG.replace(
+        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
+        r#"admin_key_ref = "ACP_STACK_SESSION_KEY""#,
+    );
+    let error = load_config_from_str(&aliased).expect_err("aliased refs must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("auth.session_key_ref and auth.admin_key_ref must be different names"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_empty_auth_session_key_ref() {
+    let blank = VALID_CONFIG.replace(
+        r#"session_key_ref = "ACP_STACK_SESSION_KEY""#,
+        r#"session_key_ref = """#,
+    );
+    let error = load_config_from_str(&blank).expect_err("empty session ref must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("auth.session_key_ref is required"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_empty_auth_admin_key_ref() {
+    let blank = VALID_CONFIG.replace(
+        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
+        r#"admin_key_ref = """#,
+    );
+    let error = load_config_from_str(&blank).expect_err("empty admin ref must be rejected");
+    assert!(
+        error.to_string().contains("auth.admin_key_ref is required"),
+        "got: {error}",
+    );
+}
