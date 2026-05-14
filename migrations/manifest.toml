@@ -2,3 +2,8 @@
 id = 1
 name = "init"
 sqlite_file = "001_init.sqlite.sql"
+
+[[migration]]
+id = 2
+name = "auth_failures_schema"
+sqlite_file = "002_auth_failures_schema.sqlite.sql"

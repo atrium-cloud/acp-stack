@@ -13,7 +13,7 @@
 - [x] Create the Rust workspace and primary `acps` binary.
 - [ ] Add config, API, auth, state, agent bridge, workspace, command, logs, and supervisor modules.
 - [x] Add structured tracing initialization.
-- [ ] Add baseline error type and response-envelope mapping.
+- [x] Add baseline error type and response-envelope mapping.
 - [x] Add unit/integration test harness.
 
 ## Config
@@ -24,8 +24,8 @@
 - [x] Implement `acps config validate [path]`.
 - [x] Implement `acps config export [--output path]`.
 - [x] Implement `acps config export --base64`.
-- [ ] Implement `acps config import <path>`.
-- [ ] Implement `acps config import --base64 <code>`.
+- [x] Implement `acps config import <path>`.
+- [x] Implement `acps config import --base64 <code>`.
 
 ## State
 
@@ -36,13 +36,26 @@
 
 ## Auth
 
-- [ ] Generate session and admin API keys during `acps init`.
-- [ ] Store API key material through secret references, not plaintext config.
-- [ ] Implement constant-time API key comparison.
+- [x] Generate session and admin API keys during `acps init`.
+- [x] Store API key material through secret references, not plaintext config.
+- [x] Implement constant-time API key comparison.
 - [ ] Enforce session-key vs admin-key route authorization.
-- [ ] Log failed authentication attempts without storing attempted key values.
-- [ ] Implement `acps auth regenerate-session-key`.
-- [ ] Ensure the admin key is generated only once during init and is not regenerable.
+- [x] Log failed authentication attempts without storing attempted key values.
+- [x] Implement `acps auth regenerate-session-key`.
+- [x] Ensure the admin key is generated only once during init and is not regenerable.
+
+## Secrets
+
+- [x] Generate the age x25519 identity at `~/.config/acp-stack/age.key` (`0600`).
+- [x] Initialize the age-encrypted store at `~/.local/share/acp-stack/secrets.age` (`0600`).
+- [x] Implement `acps secrets list`.
+- [x] Implement `acps secrets set <name>`.
+- [x] Implement `acps secrets delete <name>`.
+
+## Reset
+
+- [x] Implement `acps reset --yes` to wipe config, state, age key, and secret store.
+- [x] Dry-run output and non-zero exit when `--yes` is omitted.
 
 ## HTTP And WebSocket API
 
@@ -97,6 +110,7 @@
 - [x] Implement `acps init`.
 - [ ] Implement `acps serve`.
 - [x] Implement `acps status`.
+- [x] Implement `acps reset [--yes]`.
 - [ ] Implement `acps sessions list`.
 - [ ] Implement `acps sessions new`.
 - [ ] Implement `acps sessions prompt <session-id>`.
