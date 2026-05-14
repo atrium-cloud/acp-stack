@@ -170,7 +170,9 @@ impl Config {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let home = env::var_os("HOME").ok_or(StackError::HomeNotSet)?;
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .ok_or(StackError::HomeNotSet)?;
     Ok(PathBuf::from(home)
         .join(".config")
         .join("acp-stack")
@@ -242,6 +244,9 @@ impl Config {
             validate_absolute_path("agent.cwd", cwd)?;
         }
         validate_agent_restart(&self.agent.restart)?;
+        if let Some(expected_sha256) = &self.agent.expected_sha256 {
+            validate_expected_sha256(expected_sha256)?;
+        }
 
         Ok(())
     }
@@ -363,5 +368,13 @@ fn validate_agent_restart(value: &str) -> Result<()> {
     match value {
         "never" | "on-crash" => Ok(()),
         _ => Err(StackError::InvalidAgentRestart),
+    }
+}
+
+fn validate_expected_sha256(value: &str) -> Result<()> {
+    if value.len() == 64 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+        Ok(())
+    } else {
+        Err(StackError::InvalidExpectedSha256)
     }
 }

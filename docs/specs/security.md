@@ -9,7 +9,7 @@ The runtime uses two API keys:
 - session key
 - admin key
 
-Keys are generated during `acps init`. They are stored as secrets and referenced by config.
+The full auth implementation generates keys during `acps init`. The current 0.0.1 init subset defers key generation until secret storage exists. Once implemented, keys are stored as secrets and referenced by config.
 
 The session key authorizes general operations and can be regenerated with `acps auth regenerate-session-key`.
 

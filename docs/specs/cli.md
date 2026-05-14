@@ -45,13 +45,13 @@ acps deps apply
 
 ## Auth Commands
 
-`acps init` generates both API keys.
+The full auth implementation will generate both API keys during `acps init`. The current 0.0.1 init subset defers API key generation until secret storage exists.
 
 `acps auth regenerate-session-key` rotates the general session key. The admin key is generated only once during init and is not regenerable.
 
 ## Init
 
-`acps init` creates or validates local config, state, and secret storage. It may run the configured agent installer after explicit user confirmation.
+`acps init` creates or validates local config and state. Secret storage and API key generation are added with the auth/secrets implementation. Init may run the configured agent installer after explicit user confirmation once installer execution exists.
 
 `acps init` can seed the workspace from one source:
 
@@ -71,11 +71,20 @@ Git sources may reference a credential secret for private repositories. S3 sourc
 
 ## Current 0.0.1 Implementation Subset
 
-The first implemented CLI surface is intentionally read-only:
+The first implemented CLI surface focuses on local config and durable state — no network operations and no agent supervision yet. `init`, `status`, and `logs query` all create or migrate the local SQLite file when missing:
 
 - `acps --version`
 - `acps config validate [path]`
 - `acps config export [--output path]`
 - `acps config export --base64`
+- `acps init`
+- `acps status`
+- `acps logs query [--limit <n>] [--level <level>]`
 
 When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-stack.toml`. Export currently reads the same default path and writes canonical TOML to stdout unless `--output` is provided.
+
+`acps init` creates the default config and state directories, writes a valid starter config when one is absent, validates an existing config without overwriting it, creates or migrates `~/.local/share/acp-stack/state.sqlite`, and records an `init.completed` event. API key and secret generation are deferred to the auth/secrets implementation.
+
+`acps status` validates the default config, opens or migrates local state, records `status.checked`, and prints config, state, schema version, and latest event status.
+
+`acps logs query` reads durable SQLite events newest-first. `--limit` defaults to `50`, and `--level` filters by exact event level.

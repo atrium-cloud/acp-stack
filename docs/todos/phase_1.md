@@ -29,10 +29,10 @@
 
 ## State
 
-- [ ] Create SQLite migration runner.
-- [ ] Add tables for sessions, events, commands, agent lifecycle records, auth failures, and installer runs.
-- [ ] Add repository layer for appending and querying runtime records.
-- [ ] Ensure state is stored under `~/.local/share/acp-stack/state.sqlite`.
+- [x] Create SQLite migration runner.
+- [x] Add tables for sessions, events, commands, agent lifecycle records, auth failures, and installer runs.
+- [x] Add repository layer for appending and querying runtime records.
+- [x] Ensure state is stored under `~/.local/share/acp-stack/state.sqlite`.
 
 ## Auth
 
@@ -94,24 +94,24 @@
 
 ## CLI Surface
 
-- [ ] Implement `acps init`.
+- [x] Implement `acps init`.
 - [ ] Implement `acps serve`.
-- [ ] Implement `acps status`.
+- [x] Implement `acps status`.
 - [ ] Implement `acps sessions list`.
 - [ ] Implement `acps sessions new`.
 - [ ] Implement `acps sessions prompt <session-id>`.
 - [ ] Implement `acps sessions cancel <session-id>`.
 - [ ] Implement `acps sessions close <session-id>`.
 - [ ] Implement `acps logs tail`.
-- [ ] Implement `acps logs query`.
+- [x] Implement `acps logs query`.
 
 ## Acceptance
 
-- [ ] A user can initialize config and state with `acps init`.
+- [x] A user can initialize config and state with `acps init`.
 - [ ] A user can start the daemon with `acps serve`.
 - [ ] A direct-key ACP agent can be installed or configured.
 - [ ] A session can be created through CLI or HTTP.
 - [ ] A prompt can be sent and streamed over WebSocket.
 - [ ] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.
 - [ ] A mediated shell command can be run and logged.
-- [ ] Durable logs can be queried from SQLite.
+- [x] Durable logs can be queried from SQLite.

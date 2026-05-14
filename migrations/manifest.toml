@@ -1,0 +1,4 @@
+[[migration]]
+id = 1
+name = "init"
+sqlite_file = "001_init.sqlite.sql"

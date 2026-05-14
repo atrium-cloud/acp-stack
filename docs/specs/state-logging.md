@@ -19,6 +19,31 @@ SQLite stores:
 - WebSocket connection metadata where useful
 - usage metrics derived from local events
 
+The initial 0.0.1 state implementation creates the local SQLite database at:
+
+```text
+~/.local/share/acp-stack/state.sqlite
+```
+
+It creates baseline tables for schema migrations, events, sessions, commands, agent lifecycle records, auth failures, and installer runs. The first user-facing durable records are local events written by `acps init`, `acps status`, and CLI error handling.
+
+The migration runner follows the documented `migrations/` layout: `manifest.toml` lists each migration's `id`, `name`, and `sqlite_file`. The 0.0.1 runner embeds the SQLite migration files in the binary via `include_str!` and applies any manifest entry whose version is not already recorded in `schema_migrations`. PostgreSQL dialect files (`{id:03}_{name}.postgres.sql`) arrive with the Supabase sink in 0.0.3.
+
+`acps init` is the only command that creates the local config file; it does so atomically at owner-only permissions (Unix `O_CREAT | O_EXCL` with mode `0o600`). `acps status` requires an existing config and repairs its permissions on each run. All three of `init`, `status`, and `logs query` create or migrate the local SQLite file atomically at owner-only permissions when it is missing.
+
+Initial event records use:
+
+- stable string IDs
+- RFC3339 UTC timestamps
+- `level`
+- `kind`
+- `message`
+- validated JSON payload text
+
+`acps init` sets the `acp-stack` config and state directories to owner-only directory permissions on Unix systems, and sets the config and SQLite files to owner-only file permissions.
+
+Older binaries must reject state databases that contain a schema migration version newer than the binary supports.
+
 SQLite does not store:
 
 - portable config

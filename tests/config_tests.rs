@@ -255,3 +255,79 @@ fn rejects_invalid_agent_restart_policy() {
             .contains("agent.restart must be one of never, on-crash")
     );
 }
+
+#[test]
+fn rejects_empty_expected_sha256() {
+    let config = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        "expected_sha256 = \"\"\nrestart = \"on-crash\"",
+    );
+
+    let error = load_config_from_str(&config).expect_err("empty expected_sha256 should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
+    );
+}
+
+#[test]
+fn rejects_uppercase_expected_sha256() {
+    let valid_hash = "a".repeat(64);
+    let upper_hash = "A".repeat(64);
+    let config = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        &format!("expected_sha256 = \"{upper_hash}\"\nrestart = \"on-crash\""),
+    );
+
+    let error = load_config_from_str(&config).expect_err("uppercase hex should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
+    );
+
+    // sanity: lowercase form parses fine
+    let ok = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        &format!("expected_sha256 = \"{valid_hash}\"\nrestart = \"on-crash\""),
+    );
+    let parsed = load_config_from_str(&ok).expect("lowercase 64-hex should parse");
+    assert_eq!(
+        parsed.agent.expected_sha256.as_deref(),
+        Some(valid_hash.as_str())
+    );
+}
+
+#[test]
+fn rejects_non_hex_expected_sha256() {
+    let bad = "z".repeat(64);
+    let config = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        &format!("expected_sha256 = \"{bad}\"\nrestart = \"on-crash\""),
+    );
+
+    let error = load_config_from_str(&config).expect_err("non-hex chars should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
+    );
+}
+
+#[test]
+fn rejects_short_expected_sha256() {
+    let short = "a".repeat(63);
+    let config = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        &format!("expected_sha256 = \"{short}\"\nrestart = \"on-crash\""),
+    );
+
+    let error = load_config_from_str(&config).expect_err("63-char hex should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
+    );
+}
