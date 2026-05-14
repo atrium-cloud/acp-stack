@@ -19,7 +19,10 @@ This document records the implementation technologies chosen for the standalone 
 - `tracing-subscriber` - local tracing subscriber initialization.
 - `base64` - portable config export encoding.
 - `notify` - workspace file event streaming.
-- `age` or `rage` - age-compatible secret encryption.
+- `age` - age-compatible secret encryption (encrypts `secrets.age`).
+- `rand` - cryptographically secure random bytes for API key generation.
+- `subtle` - constant-time byte-slice comparison for API key validation.
+- `tempfile` - durable atomic-write helpers (temp file + rename).
 
 ## Storage and Data Contracts
 

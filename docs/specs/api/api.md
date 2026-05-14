@@ -12,10 +12,10 @@ Auth uses bearer API keys:
 Authorization: Bearer <key>
 ```
 
-The full auth implementation generates two keys during `acps init`. The current 0.0.1 init subset defers key generation until secret storage exists.
+`acps init` generates both API keys on first run and stores them in the age-encrypted secret store under the names declared by `[auth].session_key_ref` and `[auth].admin_key_ref`. Keys are formatted as `acps_<43-char base64url>` (32 bytes of system CSPRNG output).
 
-- **Session key** - general operations: agent sessions, workspace files, mediated commands, logs, and pending permission reads. This key can be regenerated using the `acps` CLI.
-- **Admin key** - elevated operations: secrets, config import, security-sensitive status, session-key regeneration, and policy changes. This key is generated only once during init. If it is lost or compromised, the best course of action is to export data and config, then shut down the instance.
+- **Session key** - general operations: agent sessions, workspace files, mediated commands, logs, and pending permission reads. This key can be regenerated using `acps auth regenerate-session-key`.
+- **Admin key** - elevated operations: secrets, config import, security-sensitive status, session-key regeneration, and policy changes. This key is generated only once during init and is never regenerable in place; use `acps reset --yes` to wipe the instance and re-init if the admin key is lost or compromised.
 
 ### Response Envelope
 
