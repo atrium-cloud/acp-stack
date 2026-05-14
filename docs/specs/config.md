@@ -100,6 +100,10 @@ The 0.0.1 implementation supports validation, export, and import:
 - `acps config import <path>` parses, validates, and atomically writes canonical TOML to `~/.config/acp-stack/acp-stack.toml`. Without `--force`, it refuses to overwrite an existing config. `--base64 <code>` decodes its argument as base64-encoded canonical TOML before validation. Atomic writes use a temp-file + rename under owner-only mode (`0600`).
 - Validation rejects unknown fields, invalid enum values, relative workspace paths, missing `workspace.source`, incomplete `git` or `s3` source declarations, fields that do not belong to the selected source type, and aliased or empty `[auth].session_key_ref` / `[auth].admin_key_ref`.
 
+## Request Size Limits
+
+Both `[api].max_request_bytes` and `[security.http].max_request_bytes` cap inbound HTTP request bodies. They are independent fields so that an operator can tighten security limits without changing the headline `[api]` cap, or vice versa. When both are present, the runtime enforces the tighter of the two — `min([api].max_request_bytes, [security.http].max_request_bytes)`. Oversized requests are rejected with 413 before any route handler runs.
+
 ## Hardening
 
 Config import/export hardening belongs to the 0.0.4 line:

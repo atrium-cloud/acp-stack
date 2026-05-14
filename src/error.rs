@@ -1,3 +1,4 @@
+use http::StatusCode;
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -214,6 +215,18 @@ pub enum StackError {
         current: String,
         incoming: String,
     },
+
+    #[error("failed to bind {bind}: {source}")]
+    ServeBind {
+        bind: String,
+        source: std::io::Error,
+    },
+
+    #[error("HTTP server error: {source}")]
+    ServeIo {
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl StackError {
@@ -271,6 +284,8 @@ impl StackError {
             | AuthRefsNotDistinct => "config.invalid",
             SecretReservedForAuth { .. } => "secrets.reserved_for_auth",
             ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
+            ServeBind { .. } => "serve.bind_failed",
+            ServeIo { .. } => "serve.io_error",
         }
     }
 
@@ -353,6 +368,74 @@ impl StackError {
             ImportChangesAuthRef { .. } => {
                 "config import would change auth key references".to_owned()
             }
+            ServeBind { .. } => "failed to bind HTTP listener".to_owned(),
+            ServeIo { .. } => "HTTP server error".to_owned(),
+        }
+    }
+
+    /// HTTP status code for this error when rendered through the API envelope.
+    /// Coarse mapping: client-provided invalid input is 4xx; failures the
+    /// server hits internally (filesystem, sqlite, age decrypt) are 5xx.
+    pub fn http_status(&self) -> StatusCode {
+        use StackError::*;
+        match self {
+            // Client-supplied bad input
+            ConfigToml(_)
+            | ConfigSerialize(_)
+            | ImportBase64Decode { .. }
+            | ImportUtf8 { .. }
+            | ResetNotConfirmed
+            | InvalidEventPayload
+            | InvalidAuthFailurePayload
+            | MissingSection { .. }
+            | MissingField { .. }
+            | InvalidWorkspaceSourceField { .. }
+            | InvalidSocketAddress { .. }
+            | NonZeroRequired { .. }
+            | PathMustBeAbsolute { .. }
+            | InvalidWorkspaceSourceType
+            | InvalidAgentRestart
+            | InvalidExpectedSha256
+            | AuthRefsNotDistinct
+            | SecretReservedForAuth { .. }
+            | ImportChangesAuthRef { .. } => StatusCode::BAD_REQUEST,
+            // Not found / conflict
+            SecretNotFound { .. } => StatusCode::NOT_FOUND,
+            ConfigExists { .. } => StatusCode::CONFLICT,
+            // Everything else is a server-side fault. Includes startup-time
+            // issues (missing keys, unreadable secret store) that can surface
+            // if a handler ever rebuilds state mid-flight.
+            HomeNotSet
+            | ConfigRead { .. }
+            | ConfigWrite { .. }
+            | ConfigInitialize { .. }
+            | DirectoryCreate { .. }
+            | FileCreate { .. }
+            | FileRemove { .. }
+            | PermissionSet { .. }
+            | MissingParentDir { .. }
+            | State(_)
+            | IncompatibleStateSchema { .. }
+            | UnmanagedStateTable { .. }
+            | MigrationManifestParse(_)
+            | UnknownMigrationId { .. }
+            | InvalidManifestOrder { .. }
+            | MissingMigratedTable { .. }
+            | AgeKeyRead { .. }
+            | AgeKeyWrite { .. }
+            | AgeKeyParse { .. }
+            | SecretStoreRead { .. }
+            | SecretStoreWrite { .. }
+            | SecretStoreEncrypt(_)
+            | SecretStoreDecrypt(_)
+            | SecretStorePlaintextParse(_)
+            | SecretStorePlaintextSerialize(_)
+            | SecretStorePlaintextNotUtf8 { .. }
+            | MissingSessionKey { .. }
+            | MissingAdminKey { .. }
+            | StdinRead { .. }
+            | ServeBind { .. }
+            | ServeIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

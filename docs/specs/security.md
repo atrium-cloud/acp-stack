@@ -15,6 +15,18 @@ The session key authorizes general operations and can be regenerated with `acps 
 
 The admin key authorizes elevated operations. It is generated only once during init and is never regenerable in place. If it is lost or compromised, the operator must run `acps reset --yes` to wipe config, state, age key, and the secret store, then re-run `acps init` to regenerate a fresh pair. `acps init` fails fast if the secret store exists but is missing the admin key reference, treating that state as an anomaly that requires the operator to investigate.
 
+## API Key Tiering
+
+The HTTP layer applies strict tiering between the two keys: the admin key authorizes management functions and destructive / runtime-state-altering actions (e.g. secrets mutations, config import, agent install/start/stop, key rotation). The session key authorizes everything else (status reads, config export, config validate, log queries, sessions, prompts, workspace operations, command runs, permission decisions). Normal session operations stay session-tier even when they write rows.
+
+Strict tiering means the admin key is rejected on session-tier routes (`auth.wrong_kind`, 401) and the session key is rejected on admin-tier routes. There is no superset relationship. This isolates the higher-blast-radius credential to the smallest set of routes that need it.
+
+Both keys are presented as `Authorization: Bearer <key>`. The server determines which key was presented by constant-time comparing against both stored values, then enforces the route's required tier in a per-route middleware.
+
+## Auth Failure Logging
+
+Every rejected authentication is recorded as a row in the `auth_failures` table. Rows capture the request route, the resolved key kind (`session`, `admin`, or `unknown` when no match), and the reason code (`missing`, `malformed_header`, `invalid`, `wrong_kind`). The attempted token value is never stored; only the kind that was expected and why it failed. In 0.0.1 rows carry the socket client IP when available; proxy-header interpretation behind `security.http.trust_proxy_headers` belongs with the later proxy hardening work. Rows also carry a small JSON payload for forward-compatible context (rate-limit hints, etc.).
+
 ## Baseline Posture
 
 - supports bearer key auth

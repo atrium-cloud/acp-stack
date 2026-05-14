@@ -1,10 +1,14 @@
 //! HTTP response envelope per `docs/specs/api/api.md:20-42`.
 //!
-//! These types are not wired into any HTTP handler yet; they exist so that
-//! the upcoming axum layer has a single, stable serialization shape to build
-//! against. `ApiError::from_stack_error` is the bridge between the domain
-//! error enum and the wire envelope.
+//! `ApiError::from_stack_error` bridges the domain error enum to the wire
+//! envelope. `ApiResult<T>` is the standard handler return type: handlers can
+//! `?` on `StackError` and the wrapper handles status code + envelope on the
+//! way back out.
 
+use axum::Json;
+use axum::response::{IntoResponse, Response};
+use http::StatusCode;
+use http::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -67,6 +71,68 @@ impl ApiError {
             ok: false,
             error: self,
         }
+    }
+
+    /// Render this error as an HTTP response with the given status code.
+    /// Use this when an error is produced outside the `StackError` flow —
+    /// notably the auth middleware, which constructs envelopes directly.
+    pub fn into_response_with(self, status: StatusCode) -> Response {
+        (status, Json(self.into_envelope())).into_response()
+    }
+}
+
+impl<T> IntoResponse for ApiSuccess<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "application/json")],
+            Json(self),
+        )
+            .into_response()
+    }
+}
+
+impl IntoResponse for ApiErrorEnvelope {
+    fn into_response(self) -> Response {
+        // ApiErrorEnvelope on its own carries no status code. Callers that
+        // construct envelopes directly should use `ApiError::into_response_with`
+        // to attach an explicit status. Falling through here means the caller
+        // forgot; surface that as 500 rather than silently 200.
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(self)).into_response()
+    }
+}
+
+/// Standard handler return type. `Ok` becomes a 200 + `ApiSuccess` envelope;
+/// `Err(StackError)` becomes `err.http_status()` + `ApiError` envelope built
+/// via `ApiError::from_stack_error`, which uses `public_message()` to avoid
+/// leaking local paths or secret-store internals.
+pub struct ApiResult<T>(pub Result<T, StackError>);
+
+impl<T> From<Result<T, StackError>> for ApiResult<T> {
+    fn from(value: Result<T, StackError>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> IntoResponse for ApiResult<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        match self.0 {
+            Ok(data) => ApiSuccess::new(data).into_response(),
+            Err(err) => err.into_response(),
+        }
+    }
+}
+
+impl IntoResponse for StackError {
+    fn into_response(self) -> Response {
+        let status = self.http_status();
+        ApiError::from_stack_error(&self).into_response_with(status)
     }
 }
 
@@ -172,5 +238,38 @@ mod tests {
         );
         assert!(!env.message.contains("ACP_STACK_ADMIN_KEY"));
         assert!(!env.message.contains("OTHER_ADMIN_KEY"));
+    }
+
+    #[test]
+    fn api_result_ok_renders_200_success_envelope() {
+        let result: ApiResult<&str> = ApiResult(Ok("hello"));
+        let response = result.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn api_result_err_renders_status_from_stack_error() {
+        let err = StackError::MissingField { field: "api.bind" };
+        let result: ApiResult<()> = ApiResult(Err(err));
+        let response = result.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn api_result_err_renders_500_for_server_faults() {
+        let err = StackError::AgeKeyParse {
+            path: "/tmp/age.key".into(),
+            reason: "garbage",
+        };
+        let result: ApiResult<()> = ApiResult(Err(err));
+        let response = result.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn api_error_into_response_with_uses_provided_status() {
+        let response = ApiError::new("auth.missing", "Missing Authorization header")
+            .into_response_with(StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

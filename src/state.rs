@@ -25,6 +25,7 @@ const SQL_002_AUTH_FAILURES_SCHEMA: &str =
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUTH_FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static AGENT_LIFECYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
@@ -34,6 +35,24 @@ pub struct Event {
     pub kind: String,
     pub message: String,
     pub payload_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub command: String,
+    pub exit_status: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +75,24 @@ pub struct AuthFailure {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AuthFailureFilter {
     pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLifecycleEvent {
+    pub id: String,
+    pub created_at: String,
+    pub event_kind: String,
+    pub message: String,
+    pub payload_json: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateCounts {
+    pub events: i64,
+    pub sessions: i64,
+    pub commands: i64,
+    pub auth_failures: i64,
+    pub agent_lifecycle: i64,
 }
 
 pub struct StateStore {
@@ -215,6 +252,49 @@ impl StateStore {
         }
     }
 
+    pub fn query_permission_events(&self, limit: u32) -> Result<Vec<Event>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, level, kind, message, payload_json
+            FROM events
+            WHERE kind LIKE 'permission.%' OR kind LIKE 'permissions.%'
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_event)?;
+        Ok(collect_events(rows)?)
+    }
+
+    pub fn query_sessions(&self, limit: u32) -> Result<Vec<SessionRecord>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, updated_at, status
+            FROM sessions
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_session)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn query_commands(&self, limit: u32) -> Result<Vec<CommandRecord>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, updated_at, status, command, exit_status
+            FROM commands
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_command)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn append_auth_failure(
         &self,
         key_kind: &str,
@@ -268,6 +348,63 @@ impl StateStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn count_auth_failures_since(&self, since: &str) -> Result<i64> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM auth_failures WHERE created_at >= ?1",
+            params![since],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn query_agent_lifecycle(&self, limit: u32) -> Result<Vec<AgentLifecycleEvent>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, event_kind, message, payload_json
+            FROM agent_lifecycle
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_agent_lifecycle)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn append_agent_lifecycle(
+        &self,
+        event_kind: &str,
+        message: &str,
+        payload_json: &str,
+    ) -> Result<AgentLifecycleEvent> {
+        // Reuse the events table's json_valid invariant via the same helper.
+        // The agent_lifecycle table has its own CHECK constraint, but failing
+        // here gives a clearer error than letting sqlite reject the row.
+        validate_json_payload(&self.connection, payload_json)?;
+        let event = AgentLifecycleEvent {
+            id: next_agent_lifecycle_id(),
+            created_at: current_timestamp(),
+            event_kind: event_kind.to_owned(),
+            message: message.to_owned(),
+            payload_json: payload_json.to_owned(),
+        };
+
+        self.connection.execute(
+            r#"
+            INSERT INTO agent_lifecycle (id, created_at, event_kind, message, payload_json)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                event.id,
+                event.created_at,
+                event.event_kind,
+                event.message,
+                event.payload_json,
+            ],
+        )?;
+
+        Ok(event)
+    }
+
     pub fn latest_event_timestamp(&self) -> Result<Option<String>> {
         Ok(self
             .connection
@@ -277,6 +414,28 @@ impl StateStore {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    pub fn counts(&self) -> Result<StateCounts> {
+        Ok(StateCounts {
+            events: self.count_table("events")?,
+            sessions: self.count_table("sessions")?,
+            commands: self.count_table("commands")?,
+            auth_failures: self.count_table("auth_failures")?,
+            agent_lifecycle: self.count_table("agent_lifecycle")?,
+        })
+    }
+
+    fn count_table(&self, table: &'static str) -> Result<i64> {
+        let sql = match table {
+            "events" => "SELECT COUNT(*) FROM events",
+            "sessions" => "SELECT COUNT(*) FROM sessions",
+            "commands" => "SELECT COUNT(*) FROM commands",
+            "auth_failures" => "SELECT COUNT(*) FROM auth_failures",
+            "agent_lifecycle" => "SELECT COUNT(*) FROM agent_lifecycle",
+            _ => unreachable!("count_table only accepts known migrated tables"),
+        };
+        Ok(self.connection.query_row(sql, [], |row| row.get(0))?)
     }
 
     fn ensure_migrations_table(&self) -> Result<()> {
@@ -422,6 +581,26 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     })
 }
 
+fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+    Ok(SessionRecord {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        updated_at: row.get(2)?,
+        status: row.get(3)?,
+    })
+}
+
+fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
+    Ok(CommandRecord {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        updated_at: row.get(2)?,
+        status: row.get(3)?,
+        command: row.get(4)?,
+        exit_status: row.get(5)?,
+    })
+}
+
 fn row_to_auth_failure(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthFailure> {
     Ok(AuthFailure {
         id: row.get(0)?,
@@ -431,6 +610,16 @@ fn row_to_auth_failure(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthFailure>
         client_ip: row.get(4)?,
         route: row.get(5)?,
         payload_json: row.get(6)?,
+    })
+}
+
+fn row_to_agent_lifecycle(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentLifecycleEvent> {
+    Ok(AgentLifecycleEvent {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        event_kind: row.get(2)?,
+        message: row.get(3)?,
+        payload_json: row.get(4)?,
     })
 }
 
@@ -461,6 +650,13 @@ fn next_auth_failure_id() -> String {
     let sequence = AUTH_FAILURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("af_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+fn next_agent_lifecycle_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = AGENT_LIFECYCLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("agl_{nanos:020}_{sequence:010}_{pid:010}")
 }
 
 #[cfg(test)]

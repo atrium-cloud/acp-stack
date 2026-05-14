@@ -1,5 +1,6 @@
 use acp_stack::state::{AuthFailureFilter, EventFilter, StateStore, default_state_path};
 use rusqlite::Connection;
+use rusqlite::params;
 
 #[test]
 fn resolves_default_state_path_under_home() {
@@ -244,6 +245,54 @@ fn migration_002_preserves_legacy_auth_failure_rows() {
         serde_json::from_str(&rows[0].payload_json).expect("payload should parse");
     assert_eq!(payload["legacy_client_label"], "127.0.0.1");
     assert_eq!(payload["reason"], "invalid");
+}
+
+#[test]
+fn agent_lifecycle_round_trips_through_sqlite() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let event = store
+        .append_agent_lifecycle(
+            "server.started",
+            "listening on 127.0.0.1:7700",
+            r#"{"bind":"127.0.0.1:7700"}"#,
+        )
+        .expect("agent lifecycle event should append");
+    assert!(event.id.starts_with("agl_"));
+    assert!(event.created_at.contains('T'));
+
+    let connection = Connection::open(&path).expect("sqlite should open for inspection");
+    let stored: (String, String, String, String) = connection
+        .query_row(
+            "SELECT event_kind, message, payload_json, created_at FROM agent_lifecycle WHERE id = ?1",
+            params![event.id.clone()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("row should be readable");
+    assert_eq!(stored.0, "server.started");
+    assert_eq!(stored.1, "listening on 127.0.0.1:7700");
+    assert_eq!(stored.2, r#"{"bind":"127.0.0.1:7700"}"#);
+    assert_eq!(stored.3, event.created_at);
+}
+
+#[test]
+fn agent_lifecycle_rejects_invalid_payload_json() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let error = store
+        .append_agent_lifecycle("server.starting", "starting", "{not json")
+        .expect_err("invalid JSON payload should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("event payload must be valid JSON")
+    );
 }
 
 #[test]

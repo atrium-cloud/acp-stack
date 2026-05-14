@@ -132,6 +132,17 @@ Secret values are never returned.
 - `GET /v1/logs/sessions`
 - `GET /v1/metrics/summary`
 
+The 0.0.1 daemon implements the read-only status/log/metrics subset against local config and SQLite state:
+
+- `GET /v1/status` returns schema version, latest durable event timestamp, and server version.
+- `GET /v1/status/agent` returns the configured agent identity/command and recent `agent_lifecycle` records. It does not launch or supervise the agent yet.
+- `GET /v1/status/connections` returns the current in-process active HTTP request count.
+- `GET /v1/security/check` is admin-tier and returns the current security self-check envelope. In 0.0.1 it reports findings for the effective listener bind (including `acps serve --bind` overrides), wildcard CORS on public binds, proxy-header trust without a trusted proxy allowlist, empty cached API keys, and auth-failure counts in the last minute at or above the configured threshold.
+- `GET /v1/logs/events` returns durable event rows and supports `limit` plus exact `level` filtering.
+- `GET /v1/logs/commands`, `GET /v1/logs/sessions`, and `GET /v1/logs/security` return rows from the corresponding SQLite tables. Security logs expose auth-failure metadata only; attempted token values are never stored or returned.
+- `GET /v1/logs/permissions` returns durable events whose kind starts with `permission.` or `permissions.` until the dedicated permissions schema lands.
+- `GET /v1/metrics/summary` returns local row counts for events, sessions, commands, auth failures, and agent lifecycle records.
+
 ## WebSocket
 
 WebSocket endpoint:
