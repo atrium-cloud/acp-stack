@@ -71,7 +71,7 @@ command = "opencode"
 args = ["--acp"]
 cwd = "/workspace"
 env = ["OPENCODE_API_KEY"]
-expected_sha256 = ""
+# expected_sha256 is optional; when present it must be exactly 64 lowercase hex chars.
 restart = "on-crash"
 
 [agent.install]

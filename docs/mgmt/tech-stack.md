@@ -10,8 +10,9 @@ This document records the implementation technologies chosen for the standalone 
 - `tokio` - async runtime.
 - `axum` - HTTP server and WebSocket upgrades.
 - `agentclientprotocol/rust-sdk` - ACP protocol implementation where suitable.
-- `serde`, `serde_json`, `toml` - API payloads and config files.
-- `sqlx` or `rusqlite` - SQLite state and migrations.
+- `serde`, `serde_json`, `toml` - API payloads, config files, durable event payloads, and migration manifest parsing.
+- `chrono` - RFC3339 timestamps for durable state records.
+- `rusqlite` - SQLite state and migrations.
 - `tokio::process` - agent, MCP, and command execution.
 - `portable-pty` - optional PTY allocation for terminal-like command sessions.
 - `tracing` - structured logs.
