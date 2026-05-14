@@ -66,6 +66,14 @@ acps deps apply
 
 Git sources may reference a credential secret for private repositories. S3 sources should reference AWS credential secrets instead of embedding credentials in config.
 
+## Serve
+
+`acps serve` runs the HTTP daemon in the foreground. It blocks the calling shell until it receives `SIGTERM` or `SIGINT`, at which point it triggers a graceful shutdown and exits. The expected deployment is to run it under a process manager (`systemd`, `launchd`, supervisord, a container init) — `acps` itself does not daemonize, does not write a PID file, and does not fork. Standard error carries the startup and shutdown announcement; structured runtime history goes to the SQLite `agent_lifecycle` table as `server.starting`, `server.started`, and `server.stopped` rows.
+
+Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` overrides it for this run. The HTTP server enforces the request body cap as `min([api].max_request_bytes, [security.http].max_request_bytes)` and 413s oversized requests before any handler runs.
+
+`acps serve` requires both API keys to already exist in the encrypted secret store under the names declared in `[auth]`; missing keys fail startup before the listener binds.
+
 ## Security Self-Check
 
 `acps security check` runs the local self-check described in [security](security.md).
@@ -76,7 +84,7 @@ Git sources may reference a credential secret for private repositories. S3 sourc
 
 ## Current 0.0.1 Implementation Subset
 
-The first implemented CLI surface focuses on local config, durable state, and the secret store — no network operations and no agent supervision yet. `init`, `status`, and `logs query` all create or migrate the local SQLite file when missing:
+The first implemented CLI surface focuses on local config, durable state, the secret store, and the foreground HTTP daemon. `init`, `status`, and `logs query` all create or migrate the local SQLite file when missing:
 
 - `acps --version`
 - `acps config validate [path]`
@@ -92,6 +100,7 @@ The first implemented CLI surface focuses on local config, durable state, and th
 - `acps secrets set <name>`
 - `acps secrets delete <name>`
 - `acps logs query [--limit <n>] [--level <level>]`
+- `acps serve [--bind <addr>]`
 
 When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-stack.toml`. Export currently reads the same default path and writes canonical TOML to stdout unless `--output` is provided.
 

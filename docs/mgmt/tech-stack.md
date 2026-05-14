@@ -9,6 +9,9 @@ This document records the implementation technologies chosen for the standalone 
 - `thiserror` - typed application errors.
 - `tokio` - async runtime.
 - `axum` - HTTP server and WebSocket upgrades.
+- `tower`, `tower-http` - middleware composition (body limits, tracing) for the axum layer.
+- `http` - shared HTTP types (`StatusCode`, headers) used by the response envelope mapping.
+- `zeroize` - scrubbing cached API key material on drop.
 - `agentclientprotocol/rust-sdk` - ACP protocol implementation where suitable.
 - `serde`, `serde_json`, `toml` - API payloads, config files, durable event payloads, and migration manifest parsing.
 - `chrono` - RFC3339 timestamps for durable state records.
@@ -23,6 +26,7 @@ This document records the implementation technologies chosen for the standalone 
 - `rand` - cryptographically secure random bytes for API key generation.
 - `subtle` - constant-time byte-slice comparison for API key validation.
 - `tempfile` - durable atomic-write helpers (temp file + rename).
+- `reqwest` (dev) - HTTP client driving end-to-end API integration tests.
 
 ## Storage and Data Contracts
 
