@@ -9,11 +9,11 @@ The runtime uses two API keys:
 - session key
 - admin key
 
-The full auth implementation generates keys during `acps init`. The current 0.0.1 init subset defers key generation until secret storage exists. Once implemented, keys are stored as secrets and referenced by config.
+`acps init` generates both keys, stores them in the age-encrypted secret store under the names declared by `[auth].session_key_ref` and `[auth].admin_key_ref` in the config, and prints the values once on stdout. The admin key is printed only on the run that generates it; re-running `acps init` against an already-initialized instance preserves both keys and does not reveal the admin value again. Keys are formatted as `acps_<43-char base64url>` (32 random bytes from the system CSPRNG, base64url-no-pad, with the `acps_` prefix).
 
 The session key authorizes general operations and can be regenerated with `acps auth regenerate-session-key`.
 
-The admin key authorizes elevated operations. It is generated only once during init. If it is lost or compromised, the best course of action is to export data and config, then shut down the instance.
+The admin key authorizes elevated operations. It is generated only once during init and is never regenerable in place. If it is lost or compromised, the operator must run `acps reset --yes` to wipe config, state, age key, and the secret store, then re-run `acps init` to regenerate a fresh pair. `acps init` fails fast if the secret store exists but is missing the admin key reference, treating that state as an anomaly that requires the operator to investigate.
 
 ## Baseline Posture
 
@@ -41,11 +41,12 @@ Deployment guidance should document reverse proxy patterns for Caddy, Nginx, Fly
 
 Secrets are stored outside the portable config.
 
-0.0.2 uses age-compatible encryption:
+0.0.1 uses age-compatible encryption:
 
-- private key: `~/.config/acp-stack/age.key`
-- encrypted store: `~/.local/share/acp-stack/secrets.age`
-- public key used for new secret encryption
+- private key: `~/.config/acp-stack/age.key` (bech32 x25519 identity, owner-only `0600`)
+- encrypted store: `~/.local/share/acp-stack/secrets.age` (owner-only `0600`)
+- the store is encrypted to its own public key; the inner plaintext is a TOML document of the form `[secrets]\nNAME = "value"`
+- mutations rewrite the full ciphertext through an atomic temp-file rename
 
 Secret references appear in config:
 

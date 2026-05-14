@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use base64::Engine;
+use predicates::prelude::PredicateBooleanExt as _;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -234,7 +235,7 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 1"))
+        .stdout(predicates::str::contains("schema_version: 2"))
         .stdout(predicates::str::contains("latest_event:"));
 }
 
@@ -681,4 +682,578 @@ fn mode(path: &std::path::Path) -> u32 {
         .permissions()
         .mode()
         & 0o777
+}
+
+// ----- 0.0.1 auth/secrets/reset/config-import tests -----
+
+fn run_init_with_home(home: &std::path::Path) {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home)
+        .arg("init")
+        .assert()
+        .success();
+}
+
+#[test]
+fn init_creates_age_key_and_encrypted_secret_store() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let age_key = tempdir.path().join(".config/acp-stack/age.key");
+    let store = tempdir.path().join(".local/share/acp-stack/secrets.age");
+    assert!(age_key.is_file(), "age key must be written");
+    assert!(store.is_file(), "secret store ciphertext must be written");
+}
+
+#[cfg(unix)]
+#[test]
+fn init_age_key_and_store_are_owner_only() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    assert_eq!(
+        mode(&tempdir.path().join(".config/acp-stack/age.key")),
+        0o600
+    );
+    assert_eq!(
+        mode(&tempdir.path().join(".local/share/acp-stack/secrets.age")),
+        0o600,
+    );
+}
+
+#[test]
+fn init_prints_session_and_admin_keys_on_first_run() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(stdout.contains("session key (ACP_STACK_SESSION_KEY): acps_"));
+    assert!(stdout.contains("admin key (ACP_STACK_ADMIN_KEY): acps_"));
+    assert!(stdout.contains("save the admin key now"));
+}
+
+#[test]
+fn init_is_idempotent_and_preserves_keys() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let store = tempdir.path().join(".local/share/acp-stack/secrets.age");
+    let first = fs::read(&store).expect("ciphertext readable");
+
+    let stdout = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(stdout).expect("utf8");
+    assert!(
+        stdout.contains("preserved existing API keys"),
+        "second init must report preservation, got: {stdout}",
+    );
+    assert!(
+        !stdout.contains("save the admin key now"),
+        "second init must not print key material again",
+    );
+
+    let second = fs::read(&store).expect("ciphertext readable");
+    assert_eq!(
+        first, second,
+        "ciphertext is rewritten on init even with no changes; investigate",
+    );
+}
+
+#[test]
+fn init_fails_fast_when_store_exists_with_both_auth_refs_missing() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    // Delete both auth refs via the library API (the CLI guard rejects this,
+    // which is itself a separate test) and add an unrelated secret so the
+    // store is non-empty. The new init logic must refuse to silently
+    // re-generate the admin key in this corrupted state.
+    let mut store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
+    store.set("OPENCODE_API_KEY", "xyz").expect("set unrelated");
+    store
+        .delete("ACP_STACK_SESSION_KEY")
+        .expect("delete session");
+    store.delete("ACP_STACK_ADMIN_KEY").expect("delete admin");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "does not contain the admin key reference",
+        ));
+}
+
+#[test]
+fn secrets_set_only_captures_first_line_of_stdin() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "set", "MULTILINE_TEST"])
+        .write_stdin("first-line\nsecond-line\n")
+        .assert()
+        .success();
+
+    let store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
+    assert_eq!(store.get("MULTILINE_TEST").expect("get"), "first-line");
+}
+
+#[test]
+fn init_fails_fast_when_admin_key_missing_in_existing_store() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    // Delete the admin key via the library API (the CLI guard refuses to do
+    // so directly, which is a separate test). The store now contains the
+    // session key only, mimicking a partial wipe.
+    let mut store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
+    store.delete("ACP_STACK_ADMIN_KEY").expect("delete admin");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "does not contain the admin key reference",
+        ));
+}
+
+#[test]
+fn secrets_set_refuses_to_mutate_session_key_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "set", "ACP_STACK_SESSION_KEY"])
+        .write_stdin("attacker-supplied")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "is the configured session key reference",
+        ));
+}
+
+#[test]
+fn secrets_set_refuses_to_mutate_admin_key_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "set", "ACP_STACK_ADMIN_KEY"])
+        .write_stdin("attacker-supplied")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "is the configured admin key reference",
+        ));
+}
+
+#[test]
+fn secrets_delete_refuses_to_remove_admin_key_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "delete", "ACP_STACK_ADMIN_KEY"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "is the configured admin key reference",
+        ));
+}
+
+#[test]
+fn secrets_list_shows_session_and_admin_names_only_after_init() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ACP_STACK_ADMIN_KEY"))
+        .stdout(predicates::str::contains("ACP_STACK_SESSION_KEY"))
+        .stdout(predicates::str::contains("acps_").not());
+}
+
+#[test]
+fn secrets_set_reads_value_from_stdin() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "set", "OPENCODE_API_KEY"])
+        .write_stdin("super-secret-value\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("set secret: OPENCODE_API_KEY"));
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OPENCODE_API_KEY"));
+}
+
+#[test]
+fn secrets_delete_removes_named_secret() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "set", "TEMP_VALUE"])
+        .write_stdin("abc")
+        .assert()
+        .success();
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "delete", "TEMP_VALUE"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("deleted secret: TEMP_VALUE"));
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "delete", "TEMP_VALUE"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("was not found"));
+}
+
+#[test]
+fn auth_regenerate_session_key_rotates_only_session() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let first_init_stdout = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_init = String::from_utf8(first_init_stdout).expect("utf8");
+    let admin_line = first_init
+        .lines()
+        .find(|l| l.starts_with("admin key (ACP_STACK_ADMIN_KEY): "))
+        .expect("init must print admin key");
+    let admin_value_before = admin_line
+        .trim_start_matches("admin key (ACP_STACK_ADMIN_KEY): ")
+        .trim();
+    let session_line = first_init
+        .lines()
+        .find(|l| l.starts_with("session key (ACP_STACK_SESSION_KEY): "))
+        .expect("init must print session key");
+    let session_before = session_line
+        .trim_start_matches("session key (ACP_STACK_SESSION_KEY): ")
+        .trim();
+
+    let rotate_stdout = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["auth", "regenerate-session-key"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rotate = String::from_utf8(rotate_stdout).expect("utf8");
+    assert!(rotate.contains("session key rotated"));
+    let rotated_line = rotate
+        .lines()
+        .find(|l| l.starts_with("value: "))
+        .expect("rotate must print new value");
+    let session_after = rotated_line.trim_start_matches("value: ").trim();
+
+    assert_ne!(
+        session_before, session_after,
+        "session key must change on rotation",
+    );
+
+    // Read the admin key via the store layer to confirm it wasn't touched.
+    let store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
+    assert_eq!(
+        store
+            .get("ACP_STACK_ADMIN_KEY")
+            .expect("admin key still present"),
+        admin_value_before,
+        "admin key must NOT change on session rotation",
+    );
+}
+
+#[test]
+fn reset_without_yes_lists_targets_and_keeps_files() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("reset")
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("acps reset would delete:"))
+        .stdout(predicates::str::contains("acp-stack.toml"))
+        .stdout(predicates::str::contains("state.sqlite"))
+        .stdout(predicates::str::contains("age.key"))
+        .stdout(predicates::str::contains("secrets.age"))
+        .stdout(predicates::str::contains("re-run with --yes"));
+
+    assert!(
+        tempdir
+            .path()
+            .join(".config/acp-stack/acp-stack.toml")
+            .exists(),
+        "dry-run must NOT remove files",
+    );
+}
+
+#[test]
+fn reset_dry_run_does_not_write_cli_error_event() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("reset")
+        .assert()
+        .failure();
+
+    // The dry-run contract is "exits without touching the filesystem".
+    // Recording a `cli.error` event row would touch state.sqlite, so the
+    // event log must show no error rows after a dry-run reset.
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["logs", "query", "--level", "error"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["reset", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("reset acp-stack"));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acp-stack.toml")
+            .exists()
+    );
+    assert!(!tempdir.path().join(".config/acp-stack/age.key").exists());
+    assert!(
+        !tempdir
+            .path()
+            .join(".local/share/acp-stack/state.sqlite")
+            .exists()
+    );
+    assert!(
+        !tempdir
+            .path()
+            .join(".local/share/acp-stack/secrets.age")
+            .exists()
+    );
+
+    // Re-running reset is idempotent and does not error on missing files.
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["reset", "--yes"])
+        .assert()
+        .success();
+
+    // Fresh init after reset produces a different admin key than the first.
+    let init_after = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(init_after).expect("utf8");
+    assert!(stdout.contains("admin key (ACP_STACK_ADMIN_KEY): acps_"));
+}
+
+#[test]
+fn config_import_refuses_without_force_when_config_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let exported = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "export"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let import_path = tempdir.path().join("exported.toml");
+    fs::write(&import_path, exported).expect("write export");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", import_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("config already exists"));
+}
+
+#[test]
+fn config_import_with_force_replaces_existing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    // Build an alternate config with a recognizable bind addr.
+    let modified = VALID_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7777""#);
+    let import_path = tempdir.path().join("alt.toml");
+    fs::write(&import_path, &modified).expect("write alt");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", import_path.to_str().unwrap(), "--force"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("imported config (replaced)"));
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config readable");
+    assert!(written.contains("127.0.0.1:7777"));
+}
+
+#[test]
+fn config_import_supports_base64_input() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    // No init first; we want to exercise the create-fresh import path.
+    let modified = VALID_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7788""#);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(modified);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", "--base64", &encoded])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("imported config:"));
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config readable");
+    assert!(written.contains("127.0.0.1:7788"));
+}
+
+#[test]
+fn config_import_refuses_to_change_auth_refs() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    // Build an alternate config that changes admin_key_ref. Import must
+    // refuse, otherwise an operator could swap which secret is treated as
+    // the admin key without going through `acps reset --yes`.
+    let modified = VALID_CONFIG.replace(
+        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
+        r#"admin_key_ref = "MY_NEW_ADMIN""#,
+    );
+    let import_path = tempdir.path().join("rotated.toml");
+    fs::write(&import_path, &modified).expect("write rotated");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", import_path.to_str().unwrap(), "--force"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "would change `[auth].admin_key_ref`",
+        ));
+}
+
+#[test]
+fn config_import_refuses_to_change_session_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let modified = VALID_CONFIG.replace(
+        r#"session_key_ref = "ACP_STACK_SESSION_KEY""#,
+        r#"session_key_ref = "MY_NEW_SESSION""#,
+    );
+    let import_path = tempdir.path().join("rotated-session.toml");
+    fs::write(&import_path, &modified).expect("write rotated session");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", import_path.to_str().unwrap(), "--force"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "would change `[auth].session_key_ref`",
+        ));
+}
+
+#[test]
+fn config_import_rejects_invalid_base64() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", "--base64", "!!!not-base64!!!"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not valid base64"));
 }

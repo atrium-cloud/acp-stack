@@ -27,9 +27,23 @@ The initial 0.0.1 state implementation creates the local SQLite database at:
 
 It creates baseline tables for schema migrations, events, sessions, commands, agent lifecycle records, auth failures, and installer runs. The first user-facing durable records are local events written by `acps init`, `acps status`, and CLI error handling.
 
+The `auth_failures` table records every rejected API key authentication. The attempted key value is never stored; rows carry the structural failure context only. Columns:
+
+| column         | type | notes                                                                              |
+| -------------- | ---- | ---------------------------------------------------------------------------------- |
+| `id`           | TEXT | primary key; format `af_<nanos>_<seq>_<pid>`, sorts chronologically                 |
+| `created_at`   | TEXT | RFC3339 UTC with 9-digit subseconds                                                |
+| `key_kind`     | TEXT | `session`, `admin`, or `unknown`                                                   |
+| `reason`       | TEXT | `missing`, `invalid`, `wrong_kind`, or `malformed_header`                          |
+| `client_ip`    | TEXT | nullable; populated by the HTTP layer when available                               |
+| `route`        | TEXT | nullable; the rejected route path                                                  |
+| `payload_json` | TEXT | structured JSON payload, validated by SQLite's `json_valid` check constraint        |
+
+`payload_json` is the extension point: future fields (rate-limit context, header parse details, etc.) land there without a column migration.
+
 The migration runner follows the documented `migrations/` layout: `manifest.toml` lists each migration's `id`, `name`, and `sqlite_file`. The 0.0.1 runner embeds the SQLite migration files in the binary via `include_str!` and applies any manifest entry whose version is not already recorded in `schema_migrations`. PostgreSQL dialect files (`{id:03}_{name}.postgres.sql`) arrive with the Supabase sink in 0.0.3.
 
-`acps init` is the only command that creates the local config file; it does so atomically at owner-only permissions (Unix `O_CREAT | O_EXCL` with mode `0o600`). `acps status` requires an existing config and repairs its permissions on each run. All three of `init`, `status`, and `logs query` create or migrate the local SQLite file atomically at owner-only permissions when it is missing.
+`acps init` creates the local config file when absent; `acps config import` writes one too, refusing to overwrite an existing config unless `--force` is passed. Both write atomically at owner-only permissions (Unix `O_CREAT | O_EXCL` with mode `0o600`). `acps status` requires an existing config and repairs its permissions on each run. All three of `init`, `status`, and `logs query` create or migrate the local SQLite file atomically at owner-only permissions when it is missing.
 
 Initial event records use:
 

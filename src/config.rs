@@ -216,6 +216,7 @@ impl Config {
     fn validate(&self) -> Result<()> {
         validate_socket_address("api.bind", &self.api.bind)?;
         validate_nonzero("api.max_request_bytes", self.api.max_request_bytes)?;
+        validate_auth_refs(&self.auth)?;
         validate_nonzero(
             "security.http.max_request_bytes",
             self.security.http.max_request_bytes,
@@ -250,6 +251,28 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn validate_auth_refs(auth: &AuthConfig) -> Result<()> {
+    let session = auth.session_key_ref.trim();
+    let admin = auth.admin_key_ref.trim();
+    if session.is_empty() {
+        return Err(StackError::MissingField {
+            field: "auth.session_key_ref",
+        });
+    }
+    if admin.is_empty() {
+        return Err(StackError::MissingField {
+            field: "auth.admin_key_ref",
+        });
+    }
+    // Distinct refs are a hard invariant: if they alias, generating both keys
+    // writes the second over the first, and `acps auth regenerate-session-key`
+    // rotates the admin key, collapsing the session/admin boundary.
+    if session == admin {
+        return Err(StackError::AuthRefsNotDistinct);
+    }
+    Ok(())
 }
 
 fn validate_socket_address(field: &'static str, value: &str) -> Result<()> {
