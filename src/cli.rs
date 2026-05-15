@@ -1458,6 +1458,7 @@ root = "/workspace"
 uploads = "/workspace/uploads"
 default_shell = "/bin/bash"
 runtime_user = "acp"
+max_file_bytes = 8388608
 
 [workspace.source]
 type = "none"
