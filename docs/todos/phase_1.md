@@ -11,7 +11,7 @@
 ## Runtime And Project Skeleton
 
 - [x] Create the Rust workspace and primary `acps` binary.
-- [ ] Add config, API, auth, state, workspace, command, and logs modules (agent bridge and supervisor modules complete; workspace and command gateway pending).
+- [ ] Add config, API, auth, state, workspace, command, and logs modules (agent bridge, supervisor, and workspace modules complete; command gateway pending).
 - [x] Add structured tracing initialization.
 - [x] Add baseline error type and response-envelope mapping.
 - [x] Add unit/integration test harness.
@@ -66,10 +66,10 @@
 - [ ] Implement config API routes.
 - [x] Implement agent lifecycle API routes.
 - [x] Implement session API route stubs wired to the ACP bridge.
-- [ ] Implement workspace file API routes.
+- [x] Implement workspace file API routes.
 - [ ] Implement command API routes.
 - [x] Implement log query API routes.
-- [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs. (`sessions.{id}` is complete for ACP `session/update`; command, workspace, agent, status, and log producers remain pending.)
+- [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs. (`sessions.{id}` and `workspace` are complete; command, agent, status, and log producers remain pending.)
 
 ## ACP Agent Bridge
 
@@ -94,13 +94,13 @@
 
 ## Workspace And Commands
 
-- [ ] Resolve all relative workspace paths under `workspace.root`.
-- [ ] Reject path traversal.
-- [ ] Reject symlink escapes by default.
-- [ ] Implement bounded file reads.
-- [ ] Implement explicit binary downloads.
-- [ ] Implement atomic writes where practical.
-- [ ] Implement file upload and delete.
+- [x] Resolve all relative workspace paths under `workspace.root`.
+- [x] Reject path traversal.
+- [x] Reject symlink escapes by default.
+- [x] Implement bounded file reads.
+- [x] Implement explicit binary downloads.
+- [x] Implement atomic writes where practical.
+- [x] Implement file upload and delete.
 - [ ] Implement daemon-mediated shell command execution.
 - [ ] Capture command stdout, stderr, exit status, and timing.
 - [ ] Stream command output over WebSocket.
@@ -126,6 +126,6 @@
 - [x] A direct-key ACP agent can be installed or configured.
 - [x] A session can be created through CLI or HTTP.
 - [x] A prompt can be sent and streamed over WebSocket.
-- [ ] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.
+- [x] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.
 - [ ] A mediated shell command can be run and logged.
 - [x] Durable logs can be queried from SQLite.

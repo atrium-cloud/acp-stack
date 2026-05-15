@@ -241,6 +241,80 @@ mod tests {
     }
 
     #[test]
+    fn workspace_path_invalid_maps_to_400() {
+        let err = StackError::WorkspacePathInvalid {
+            reason: "contains ..".into(),
+            requested: "../etc/passwd".into(),
+        };
+        assert_eq!(err.error_code(), "workspace.path_invalid");
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+        let env = ApiError::from_stack_error(&err);
+        assert!(env.message.contains("contains .."), "got {}", env.message);
+    }
+
+    #[test]
+    fn workspace_symlink_escape_maps_to_400() {
+        let err = StackError::WorkspaceSymlinkEscape {
+            requested: "outside".into(),
+        };
+        assert_eq!(err.error_code(), "workspace.symlink_escape");
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn workspace_not_found_maps_to_404() {
+        let err = StackError::WorkspaceNotFound {
+            requested: "missing".into(),
+        };
+        assert_eq!(err.error_code(), "workspace.not_found");
+        assert_eq!(err.http_status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn workspace_too_large_maps_to_413_with_limit() {
+        let err = StackError::WorkspaceTooLarge { limit: 8_388_608 };
+        assert_eq!(err.error_code(), "workspace.too_large");
+        assert_eq!(err.http_status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let env = ApiError::from_stack_error(&err);
+        assert!(env.message.contains("8388608"), "got {}", env.message);
+    }
+
+    #[test]
+    fn workspace_upload_invalid_maps_to_400() {
+        let err = StackError::WorkspaceUploadInvalid {
+            reason: "missing path field",
+        };
+        assert_eq!(err.error_code(), "workspace.upload_invalid");
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn workspace_io_failed_sanitizes_local_paths() {
+        let err = StackError::WorkspaceIo {
+            requested: "notes.md".into(),
+            source: std::io::Error::other("/home/alice/secret"),
+        };
+        assert_eq!(err.error_code(), "workspace.io_failed");
+        assert_eq!(err.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let env = ApiError::from_stack_error(&err);
+        assert!(
+            !env.message.contains("/home/alice"),
+            "leaked: {}",
+            env.message
+        );
+        assert!(!env.message.contains("secret"), "leaked: {}", env.message);
+    }
+
+    #[test]
+    fn workspace_encoding_invalid_maps_to_400() {
+        let err = StackError::WorkspaceEncodingInvalid {
+            reason: "encoding must be utf8 or base64",
+        };
+        assert_eq!(err.error_code(), "workspace.encoding_invalid");
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn api_result_ok_renders_200_success_envelope() {
         let result: ApiResult<&str> = ApiResult(Ok("hello"));
         let response = result.into_response();

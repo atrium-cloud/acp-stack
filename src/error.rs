@@ -188,6 +188,9 @@ pub enum StackError {
     #[error("{field} must be absolute")]
     PathMustBeAbsolute { field: &'static str },
 
+    #[error("{field} must not contain `..` segments")]
+    PathContainsParentDir { field: &'static str },
+
     #[error("workspace.source.type must be one of none, git, s3")]
     InvalidWorkspaceSourceType,
 
@@ -307,6 +310,34 @@ pub enum StackError {
 
     #[error("prompt body is not valid ACP content: {0}")]
     PromptBodyInvalid(String),
+
+    #[error("workspace path `{requested}` is invalid: {reason}")]
+    WorkspacePathInvalid { reason: String, requested: String },
+
+    #[error("workspace path `{requested}` resolves outside the workspace root")]
+    WorkspaceSymlinkEscape { requested: String },
+
+    #[error("workspace path `{requested}` was not found")]
+    WorkspaceNotFound { requested: String },
+
+    #[error("workspace file exceeds the {limit}-byte size limit")]
+    WorkspaceTooLarge { limit: u64 },
+
+    #[error("workspace upload is invalid: {reason}")]
+    WorkspaceUploadInvalid { reason: &'static str },
+
+    #[error("workspace I/O on `{requested}` failed: {source}")]
+    WorkspaceIo {
+        requested: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("workspace file encoding is invalid: {reason}")]
+    WorkspaceEncodingInvalid { reason: &'static str },
+
+    #[error("workspace.uploads must be inside workspace.root")]
+    WorkspaceUploadsNotUnderRoot,
 }
 
 impl StackError {
@@ -358,6 +389,7 @@ impl StackError {
             | InvalidSocketAddress { .. }
             | NonZeroRequired { .. }
             | PathMustBeAbsolute { .. }
+            | PathContainsParentDir { .. }
             | InvalidWorkspaceSourceType
             | InvalidAgentRestart
             | InvalidExpectedSha256
@@ -386,6 +418,14 @@ impl StackError {
             PromptSessionMismatch { .. } => "prompt.session_mismatch",
             PromptBodyEmpty => "prompt.body_empty",
             PromptBodyInvalid(_) => "prompt.body_invalid",
+            WorkspacePathInvalid { .. } => "workspace.path_invalid",
+            WorkspaceSymlinkEscape { .. } => "workspace.symlink_escape",
+            WorkspaceNotFound { .. } => "workspace.not_found",
+            WorkspaceTooLarge { .. } => "workspace.too_large",
+            WorkspaceUploadInvalid { .. } => "workspace.upload_invalid",
+            WorkspaceIo { .. } => "workspace.io_failed",
+            WorkspaceEncodingInvalid { .. } => "workspace.encoding_invalid",
+            WorkspaceUploadsNotUnderRoot => "config.invalid",
         }
     }
 
@@ -454,6 +494,7 @@ impl StackError {
             InvalidSocketAddress { field } => format!("{field} must be a socket address"),
             NonZeroRequired { field } => format!("{field} must be greater than zero"),
             PathMustBeAbsolute { field } => format!("{field} must be absolute"),
+            PathContainsParentDir { field } => format!("{field} must not contain `..` segments"),
             InvalidWorkspaceSourceType => {
                 "workspace.source.type must be one of none, git, s3".to_owned()
             }
@@ -513,6 +554,24 @@ impl StackError {
             } => format!("session `{session_id}` does not own prompt `{prompt_id}`"),
             PromptBodyEmpty => "prompt body must include at least one content block".to_owned(),
             PromptBodyInvalid(_) => "prompt body is not valid ACP content".to_owned(),
+            WorkspacePathInvalid { reason, .. } => format!("workspace path is invalid: {reason}"),
+            WorkspaceSymlinkEscape { .. } => {
+                "workspace path resolves outside the workspace root".to_owned()
+            }
+            WorkspaceNotFound { requested } => {
+                format!("workspace path `{requested}` was not found")
+            }
+            WorkspaceTooLarge { limit } => {
+                format!("workspace file exceeds the {limit}-byte size limit")
+            }
+            WorkspaceUploadInvalid { reason } => format!("workspace upload is invalid: {reason}"),
+            WorkspaceIo { .. } => "workspace I/O failed".to_owned(),
+            WorkspaceEncodingInvalid { reason } => {
+                format!("workspace file encoding is invalid: {reason}")
+            }
+            WorkspaceUploadsNotUnderRoot => {
+                "workspace.uploads must be inside workspace.root".to_owned()
+            }
         }
     }
 
@@ -536,6 +595,7 @@ impl StackError {
             | InvalidSocketAddress { .. }
             | NonZeroRequired { .. }
             | PathMustBeAbsolute { .. }
+            | PathContainsParentDir { .. }
             | InvalidWorkspaceSourceType
             | InvalidAgentRestart
             | InvalidExpectedSha256
@@ -601,6 +661,18 @@ impl StackError {
             SessionClosed { .. } | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
             PromptBodyEmpty | PromptBodyInvalid(_) => StatusCode::BAD_REQUEST,
             AgentRequestFailed { .. } => StatusCode::BAD_GATEWAY,
+            // Workspace: client-supplied path / encoding / upload-shape problems
+            // are 400; missing files are 404; size cap exceeded is 413; the
+            // underlying I/O error is an internal fault (the path itself was
+            // already validated client-side).
+            WorkspacePathInvalid { .. }
+            | WorkspaceSymlinkEscape { .. }
+            | WorkspaceUploadInvalid { .. }
+            | WorkspaceEncodingInvalid { .. } => StatusCode::BAD_REQUEST,
+            WorkspaceNotFound { .. } => StatusCode::NOT_FOUND,
+            WorkspaceTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            WorkspaceIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            WorkspaceUploadsNotUnderRoot => StatusCode::BAD_REQUEST,
         }
     }
 }

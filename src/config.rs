@@ -57,6 +57,7 @@ pub struct WorkspaceConfig {
     pub uploads: String,
     pub default_shell: String,
     pub runtime_user: String,
+    pub max_file_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<WorkspaceSourceConfig>,
 }
@@ -233,6 +234,18 @@ impl Config {
         validate_absolute_path("workspace.root", &self.workspace.root)?;
         validate_absolute_path("workspace.uploads", &self.workspace.uploads)?;
         validate_absolute_path("workspace.default_shell", &self.workspace.default_shell)?;
+        validate_nonzero("workspace.max_file_bytes", self.workspace.max_file_bytes)?;
+        validate_no_parent_dir_segments("workspace.root", &self.workspace.root)?;
+        validate_no_parent_dir_segments("workspace.uploads", &self.workspace.uploads)?;
+        // Lexical pre-check: uploads must live under root. With `..` segments
+        // already rejected above, `starts_with` is sound. The runtime layer
+        // also re-resolves the upload destination against workspace.root, so a
+        // symlink inside the workspace that points outside is caught at write
+        // time; this check rejects the obvious misconfiguration up front and
+        // keeps `workspace_relative_string` from emitting absolute paths.
+        if !Path::new(&self.workspace.uploads).starts_with(Path::new(&self.workspace.root)) {
+            return Err(StackError::WorkspaceUploadsNotUnderRoot);
+        }
         let source = self
             .workspace
             .source
@@ -295,6 +308,20 @@ fn validate_absolute_path(field: &'static str, value: &str) -> Result<()> {
         return Err(StackError::PathMustBeAbsolute { field });
     }
 
+    Ok(())
+}
+
+/// `Path::starts_with` is purely lexical — `/workspace/../etc/uploads`
+/// "starts with" `/workspace` even though it resolves outside. Reject `..`
+/// segments in the configured paths up front so the workspace-root/uploads
+/// containment check below cannot be tricked, and so request-time path
+/// resolution does not have to canonicalize the config paths repeatedly.
+fn validate_no_parent_dir_segments(field: &'static str, value: &str) -> Result<()> {
+    for component in Path::new(value).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(StackError::PathContainsParentDir { field });
+        }
+    }
     Ok(())
 }
 

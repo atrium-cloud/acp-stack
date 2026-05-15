@@ -67,6 +67,68 @@ fn rejects_relative_workspace_paths() {
 }
 
 #[test]
+fn parses_workspace_max_file_bytes() {
+    let config = load_config_from_str(VALID_CONFIG).expect("valid config should parse");
+    assert_eq!(config.workspace.max_file_bytes, 8_388_608);
+}
+
+#[test]
+fn rejects_zero_workspace_max_file_bytes() {
+    let error = load_config_from_str(
+        &VALID_CONFIG.replace("max_file_bytes = 8388608", "max_file_bytes = 0"),
+    )
+    .expect_err("zero max_file_bytes should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.max_file_bytes must be greater than zero"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_missing_workspace_max_file_bytes() {
+    let error = load_config_from_str(&VALID_CONFIG.replace("max_file_bytes = 8388608\n", ""))
+        .expect_err("missing max_file_bytes should fail");
+
+    assert!(error.to_string().contains("max_file_bytes"), "got: {error}",);
+}
+
+#[test]
+fn rejects_uploads_with_parent_dir_segments() {
+    // Lexical starts_with passes for this, but the resolved path escapes.
+    let error = load_config_from_str(&VALID_CONFIG.replace(
+        r#"uploads = "/workspace/uploads""#,
+        r#"uploads = "/workspace/../etc/uploads""#,
+    ))
+    .expect_err("uploads with `..` should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.uploads must not contain `..` segments"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_uploads_outside_workspace_root() {
+    let error = load_config_from_str(&VALID_CONFIG.replace(
+        r#"uploads = "/workspace/uploads""#,
+        r#"uploads = "/etc/dropbox""#,
+    ))
+    .expect_err("uploads outside root should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.uploads must be inside workspace.root"),
+        "got: {error}",
+    );
+}
+
+#[test]
 fn rejects_relative_workspace_default_shell() {
     let error = load_config_from_str(&VALID_CONFIG.replace(
         r#"default_shell = "/bin/bash""#,

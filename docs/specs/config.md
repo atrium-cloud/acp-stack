@@ -46,6 +46,7 @@ root = "/workspace"
 uploads = "/workspace/uploads"
 default_shell = "/bin/bash"
 runtime_user = "acp"
+max_file_bytes = 8388608
 
 [workspace.source]
 type = "git" # none | git | s3
@@ -103,6 +104,8 @@ The 0.0.1 implementation supports validation, export, and import:
 ## Request Size Limits
 
 Both `[api].max_request_bytes` and `[security.http].max_request_bytes` cap inbound HTTP request bodies. They are independent fields so that an operator can tighten security limits without changing the headline `[api]` cap, or vice versa. When both are present, the runtime enforces the tighter of the two — `min([api].max_request_bytes, [security.http].max_request_bytes)`. Oversized requests are rejected with 413 before any route handler runs.
+
+`[workspace].max_file_bytes` is a separate, per-file ceiling that the workspace API applies to reads, writes, uploads, and downloads. It is independent of the HTTP body cap because workspace operations also include reads and downloads (which the HTTP body cap does not see) and because the natural file-size limit can be lower than the body cap. Files larger than this limit cannot be transferred through the workspace API regardless of how the bytes are framed on the wire.
 
 ## Hardening
 
