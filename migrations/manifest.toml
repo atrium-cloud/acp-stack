@@ -27,3 +27,8 @@ sqlite_file = "005_commands_schema.sqlite.sql"
 id = 6
 name = "permissions"
 sqlite_file = "006_permissions.sqlite.sql"
+
+[[migration]]
+id = 7
+name = "events_source"
+sqlite_file = "007_events_source.sqlite.sql"

@@ -50,7 +50,10 @@ impl ServerHarness {
     async fn auth_failure_count(&self) -> usize {
         let guard = self.state.lock().await;
         guard
-            .query_auth_failures(AuthFailureFilter { limit: 100 })
+            .query_auth_failures(AuthFailureFilter {
+                limit: 100,
+                ..AuthFailureFilter::default()
+            })
             .expect("query auth failures")
             .len()
     }
@@ -58,7 +61,10 @@ impl ServerHarness {
     async fn latest_auth_failure(&self) -> (String, String) {
         let guard = self.state.lock().await;
         let rows = guard
-            .query_auth_failures(AuthFailureFilter { limit: 1 })
+            .query_auth_failures(AuthFailureFilter {
+                limit: 1,
+                ..AuthFailureFilter::default()
+            })
             .expect("query auth failures");
         let row = rows.into_iter().next().expect("at least one auth failure");
         (row.key_kind, row.reason)
@@ -67,7 +73,10 @@ impl ServerHarness {
     async fn latest_auth_failure_client_ip(&self) -> Option<String> {
         let guard = self.state.lock().await;
         let rows = guard
-            .query_auth_failures(AuthFailureFilter { limit: 1 })
+            .query_auth_failures(AuthFailureFilter {
+                limit: 1,
+                ..AuthFailureFilter::default()
+            })
             .expect("query auth failures");
         rows.into_iter()
             .next()
@@ -330,7 +339,184 @@ async fn logs_events_returns_array_envelope() {
     let body: Value = response.json().await.expect("json");
     let events = body["data"]["events"].as_array().expect("events array");
     assert!(!events.is_empty());
-    assert_eq!(events[0]["kind"], "test.kind");
+    // `kind` matches the seeded value; the source column round-trips into the
+    // response envelope; the next_cursor key is always present.
+    assert!(events.iter().any(|e| e["kind"] == "test.kind"));
+    assert!(events.iter().any(|e| e["source"].is_string()));
+    assert!(body["data"].get("next_cursor").is_some());
+}
+
+#[tokio::test]
+async fn logs_events_supports_kind_filter() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_event_with_source("info", "command.started", "command", "", "{}")
+            .expect("append");
+        guard
+            .append_event_with_source("info", "command.exited", "command", "", "{}")
+            .expect("append");
+        guard
+            .append_event("info", "session.update", "", "{}")
+            .expect("append");
+    }
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?kind=command.&limit=10",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let events = body["data"]["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 2);
+    for event in events {
+        assert!(event["kind"].as_str().unwrap().starts_with("command."));
+    }
+}
+
+#[tokio::test]
+async fn logs_events_supports_source_filter() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_event_with_source("info", "command.exited", "command", "", "{}")
+            .expect("append");
+        guard
+            .append_event_with_source("info", "permission.created", "permission", "", "{}")
+            .expect("append");
+    }
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?source=command&limit=10",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let events = body["data"]["events"].as_array().expect("events array");
+    assert!(events.iter().all(|e| e["source"] == "command"));
+}
+
+#[tokio::test]
+async fn logs_events_pagination_cursor_advances_page() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        for i in 0..5 {
+            guard
+                .append_event("info", "test.page", &format!("row-{i}"), "{}")
+                .expect("append");
+        }
+    }
+    let first = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?kind=test.page&limit=2",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let next_cursor = first["data"]["next_cursor"]
+        .as_str()
+        .expect("next_cursor present when page saturates limit")
+        .to_owned();
+    let second = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?kind=test.page&limit=2&after={next_cursor}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let second_events = second["data"]["events"].as_array().expect("events array");
+    assert_eq!(second_events.len(), 2);
+    // The cursor must not echo back in the next page.
+    assert!(
+        second_events
+            .iter()
+            .all(|e| e["id"].as_str().unwrap() != next_cursor)
+    );
+}
+
+#[tokio::test]
+async fn api_request_middleware_records_event_with_status_and_duration() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/logs/events?limit=1", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Inspect SQLite directly — the writer runs inside the response future.
+    let guard = harness.state.lock().await;
+    let rows = guard
+        .query_events(acp_stack::state::LogFilter {
+            limit: 50,
+            kind: Some("api.request"),
+            ..acp_stack::state::LogFilter::default()
+        })
+        .expect("query");
+    assert!(
+        rows.iter()
+            .any(|r| r.payload_json.contains("\"status\":200")),
+        "expected an api.request row with status=200"
+    );
+    let recorded = rows
+        .iter()
+        .find(|r| r.payload_json.contains("\"status\":200"))
+        .expect("matching row");
+    assert_eq!(recorded.source, "api");
+    let payload: Value = serde_json::from_str(&recorded.payload_json).expect("payload json");
+    assert_eq!(payload["method"].as_str(), Some("GET"));
+    assert!(payload["duration_ms"].is_number());
+}
+
+#[tokio::test]
+async fn api_request_middleware_skips_status_routes() {
+    let harness = ServerHarness::spawn().await;
+    // Hit /v1/status repeatedly; the skip list must keep `api.request` rows
+    // out of SQLite for this path so polling clients don't bloat the table.
+    for _ in 0..3 {
+        let _ = reqwest::Client::new()
+            .get(format!("{}/v1/status", harness.base_url))
+            .header("Authorization", format!("Bearer {SESSION_KEY}"))
+            .send()
+            .await
+            .expect("send");
+    }
+    let guard = harness.state.lock().await;
+    let rows = guard
+        .query_events(acp_stack::state::LogFilter {
+            limit: 100,
+            kind: Some("api.request"),
+            ..acp_stack::state::LogFilter::default()
+        })
+        .expect("query");
+    assert!(
+        rows.iter()
+            .all(|r| !r.payload_json.contains("\"/v1/status\"")
+                && !r.payload_json.contains("\\\"/v1/status\\\"")),
+        "no api.request rows should be recorded for /v1/status",
+    );
 }
 
 #[tokio::test]
@@ -421,19 +607,31 @@ async fn metrics_summary_counts_existing_state_rows() {
             .expect("append lifecycle");
     }
 
+    // The default window is 24h; the seeded fixtures use dates older than
+    // that, so widen the window for the count assertions.
     let response = reqwest::Client::new()
-        .get(format!("{}/v1/metrics/summary", harness.base_url))
+        .get(format!("{}/v1/metrics/summary?since=30d", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
         .send()
         .await
         .expect("send");
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["data"]["sessions"], Value::Number(1.into()));
-    assert_eq!(body["data"]["commands"], Value::Number(1.into()));
-    assert_eq!(body["data"]["auth_failures"], Value::Number(1.into()));
-    assert_eq!(body["data"]["agent_lifecycle"], Value::Number(1.into()));
-    assert_eq!(body["data"]["events"], Value::Number(1.into()));
+    let counts = &body["data"]["counts"];
+    assert_eq!(counts["sessions"], Value::Number(1.into()));
+    assert_eq!(counts["commands"], Value::Number(1.into()));
+    assert_eq!(counts["auth_failures"], Value::Number(1.into()));
+    assert_eq!(counts["agent_lifecycle"], Value::Number(1.into()));
+    assert_eq!(counts["events"], Value::Number(1.into()));
+    // The window envelope should also be present and well-formed.
+    assert!(body["data"]["window"]["since"].is_string());
+    assert!(body["data"]["window"]["until"].is_string());
+    // New derived blocks are always emitted even when their inputs are
+    // missing — the metrics consumer relies on the keys being present.
+    assert!(body["data"]["sessions"]["active"].is_number());
+    assert!(body["data"]["commands"]["total"].is_number());
+    assert!(body["data"]["permissions"]["total"].is_number());
+    assert!(body["data"]["security"]["auth_failures"].is_number());
 }
 
 #[tokio::test]
@@ -653,6 +851,159 @@ async fn log_query_routes_return_seeded_records_newest_first() {
         .await
         .expect("json");
     assert_eq!(security["data"]["auth_failures"][0]["reason"], "missing");
+}
+
+#[tokio::test]
+async fn logs_security_pages_auth_failures_and_events_independently() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")
+            .expect("append auth failure");
+        guard
+            .append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")
+            .expect("append auth failure");
+        guard
+            .append_event_with_source("warn", "security.first", "api", "", "{}")
+            .expect("append security event");
+        guard
+            .append_event_with_source("warn", "security.second", "api", "", "{}")
+            .expect("append security event");
+    }
+
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .get(format!("{}/v1/logs/security?limit=1", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let auth_cursor = first["data"]["auth_failures_next_cursor"]
+        .as_str()
+        .expect("auth cursor")
+        .to_owned();
+    let event_cursor = first["data"]["events_next_cursor"]
+        .as_str()
+        .expect("event cursor")
+        .to_owned();
+    let first_auth_id = first["data"]["auth_failures"][0]["id"]
+        .as_str()
+        .expect("auth id")
+        .to_owned();
+    let first_event_id = first["data"]["events"][0]["id"]
+        .as_str()
+        .expect("event id")
+        .to_owned();
+
+    let auth_paged: Value = client
+        .get(format!(
+            "{}/v1/logs/security?limit=1&auth_failures_after={auth_cursor}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_ne!(
+        auth_paged["data"]["auth_failures"][0]["id"]
+            .as_str()
+            .expect("auth id"),
+        first_auth_id,
+        "auth cursor should advance auth_failures"
+    );
+    assert_eq!(
+        auth_paged["data"]["events"][0]["id"]
+            .as_str()
+            .expect("event id"),
+        first_event_id,
+        "auth cursor must not advance security events"
+    );
+
+    let events_paged: Value = client
+        .get(format!(
+            "{}/v1/logs/security?limit=1&events_after={event_cursor}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        events_paged["data"]["auth_failures"][0]["id"]
+            .as_str()
+            .expect("auth id"),
+        first_auth_id,
+        "event cursor must not advance auth_failures"
+    );
+    assert_ne!(
+        events_paged["data"]["events"][0]["id"]
+            .as_str()
+            .expect("event id"),
+        first_event_id,
+        "event cursor should advance security events"
+    );
+}
+
+#[tokio::test]
+async fn logs_security_legacy_after_still_pages_when_specific_cursor_absent() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")
+            .expect("append auth failure");
+        guard
+            .append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")
+            .expect("append auth failure");
+    }
+
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .get(format!("{}/v1/logs/security?limit=1", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let cursor = first["data"]["auth_failures_next_cursor"]
+        .as_str()
+        .expect("cursor")
+        .to_owned();
+    let first_id = first["data"]["auth_failures"][0]["id"]
+        .as_str()
+        .expect("auth id")
+        .to_owned();
+
+    let second: Value = client
+        .get(format!(
+            "{}/v1/logs/security?limit=1&after={cursor}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    assert_ne!(
+        second["data"]["auth_failures"][0]["id"]
+            .as_str()
+            .expect("auth id"),
+        first_id
+    );
 }
 
 #[tokio::test]

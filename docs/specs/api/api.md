@@ -248,10 +248,90 @@ The 0.0.1 daemon implements the status/log/metrics subset against local config, 
 - `GET /v1/agent/capabilities` returns the latest persisted ACP `initialize` capability snapshot plus optional adapter metadata and current process state. Before the first successful start it returns `agent.not_initialized`.
 - `GET /v1/status/connections` returns the current in-process active HTTP request count.
 - `GET /v1/security/check` is admin-tier and returns the current security self-check envelope. In 0.0.1 it reports findings for the effective listener bind (including `acps serve --bind` overrides), wildcard CORS on public binds, proxy-header trust without a trusted proxy allowlist, empty cached API keys, and auth-failure counts in the last minute at or above the configured threshold.
-- `GET /v1/logs/events` returns durable event rows and supports `limit` plus exact `level` filtering.
-- `GET /v1/logs/commands` and `GET /v1/logs/sessions` return rows from the corresponding SQLite tables. `GET /v1/logs/security` returns `{ auth_failures, events }`: `auth_failures` contains durable auth rejection rows, and `events` contains durable `security.*` rows such as rate-limit hits, IP blocks, denied origins, and oversized request rejections. Attempted token values are never stored or returned.
-- `GET /v1/logs/permissions` returns durable events whose kind starts with `permission.` or `permissions.` until the dedicated permissions schema lands.
-- `GET /v1/metrics/summary` returns local row counts for events, sessions, commands, auth failures, agent lifecycle records, installer runs, and agent capability snapshots.
+
+#### `GET /v1/logs/events`
+
+Session-tier. Returns durable event rows newest-first.
+
+Query parameters (all optional):
+
+- `limit` (default `100`, max `1000`).
+- `level` — exact match (`info`, `warn`, `error`, ...).
+- `kind` — exact event kind, or a dotted prefix when the value ends with `.` (e.g. `kind=command.` matches every `command.*` kind).
+- `source` — writer label: `system`, `api`, `acp`, `command`, `permission`, `cli`, `local`. Added in 0.0.3 (migration 007).
+- `session_id` — events scoped to the given session id (uses the `events.session_id` column populated by the ACP bridge).
+- `command_id` — events whose `payload_json.command_id` matches.
+- `permission_id` — events whose `payload_json.permission_id` matches. Legacy permission events with only `payload_json.id` also match when the row is permission-scoped.
+- `since`, `until` — RFC3339 bounds (`since` inclusive, `until` exclusive). Strings are compared lexicographically against the stored RFC3339 timestamps.
+- `after` — keyset pagination cursor; pass the `id` of the last event from the previous page.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "events": [
+      { "id": "evt_…", "created_at": "…", "level": "info", "kind": "command.exited",
+        "message": "", "payload_json": "{…}", "source": "command" }
+    ],
+    "next_cursor": "evt_…"  // present (and non-null) only when the page saturated `limit`
+  }
+}
+```
+
+#### `GET /v1/logs/sessions`, `GET /v1/logs/commands`
+
+Session-tier. Same response envelope as `/v1/logs/events` (typed item shapes from the corresponding SQLite tables, plus `next_cursor`). Query params: `limit`, `since`, `until`, `after`, plus `status` on commands.
+
+#### `GET /v1/logs/permissions`
+
+Session-tier. Returns durable events whose kind starts with `permission.` / `permissions.`. Accepts `limit`, `kind`, `source`, `since`, `until`, `after`, `permission_id`. Body: `{ events, next_cursor }`.
+
+#### `GET /v1/logs/security`
+
+Session-tier. Returns `{ auth_failures, events, auth_failures_next_cursor, events_next_cursor }`. Both inner streams accept `limit`, `since`, and `until`. Page them independently with `auth_failures_after` and `events_after`; the legacy `after` parameter remains as a compatibility alias for both streams when the stream-specific cursor is omitted. `auth_failures` lists durable auth-rejection rows; `events` lists durable `security.*` rows (rate-limit hits, IP blocks, denied origins, oversized requests, etc.). Attempted token values are never stored or returned.
+
+#### `GET /v1/metrics/summary`
+
+Session-tier. Returns derived metrics for the requested window. When `since` is omitted the default window is the last 24 hours. Accepts `since`, `until` as either RFC3339 timestamps or duration suffixes (`30m`, `1h`, `2d`, `1w`); when a duration is supplied it is interpreted as "this much time ago".
+
+Response:
+
+```jsonc
+{
+  "ok": true,
+  "data": {
+    "window": { "since": "<RFC3339>", "until": "<RFC3339>" },
+    "counts": { "events": int, "sessions": int, "commands": int,
+                "auth_failures": int, "agent_lifecycle": int, "installer_runs": int,
+                "agent_capabilities": int, "prompts": int,
+                "permission_requests": int, "permission_decisions": int },
+    "sessions": { "active": int, "closed": int,
+                  "average_duration_ms": int|null,
+                  "p50_duration_ms": int|null, "p95_duration_ms": int|null },
+    "turns": { "total": int, "by_status": { ... }, "average_per_session": float|null },
+    "commands": { "total": int, "by_status": { ... },
+                  "average_duration_ms": int|null,
+                  "p50_duration_ms": int|null, "p95_duration_ms": int|null,
+                  "truncated_count": int },
+    "permissions": { "total": int, "by_outcome": { ... },
+                     "average_response_ms": int|null,
+                     "p50_response_ms": int|null, "p95_response_ms": int|null },
+    "security": { "auth_failures": int, "by_reason": { ... }, "events_by_kind": { ... } },
+    "api_connections": { "request_count": int|null,
+                         "by_status": { "2xx": int, ... },
+                         "average_duration_ms": int|null },
+    "ws_connections": { "connections_opened": int|null,
+                        "connections_closed": int|null,
+                        "average_duration_ms": int|null },
+    "usage": { "tokens_input": int|null, "tokens_output": int|null,
+               "context_window_max": int|null }
+  }
+}
+```
+
+`api_connections.request_count` and `ws_connections.*` are populated by the `api.request` / `ws.client_connected` / `ws.client_disconnected` audit events emitted by the daemon (source `api`). `/v1/ws` and `/v1/status*` are excluded from `api.request` to keep cardinality bounded. `usage.*` is best-effort: when the configured agent reports token/context usage on ACP `session/update`, the bridge persists a `usage.reported` event and the metrics summary aggregates it; otherwise these fields stay `null`.
 
 ## WebSocket
 

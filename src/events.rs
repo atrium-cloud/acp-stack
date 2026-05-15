@@ -186,6 +186,7 @@ mod tests {
             kind: kind.to_owned(),
             message: String::new(),
             payload_json: "{}".to_owned(),
+            source: "system".to_owned(),
         }
     }
 

@@ -261,7 +261,10 @@ impl CommandGateway {
 
     pub async fn list(&self, limit: u32) -> Result<Vec<CommandRecord>> {
         let store = self.state.lock().await;
-        store.query_commands(limit)
+        store.query_commands(crate::state::CommandFilter {
+            limit,
+            ..Default::default()
+        })
     }
 
     /// Signal the running command to cancel. The supervisor task is
@@ -709,7 +712,13 @@ impl SupervisorTask {
         }
         if let Ok(event) = {
             let store = self.state.lock().await;
-            store.append_event("error", "command.spawn_failed", &message, &payload_text)
+            store.append_event_with_source(
+                "error",
+                "command.spawn_failed",
+                crate::state::EVENT_SOURCE_COMMAND,
+                &message,
+                &payload_text,
+            )
         } {
             self.event_hub
                 .publish_command_event(&self.command_id, &event, payload);
@@ -720,7 +729,13 @@ impl SupervisorTask {
         let payload_text = data.to_string();
         let event = {
             let store = self.state.lock().await;
-            store.append_event("info", kind, "", &payload_text)
+            store.append_event_with_source(
+                "info",
+                kind,
+                crate::state::EVENT_SOURCE_COMMAND,
+                "",
+                &payload_text,
+            )
         };
         match event {
             Ok(event) => {
@@ -756,7 +771,13 @@ impl SupervisorTask {
         let payload_text = payload.to_string();
         let event = {
             let store = self.state.lock().await;
-            store.append_event("info", kind, "", &payload_text)
+            store.append_event_with_source(
+                "info",
+                kind,
+                crate::state::EVENT_SOURCE_COMMAND,
+                "",
+                &payload_text,
+            )
         };
         if let Ok(event) = event {
             self.event_hub

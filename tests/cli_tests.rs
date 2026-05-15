@@ -299,7 +299,7 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 6"))
+        .stdout(predicates::str::contains("schema_version: 7"))
         .stdout(predicates::str::contains("latest_event:"));
 }
 
@@ -522,7 +522,9 @@ fn logs_query_shows_init_event() {
         .args(["logs", "query"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("info init.completed initialized"));
+        .stdout(predicates::str::contains(
+            "info cli init.completed initialized",
+        ));
 }
 
 #[cfg(unix)]
@@ -609,7 +611,9 @@ fn failed_cli_command_records_error_after_state_exists() {
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("error cli.error command failed"));
+        .stdout(predicates::str::contains(
+            "error cli cli.error command failed",
+        ));
 }
 
 #[test]
@@ -636,7 +640,9 @@ fn parse_failure_records_error_after_state_exists() {
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("error cli.error command failed"));
+        .stdout(predicates::str::contains(
+            "error cli cli.error command failed",
+        ));
 }
 
 #[test]
@@ -721,7 +727,9 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("error cli.error command failed"));
+        .stdout(predicates::str::contains(
+            "error cli cli.error command failed",
+        ));
 }
 
 #[test]
@@ -879,7 +887,9 @@ fn error_recording_path_repairs_permissive_state_file() {
         .args(["logs", "query", "--level", "error"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("error cli.error command failed"));
+        .stdout(predicates::str::contains(
+            "error cli cli.error command failed",
+        ));
 }
 
 #[cfg(unix)]

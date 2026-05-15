@@ -82,9 +82,10 @@ migrations/
   004_sessions.sqlite.sql
   005_commands_schema.sqlite.sql
   006_permissions.sqlite.sql
+  007_events_source.sqlite.sql
 ```
 
-Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
+Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Migration 007 adds a `source` column to `events` (default `system`) so log queries can filter by writer origin (`api`, `acp`, `command`, `permission`, `cli`, `local`). Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
 
 Rules:
 
@@ -128,6 +129,24 @@ Local logs include:
 - context window usage when reported by the agent
 
 Token and context usage are best-effort fields. If the configured agent does not expose them through ACP updates or prompt responses, the fields remain null rather than estimated.
+
+### Implementation (0.0.3)
+
+Derivation is done in SQLite at query time and exposed through `GET /v1/metrics/summary` over a `[since, until)` window. The window defaults to the last 24 hours; callers can pass `since` / `until` as RFC3339 timestamps or duration suffixes (`30m`, `1h`, `2d`, `1w`).
+
+The summary covers:
+
+- `counts` per logged table.
+- `sessions.active` / `closed` plus average / p50 / p95 wall-clock duration of closed rows.
+- `turns.total`, `turns.by_status`, and `turns.average_per_session`.
+- `commands.total`, `commands.by_status`, average / p50 / p95 `duration_ms`, `truncated_count`.
+- `permissions.total`, `permissions.by_outcome`, average / p50 / p95 response_ms (decision timestamp minus request timestamp).
+- `security.auth_failures`, `security.by_reason`, `security.events_by_kind`.
+- `api_connections.request_count` plus `2xx`/`4xx`/`5xx` buckets and average duration, derived from `api.request` audit events. The middleware skips `/v1/ws` and `/v1/status*` to keep cardinality bounded.
+- `ws_connections.connections_opened` / `connections_closed` / `average_duration_ms`, derived from `ws.client_connected` and `ws.client_disconnected` events emitted by the WS handler.
+- `usage.tokens_input` / `usage.tokens_output` / `usage.context_window_max`, aggregated from `usage.reported` events the ACP bridge persists whenever an inbound `session/update` carries a recognized usage shape (top-level `usage`, `update.usage`, `prompt_response.usage`, or `meta.usage`). When the agent never reports these fields, every usage value stays `null`.
+
+Percentiles are computed in pure Rust from the windowed result set — SQLite has no `percentile_cont`. Windows up to ~tens of thousands of rows are comfortable; larger windows should add reservoir sampling rather than column materialization.
 
 ## Supabase Sink
 

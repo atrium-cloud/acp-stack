@@ -32,7 +32,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        6
+        7
     );
 }
 
@@ -71,7 +71,7 @@ fn appends_and_queries_events_newest_first() {
     let all = store
         .query_events(EventFilter {
             limit: 10,
-            level: None,
+            ..EventFilter::default()
         })
         .expect("events should query");
     assert_eq!(all.len(), 2);
@@ -84,6 +84,7 @@ fn appends_and_queries_events_newest_first() {
         .query_events(EventFilter {
             limit: 10,
             level: Some("error"),
+            ..EventFilter::default()
         })
         .expect("filtered events should query");
     assert_eq!(errors.len(), 1);
@@ -137,7 +138,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 6")
+            .contains("state schema version 99 is newer than supported version 7")
     );
 }
 
@@ -235,7 +236,10 @@ fn migration_002_preserves_legacy_auth_failure_rows() {
     store.migrate().expect("migration should pass");
 
     let rows = store
-        .query_auth_failures(AuthFailureFilter { limit: 10 })
+        .query_auth_failures(AuthFailureFilter {
+            limit: 10,
+            ..AuthFailureFilter::default()
+        })
         .expect("auth failures should query");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "legacy_af_1");
@@ -323,7 +327,7 @@ fn event_ids_stay_sorted_when_appended_in_quick_succession() {
     let descending = store
         .query_events(EventFilter {
             limit: 200,
-            level: None,
+            ..EventFilter::default()
         })
         .expect("events should query");
     // Newest-first ordering should match the reverse insertion order.
@@ -460,4 +464,259 @@ fn permission_decisions_persist_with_principal() {
     assert_eq!(decision.request_id, request.id);
     assert_eq!(decision.decision, "approved");
     assert_eq!(decision.deciding_principal.as_deref(), Some("session-key"));
+}
+
+// ----- LogFilter / source / metrics tests (Phase 3 batch A+B) ----------------
+
+#[test]
+fn append_event_default_source_is_system() {
+    let (_dir, store) = fresh_state("source_default.sqlite");
+    let event = store
+        .append_event("info", "test.kind", "msg", "{}")
+        .expect("append");
+    assert_eq!(event.source, "system");
+}
+
+#[test]
+fn append_event_with_source_round_trips_label() {
+    let (_dir, store) = fresh_state("source_round_trip.sqlite");
+    let event = store
+        .append_event_with_source("info", "test.kind", "api", "msg", "{}")
+        .expect("append");
+    assert_eq!(event.source, "api");
+    let events = store
+        .query_events(EventFilter {
+            limit: 10,
+            source: Some("api"),
+            ..EventFilter::default()
+        })
+        .expect("query");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, event.id);
+}
+
+#[test]
+fn log_filter_kind_prefix_matches_dotted_namespace() {
+    let (_dir, store) = fresh_state("kind_prefix.sqlite");
+    store
+        .append_event("info", "command.started", "", "{}")
+        .unwrap();
+    store
+        .append_event("info", "command.exited", "", "{}")
+        .unwrap();
+    store
+        .append_event("info", "session.update", "", "{}")
+        .unwrap();
+    let rows = store
+        .query_events(EventFilter {
+            limit: 100,
+            kind_prefix: Some("command."),
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.kind.starts_with("command.")));
+}
+
+#[test]
+fn log_filter_session_id_predicate_only_returns_matching_rows() {
+    let (_dir, store) = fresh_state("session_filter.sqlite");
+    store
+        .append_session_event("sess_a", "info", "session.update", "", "{}")
+        .unwrap();
+    store
+        .append_session_event("sess_b", "info", "session.update", "", "{}")
+        .unwrap();
+    store.append_event("info", "system.note", "", "{}").unwrap();
+    let rows = store
+        .query_events(EventFilter {
+            limit: 100,
+            session_id: Some("sess_a"),
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn log_filter_command_id_payload_correlation() {
+    let (_dir, store) = fresh_state("command_filter.sqlite");
+    let payload_match = serde_json::json!({"command_id": "cmd_match"}).to_string();
+    let payload_other = serde_json::json!({"command_id": "cmd_other"}).to_string();
+    store
+        .append_event_with_source("info", "command.started", "command", "", &payload_match)
+        .unwrap();
+    store
+        .append_event_with_source("info", "command.started", "command", "", &payload_other)
+        .unwrap();
+    let rows = store
+        .query_events(EventFilter {
+            limit: 10,
+            command_id: Some("cmd_match"),
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].payload_json.contains("cmd_match"));
+}
+
+#[test]
+fn log_filter_permission_id_matches_legacy_id_payload() {
+    let (_dir, store) = fresh_state("permission_legacy_filter.sqlite");
+    let payload_match = serde_json::json!({"id": "perm_match"}).to_string();
+    let payload_other = serde_json::json!({"id": "perm_other"}).to_string();
+    store
+        .append_event_with_source(
+            "info",
+            "permission.expired",
+            "permission",
+            "",
+            &payload_match,
+        )
+        .unwrap();
+    store
+        .append_event_with_source(
+            "info",
+            "permission.expired",
+            "permission",
+            "",
+            &payload_other,
+        )
+        .unwrap();
+    store
+        .append_event_with_source("info", "system.note", "system", "", &payload_match)
+        .unwrap();
+    let rows = store
+        .query_events(EventFilter {
+            limit: 10,
+            permission_id: Some("perm_match"),
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].payload_json.contains("perm_match"));
+}
+
+#[test]
+fn log_filter_since_until_window_excludes_rows_outside_range() {
+    let (_dir, store) = fresh_state("time_range.sqlite");
+    // Seed events with explicit timestamps so the window is deterministic.
+    let connection = rusqlite::Connection::open(_dir.path().join("time_range.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (id, created_at, level, kind, message, payload_json, source) \
+             VALUES ('e_old', '2026-05-10T00:00:00.000000000Z', 'info', 'x', '', '{}', 'system'), \
+                    ('e_mid', '2026-05-14T12:00:00.000000000Z', 'info', 'x', '', '{}', 'system'), \
+                    ('e_new', '2026-05-16T00:00:00.000000000Z', 'info', 'x', '', '{}', 'system')",
+            [],
+        )
+        .unwrap();
+    let rows = store
+        .query_events(EventFilter {
+            limit: 100,
+            since: Some("2026-05-14T00:00:00Z"),
+            until: Some("2026-05-15T00:00:00Z"),
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "e_mid");
+}
+
+#[test]
+fn log_filter_cursor_paginates_across_timestamp_ties() {
+    let (_dir, store) = fresh_state("cursor.sqlite");
+    // Three events with the same timestamp — the cursor must still progress.
+    let connection = rusqlite::Connection::open(_dir.path().join("cursor.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (id, created_at, level, kind, message, payload_json, source) \
+             VALUES ('e_1', '2026-05-15T00:00:00.000000000Z', 'info', 'x', '', '{}', 'system'), \
+                    ('e_2', '2026-05-15T00:00:00.000000000Z', 'info', 'x', '', '{}', 'system'), \
+                    ('e_3', '2026-05-15T00:00:00.000000000Z', 'info', 'x', '', '{}', 'system')",
+            [],
+        )
+        .unwrap();
+    let first_page = store
+        .query_events(EventFilter {
+            limit: 2,
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(first_page.len(), 2);
+    let cursor = first_page.last().unwrap().id.clone();
+    let second_page = store
+        .query_events(EventFilter {
+            limit: 2,
+            after_id: Some(&cursor),
+            ..EventFilter::default()
+        })
+        .unwrap();
+    assert_eq!(second_page.len(), 1);
+    assert_ne!(second_page[0].id, cursor);
+}
+
+#[test]
+fn metrics_summary_aggregates_within_window() {
+    use acp_stack::state::{MetricsWindow, NewCommandRecord};
+    let (_dir, store) = fresh_state("metrics.sqlite");
+    // Seed one event, one command, one auth_failure inside the window.
+    store
+        .append_event_with_source(
+            "info",
+            "api.request",
+            "api",
+            "",
+            r#"{"status":200,"duration_ms":42}"#,
+        )
+        .unwrap();
+    store
+        .append_command(NewCommandRecord {
+            command: "echo hi",
+            cwd: None,
+            env_json: None,
+        })
+        .unwrap();
+    store
+        .append_auth_failure("session", "invalid", None, Some("/v1/x"), "{}")
+        .unwrap();
+    let now = chrono::Utc::now();
+    let since =
+        (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let until =
+        (now + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let summary = store
+        .metrics_summary(MetricsWindow { since, until })
+        .unwrap();
+    assert_eq!(summary.commands.total, 1);
+    assert_eq!(summary.security.auth_failures, 1);
+    assert_eq!(summary.api_connections.request_count, Some(1));
+    assert_eq!(
+        summary
+            .api_connections
+            .by_status
+            .get("2xx")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+}
+
+#[test]
+fn metrics_summary_returns_zero_when_window_misses_all_rows() {
+    use acp_stack::state::MetricsWindow;
+    let (_dir, store) = fresh_state("metrics_empty.sqlite");
+    store.append_event("info", "x.y", "", "{}").unwrap();
+    let summary = store
+        .metrics_summary(MetricsWindow {
+            since: "2000-01-01T00:00:00.000000000Z".to_owned(),
+            until: "2000-01-02T00:00:00.000000000Z".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(summary.counts.events, 0);
+    // Optional metric instruments stay None when no inputs landed in the
+    // window — distinguishes "instrument absent" from "instrument has 0 hits"
+    // semantically, even when the column counts to 0.
+    assert!(summary.usage.tokens_input.is_none());
+    assert!(summary.api_connections.request_count.is_none());
 }
