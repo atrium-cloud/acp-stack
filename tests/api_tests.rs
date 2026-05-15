@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use acp_stack::api::{self, AppState};
-use acp_stack::config::{Config, load_config_from_str};
+use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
 use acp_stack::state::{AuthFailureFilter, StateStore};
 use reqwest::StatusCode;
 use rusqlite::Connection;
@@ -74,6 +74,15 @@ impl Drop for ServerHarness {
 fn test_config() -> Config {
     let toml_text = include_str!("fixtures/valid-acp-stack.toml");
     load_config_from_str(toml_text).expect("config parses")
+}
+
+fn codex_adapter() -> AgentAdapterConfig {
+    AgentAdapterConfig {
+        id: "codex-acp".to_owned(),
+        name: "Codex ACP Adapter".to_owned(),
+        upstream_agent: "codex-cli".to_owned(),
+        source_url: Some("https://github.com/zed-industries/codex-acp".to_owned()),
+    }
 }
 
 fn seed_session(path: &Path, id: &str, status: &str, created_at: &str, updated_at: &str) {
@@ -302,7 +311,28 @@ async fn status_agent_returns_configured_agent_snapshot() {
     assert_eq!(body["ok"], Value::Bool(true));
     assert_eq!(body["data"]["configured"], Value::Bool(true));
     assert_eq!(body["data"]["agent"]["id"], "opencode");
+    assert_eq!(body["data"]["agent"]["adapter"], Value::Null);
     assert!(body["data"]["lifecycle_events"].as_array().is_some());
+}
+
+#[tokio::test]
+async fn status_agent_returns_adapter_metadata_when_configured() {
+    let mut config = test_config();
+    config.agent.adapter = Some(codex_adapter());
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/status/agent", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["agent"]["adapter"]["id"], "codex-acp");
+    assert_eq!(
+        body["data"]["agent"]["adapter"]["source_url"],
+        "https://github.com/zed-industries/codex-acp"
+    );
 }
 
 #[tokio::test]

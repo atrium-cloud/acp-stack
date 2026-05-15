@@ -91,7 +91,6 @@ Round out the standalone runtime surface:
 The following are outside the 0.0.1 to 0.0.5 scope:
 
 - multiple active agents per runtime
-- agent registry resolution
 - broad cross-distro package/runtime reconciliation
 - complete OS-level interception of arbitrary shell activity
 - built-in TLS termination, persistent IP allowlists, and advanced edge/WAF policy

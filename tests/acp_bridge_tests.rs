@@ -53,10 +53,13 @@ fn fake_agent_config() -> AgentConfig {
         env: vec![],
         expected_sha256: None,
         restart: "never".into(),
+        adapter: None,
         install: Some(AgentInstallConfig {
             install_type: "shell".into(),
-            shell: "true".into(),
             creates: "true".into(),
+            shell: Some("true".into()),
+            id: None,
+            registry_url: None,
         }),
     }
 }

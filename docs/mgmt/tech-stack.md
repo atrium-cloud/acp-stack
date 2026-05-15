@@ -11,7 +11,7 @@ This document records the implementation technologies chosen for the standalone 
 - `axum` (`ws`) - HTTP server, route/middleware composition, and WebSocket upgrades for `/v1/ws`.
 - `tower`, `tower-http` - middleware composition (body limits, tracing) for the axum layer.
 - `http` - shared HTTP types (`StatusCode`, headers) used by the response envelope mapping.
-- `reqwest` with rustls - CLI HTTP client for daemon-backed commands such as `acps agent start` and `acps agent stop`, including HTTPS `public_url` targets.
+- `reqwest` with rustls and blocking support - CLI HTTP client for daemon-backed commands such as `acps agent start` and `acps agent stop`, HTTPS `public_url` targets, and synchronous ACP registry fetches during agent installation.
 - `zeroize` - scrubbing cached API key material on drop.
 - `agent-client-protocol` - the published Rust SDK for the Agent Client Protocol. We act as the ACP client and rely on it for JSON-RPC framing, request/response correlation, and the protocol schema. The `unstable_session_close` and `unstable_session_resume` SDK features are enabled so the bridge can wire every spec-required session method (`session/new`, `session/load`, `session/resume`, `session/close`, `session/prompt`, `session/cancel`).
 - `sha2` - SHA-256 hashing of installed agent binaries for the optional `expected_sha256` integrity check.
