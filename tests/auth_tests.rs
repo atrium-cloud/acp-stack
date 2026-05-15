@@ -73,7 +73,10 @@ fn record_auth_failure_persists_row_with_kind_and_reason() {
     assert_eq!(payload["reason"], "invalid");
 
     let rows = store
-        .query_auth_failures(AuthFailureFilter { limit: 10 })
+        .query_auth_failures(AuthFailureFilter {
+            limit: 10,
+            ..AuthFailureFilter::default()
+        })
         .expect("query");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, failure.id);
@@ -109,7 +112,10 @@ fn auth_failure_rows_query_newest_first() {
     }
 
     let rows = store
-        .query_auth_failures(AuthFailureFilter { limit: 10 })
+        .query_auth_failures(AuthFailureFilter {
+            limit: 10,
+            ..AuthFailureFilter::default()
+        })
         .expect("query");
     assert_eq!(rows.len(), 4);
     // Lexicographic id order matches chronological order; reverse-iterating
