@@ -11,31 +11,38 @@
 //! - drives the ACP `initialize` handshake,
 //! - captures the resulting `AgentCapabilities` as a JSON snapshot for our
 //!   own API contract (so upstream renames don't leak through),
+//! - retains a `ConnectionTo<Agent>` handle so session methods can be
+//!   dispatched after initialize completes,
+//! - persists `session/update` notifications to SQLite through a
+//!   `SessionEventSink`,
 //! - keeps the connection running in a dedicated task until `shutdown` is
 //!   called or the supervisor is dropped.
-//!
-//! Session methods (`session/*`) and notification forwarding land in the
-//! next batch alongside the WebSocket event bus. Right now any incoming
-//! request from the agent gets the default SDK "method not found" response.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    AgentNotification, InitializeRequest, InitializeResponse, ProtocolVersion,
+    AgentNotification, CancelNotification, CloseSessionRequest, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
+    PromptRequest, ProtocolVersion, ResumeSessionRequest, SessionId, SessionNotification,
+    StopReason,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
+use tokio::sync::{Mutex as TokioMutex, Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
+use crate::events::EventHub;
+use crate::state::StateStore;
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
 /// unresponsive. Headless ACP agents handshake in milliseconds; anything more
@@ -71,6 +78,31 @@ impl AgentCapabilitiesDto {
         serde_json::to_string(self).map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("failed to serialize agent capabilities: {err}"),
         })
+    }
+
+    /// Whether the agent advertised the `load_session` capability in its
+    /// `initialize` response. Used to gate `POST /v1/sessions/{id}/load`.
+    pub fn supports_load_session(&self) -> bool {
+        self.capabilities
+            .get("loadSession")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn supports_resume_session(&self) -> bool {
+        self.supports_session_capability("resume")
+    }
+
+    pub fn supports_close_session(&self) -> bool {
+        self.supports_session_capability("close")
+    }
+
+    fn supports_session_capability(&self, name: &str) -> bool {
+        self.capabilities
+            .get("sessionCapabilities")
+            .and_then(Value::as_object)
+            .and_then(|caps| caps.get(name))
+            .is_some_and(Value::is_object)
     }
 
     fn from_initialize_response(response: &InitializeResponse) -> Result<Self> {
@@ -110,14 +142,213 @@ impl AgentCapabilitiesDto {
     }
 }
 
-/// One spawned agent + its live ACP connection. Single-use: call
-/// `AcpBridge::spawn`, hold the bridge for as long as the agent should run,
-/// then call `shutdown()` exactly once.
+/// Sink for ACP `session/update` notifications. The bridge writes through this
+/// trait instead of holding a `StateStore` directly, so tests can substitute
+/// an in-memory sink without standing up a SQLite file.
+///
+/// `append` returns a future so a real implementation can durably persist the
+/// event before the notification handler returns; otherwise a fast shutdown
+/// would drop in-flight writes. `flush` waits for any background writer task
+/// owned by the sink to drain; the bridge calls it during graceful shutdown.
+pub trait SessionEventSink: Send + Sync + 'static {
+    fn append<'a>(
+        &'a self,
+        session_id: &'a str,
+        kind: &'a str,
+        payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()>;
+
+    fn flush<'a>(&'a self) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// `SessionEventSink` backed by the daemon's real `StateStore`.
+///
+/// Session-update writes flow through a **bounded** mpsc channel into a
+/// single background writer task. The bound provides backpressure: a noisy
+/// agent that emits updates faster than SQLite drains them blocks at
+/// `append`, which yields back to the SDK's notification handler and lets
+/// the event loop tick (it never spin-waits, since `send` is async). Without
+/// the bound a runaway agent could exhaust daemon memory before any HTTP
+/// limit kicks in.
+///
+/// `flush()` drops the sender, the writer task drains the remaining queue,
+/// and we await it during graceful shutdown so no notification rows are lost.
+pub struct StateStoreSessionSink {
+    tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionEventRow>>>,
+    writer: TokioMutex<Option<JoinHandle<()>>>,
+}
+
+struct SessionEventRow {
+    session_id: String,
+    kind: String,
+    payload_json: String,
+}
+
+/// Backpressure buffer for unwritten ACP session updates. Sized so a typical
+/// streaming turn (text chunks, tool calls) fits comfortably without ever
+/// blocking, but small enough that a pathological agent can't grow daemon
+/// memory by gigabytes before SQLite catches up.
+pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
+
+impl StateStoreSessionSink {
+    pub fn new(state: Arc<TokioMutex<StateStore>>, event_hub: EventHub) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionEventRow>(SESSION_EVENT_BUFFER);
+        let writer_event_hub = event_hub.clone();
+        let writer = tokio::spawn(async move {
+            while let Some(row) = rx.recv().await {
+                let guard = state.lock().await;
+                match guard.append_session_event(
+                    &row.session_id,
+                    "info",
+                    &row.kind,
+                    "ACP session update",
+                    &row.payload_json,
+                ) {
+                    Ok(event) => {
+                        writer_event_hub.publish_session_update(
+                            &row.session_id,
+                            &event,
+                            &row.payload_json,
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            session_id = %row.session_id,
+                            "failed to persist ACP session update"
+                        );
+                    }
+                }
+            }
+        });
+        Self {
+            tx: TokioMutex::new(Some(tx)),
+            writer: TokioMutex::new(Some(writer)),
+        }
+    }
+}
+
+impl SessionEventSink for StateStoreSessionSink {
+    fn append<'a>(
+        &'a self,
+        session_id: &'a str,
+        kind: &'a str,
+        payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let sender = {
+                let guard = self.tx.lock().await;
+                match guard.as_ref() {
+                    Some(tx) => tx.clone(),
+                    None => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "session event sink is closed; dropping update"
+                        );
+                        return;
+                    }
+                }
+            };
+            if let Err(err) = sender
+                .send(SessionEventRow {
+                    session_id: session_id.to_owned(),
+                    kind: kind.to_owned(),
+                    payload_json: payload_json.to_owned(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    error = %err,
+                    session_id = %session_id,
+                    "session event writer task ended; dropping update"
+                );
+            }
+        })
+    }
+
+    fn flush<'a>(&'a self) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            {
+                let mut guard = self.tx.lock().await;
+                // Dropping the sender lets the writer task observe EOF and
+                // drain its queue before exiting. Idempotent.
+                *guard = None;
+            }
+            let writer = self.writer.lock().await.take();
+            if let Some(task) = writer {
+                if let Err(err) = task.await {
+                    tracing::warn!(
+                        error = ?err,
+                        "session event writer task did not exit cleanly"
+                    );
+                }
+            }
+        })
+    }
+}
+
+/// One spawned agent + its live ACP connection.
+///
+/// Use through `Arc<AcpBridge>` once spawned so multiple session dispatchers
+/// and the shutdown path can hold the same handle without serializing through
+/// the supervisor's state lock. Single-use lifecycle: `spawn` once, hold while
+/// the agent should run, then call `shutdown()` exactly once.
 pub struct AcpBridge {
-    child: Child,
+    /// `TokioMutex<Option<Child>>` so `shutdown(&self)` can `.take()` the
+    /// child to await/kill without consuming the bridge. Reads after a
+    /// successful shutdown see `None` and short-circuit.
+    child: TokioMutex<Option<Child>>,
     capabilities: AgentCapabilitiesDto,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    connection_task: Option<JoinHandle<()>>,
+    /// Cloneable handle for sending requests/notifications to the agent.
+    /// Populated inside the connect closure before it parks on `shutdown_rx`,
+    /// so callers outside the closure can dispatch session methods. Wrapped
+    /// in an `Option` because `shutdown()` clears it before tearing down.
+    connection: TokioMutex<Option<ConnectionTo<Agent>>>,
+    shutdown_tx: TokioMutex<Option<oneshot::Sender<()>>>,
+    connection_task: TokioMutex<Option<JoinHandle<()>>>,
+    spawn_pid: Option<u32>,
+    /// Held so `shutdown()` can flush any pending `session/update` writes the
+    /// sink's background writer task has queued.
+    sink: Arc<dyn SessionEventSink>,
+    notification_drain: Arc<NotificationDrain>,
+}
+
+#[derive(Default)]
+struct NotificationDrain {
+    active: AtomicUsize,
+    idle: Notify,
+}
+
+struct NotificationGuard {
+    drain: Arc<NotificationDrain>,
+}
+
+impl NotificationDrain {
+    fn enter(self: &Arc<Self>) -> NotificationGuard {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        NotificationGuard {
+            drain: Arc::clone(self),
+        }
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            if self.active.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            self.idle.notified().await;
+        }
+    }
+}
+
+impl Drop for NotificationGuard {
+    fn drop(&mut self) {
+        if self.drain.active.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.drain.idle.notify_waiters();
+        }
+    }
 }
 
 impl AcpBridge {
@@ -131,6 +362,7 @@ impl AcpBridge {
         agent: &AgentConfig,
         env: HashMap<String, String>,
         cwd: PathBuf,
+        sink: Arc<dyn SessionEventSink>,
     ) -> Result<Self> {
         let command_path = resolve_command_path(&agent.command, &cwd).ok_or_else(|| {
             StackError::AgentInitializeFailed {
@@ -179,9 +411,18 @@ impl AcpBridge {
         let transport =
             agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
 
-        let (init_tx, init_rx) =
-            oneshot::channel::<std::result::Result<InitializeResponse, String>>();
+        let (init_tx, init_rx) = oneshot::channel::<
+            std::result::Result<(InitializeResponse, ConnectionTo<Agent>), String>,
+        >();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        // Notifications get persisted to the durable event log keyed by
+        // session_id and then fanned out live through the event hub.
+        // Non-session notifications are still logged-and-dropped.
+        let notification_drain = Arc::new(NotificationDrain::default());
+        let notification_sink = sink.clone();
+        let notification_drain_for_task = Arc::clone(&notification_drain);
+        let bridge_sink = sink.clone();
 
         // The SDK's Client.builder().connect_with(...) future drives the IO
         // loop until the closure returns. We spawn it as a tokio task so the
@@ -191,11 +432,22 @@ impl AcpBridge {
             let run = Client
                 .builder()
                 .on_receive_notification(
-                    async move |_notification: AgentNotification, _cx| {
-                        // Session updates and other notifications land here.
-                        // Until the WebSocket event bus exists, log-and-drop
-                        // is the policy. Anything we drop today will be
-                        // re-routed to the bus in the next batch.
+                    async move |notification: AgentNotification, _cx| {
+                        match notification {
+                            AgentNotification::SessionNotification(session_note) => {
+                                enqueue_session_notification(
+                                    notification_sink.clone(),
+                                    Arc::clone(&notification_drain_for_task),
+                                    &session_note,
+                                );
+                            }
+                            other => {
+                                tracing::debug!(
+                                    method = %other.method(),
+                                    "acp bridge dropped non-session notification"
+                                );
+                            }
+                        }
                         Ok(())
                     },
                     agent_client_protocol::on_receive_notification!(),
@@ -208,7 +460,11 @@ impl AcpBridge {
                         .map_err(|err| err.to_string());
                     match response {
                         Ok(response) => {
-                            let _ = init_tx.send(Ok(response));
+                            // Send the connection handle out so the bridge
+                            // can dispatch session methods after this closure
+                            // parks. `cx` is Clone, so we keep the original
+                            // here for any future closure-internal use.
+                            let _ = init_tx.send(Ok((response, cx.clone())));
                         }
                         Err(reason) => {
                             let _ = init_tx.send(Err(reason));
@@ -231,8 +487,8 @@ impl AcpBridge {
             }
         });
 
-        let init_response = match timeout(INITIALIZE_TIMEOUT, init_rx).await {
-            Ok(Ok(Ok(response))) => response,
+        let (init_response, connection) = match timeout(INITIALIZE_TIMEOUT, init_rx).await {
+            Ok(Ok(Ok((response, connection)))) => (response, connection),
             Ok(Ok(Err(reason))) => {
                 fail_spawn(&mut child, connection_task).await;
                 return Err(StackError::AgentInitializeFailed { reason });
@@ -255,12 +511,17 @@ impl AcpBridge {
         };
 
         let capabilities = AgentCapabilitiesDto::from_initialize_response(&init_response)?;
+        let pid = child.id();
 
         Ok(Self {
-            child,
+            child: TokioMutex::new(Some(child)),
             capabilities,
-            shutdown_tx: Some(shutdown_tx),
-            connection_task: Some(connection_task),
+            connection: TokioMutex::new(Some(connection)),
+            shutdown_tx: TokioMutex::new(Some(shutdown_tx)),
+            connection_task: TokioMutex::new(Some(connection_task)),
+            spawn_pid: pid,
+            sink: bridge_sink,
+            notification_drain,
         })
     }
 
@@ -268,18 +529,151 @@ impl AcpBridge {
         &self.capabilities
     }
 
+    /// Best-effort pid of the spawned child. Captured at spawn time and
+    /// stable for the bridge lifetime; once `shutdown()` has reaped the
+    /// child, callers should rely on `agent_lifecycle` rows instead.
     pub fn pid(&self) -> Option<u32> {
-        self.child.id()
+        self.spawn_pid
+    }
+
+    async fn connection(&self) -> Result<ConnectionTo<Agent>> {
+        let guard = self.connection.lock().await;
+        guard.as_ref().cloned().ok_or(StackError::AgentNotRunning)
+    }
+
+    /// `session/new`. Always supported per ACP baseline.
+    pub async fn new_session(
+        &self,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<NewSessionResponse> {
+        let connection = self.connection().await?;
+        let mut request = NewSessionRequest::new(cwd);
+        request.mcp_servers = mcp_servers;
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/new",
+                message: err.to_string(),
+            })
+    }
+
+    /// `session/load`. Requires the `loadSession` capability.
+    pub async fn load_session(
+        &self,
+        session_id: SessionId,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<()> {
+        if !self.capabilities.supports_load_session() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/load",
+            });
+        }
+        let connection = self.connection().await?;
+        let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/load",
+                message: err.to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// `session/resume`. Gated by the `unstable_session_resume` SDK feature
+    /// (enabled at the workspace level). The agent may still reject if it
+    /// does not implement resume — that surfaces as `agent.request_failed`.
+    pub async fn resume_session(
+        &self,
+        session_id: SessionId,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<()> {
+        if !self.capabilities.supports_resume_session() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/resume",
+            });
+        }
+        let connection = self.connection().await?;
+        let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/resume",
+                message: err.to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// `session/close`. Gated by the `unstable_session_close` SDK feature.
+    pub async fn close_session(&self, session_id: SessionId) -> Result<()> {
+        if !self.capabilities.supports_close_session() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/close",
+            });
+        }
+        let connection = self.connection().await?;
+        let request = CloseSessionRequest::new(session_id);
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/close",
+                message: err.to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// `session/prompt`. Awaits the turn's final response.
+    pub async fn prompt_session(&self, request: PromptRequest) -> Result<StopReason> {
+        let connection = self.connection().await?;
+        let response = connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/prompt",
+                message: err.to_string(),
+            })?;
+        Ok(response.stop_reason)
+    }
+
+    /// `session/cancel` is a fire-and-forget notification.
+    pub async fn cancel_session(&self, session_id: SessionId) -> Result<()> {
+        let connection = self.connection().await?;
+        connection
+            .send_notification(CancelNotification::new(session_id))
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/cancel",
+                message: err.to_string(),
+            })?;
+        Ok(())
     }
 
     /// Gracefully tear down the agent: signal the connection task to return,
     /// then close stdin / wait / SIGKILL the child on a bounded timeline.
-    /// Returns the exit status if available.
-    pub async fn shutdown(mut self) -> Result<Option<i32>> {
-        if let Some(tx) = self.shutdown_tx.take() {
+    /// Returns the exit status if available. Idempotent: a second call sees
+    /// every field already `None` and returns `Ok(None)`.
+    pub async fn shutdown(&self) -> Result<Option<i32>> {
+        // Clear the cloneable handle so any in-flight session calls fail
+        // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
+        {
+            let mut guard = self.connection.lock().await;
+            *guard = None;
+        }
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }
-        if let Some(mut task) = self.connection_task.take() {
+        let task = self.connection_task.lock().await.take();
+        if let Some(mut task) = task {
             // Wait for the SDK closure to return. If it doesn't within the
             // grace window, abort the task explicitly so the IO loop does
             // not continue running detached after shutdown returns.
@@ -297,28 +691,60 @@ impl AcpBridge {
                 }
             }
         }
+        self.notification_drain.wait_idle().await;
+        // Drain queued `session/update` writes after the connection task has
+        // stopped and every accepted notification append task has finished
+        // enqueueing its row. Only then is it safe to close the sink.
+        self.sink.flush().await;
+
+        let mut child = match self.child.lock().await.take() {
+            Some(child) => child,
+            None => return Ok(None),
+        };
 
         // First try to let the child notice stdin closure and exit on its
         // own. If it doesn't, escalate to a process-group SIGKILL so any
         // grandchildren the agent forked (MCP servers, tool subprocesses)
         // also die with the daemon — the bridge spawned with
         // `process_group(0)`, so the child is its own pgid leader.
-        let status = match timeout(SHUTDOWN_GRACE, self.child.wait()).await {
+        let status = match timeout(SHUTDOWN_GRACE, child.wait()).await {
             Ok(Ok(status)) => Some(status),
             Ok(Err(err)) => {
                 tracing::warn!(error = ?err, "acp bridge: wait failed");
-                kill_child_process_group(&mut self.child);
+                kill_child_process_group(&mut child);
                 None
             }
             Err(_) => {
-                kill_child_process_group(&mut self.child);
-                let _ = self.child.wait().await.ok();
+                kill_child_process_group(&mut child);
+                let _ = child.wait().await.ok();
                 None
             }
         };
 
         Ok(status.and_then(|s| s.code()))
     }
+}
+
+fn enqueue_session_notification(
+    sink: Arc<dyn SessionEventSink>,
+    drain: Arc<NotificationDrain>,
+    note: &SessionNotification,
+) {
+    // Serialize the verbatim notification payload so downstream queriers can
+    // reconstruct the full ACP update without re-deriving from the typed enum.
+    let payload = match serde_json::to_string(&note) {
+        Ok(payload) => payload,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize session/update; dropping");
+            return;
+        }
+    };
+    let session_id = note.session_id.0.to_string();
+    let guard = drain.enter();
+    tokio::spawn(async move {
+        sink.append(&session_id, "session.update", &payload).await;
+        drop(guard);
+    });
 }
 
 #[cfg(unix)]
