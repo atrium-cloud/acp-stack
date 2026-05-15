@@ -80,15 +80,41 @@ session-scoped history.
 
 ### Workspace API
 
-- `GET /v1/workspace`
-- `GET /v1/files?path=...`
-- `GET /v1/files/content?path=...`
-- `PUT /v1/files/content`
-- `POST /v1/files/upload`
-- `GET /v1/files/download?path=...`
-- `DELETE /v1/files?path=...`
+Session-tier. All request paths are workspace-relative (rooted at `workspace.root`, no leading `/`). The empty string and `.` mean the workspace root itself. The workspace API rejects path traversal (`..`), embedded NUL bytes, absolute paths, and symlinks that escape `workspace.root`. Path resolution canonicalizes intermediate symlinks; reads through symlinks that still resolve inside the root are allowed. Writes additionally refuse to overwrite an existing symlink at the target.
 
-All paths are resolved under `workspace.root` unless explicitly allowed by future policy. The workspace API should reject path traversal and symlink escapes.
+`workspace.max_file_bytes` (config) bounds reads, writes, downloads, and uploads. Files larger than that limit return `workspace.too_large` (413).
+
+- `GET /v1/workspace` — workspace metadata.
+
+  Response: `{ root, uploads_path, default_shell, max_file_bytes }`.
+
+  `uploads_path` is the workspace-relative form of `workspace.uploads`, so clients can use it directly with the file routes.
+
+- `GET /v1/files?path=...` — list directory entries.
+
+  Response: `{ path, entries: [{ name, kind, size, modified }] }` where `kind` is `"file" | "directory" | "symlink" | "other"`. Entries are sorted directories-first, then files, then symlinks, each group ascending by name. `size` is omitted for non-files. `modified` is RFC-3339.
+
+- `GET /v1/files/content?path=...` — read a file.
+
+  Response: `{ path, encoding, content, size, modified }`. `encoding` is `"utf8"` when the bytes are valid UTF-8, else `"base64"`. Files over `max_file_bytes` → 413 `workspace.too_large`.
+
+- `PUT /v1/files/content` — write a file atomically.
+
+  Body: `{ path, encoding, content }` with `encoding` in `"utf8" | "base64"`. Decoded byte length over `max_file_bytes` → 413 `workspace.too_large`. Response: `{ path, size, modified }`. The parent directory must exist; missing parent → 404 `workspace.not_found`. The handler writes through a sibling temp file and renames.
+
+- `POST /v1/files/upload` — multipart upload (`multipart/form-data`).
+
+  Required fields: `path` (text, **destination relative to `workspace.uploads`** — interpreted as the final path including the filename) and `file` (binary part). The multipart filename is echoed back as `filename` but is not used for path construction. Decoded size over `max_file_bytes` → 413. Missing parent → 404. Response: `{ path, filename, size, modified }` where `path` is workspace-relative (so it can be passed back to `/v1/files*` routes directly).
+
+- `GET /v1/files/download?path=...` — binary stream download.
+
+  Headers: `Content-Type: application/octet-stream`, `Content-Disposition: attachment; filename="<basename>"`, `Content-Length`. Body is the raw file bytes (not enveloped). Files over `max_file_bytes` → 413 (envelope-formatted before any bytes are sent).
+
+- `DELETE /v1/files?path=...` — remove a regular file.
+
+  Response: `{ path, deleted: true }`. Refuses directories with 400 `workspace.path_invalid` (no recursive removal in 0.0.1). Refuses symlinks with 400 `workspace.symlink_escape`.
+
+Every workspace mutation (`workspace.write`, `workspace.upload`, `workspace.delete`) is written to the `events` table and fanned out on the `workspace` WebSocket topic.
 
 ### Command API
 
@@ -167,13 +193,12 @@ The WebSocket multiplexes runtime events. Clients subscribe to topics:
 - `sessions.{id}` (implemented for live ACP `session/update` events)
 - `commands.{id}`
 - `permissions`
-- `workspace`
+- `workspace` (implemented; emits `workspace.write`, `workspace.upload`, `workspace.delete`)
 - `agent`
 - `status`
 - `logs`
 
-The non-session topics are reserved by the contract but do not yet have live
-producers.
+The other reserved topics do not yet have live producers.
 
 Example client message:
 
