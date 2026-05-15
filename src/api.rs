@@ -20,15 +20,18 @@
 //! a sanitized `ApiError` payload via `public_message()`, so local paths and
 //! secret-store internals never leak to remote callers.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Query, Request, State};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::{Duration, SecondsFormat, Utc};
 use http::StatusCode;
@@ -46,11 +49,12 @@ use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_fail
 use crate::config::Config;
 use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
+use crate::events::EventHub;
 use crate::fs_util::home_dir;
 use crate::secrets::SecretStore;
 use crate::state::InstallerRunInput;
-use crate::state::{AuthFailureFilter, EventFilter, StateStore};
-use crate::supervisor::{AgentSnapshot, AgentSupervisor};
+use crate::state::{AuthFailureFilter, EventFilter, PromptRecord, SessionRecord, StateStore};
+use crate::supervisor::{AgentSnapshot, AgentSupervisor, parse_mcp_servers, parse_prompt_blocks};
 
 /// Shared handler/middleware state. Cheap to clone (Arc-only inside).
 #[derive(Clone)]
@@ -63,6 +67,7 @@ pub struct AppState {
     pub max_request_bytes: usize,
     pub active_requests: Arc<AtomicU64>,
     pub agent_supervisor: Arc<AgentSupervisor>,
+    pub event_hub: EventHub,
 }
 
 impl AppState {
@@ -87,6 +92,7 @@ impl AppState {
         let api_cap = config.api.max_request_bytes;
         let security_cap = config.security.http.max_request_bytes;
         let cap = api_cap.min(security_cap);
+        let event_hub = EventHub::new();
         // SQLite is local and `usize::MAX` covers any byte count we'd allow on
         // a HTTP request. Saturating cast keeps 32-bit targets safe.
         let max_request_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
@@ -99,6 +105,7 @@ impl AppState {
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
             agent_supervisor: Arc::new(AgentSupervisor::new()),
+            event_hub,
         }
     }
 }
@@ -135,6 +142,24 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/logs/security", get(logs_security_handler))
         .route("/v1/logs/sessions", get(logs_sessions_handler))
         .route("/v1/metrics/summary", get(metrics_summary_handler))
+        .route("/v1/ws", get(ws_handler))
+        .route(
+            "/v1/sessions",
+            get(sessions_list_handler).post(sessions_create_handler),
+        )
+        .route(
+            "/v1/sessions/{id}",
+            get(sessions_get_handler).delete(sessions_close_handler),
+        )
+        .route("/v1/sessions/{id}/load", post(sessions_load_handler))
+        .route("/v1/sessions/{id}/resume", post(sessions_resume_handler))
+        .route("/v1/sessions/{id}/prompt", post(sessions_prompt_handler))
+        .route("/v1/sessions/{id}/cancel", post(sessions_cancel_handler))
+        .route(
+            "/v1/sessions/{id}/prompts/{prompt_id}",
+            get(sessions_prompt_status_handler),
+        )
+        .route("/v1/sessions/{id}/events", get(sessions_events_handler))
         .layer(RequestBodyLimitLayer::new(limit))
         // Axum's per-extractor default body limit (2 MiB) would silently cap
         // String/Json/etc handlers below the configured runtime limit. Disable
@@ -226,6 +251,83 @@ async fn shutdown_signal() {
     if let Err(err) = tokio::signal::ctrl_c().await {
         tracing::warn!(error = %err, "ctrl-c handler install failed");
         std::future::pending::<()>().await;
+    }
+}
+
+#[derive(Deserialize)]
+struct WsClientMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    #[serde(default)]
+    topics: Vec<String>,
+}
+
+async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    let event_hub = state.event_hub.clone();
+    ws.on_upgrade(move |socket| ws_connection(socket, event_hub))
+        .into_response()
+}
+
+async fn ws_connection(mut socket: WebSocket, event_hub: EventHub) {
+    let mut receiver = event_hub.subscribe();
+    let mut subscribed_topics = HashSet::<String>::new();
+
+    loop {
+        tokio::select! {
+            inbound = socket.recv() => {
+                let Some(inbound) = inbound else {
+                    break;
+                };
+                let Ok(message) = inbound else {
+                    break;
+                };
+                match message {
+                    Message::Text(text) => {
+                        handle_ws_client_message(&mut subscribed_topics, text.as_str()).await;
+                    }
+                    Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                    Message::Close(_) => break,
+                }
+            }
+            event = receiver.recv() => {
+                let Ok(event) = event else {
+                    continue;
+                };
+                if !subscribed_topics.contains(&event.topic) {
+                    continue;
+                }
+                let payload = match serde_json::to_string(&event) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        tracing::warn!(error = %err, event_id = %event.id, "failed to serialize websocket event");
+                        continue;
+                    }
+                };
+                if socket.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn handle_ws_client_message(subscribed_topics: &mut HashSet<String>, text: &str) {
+    let message: WsClientMessage = match serde_json::from_str(text) {
+        Ok(message) => message,
+        Err(err) => {
+            tracing::debug!(error = %err, "dropping malformed websocket client message");
+            return;
+        }
+    };
+    if message.message_type != "subscribe" {
+        return;
+    }
+    for topic in message.topics {
+        if topic.starts_with("sessions.") {
+            subscribed_topics.insert(topic);
+        } else {
+            tracing::debug!(topic = %topic, "dropping unsupported websocket subscription topic");
+        }
     }
 }
 
@@ -877,6 +979,7 @@ struct MetricsSummaryResponse {
     agent_lifecycle: i64,
     installer_runs: i64,
     agent_capabilities: i64,
+    prompts: i64,
 }
 
 async fn metrics_summary_handler(
@@ -893,6 +996,7 @@ async fn metrics_summary_handler(
         agent_lifecycle: counts.agent_lifecycle,
         installer_runs: counts.installer_runs,
         agent_capabilities: counts.agent_capabilities,
+        prompts: counts.prompts,
     }))
 }
 
@@ -1106,6 +1210,7 @@ async fn agent_start_handler(
             &state.config.workspace.root,
             env,
             &state.state,
+            state.event_hub.clone(),
         )
         .await?;
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
@@ -1162,6 +1267,340 @@ async fn agent_capabilities_handler(
         capabilities,
         process_state: format!("{:?}", snapshot.state).to_lowercase(),
     }))
+}
+
+// ----- Session handlers -----------------------------------------------------
+
+#[derive(Serialize)]
+struct SessionResponse {
+    id: String,
+    created_at: String,
+    updated_at: String,
+    status: String,
+    agent_id: String,
+    cwd: String,
+    title: Option<String>,
+    metadata_json: String,
+}
+
+impl From<SessionRecord> for SessionResponse {
+    fn from(record: SessionRecord) -> Self {
+        Self {
+            id: record.id,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            status: record.status,
+            agent_id: record.agent_id,
+            cwd: record.cwd,
+            title: record.title,
+            metadata_json: record.metadata_json,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SessionsListResponse {
+    sessions: Vec<SessionResponse>,
+}
+
+#[derive(Deserialize, Default)]
+struct SessionsListParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+}
+
+async fn sessions_list_handler(
+    Query(params): Query<SessionsListParams>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<SessionsListResponse>, StackError> {
+    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let store = state.state.lock().await;
+    let sessions = store.query_sessions(limit)?;
+    drop(store);
+    Ok(ApiSuccess::new(SessionsListResponse {
+        sessions: sessions.into_iter().map(SessionResponse::from).collect(),
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct SessionsCreateBody {
+    #[serde(default)]
+    cwd: Option<String>,
+    // `mcp_servers` is intentionally omitted from the public surface in this
+    // batch. The spec (`docs/specs/acp/acp-bridge.md`) declares MCP servers
+    // through admin-controlled config, not the session API. Accepting an
+    // ad-hoc list from session-tier callers would let any session-key
+    // holder request arbitrary agent-side process execution.
+}
+
+async fn sessions_create_handler(
+    State(state): State<AppState>,
+    body: Option<Json<SessionsCreateBody>>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let Json(payload) = body.unwrap_or_default();
+    let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
+    let record = state
+        .agent_supervisor
+        .create_session(
+            &state.config.agent,
+            &state.config.workspace.root,
+            Some(cwd),
+            parse_mcp_servers(None)?,
+            &state.state,
+        )
+        .await?;
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+async fn sessions_get_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let store = state.state.lock().await;
+    let record = store.get_session(&id)?;
+    drop(store);
+    let record = record.ok_or(StackError::SessionNotFound { id })?;
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+#[derive(Deserialize, Default)]
+struct SessionsLoadBody {
+    #[serde(default)]
+    cwd: Option<String>,
+    // See `SessionsCreateBody`: MCP servers come from admin config, not
+    // session-tier request bodies, until a proper policy surface lands.
+}
+
+async fn sessions_load_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<SessionsLoadBody>>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let Json(payload) = body.unwrap_or_default();
+    let cwd = payload
+        .cwd
+        .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
+        .transpose()?;
+    let record = state
+        .agent_supervisor
+        .load_session(
+            &id,
+            cwd,
+            parse_mcp_servers(None)?,
+            &state.config.workspace.root,
+            &state.state,
+        )
+        .await?;
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+async fn sessions_resume_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<SessionsLoadBody>>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let Json(payload) = body.unwrap_or_default();
+    let cwd = payload
+        .cwd
+        .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
+        .transpose()?;
+    let record = state
+        .agent_supervisor
+        .resume_session(
+            &id,
+            cwd,
+            parse_mcp_servers(None)?,
+            &state.config.workspace.root,
+            &state.state,
+        )
+        .await?;
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+/// Resolve and validate a session `cwd` against `workspace.root`. Returns
+/// the canonical (no `..`) string. Rejects anything outside the workspace
+/// boundary; this is the same containment the Workspace API will share when
+/// it lands.
+fn resolve_session_cwd(raw: Option<String>, workspace_root: &str) -> Result<String> {
+    let candidate = raw.unwrap_or_else(|| workspace_root.to_owned());
+    let root_path = std::path::PathBuf::from(workspace_root);
+    let candidate_path = std::path::PathBuf::from(&candidate);
+    if !candidate_path.is_absolute() {
+        return Err(StackError::PromptBodyInvalid(
+            "session cwd must be an absolute path".to_owned(),
+        ));
+    }
+    // Reject `..` segments before normalization rather than relying on
+    // canonicalize, because the path may not exist yet and canonicalize would
+    // fail. The spec already forbids traversal; we enforce it lexically.
+    if candidate_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(StackError::PromptBodyInvalid(
+            "session cwd must not contain `..` segments".to_owned(),
+        ));
+    }
+    if !candidate_path.starts_with(&root_path) {
+        return Err(StackError::PromptBodyInvalid(format!(
+            "session cwd must be under workspace.root ({workspace_root})"
+        )));
+    }
+    Ok(candidate)
+}
+
+#[derive(Deserialize)]
+struct SessionsPromptBody {
+    prompt: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct PromptSubmitResponse {
+    prompt_id: String,
+    session_id: String,
+    status: String,
+    created_at: String,
+}
+
+async fn sessions_prompt_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<SessionsPromptBody>,
+) -> std::result::Result<ApiSuccess<PromptSubmitResponse>, StackError> {
+    let blocks = parse_prompt_blocks(&payload.prompt)?;
+    if blocks.is_empty() {
+        return Err(StackError::PromptBodyEmpty);
+    }
+    // Canonical JSON of the parsed blocks is durable storage; the original
+    // request body shape is what the agent sees, so we serialize the typed
+    // ACP value (consistent with how we read it back).
+    let prompt_json = serde_json::to_string(&blocks).map_err(|err| {
+        StackError::PromptBodyInvalid(format!("failed to canonicalize prompt: {err}"))
+    })?;
+    let record = state
+        .agent_supervisor
+        .submit_prompt(&id, blocks, prompt_json, &state.state)
+        .await?;
+    Ok(ApiSuccess::new(PromptSubmitResponse {
+        prompt_id: record.id,
+        session_id: record.session_id,
+        status: record.status,
+        created_at: record.created_at,
+    }))
+}
+
+#[derive(Serialize)]
+struct PromptStatusResponse {
+    id: String,
+    session_id: String,
+    created_at: String,
+    updated_at: String,
+    status: String,
+    stop_reason: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+impl From<PromptRecord> for PromptStatusResponse {
+    fn from(r: PromptRecord) -> Self {
+        Self {
+            id: r.id,
+            session_id: r.session_id,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            status: r.status,
+            stop_reason: r.stop_reason,
+            error_code: r.error_code,
+            error_message: r.error_message,
+        }
+    }
+}
+
+async fn sessions_prompt_status_handler(
+    State(state): State<AppState>,
+    Path((session_id, prompt_id)): Path<(String, String)>,
+) -> std::result::Result<ApiSuccess<PromptStatusResponse>, StackError> {
+    let store = state.state.lock().await;
+    let record = store.get_prompt(&prompt_id)?;
+    drop(store);
+    let record = record.ok_or_else(|| StackError::PromptNotFound {
+        id: prompt_id.clone(),
+    })?;
+    if record.session_id != session_id {
+        return Err(StackError::PromptSessionMismatch {
+            session_id,
+            prompt_id,
+        });
+    }
+    Ok(ApiSuccess::new(PromptStatusResponse::from(record)))
+}
+
+#[derive(Deserialize, Default)]
+struct SessionsEventsParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    #[serde(default)]
+    after: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SessionsEventsResponse {
+    events: Vec<LogEventJson>,
+}
+
+async fn sessions_events_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<SessionsEventsParams>,
+) -> std::result::Result<ApiSuccess<SessionsEventsResponse>, StackError> {
+    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let store = state.state.lock().await;
+    let exists = store.get_session(&id)?.is_some();
+    if !exists {
+        return Err(StackError::SessionNotFound { id });
+    }
+    let events = store.query_session_events(&id, params.after.as_deref(), limit)?;
+    drop(store);
+    Ok(ApiSuccess::new(SessionsEventsResponse {
+        events: events
+            .into_iter()
+            .map(|e| LogEventJson {
+                id: e.id,
+                created_at: e.created_at,
+                level: e.level,
+                kind: e.kind,
+                message: e.message,
+                payload_json: e.payload_json,
+            })
+            .collect(),
+    }))
+}
+
+#[derive(Serialize)]
+struct SessionsCancelResponse {
+    session_id: String,
+}
+
+async fn sessions_cancel_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<ApiSuccess<SessionsCancelResponse>, StackError> {
+    state
+        .agent_supervisor
+        .cancel_session(&id, &state.state)
+        .await?;
+    Ok(ApiSuccess::new(SessionsCancelResponse { session_id: id }))
+}
+
+async fn sessions_close_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let record = state
+        .agent_supervisor
+        .close_session(&id, &state.state)
+        .await?;
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
 // ----- Tests ----------------------------------------------------------------
