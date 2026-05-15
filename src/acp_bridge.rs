@@ -188,6 +188,86 @@ struct SessionEventRow {
     payload_json: String,
 }
 
+/// Normalize the agent's reported token/context usage if the inbound
+/// `session/update` payload carries it. ACP itself has no standard shape, so
+/// we recognize the conventions used by Claude and other agents: a `usage`
+/// object reachable at the top level, under `update.usage`, or under
+/// `prompt_response.usage`. Fields outside `input_tokens`, `output_tokens`,
+/// and `context_window_max` (also accepting the legacy `context_window`
+/// alias) are ignored. Returns `None` if none of those fields parse as a
+/// positive integer — callers must not emit a `usage.reported` event in that
+/// case because every aggregate would still be null.
+fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let usage = locate_usage_object(&value)?;
+    let input_tokens = read_token_field(usage, "input_tokens");
+    let output_tokens = read_token_field(usage, "output_tokens");
+    let context_window_max = read_token_field(usage, "context_window_max")
+        .or_else(|| read_token_field(usage, "context_window"));
+    if input_tokens.is_none() && output_tokens.is_none() && context_window_max.is_none() {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "session_id".to_owned(),
+        serde_json::Value::String(session_id.to_owned()),
+    );
+    if let Some(v) = input_tokens {
+        out.insert(
+            "input_tokens".to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(v)),
+        );
+    }
+    if let Some(v) = output_tokens {
+        out.insert(
+            "output_tokens".to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(v)),
+        );
+    }
+    if let Some(v) = context_window_max {
+        out.insert(
+            "context_window_max".to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(v)),
+        );
+    }
+    Some(serde_json::Value::Object(out))
+}
+
+fn locate_usage_object(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    if let Some(obj) = value.get("usage") {
+        if obj.is_object() {
+            return Some(obj);
+        }
+    }
+    if let Some(update) = value.get("update").and_then(|v| v.get("usage")) {
+        if update.is_object() {
+            return Some(update);
+        }
+    }
+    if let Some(prompt_response) = value.get("prompt_response").and_then(|v| v.get("usage")) {
+        if prompt_response.is_object() {
+            return Some(prompt_response);
+        }
+    }
+    if let Some(meta_usage) = value.get("meta").and_then(|v| v.get("usage")) {
+        if meta_usage.is_object() {
+            return Some(meta_usage);
+        }
+    }
+    None
+}
+
+fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
+    let raw = usage.get(key)?;
+    if let Some(n) = raw.as_i64() {
+        return if n >= 0 { Some(n) } else { None };
+    }
+    if let Some(n) = raw.as_u64() {
+        return i64::try_from(n).ok();
+    }
+    None
+}
+
 /// Backpressure buffer for unwritten ACP session updates. Sized so a typical
 /// streaming turn (text chunks, tool calls) fits comfortably without ever
 /// blocking, but small enough that a pathological agent can't grow daemon
@@ -201,10 +281,11 @@ impl StateStoreSessionSink {
         let writer = tokio::spawn(async move {
             while let Some(row) = rx.recv().await {
                 let guard = state.lock().await;
-                match guard.append_session_event(
+                match guard.append_session_event_with_source(
                     &row.session_id,
                     "info",
                     &row.kind,
+                    crate::state::EVENT_SOURCE_ACP,
                     "ACP session update",
                     &row.payload_json,
                 ) {
@@ -214,6 +295,31 @@ impl StateStoreSessionSink {
                             &event,
                             &row.payload_json,
                         );
+                        // Best-effort token / context usage capture. ACP does
+                        // not standardize a usage shape, but Claude (and
+                        // others) emit it on `update.usage.*` or on prompt
+                        // completion. Persist a normalized `usage.reported`
+                        // event when we recognize the shape; ignore otherwise.
+                        if let Some(usage) =
+                            extract_usage_payload(&row.session_id, &row.payload_json)
+                        {
+                            if let Ok(usage_text) = serde_json::to_string(&usage) {
+                                if let Err(err) = guard.append_session_event_with_source(
+                                    &row.session_id,
+                                    "info",
+                                    "usage.reported",
+                                    crate::state::EVENT_SOURCE_ACP,
+                                    "agent usage reported",
+                                    &usage_text,
+                                ) {
+                                    tracing::warn!(
+                                        error = %err,
+                                        session_id = %row.session_id,
+                                        "failed to persist usage.reported event"
+                                    );
+                                }
+                            }
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -983,5 +1089,43 @@ mod tests {
 
         let outcome = outcome_task.await.expect("task joins");
         assert!(matches!(outcome, RequestPermissionOutcome::Cancelled));
+    }
+
+    #[test]
+    fn extract_usage_payload_picks_up_top_level_usage_object() {
+        let payload =
+            r#"{"usage": {"input_tokens": 12, "output_tokens": 34, "context_window_max": 200000}}"#;
+        let usage =
+            super::extract_usage_payload("sess_x", payload).expect("usage should be extracted");
+        assert_eq!(usage["input_tokens"].as_i64(), Some(12));
+        assert_eq!(usage["output_tokens"].as_i64(), Some(34));
+        assert_eq!(usage["context_window_max"].as_i64(), Some(200000));
+        assert_eq!(usage["session_id"].as_str(), Some("sess_x"));
+    }
+
+    #[test]
+    fn extract_usage_payload_walks_nested_paths() {
+        let payload = r#"{"update": {"usage": {"input_tokens": 5}}}"#;
+        let usage =
+            super::extract_usage_payload("sess_y", payload).expect("usage should be extracted");
+        assert_eq!(usage["input_tokens"].as_i64(), Some(5));
+        // Output tokens absent — must NOT be serialized rather than written as 0.
+        assert!(usage.get("output_tokens").is_none());
+    }
+
+    #[test]
+    fn extract_usage_payload_returns_none_when_shape_unknown() {
+        assert!(super::extract_usage_payload("sess_z", "{}").is_none());
+        assert!(super::extract_usage_payload("sess_z", r#"{"update":{"foo":"bar"}}"#).is_none());
+        assert!(super::extract_usage_payload("sess_z", "not-json").is_none());
+    }
+
+    #[test]
+    fn extract_usage_payload_rejects_negative_numbers() {
+        let payload = r#"{"usage": {"input_tokens": -5, "output_tokens": 3}}"#;
+        let usage = super::extract_usage_payload("s", payload).expect("partial usage");
+        // Negative tokens were dropped; output tokens preserved.
+        assert!(usage.get("input_tokens").is_none());
+        assert_eq!(usage["output_tokens"].as_i64(), Some(3));
     }
 }

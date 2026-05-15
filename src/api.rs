@@ -256,6 +256,14 @@ pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .merge(session_routes)
         .merge(admin_routes)
+        // `log_api_request` sits INSIDE `authenticate` so it can read the
+        // resolved `KeyKind` extension on the request. It records one
+        // durable `api.request` event per completed request — see metrics
+        // §api_connection_metrics.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            log_api_request,
+        ))
         // Authenticate runs OUTSIDE the tier gate. It sets the resolved
         // KeyKind on the request extensions; require_session then matches
         // against the tier required by this router.
@@ -374,14 +382,22 @@ async fn ws_handler(
             "Origin is not in the configured allowlist",
         );
     }
-    let event_hub = state.event_hub.clone();
-    ws.on_upgrade(move |socket| ws_connection(socket, event_hub))
+    let app_state = state.clone();
+    ws.on_upgrade(move |socket| ws_connection(socket, app_state))
         .into_response()
 }
 
-async fn ws_connection(mut socket: WebSocket, event_hub: EventHub) {
-    let mut receiver = event_hub.subscribe();
+async fn ws_connection(mut socket: WebSocket, state: AppState) {
+    let mut receiver = state.event_hub.subscribe();
     let mut subscribed_topics = HashSet::<String>::new();
+    let connection_id = next_ws_connection_id();
+    let started_at = std::time::Instant::now();
+    persist_ws_lifecycle_event(
+        &state,
+        "ws.client_connected",
+        serde_json::json!({"connection_id": connection_id}),
+    )
+    .await;
 
     loop {
         tokio::select! {
@@ -419,6 +435,52 @@ async fn ws_connection(mut socket: WebSocket, event_hub: EventHub) {
                 }
             }
         }
+    }
+
+    let duration_ms = started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let mut topics: Vec<String> = subscribed_topics.into_iter().collect();
+    topics.sort();
+    persist_ws_lifecycle_event(
+        &state,
+        "ws.client_disconnected",
+        serde_json::json!({
+            "connection_id": connection_id,
+            "topics": topics,
+            "duration_ms": duration_ms,
+        }),
+    )
+    .await;
+}
+
+/// Monotonically-increasing connection identifier. Pairs the connect/disconnect
+/// events for a single client across the durable event log. Reset per process
+/// — durability of the pair is provided by the timestamp + connection_id
+/// composite, not the counter alone.
+fn next_ws_connection_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    format!("ws_{nanos}_{seq}")
+}
+
+async fn persist_ws_lifecycle_event(state: &AppState, kind: &str, payload: serde_json::Value) {
+    let payload_text = match serde_json::to_string(&payload) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::warn!(error = %err, kind, "failed to serialize ws lifecycle event payload");
+            return;
+        }
+    };
+    let store = state.state.lock().await;
+    if let Err(err) = store.append_event_with_source(
+        "info",
+        kind,
+        crate::state::EVENT_SOURCE_API,
+        "",
+        &payload_text,
+    ) {
+        tracing::warn!(error = %err, kind, "failed to persist ws lifecycle event");
     }
 }
 
@@ -718,6 +780,73 @@ async fn track_active_requests(
     next.run(req).await
 }
 
+/// Per-completed-request audit event. Emits one `api.request` row into the
+/// durable `events` table with `{method, path, status, duration_ms, key_kind}`.
+/// Skips routes that the metrics layer should ignore — WS upgrades and the
+/// high-cardinality `/v1/status*` polls — so request volume stays bounded.
+///
+/// The event powers the `api_connections` block in `/v1/metrics/summary`.
+async fn log_api_request(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let started_at = std::time::Instant::now();
+    let method = req.method().as_str().to_owned();
+    let raw_path = req.uri().path().to_owned();
+    // Prefer the matched path template (e.g. `/v1/sessions/{id}`) to keep
+    // event cardinality bounded. Falls back to the raw path for routes that
+    // don't have a matched template (rare; mostly framework fallbacks).
+    let path = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_owned())
+        .unwrap_or_else(|| raw_path.clone());
+    let key_kind = req.extensions().get::<KeyKind>().map(|k| match k {
+        KeyKind::Session => "session",
+        KeyKind::Admin => "admin",
+        KeyKind::Unknown => "unknown",
+    });
+
+    let response = next.run(req).await;
+
+    if should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path) {
+        return response;
+    }
+
+    let status = response.status().as_u16();
+    let duration_ms = started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let payload = serde_json::json!({
+        "method": method,
+        "path": path,
+        "status": status,
+        "duration_ms": duration_ms,
+        "key_kind": key_kind,
+    });
+    let payload_text = payload.to_string();
+    // Best-effort: a failed audit insert must not break the response. Surface
+    // it at warn so the operator can see the divergence in tracing logs.
+    let store = state.state.lock().await;
+    if let Err(err) = store.append_event_with_source(
+        "info",
+        "api.request",
+        crate::state::EVENT_SOURCE_API,
+        "",
+        &payload_text,
+    ) {
+        tracing::warn!(error = %err, path, "failed to persist api.request event");
+    }
+    response
+}
+
+/// Returns true when the path should not produce an `api.request` row.
+/// `/v1/ws` and `/v1/status*` are excluded — the first generates its own
+/// `ws.client_connected` / `ws.client_disconnected` pair, the second is a
+/// frequent poll surface whose cardinality would dwarf real traffic.
+fn should_skip_api_request_log(path: &str) -> bool {
+    path == "/v1/ws" || path.starts_with("/v1/status")
+}
+
 struct ActiveRequestGuard {
     active_requests: Arc<AtomicU64>,
 }
@@ -992,7 +1121,13 @@ async fn persist_security_event(
         }
     };
     let store = state.state.lock().await;
-    if let Err(err) = store.append_event(level, kind, message, &payload) {
+    if let Err(err) = store.append_event_with_source(
+        level,
+        kind,
+        crate::state::EVENT_SOURCE_API,
+        message,
+        &payload,
+    ) {
         tracing::warn!(error = %err, kind, "failed to persist security event");
     }
 }
@@ -1171,9 +1306,10 @@ async fn config_import_handler(
     match serde_json::to_string(&payload) {
         Ok(payload_text) => {
             let store = state.state.lock().await;
-            if let Err(err) = store.append_event(
+            if let Err(err) = store.append_event_with_source(
                 "info",
                 "server.config_imported",
+                crate::state::EVENT_SOURCE_API,
                 "config imported via /v1/config/import",
                 &payload_text,
             ) {
@@ -1261,21 +1397,41 @@ async fn secrets_delete_handler(
 /// memory-pressure attack. Operators with longer-tail queries should page.
 const MAX_LOGS_LIMIT: u32 = 1000;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct LogsEventsParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,
-    #[serde(default)]
     level: Option<String>,
+    kind: Option<String>,
+    source: Option<String>,
+    session_id: Option<String>,
+    command_id: Option<String>,
+    permission_id: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    after: Option<String>,
 }
 
 fn default_logs_limit() -> u32 {
     100
 }
 
+/// Split a `kind` query param into either an exact match or a dotted prefix.
+/// A trailing `.` (e.g. `command.`) is treated as a prefix; anything else is
+/// matched exactly.
+fn split_kind_filter(kind: Option<&str>) -> (Option<&str>, Option<&str>) {
+    match kind {
+        Some(k) if k.ends_with('.') => (None, Some(k)),
+        Some(k) => (Some(k), None),
+        None => (None, None),
+    }
+}
+
 #[derive(Serialize)]
 struct LogsEventsResponse {
     events: Vec<LogEventJson>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1286,6 +1442,21 @@ struct LogEventJson {
     kind: String,
     message: String,
     payload_json: String,
+    source: String,
+}
+
+impl From<crate::state::Event> for LogEventJson {
+    fn from(e: crate::state::Event) -> Self {
+        Self {
+            id: e.id,
+            created_at: e.created_at,
+            level: e.level,
+            kind: e.kind,
+            message: e.message,
+            payload_json: e.payload_json,
+            source: e.source,
+        }
+    }
 }
 
 async fn logs_events_handler(
@@ -1293,29 +1464,74 @@ async fn logs_events_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
     let store = state.state.lock().await;
     let events = store.query_events(EventFilter {
         limit,
         level: params.level.as_deref(),
+        kind: kind_exact,
+        kind_prefix,
+        source: params.source.as_deref(),
+        session_id: params.session_id.as_deref(),
+        command_id: params.command_id.as_deref(),
+        permission_id: params.permission_id.as_deref(),
+        since: params.since.as_deref(),
+        until: params.until.as_deref(),
+        after_id: params.after.as_deref(),
     })?;
     drop(store);
-    let events = events
-        .into_iter()
-        .map(|e| LogEventJson {
-            id: e.id,
-            created_at: e.created_at,
-            level: e.level,
-            kind: e.kind,
-            message: e.message,
-            payload_json: e.payload_json,
-        })
-        .collect();
-    Ok(ApiSuccess::new(LogsEventsResponse { events }))
+    let next_cursor = paging_cursor(&events, limit);
+    let events = events.into_iter().map(LogEventJson::from).collect();
+    Ok(ApiSuccess::new(LogsEventsResponse {
+        events,
+        next_cursor,
+    }))
+}
+
+/// Return the cursor for the next page when `rows` saturated `limit`. When the
+/// caller asked for `limit` rows and we returned fewer, there is no next page.
+fn paging_cursor<T>(rows: &[T], limit: u32) -> Option<String>
+where
+    T: HasRowId,
+{
+    if (rows.len() as u32) < limit {
+        return None;
+    }
+    rows.last().map(|row| row.row_id().to_owned())
+}
+
+trait HasRowId {
+    fn row_id(&self) -> &str;
+}
+
+impl HasRowId for crate::state::Event {
+    fn row_id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl HasRowId for crate::state::SessionRecord {
+    fn row_id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl HasRowId for crate::state::CommandRecord {
+    fn row_id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl HasRowId for crate::state::AuthFailure {
+    fn row_id(&self) -> &str {
+        &self.id
+    }
 }
 
 #[derive(Serialize)]
 struct LogsSessionsResponse {
     sessions: Vec<SessionLogJson>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1326,14 +1542,32 @@ struct SessionLogJson {
     status: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LogsSessionsParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    since: Option<String>,
+    until: Option<String>,
+    status: Option<String>,
+    after: Option<String>,
+}
+
 async fn logs_sessions_handler(
-    Query(params): Query<LogsLimitParams>,
+    Query(params): Query<LogsSessionsParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsSessionsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let store = state.state.lock().await;
-    let sessions = store.query_sessions(limit)?;
+    let sessions = store.query_sessions(crate::state::SessionFilter {
+        limit,
+        since: params.since.as_deref(),
+        until: params.until.as_deref(),
+        status: params.status.as_deref(),
+        after_id: params.after.as_deref(),
+    })?;
     drop(store);
+    let next_cursor = paging_cursor(&sessions, limit);
     Ok(ApiSuccess::new(LogsSessionsResponse {
         sessions: sessions
             .into_iter()
@@ -1344,18 +1578,32 @@ async fn logs_sessions_handler(
                 status: session.status,
             })
             .collect(),
+        next_cursor,
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct LogsLimitParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LogsCommandsParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    since: Option<String>,
+    until: Option<String>,
+    status: Option<String>,
+    after: Option<String>,
+}
+
 #[derive(Serialize)]
 struct LogsCommandsResponse {
     commands: Vec<CommandLogJson>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1369,13 +1617,20 @@ struct CommandLogJson {
 }
 
 async fn logs_commands_handler(
-    Query(params): Query<LogsLimitParams>,
+    Query(params): Query<LogsCommandsParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsCommandsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let store = state.state.lock().await;
-    let commands = store.query_commands(limit)?;
+    let commands = store.query_commands(crate::state::CommandFilter {
+        limit,
+        since: params.since.as_deref(),
+        until: params.until.as_deref(),
+        status: params.status.as_deref(),
+        after_id: params.after.as_deref(),
+    })?;
     drop(store);
+    let next_cursor = paging_cursor(&commands, limit);
     Ok(ApiSuccess::new(LogsCommandsResponse {
         commands: commands
             .into_iter()
@@ -1388,6 +1643,7 @@ async fn logs_commands_handler(
                 exit_status: command.exit_status,
             })
             .collect(),
+        next_cursor,
     }))
 }
 
@@ -1565,32 +1821,66 @@ async fn permissions_deny_handler(
     Ok(ApiSuccess::new(decision))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LogsPermissionsParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    kind: Option<String>,
+    source: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    after: Option<String>,
+    permission_id: Option<String>,
+}
+
 async fn logs_permissions_handler(
-    Query(params): Query<LogsLimitParams>,
+    Query(params): Query<LogsPermissionsParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
     let store = state.state.lock().await;
-    let events = store.query_permission_events(limit)?;
+    let events = store.query_permission_events(EventFilter {
+        limit,
+        level: None,
+        kind: kind_exact,
+        kind_prefix,
+        source: params.source.as_deref(),
+        session_id: None,
+        command_id: None,
+        permission_id: params.permission_id.as_deref(),
+        since: params.since.as_deref(),
+        until: params.until.as_deref(),
+        after_id: params.after.as_deref(),
+    })?;
     drop(store);
-    let events = events
-        .into_iter()
-        .map(|e| LogEventJson {
-            id: e.id,
-            created_at: e.created_at,
-            level: e.level,
-            kind: e.kind,
-            message: e.message,
-            payload_json: e.payload_json,
-        })
-        .collect();
-    Ok(ApiSuccess::new(LogsEventsResponse { events }))
+    let next_cursor = paging_cursor(&events, limit);
+    let events = events.into_iter().map(LogEventJson::from).collect();
+    Ok(ApiSuccess::new(LogsEventsResponse {
+        events,
+        next_cursor,
+    }))
 }
 
 #[derive(Serialize)]
 struct LogsSecurityResponse {
     auth_failures: Vec<AuthFailureJson>,
     events: Vec<LogEventJson>,
+    auth_failures_next_cursor: Option<String>,
+    events_next_cursor: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct LogsSecurityParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    since: Option<String>,
+    until: Option<String>,
+    after: Option<String>,
+    auth_failures_after: Option<String>,
+    events_after: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1610,14 +1900,32 @@ struct AuthFailureJson {
 /// requests, etc.). Two independent streams keep their existing schemas;
 /// clients merge them on `created_at` for a unified timeline.
 async fn logs_security_handler(
-    Query(params): Query<LogsLimitParams>,
+    Query(params): Query<LogsSecurityParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsSecurityResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let auth_failures_after = params
+        .auth_failures_after
+        .as_deref()
+        .or(params.after.as_deref());
+    let events_after = params.events_after.as_deref().or(params.after.as_deref());
     let store = state.state.lock().await;
-    let auth_failures = store.query_auth_failures(AuthFailureFilter { limit })?;
-    let security_events = store.query_security_events(limit)?;
+    let auth_failures = store.query_auth_failures(AuthFailureFilter {
+        limit,
+        since: params.since.as_deref(),
+        until: params.until.as_deref(),
+        after_id: auth_failures_after,
+    })?;
+    let security_events = store.query_security_events(EventFilter {
+        limit,
+        since: params.since.as_deref(),
+        until: params.until.as_deref(),
+        after_id: events_after,
+        ..EventFilter::default()
+    })?;
     drop(store);
+    let auth_failures_next_cursor = paging_cursor(&auth_failures, limit);
+    let events_next_cursor = paging_cursor(&security_events, limit);
     Ok(ApiSuccess::new(LogsSecurityResponse {
         auth_failures: auth_failures
             .into_iter()
@@ -1633,20 +1941,45 @@ async fn logs_security_handler(
             .collect(),
         events: security_events
             .into_iter()
-            .map(|e| LogEventJson {
-                id: e.id,
-                created_at: e.created_at,
-                level: e.level,
-                kind: e.kind,
-                message: e.message,
-                payload_json: e.payload_json,
-            })
+            .map(LogEventJson::from)
             .collect(),
+        auth_failures_next_cursor,
+        events_next_cursor,
     }))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct MetricsSummaryParams {
+    /// Window start. Accepts RFC3339 (e.g. `2026-05-16T00:00:00Z`) or a
+    /// duration suffix (`1h`, `30m`, `2d`). Defaults to 24h ago.
+    since: Option<String>,
+    /// Window end. Same format as `since`. Defaults to "now".
+    until: Option<String>,
 }
 
 #[derive(Serialize)]
 struct MetricsSummaryResponse {
+    window: MetricsWindowJson,
+    counts: MetricsCountsJson,
+    sessions: MetricsSessionsJson,
+    turns: MetricsTurnsJson,
+    commands: MetricsCommandsJson,
+    permissions: MetricsPermissionsJson,
+    security: MetricsSecurityJson,
+    api_connections: MetricsApiConnectionsJson,
+    ws_connections: MetricsWsConnectionsJson,
+    usage: MetricsUsageJson,
+}
+
+#[derive(Serialize)]
+struct MetricsWindowJson {
+    since: String,
+    until: String,
+}
+
+#[derive(Serialize)]
+struct MetricsCountsJson {
     events: i64,
     sessions: i64,
     commands: i64,
@@ -1655,24 +1988,192 @@ struct MetricsSummaryResponse {
     installer_runs: i64,
     agent_capabilities: i64,
     prompts: i64,
+    permission_requests: i64,
+    permission_decisions: i64,
+}
+
+#[derive(Serialize)]
+struct MetricsSessionsJson {
+    active: i64,
+    closed: i64,
+    average_duration_ms: Option<i64>,
+    p50_duration_ms: Option<i64>,
+    p95_duration_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct MetricsTurnsJson {
+    total: i64,
+    by_status: std::collections::BTreeMap<String, i64>,
+    average_per_session: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct MetricsCommandsJson {
+    total: i64,
+    by_status: std::collections::BTreeMap<String, i64>,
+    average_duration_ms: Option<i64>,
+    p50_duration_ms: Option<i64>,
+    p95_duration_ms: Option<i64>,
+    truncated_count: i64,
+}
+
+#[derive(Serialize)]
+struct MetricsPermissionsJson {
+    total: i64,
+    by_outcome: std::collections::BTreeMap<String, i64>,
+    average_response_ms: Option<i64>,
+    p50_response_ms: Option<i64>,
+    p95_response_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct MetricsSecurityJson {
+    auth_failures: i64,
+    by_reason: std::collections::BTreeMap<String, i64>,
+    events_by_kind: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Serialize)]
+struct MetricsApiConnectionsJson {
+    request_count: Option<i64>,
+    by_status: std::collections::BTreeMap<String, i64>,
+    average_duration_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct MetricsWsConnectionsJson {
+    connections_opened: Option<i64>,
+    connections_closed: Option<i64>,
+    average_duration_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct MetricsUsageJson {
+    tokens_input: Option<i64>,
+    tokens_output: Option<i64>,
+    context_window_max: Option<i64>,
 }
 
 async fn metrics_summary_handler(
+    Query(params): Query<MetricsSummaryParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<MetricsSummaryResponse>, StackError> {
+    let now = chrono::Utc::now();
+    let until = match params.until.as_deref() {
+        Some(raw) => parse_metrics_bound(raw, now)?,
+        None => now,
+    };
+    let since = match params.since.as_deref() {
+        Some(raw) => parse_metrics_bound(raw, now)?,
+        None => now - chrono::Duration::hours(24),
+    };
+    if since > until {
+        return Err(StackError::InvalidParam {
+            field: "since",
+            reason: "must be earlier than until".to_owned(),
+        });
+    }
+    let window = crate::state::MetricsWindow {
+        since: format_rfc3339_nanos(since),
+        until: format_rfc3339_nanos(until),
+    };
     let store = state.state.lock().await;
-    let counts = store.counts()?;
+    let summary = store.metrics_summary(window)?;
     drop(store);
-    Ok(ApiSuccess::new(MetricsSummaryResponse {
-        events: counts.events,
-        sessions: counts.sessions,
-        commands: counts.commands,
-        auth_failures: counts.auth_failures,
-        agent_lifecycle: counts.agent_lifecycle,
-        installer_runs: counts.installer_runs,
-        agent_capabilities: counts.agent_capabilities,
-        prompts: counts.prompts,
-    }))
+    Ok(ApiSuccess::new(MetricsSummaryResponse::from(summary)))
+}
+
+/// Parse either an RFC3339 timestamp or a duration suffix relative to `now`.
+/// Accepts `Ns`, `Nm`, `Nh`, `Nd`. The duration suffix subtracts from `now`
+/// so callers can pass `since=1h` to mean "an hour ago".
+fn parse_metrics_bound(
+    raw: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<chrono::DateTime<chrono::Utc>, StackError> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(dt.with_timezone(&chrono::Utc));
+    }
+    let duration =
+        crate::time_util::parse_duration_suffix(raw).ok_or_else(|| StackError::InvalidParam {
+            field: "since/until",
+            reason: format!("not a valid RFC3339 timestamp or duration: {raw}"),
+        })?;
+    Ok(now - duration)
+}
+
+fn format_rfc3339_nanos(dt: chrono::DateTime<chrono::Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+}
+
+impl From<crate::state::MetricsSummary> for MetricsSummaryResponse {
+    fn from(summary: crate::state::MetricsSummary) -> Self {
+        Self {
+            window: MetricsWindowJson {
+                since: summary.window.since,
+                until: summary.window.until,
+            },
+            counts: MetricsCountsJson {
+                events: summary.counts.events,
+                sessions: summary.counts.sessions,
+                commands: summary.counts.commands,
+                auth_failures: summary.counts.auth_failures,
+                agent_lifecycle: summary.counts.agent_lifecycle,
+                installer_runs: summary.counts.installer_runs,
+                agent_capabilities: summary.counts.agent_capabilities,
+                prompts: summary.counts.prompts,
+                permission_requests: summary.counts.permission_requests,
+                permission_decisions: summary.counts.permission_decisions,
+            },
+            sessions: MetricsSessionsJson {
+                active: summary.sessions.active,
+                closed: summary.sessions.closed,
+                average_duration_ms: summary.sessions.average_duration_ms,
+                p50_duration_ms: summary.sessions.p50_duration_ms,
+                p95_duration_ms: summary.sessions.p95_duration_ms,
+            },
+            turns: MetricsTurnsJson {
+                total: summary.turns.total,
+                by_status: summary.turns.by_status,
+                average_per_session: summary.turns.average_per_session,
+            },
+            commands: MetricsCommandsJson {
+                total: summary.commands.total,
+                by_status: summary.commands.by_status,
+                average_duration_ms: summary.commands.average_duration_ms,
+                p50_duration_ms: summary.commands.p50_duration_ms,
+                p95_duration_ms: summary.commands.p95_duration_ms,
+                truncated_count: summary.commands.truncated_count,
+            },
+            permissions: MetricsPermissionsJson {
+                total: summary.permissions.total,
+                by_outcome: summary.permissions.by_outcome,
+                average_response_ms: summary.permissions.average_response_ms,
+                p50_response_ms: summary.permissions.p50_response_ms,
+                p95_response_ms: summary.permissions.p95_response_ms,
+            },
+            security: MetricsSecurityJson {
+                auth_failures: summary.security.auth_failures,
+                by_reason: summary.security.by_reason,
+                events_by_kind: summary.security.events_by_kind,
+            },
+            api_connections: MetricsApiConnectionsJson {
+                request_count: summary.api_connections.request_count,
+                by_status: summary.api_connections.by_status,
+                average_duration_ms: summary.api_connections.average_duration_ms,
+            },
+            ws_connections: MetricsWsConnectionsJson {
+                connections_opened: summary.ws_connections.connections_opened,
+                connections_closed: summary.ws_connections.connections_closed,
+                average_duration_ms: summary.ws_connections.average_duration_ms,
+            },
+            usage: MetricsUsageJson {
+                tokens_input: summary.usage.tokens_input,
+                tokens_output: summary.usage.tokens_output,
+                context_window_max: summary.usage.context_window_max,
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -2008,7 +2509,10 @@ async fn sessions_list_handler(
 ) -> std::result::Result<ApiSuccess<SessionsListResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let store = state.state.lock().await;
-    let sessions = store.query_sessions(limit)?;
+    let sessions = store.query_sessions(crate::state::SessionFilter {
+        limit,
+        ..Default::default()
+    })?;
     drop(store);
     Ok(ApiSuccess::new(SessionsListResponse {
         sessions: sessions.into_iter().map(SessionResponse::from).collect(),
@@ -2129,10 +2633,11 @@ async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[Strin
     });
     let payload_text = payload.to_string();
     let store = state.state.lock().await;
-    if let Err(err) = store.append_session_event(
+    if let Err(err) = store.append_session_event_with_source(
         session_id,
         "info",
         "mcp.session_attached",
+        crate::state::EVENT_SOURCE_API,
         "mcp servers attached to session",
         &payload_text,
     ) {
@@ -2285,17 +2790,7 @@ async fn sessions_events_handler(
     let events = store.query_session_events(&id, params.after.as_deref(), limit)?;
     drop(store);
     Ok(ApiSuccess::new(SessionsEventsResponse {
-        events: events
-            .into_iter()
-            .map(|e| LogEventJson {
-                id: e.id,
-                created_at: e.created_at,
-                level: e.level,
-                kind: e.kind,
-                message: e.message,
-                payload_json: e.payload_json,
-            })
-            .collect(),
+        events: events.into_iter().map(LogEventJson::from).collect(),
     }))
 }
 
@@ -2758,7 +3253,13 @@ async fn publish_workspace_mutation(
         // `message` is empty: the kind + payload carry the structured detail,
         // and we want sanitized logs that do not echo user paths into the
         // text column (`logs/events` is session-tier-readable).
-        store.append_event("info", kind, "", &payload_json)?
+        store.append_event_with_source(
+            "info",
+            kind,
+            crate::state::EVENT_SOURCE_API,
+            "",
+            &payload_json,
+        )?
     };
     state.event_hub.publish_workspace_event(&event, data);
     Ok(())

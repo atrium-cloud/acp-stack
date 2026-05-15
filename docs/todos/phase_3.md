@@ -25,24 +25,24 @@
 
 ## Metrics
 
-- [ ] Derive session duration metrics.
-- [ ] Derive turn counts.
-- [ ] Capture token usage when reported by the agent.
-- [ ] Capture context window usage when reported by the agent.
-- [ ] Derive command counts and command durations.
-- [ ] Derive permission response times.
-- [ ] Derive API connection summaries.
-- [ ] Derive WebSocket connection summaries.
-- [ ] Derive security event summaries.
-- [ ] Implement `GET /v1/metrics/summary`.
+- [x] Derive session duration metrics.
+- [x] Derive turn counts.
+- [x] Capture token usage when reported by the agent.
+- [x] Capture context window usage when reported by the agent.
+- [x] Derive command counts and command durations.
+- [x] Derive permission response times.
+- [x] Derive API connection summaries.
+- [x] Derive WebSocket connection summaries.
+- [x] Derive security event summaries.
+- [x] Implement `GET /v1/metrics/summary`.
 
 ## Log Query UX
 
-- [ ] Add query filters for time range, source, session ID, command ID, permission ID, and event kind.
-- [ ] Add pagination for event, command, permission, security, and session logs.
-- [ ] Implement `acps logs query --since <duration>`.
-- [ ] Implement `acps logs query --session <session-id>`.
-- [ ] Implement `acps logs query --kind <kind>`.
+- [x] Add query filters for time range, source, session ID, command ID, permission ID, and event kind.
+- [x] Add pagination for event, command, permission, security, and session logs.
+- [x] Implement `acps logs query --since <duration>`.
+- [x] Implement `acps logs query --session <session-id>`.
+- [x] Implement `acps logs query --kind <kind>`.
 
 ## Local Agent CLI
 

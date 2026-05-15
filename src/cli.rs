@@ -64,6 +64,28 @@ enum Command {
         #[command(subcommand)]
         command: DepsCommand,
     },
+    /// Inspect derived runtime metrics.
+    Metrics {
+        #[command(subcommand)]
+        command: MetricsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricsCommand {
+    /// Print the metrics summary (counts, durations, percentiles).
+    Summary(MetricsSummaryArgs),
+}
+
+#[derive(Debug, Args)]
+struct MetricsSummaryArgs {
+    /// Window start. Accepts `1h`/`30m`/`2d` or an RFC3339 timestamp.
+    /// Defaults to 24h ago.
+    #[arg(long)]
+    since: Option<String>,
+    /// Window end. Same format as `--since`. Defaults to now.
+    #[arg(long)]
+    until: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -216,6 +238,34 @@ struct LogsQueryArgs {
     limit: u32,
     #[arg(long)]
     level: Option<String>,
+    /// Lower time bound. Accepts a duration suffix (`1h`/`30m`/`2d`) or an
+    /// RFC3339 timestamp. When a suffix is supplied it's interpreted as
+    /// "this much time ago".
+    #[arg(long)]
+    since: Option<String>,
+    /// Upper time bound. Same format as `--since`. Defaults to "now".
+    #[arg(long)]
+    until: Option<String>,
+    /// Exact event kind, or a dotted prefix when the value ends with `.`
+    /// (e.g. `command.` matches `command.started`, `command.exited`, ...).
+    #[arg(long)]
+    kind: Option<String>,
+    /// Filter by writer source (`api`, `acp`, `command`, `permission`, `cli`,
+    /// `system`).
+    #[arg(long)]
+    source: Option<String>,
+    /// Show events scoped to a single session id.
+    #[arg(long)]
+    session: Option<String>,
+    /// Show events whose payload carries this command id.
+    #[arg(long)]
+    command: Option<String>,
+    /// Show events whose payload carries this permission id.
+    #[arg(long)]
+    permission: Option<String>,
+    /// Continuation cursor from a previous page (the last returned event id).
+    #[arg(long)]
+    after: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -269,6 +319,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Agent { command } => run_agent_command(command),
         Command::Sessions { command } => run_sessions_command(command),
         Command::Deps { command } => run_deps_command(command),
+        Command::Metrics { command } => run_metrics_command(command),
     };
 
     if let Err(error) = &result {
@@ -547,9 +598,10 @@ fn run_init() -> Result<()> {
             (session_ref.as_str(), session_value.as_str()),
             (admin_ref.as_str(), admin_value.as_str()),
         ])?;
-        store.append_event(
+        store.append_event_with_source(
             "info",
             "auth.keys_generated",
+            crate::state::EVENT_SOURCE_CLI,
             "generated session and admin API keys",
             &serde_json::json!({
                 "session_key_ref": session_ref,
@@ -563,7 +615,13 @@ fn run_init() -> Result<()> {
     // Record init.completed AFTER secret-store setup so a half-finished init
     // (e.g. failed key generation) does not leave a misleading
     // "initialized" event in the durable log.
-    store.append_event("info", "init.completed", "initialized", "{}")?;
+    store.append_event_with_source(
+        "info",
+        "init.completed",
+        crate::state::EVENT_SOURCE_CLI,
+        "initialized",
+        "{}",
+    )?;
 
     println!("initialized acp-stack");
     println!("{config_status}: {}", config_path.display());
@@ -594,7 +652,13 @@ fn run_status() -> Result<()> {
     let store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
-    store.append_event("info", "status.checked", "status checked", "{}")?;
+    store.append_event_with_source(
+        "info",
+        "status.checked",
+        crate::state::EVENT_SOURCE_CLI,
+        "status checked",
+        "{}",
+    )?;
 
     let schema_version = store.schema_version()?;
     let latest_event = store
@@ -1255,6 +1319,68 @@ fn run_deps_command(command: DepsCommand) -> Result<()> {
     }
 }
 
+/// Minimal percent-encoder for query-string values. Encodes the small set of
+/// characters that can appear in our metrics bounds (`:` and `+` from RFC3339,
+/// `&` defensively). Anything outside the safe set turns into `%XX`.
+fn encode_query_value(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        let safe = matches!(byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn run_metrics_command(command: MetricsCommand) -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let session_key = open_cli_key(&config, &home, CliKey::Session)?;
+    let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    runtime.block_on(async move {
+        match command {
+            MetricsCommand::Summary(args) => {
+                let mut query = String::new();
+                if let Some(since) = &args.since {
+                    query.push_str(&format!("since={}", encode_query_value(since)));
+                }
+                if let Some(until) = &args.until {
+                    if !query.is_empty() {
+                        query.push('&');
+                    }
+                    query.push_str(&format!("until={}", encode_query_value(until)));
+                }
+                let path = if query.is_empty() {
+                    "/v1/metrics/summary".to_owned()
+                } else {
+                    format!("/v1/metrics/summary?{query}")
+                };
+                let body =
+                    daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
+                // Pretty-print: full JSON is sufficient for the operator; the
+                // shape is documented and stable.
+                if let Some(data) = body.get("data") {
+                    let rendered =
+                        serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+                    println!("{rendered}");
+                } else {
+                    println!("{body}");
+                }
+                Ok(())
+            }
+        }
+    })
+}
+
 fn run_sessions_command(command: SessionsCommand) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
@@ -1422,22 +1548,76 @@ fn run_logs_command(command: LogsCommand) -> Result<()> {
             let store = StateStore::open(&state_path)?;
             store.migrate()?;
             set_owner_only_file(&state_path)?;
+
+            let now = chrono::Utc::now();
+            let since = resolve_time_bound(args.since.as_deref(), "since", now)?;
+            let until = resolve_time_bound(args.until.as_deref(), "until", now)?;
+            let (kind_exact, kind_prefix) = match args.kind.as_deref() {
+                Some(k) if k.ends_with('.') => (None, Some(k)),
+                Some(k) => (Some(k), None),
+                None => (None, None),
+            };
             let events = store.query_events(EventFilter {
                 limit: args.limit,
                 level: args.level.as_deref(),
+                kind: kind_exact,
+                kind_prefix,
+                source: args.source.as_deref(),
+                session_id: args.session.as_deref(),
+                command_id: args.command.as_deref(),
+                permission_id: args.permission.as_deref(),
+                since: since.as_deref(),
+                until: until.as_deref(),
+                after_id: args.after.as_deref(),
             })?;
 
-            for event in events {
+            for event in &events {
                 println!(
-                    "{} {} {} {}",
-                    event.created_at, event.level, event.kind, event.message
+                    "{} {} {} {} {}",
+                    event.created_at, event.level, event.source, event.kind, event.message
                 );
+            }
+            if (events.len() as u32) == args.limit {
+                if let Some(last) = events.last() {
+                    eprintln!(
+                        "-- more rows available; pass --after {} to continue",
+                        last.id
+                    );
+                }
             }
 
             Ok(())
         }
         LogsCommand::Tail(args) => run_logs_tail(args),
     }
+}
+
+/// Accept either a duration suffix (`30m`, `1h`, `2d`) or an RFC3339
+/// timestamp. The suffix form resolves relative to `now`; the RFC3339 form is
+/// returned verbatim after a parse round-trip to confirm it's well-formed.
+fn resolve_time_bound(
+    raw: Option<&str>,
+    field: &'static str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(
+            dt.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        ));
+    }
+    let duration =
+        crate::time_util::parse_duration_suffix(raw).ok_or_else(|| StackError::InvalidParam {
+            field,
+            reason: format!("not a valid RFC3339 timestamp or duration: {raw}"),
+        })?;
+    let resolved = now - duration;
+    Ok(Some(
+        resolved.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    ))
 }
 
 fn run_logs_tail(args: LogsTailArgs) -> Result<()> {
@@ -1557,7 +1737,13 @@ fn record_cli_error_message(error_message: &str) {
         return;
     }
     let payload = serde_json::json!({ "error": error_message }).to_string();
-    if let Err(log_error) = store.append_event("error", "cli.error", "command failed", &payload) {
+    if let Err(log_error) = store.append_event_with_source(
+        "error",
+        "cli.error",
+        crate::state::EVENT_SOURCE_CLI,
+        "command failed",
+        &payload,
+    ) {
         eprintln!("failed to record CLI error: {log_error}");
     }
 }
