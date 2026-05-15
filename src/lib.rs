@@ -16,6 +16,7 @@ pub mod permissions;
 pub mod secrets;
 pub mod state;
 pub mod supervisor;
+pub mod time_util;
 pub mod tracing_init;
 pub mod workspace;
 

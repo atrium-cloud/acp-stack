@@ -103,6 +103,9 @@ pub enum StackError {
     #[error("event payload must be valid JSON text")]
     InvalidEventPayload,
 
+    #[error("query parameter `{field}` is invalid: {reason}")]
+    InvalidParam { field: &'static str, reason: String },
+
     #[error("auth failure payload must be valid JSON text")]
     InvalidAuthFailurePayload,
 
@@ -584,6 +587,7 @@ impl StackError {
             RateLimited => "auth.rate_limited",
             IpBlocked { .. } => "auth.ip_blocked",
             OriginNotAllowed { .. } => "auth.origin_not_allowed",
+            InvalidParam { .. } => "request.invalid_param",
         }
     }
 
@@ -804,6 +808,7 @@ impl StackError {
             RateLimited => "rate limit exceeded".to_owned(),
             IpBlocked { .. } => "client IP is temporarily blocked".to_owned(),
             OriginNotAllowed { .. } => "origin is not allowed".to_owned(),
+            InvalidParam { field, reason } => format!("invalid parameter `{field}`: {reason}"),
         }
     }
 
@@ -935,6 +940,7 @@ impl StackError {
             StateInvalidJson { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             RateLimited | IpBlocked { .. } => StatusCode::TOO_MANY_REQUESTS,
             OriginNotAllowed { .. } => StatusCode::FORBIDDEN,
+            InvalidParam { .. } => StatusCode::BAD_REQUEST,
         }
     }
 }

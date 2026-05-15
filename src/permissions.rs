@@ -215,7 +215,11 @@ impl PermissionService {
             &record.created_at,
             "permission.created",
             json!({
+                // `permission_id` lets log queries filter by the permission row
+                // id through `json_extract(payload_json, '$.permission_id')`;
+                // `id` is preserved for clients that already key on it.
                 "id": record.id,
+                "permission_id": record.id,
                 "source": record.source,
                 "subject_id": record.subject_id,
                 "expires_at": record.expires_at,
@@ -313,6 +317,7 @@ impl PermissionService {
             kind,
             json!({
                 "id": id,
+                "permission_id": id,
                 "decision": decision.decision,
                 "deciding_principal": decision.deciding_principal,
                 "reason": decision.reason,
@@ -401,6 +406,7 @@ impl PermissionService {
                 kind,
                 json!({
                     "id": id,
+                    "permission_id": id,
                     "decision": new_status.as_str(),
                     "deciding_principal": "system",
                     "reason": "timeout",
@@ -453,7 +459,13 @@ async fn persist_and_publish_permission_event(
     };
     {
         let store = state.lock().await;
-        if let Err(err) = store.append_event("info", kind, message, &payload_text) {
+        if let Err(err) = store.append_event_with_source(
+            "info",
+            kind,
+            crate::state::EVENT_SOURCE_PERMISSION,
+            message,
+            &payload_text,
+        ) {
             tracing::warn!(
                 error = %err,
                 perm_id = id,
@@ -561,6 +573,54 @@ mod tests {
 
         let view = service.get(&record.id).await.expect("get");
         assert_eq!(view.status, "expired");
+    }
+
+    #[tokio::test]
+    async fn timeout_event_is_filterable_by_permission_id() {
+        let (_dir, service) = fresh_service(PermissionTimeoutAction::Deny);
+        let (record, rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Command,
+                requester: None,
+                subject_id: None,
+                detail: json!({}),
+            })
+            .await
+            .expect("request");
+        let outcome = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("must fire")
+            .expect("recv");
+        assert!(matches!(outcome, PermissionOutcome::Expired));
+
+        let rows = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rows = {
+                    let state = service.state.lock().await;
+                    state
+                        .query_permission_events(crate::state::EventFilter {
+                            limit: 10,
+                            permission_id: Some(&record.id),
+                            ..crate::state::EventFilter::default()
+                        })
+                        .expect("query permission events")
+                };
+                if rows.iter().any(|row| row.kind == "permission.expired") {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timeout event should persist");
+
+        let expired = rows
+            .iter()
+            .find(|row| row.kind == "permission.expired")
+            .expect("expired event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&expired.payload_json).expect("payload json");
+        assert_eq!(payload["permission_id"], record.id);
     }
 
     #[tokio::test]
