@@ -76,10 +76,42 @@ env = ["OPENCODE_API_KEY"]
 restart = "on-crash"
 
 [agent.install]
-type = "shell"
-shell = "curl -fsSL https://opencode.ai/install | bash"
+type = "registry"
+id = "opencode"
 creates = "opencode"
 ```
+
+`[agent]` names the ACP process that `acp-stack` launches. For a native ACP agent such as OpenCode, omit `[agent.adapter]`. OpenCode remains a good direct-key example because it uses API keys rather than browser OAuth.
+
+For an adapter-backed agent, `[agent.adapter]` records the registry adapter executable and the upstream agent it wraps; `agent.adapter.id` should match the ACP registry entry when the adapter is distributed through `agentclientprotocol/registry`. As of 2026-05-15, the externally identified adapter-backed agents are Claude Agent, Codex CLI, and Pi. Treat that list as ecosystem data resolved from the registry/Zed ACP pages rather than a baked-in allowlist.
+
+Example adapter-backed Codex config for API-key deployments:
+
+```toml
+[agent]
+id = "codex"
+name = "Codex"
+command = "codex-acp"
+args = []
+cwd = "/workspace"
+env = ["OPENAI_API_KEY"]
+restart = "on-crash"
+
+[agent.adapter]
+id = "codex-acp"
+name = "Codex ACP Adapter"
+upstream_agent = "codex-cli"
+source_url = "https://github.com/zed-industries/codex-acp"
+
+[agent.install]
+type = "registry"
+id = "codex-acp"
+creates = "codex-acp"
+```
+
+Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets. Codex can be used with OAuth in other environments, but the initial `acp-stack` runtime supports headless direct-key operation only, so the Codex adapter example uses `OPENAI_API_KEY`.
+
+The operator-facing installation flow resolves agents from the ACP registry, not arbitrary third-party install scripts. Direct `[agent.install] type = "shell"` recipes are a low-level/manual escape hatch only. Registry installs fetch `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json` by default, select the configured `agent.install.id`, and use supported registry package distributions (`npx` through `npm install -g`, or `uvx` through `uv tool install`) to make `agent.install.creates` available.
 
 ## Import And Export
 

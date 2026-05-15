@@ -76,7 +76,7 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 
 ## Agent Commands
 
-`acps agent install` runs the configured `[agent.install]` recipe locally, records the installer run in SQLite, verifies `creates`, and checks `expected_sha256` when configured.
+`acps agent install` installs the configured ACP agent process. The operator-facing path resolves the agent or adapter from the ACP registry, then records the installer run in SQLite, verifies `creates`, and checks `expected_sha256` when configured. Adapter-backed agents install the adapter executable, such as `codex-acp`, because that is the process `acp-stack` speaks ACP with. Direct shell recipes are a low-level/manual escape hatch, not the preferred discovery or installation path.
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 

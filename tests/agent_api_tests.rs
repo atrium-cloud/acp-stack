@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use acp_stack::api::{self, AppState};
-use acp_stack::config::{Config, load_config_from_str};
+use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
 use acp_stack::state::StateStore;
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -66,11 +66,19 @@ fn test_config() -> Config {
     config.agent.env = vec![];
     config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
     config.agent.expected_sha256 = None;
+    config.agent.adapter = Some(AgentAdapterConfig {
+        id: "codex-acp".to_owned(),
+        name: "Codex ACP Adapter".to_owned(),
+        upstream_agent: "codex-cli".to_owned(),
+        source_url: Some("https://github.com/zed-industries/codex-acp".to_owned()),
+    });
     // Replace the install recipe with something that completes in milliseconds.
     config.agent.install = Some(acp_stack::config::AgentInstallConfig {
         install_type: "shell".into(),
-        shell: "true".into(),
         creates: "true".into(),
+        shell: Some("true".into()),
+        id: None,
+        registry_url: None,
     });
     config
 }
@@ -130,6 +138,11 @@ async fn install_then_start_then_capabilities_then_stop() {
     assert_eq!(caps.status(), StatusCode::OK);
     let caps_body: Value = caps.json().await.expect("caps json");
     assert_eq!(caps_body["data"]["agent_id"], "opencode");
+    assert_eq!(caps_body["data"]["adapter"]["id"], "codex-acp");
+    assert_eq!(
+        caps_body["data"]["adapter"]["source_url"],
+        "https://github.com/zed-industries/codex-acp"
+    );
 
     // Stop.
     let stop = client
@@ -148,6 +161,16 @@ async fn install_then_start_then_capabilities_then_stop() {
     assert!(kinds.contains(&"agent.starting"), "kinds: {kinds:?}");
     assert!(kinds.contains(&"agent.started"), "kinds: {kinds:?}");
     assert!(kinds.contains(&"agent.stopped"), "kinds: {kinds:?}");
+    let started = lifecycle
+        .iter()
+        .find(|r| r.event_kind == "agent.started")
+        .expect("agent.started row");
+    let payload: Value = serde_json::from_str(&started.payload_json).expect("started payload json");
+    assert_eq!(payload["adapter"]["id"], "codex-acp");
+    assert_eq!(
+        payload["adapter"]["source_url"],
+        "https://github.com/zed-industries/codex-acp"
+    );
 }
 
 #[tokio::test]

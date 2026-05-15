@@ -35,7 +35,7 @@ tower = "0.5.3"
 tower-http = { version = "0.6.10", features = ["limit", "trace"] }
 zeroize = "1.8.2"
 http = "1.3.2"
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls", "multipart"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls", "multipart"] }
 agent-client-protocol = { version = "0.11.1", features = ["unstable_session_close", "unstable_session_resume"] }
 sha2 = "0.10"
 tokio-util = { version = "0.7", features = ["compat", "rt"] }

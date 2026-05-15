@@ -29,6 +29,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::AgentInstallConfig;
@@ -36,9 +37,12 @@ use crate::error::{Result, StackError};
 use crate::state::{INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore};
 
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const REGISTRY_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_INSTALLER_STREAM_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
 
 const STDERR_TAIL_BYTES: usize = 2 * 1024;
+const DEFAULT_REGISTRY_URL: &str =
+    "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallerOutcome {
@@ -129,7 +133,7 @@ pub fn run_installer_capture(
     agent_env: HashMap<String, String>,
     workspace_root: &Path,
 ) -> InstallerResult {
-    if install.install_type != "shell" {
+    if !matches!(install.install_type.as_str(), "shell" | "registry") {
         return InstallerResult {
             outcome: Err(StackError::AgentNotConfigured),
             row: InstallerRowDraft {
@@ -165,7 +169,14 @@ pub fn run_installer_capture(
         return InstallerResult { outcome, row };
     }
 
-    let run_result = run_shell_install(&install.shell, &agent_env, workspace_root);
+    let run_result = match install.install_type.as_str() {
+        "shell" => match install.shell.as_deref() {
+            Some(shell) => run_shell_install(shell, &agent_env, workspace_root),
+            None => Err(StackError::AgentNotConfigured),
+        },
+        "registry" => run_registry_install(install, &agent_env, workspace_root),
+        _ => Err(StackError::AgentNotConfigured),
+    };
     let finished_at = current_timestamp();
 
     match run_result {
@@ -235,6 +246,124 @@ pub fn run_installer_capture(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct RegistryIndex {
+    agents: Vec<RegistryAgent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryAgent {
+    id: String,
+    #[serde(default)]
+    distribution: RegistryDistribution,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RegistryDistribution {
+    npx: Option<RegistryPackageDistribution>,
+    uvx: Option<RegistryPackageDistribution>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryPackageDistribution {
+    package: String,
+}
+
+#[derive(Debug)]
+enum RegistryInstallPlan {
+    NpmGlobal { package: String },
+    UvTool { package: String },
+}
+
+fn run_registry_install(
+    install: &AgentInstallConfig,
+    agent_env: &HashMap<String, String>,
+    workspace_root: &Path,
+) -> Result<CapturedOutput> {
+    let registry_id = install
+        .id
+        .as_deref()
+        .ok_or(StackError::AgentNotConfigured)?;
+    let registry_url = install
+        .registry_url
+        .as_deref()
+        .unwrap_or(DEFAULT_REGISTRY_URL);
+    let registry = fetch_registry_index(registry_url)?;
+    let plan = registry_install_plan(&registry, registry_id)?;
+    run_registry_install_plan(plan, agent_env, workspace_root)
+}
+
+fn fetch_registry_index(url: &str) -> Result<RegistryIndex> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REGISTRY_FETCH_TIMEOUT)
+        .build()
+        .map_err(|source| StackError::AgentRegistryFetch {
+            url: url.to_owned(),
+            source,
+        })?;
+    let body = client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|source| StackError::AgentRegistryFetch {
+            url: url.to_owned(),
+            source,
+        })?
+        .text()
+        .map_err(|source| StackError::AgentRegistryFetch {
+            url: url.to_owned(),
+            source,
+        })?;
+    serde_json::from_str(&body).map_err(|source| StackError::AgentRegistryParse { source })
+}
+
+fn registry_install_plan(
+    registry: &RegistryIndex,
+    registry_id: &str,
+) -> Result<RegistryInstallPlan> {
+    let agent = registry
+        .agents
+        .iter()
+        .find(|agent| agent.id == registry_id)
+        .ok_or_else(|| StackError::AgentRegistryMissing {
+            id: registry_id.to_owned(),
+        })?;
+    if let Some(npx) = &agent.distribution.npx {
+        return Ok(RegistryInstallPlan::NpmGlobal {
+            package: npx.package.clone(),
+        });
+    }
+    if let Some(uvx) = &agent.distribution.uvx {
+        return Ok(RegistryInstallPlan::UvTool {
+            package: uvx.package.clone(),
+        });
+    }
+    Err(StackError::AgentRegistryUnsupportedDistribution {
+        id: registry_id.to_owned(),
+    })
+}
+
+fn run_registry_install_plan(
+    plan: RegistryInstallPlan,
+    agent_env: &HashMap<String, String>,
+    workspace_root: &Path,
+) -> Result<CapturedOutput> {
+    match plan {
+        RegistryInstallPlan::NpmGlobal { package } => run_program_install(
+            "npm",
+            &["install".to_owned(), "-g".to_owned(), package],
+            agent_env,
+            workspace_root,
+        ),
+        RegistryInstallPlan::UvTool { package } => run_program_install(
+            "uv",
+            &["tool".to_owned(), "install".to_owned(), package],
+            agent_env,
+            workspace_root,
+        ),
+    }
+}
+
 fn verify_expected_sha256(expected: Option<&str>, actual: &str) -> Result<()> {
     match expected {
         Some(expected) if expected != actual => Err(StackError::AgentSha256Mismatch {
@@ -256,10 +385,23 @@ fn run_shell_install(
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
 ) -> Result<CapturedOutput> {
-    let mut command = Command::new("/bin/sh");
+    run_program_install(
+        "/bin/sh",
+        &["-c".to_owned(), shell.to_owned()],
+        agent_env,
+        workspace_root,
+    )
+}
+
+fn run_program_install(
+    program: &str,
+    args: &[String],
+    agent_env: &HashMap<String, String>,
+    workspace_root: &Path,
+) -> Result<CapturedOutput> {
+    let mut command = Command::new(program);
     command
-        .arg("-c")
-        .arg(shell)
+        .args(args)
         .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -512,13 +654,73 @@ mod tests {
     fn install_config(shell: &str, creates: &str) -> AgentInstallConfig {
         AgentInstallConfig {
             install_type: "shell".into(),
-            shell: shell.into(),
             creates: creates.into(),
+            shell: Some(shell.into()),
+            id: None,
+            registry_url: None,
         }
     }
 
     fn workspace_root() -> PathBuf {
         std::env::temp_dir()
+    }
+
+    #[test]
+    fn registry_install_plan_prefers_npx_distribution() {
+        let registry: RegistryIndex = serde_json::from_str(
+            r#"{
+                "version": "1.0.0",
+                "agents": [{
+                    "id": "codex-acp",
+                    "distribution": {
+                        "npx": { "package": "@zed-industries/codex-acp", "args": [] },
+                        "uvx": { "package": "codex-acp", "args": [] }
+                    }
+                }]
+            }"#,
+        )
+        .expect("registry");
+        let plan = registry_install_plan(&registry, "codex-acp").expect("plan");
+        match plan {
+            RegistryInstallPlan::NpmGlobal { package } => {
+                assert_eq!(package, "@zed-industries/codex-acp");
+            }
+            RegistryInstallPlan::UvTool { .. } => panic!("expected npm plan"),
+        }
+    }
+
+    #[test]
+    fn registry_install_plan_reports_missing_agent() {
+        let registry: RegistryIndex =
+            serde_json::from_str(r#"{"version":"1.0.0","agents":[]}"#).expect("registry");
+        let error = registry_install_plan(&registry, "missing").expect_err("missing");
+        assert!(matches!(error, StackError::AgentRegistryMissing { .. }));
+    }
+
+    #[test]
+    fn registry_install_plan_rejects_unsupported_distribution() {
+        let registry: RegistryIndex = serde_json::from_str(
+            r#"{
+                "version": "1.0.0",
+                "agents": [{
+                    "id": "binary-only",
+                    "distribution": {
+                        "binary": {
+                            "linux-x86_64": {
+                                "archive": "https://example.com/agent.tgz",
+                                "cmd": "./agent"
+                            }
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .expect("registry");
+        let error = registry_install_plan(&registry, "binary-only").expect_err("unsupported");
+        assert!(matches!(
+            error,
+            StackError::AgentRegistryUnsupportedDistribution { .. }
+        ));
     }
 
     #[test]

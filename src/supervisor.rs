@@ -278,6 +278,7 @@ impl AgentSupervisor {
         let starting_payload = json!({
             "agent_id": agent.id,
             "command": agent.command,
+            "adapter": agent.adapter,
         })
         .to_string();
         {
@@ -323,6 +324,7 @@ impl AgentSupervisor {
                 let started_payload = json!({
                     "agent_id": agent.id,
                     "pid": pid,
+                    "adapter": agent.adapter,
                 })
                 .to_string();
                 guard.append_agent_lifecycle(

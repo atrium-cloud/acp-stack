@@ -121,7 +121,19 @@ pub struct AgentConfig {
     pub expected_sha256: Option<String>,
     pub restart: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AgentAdapterConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<AgentInstallConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterConfig {
+    pub id: String,
+    pub name: String,
+    pub upstream_agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,8 +141,13 @@ pub struct AgentConfig {
 pub struct AgentInstallConfig {
     #[serde(rename = "type")]
     pub install_type: String,
-    pub shell: String,
     pub creates: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +277,12 @@ impl Config {
         validate_agent_restart(&self.agent.restart)?;
         if let Some(expected_sha256) = &self.agent.expected_sha256 {
             validate_expected_sha256(expected_sha256)?;
+        }
+        if let Some(adapter) = &self.agent.adapter {
+            validate_agent_adapter(adapter)?;
+        }
+        if let Some(install) = &self.agent.install {
+            validate_agent_install(install)?;
         }
 
         Ok(())
@@ -427,4 +450,75 @@ fn validate_expected_sha256(value: &str) -> Result<()> {
     } else {
         Err(StackError::InvalidExpectedSha256)
     }
+}
+
+fn validate_agent_adapter(adapter: &AgentAdapterConfig) -> Result<()> {
+    validate_nonempty("agent.adapter.id", &adapter.id)?;
+    validate_nonempty("agent.adapter.name", &adapter.name)?;
+    validate_nonempty("agent.adapter.upstream_agent", &adapter.upstream_agent)?;
+    if let Some(source_url) = &adapter.source_url {
+        validate_http_url_prefix("agent.adapter.source_url", source_url)?;
+    }
+    Ok(())
+}
+
+fn validate_agent_install(install: &AgentInstallConfig) -> Result<()> {
+    validate_nonempty("agent.install.creates", &install.creates)?;
+    match install.install_type.as_str() {
+        "shell" => {
+            require_present("agent.install.shell", install.shell.as_deref())?;
+            reject_present_for_type("agent.install.id", install.id.as_deref(), "shell")?;
+            reject_present_for_type(
+                "agent.install.registry_url",
+                install.registry_url.as_deref(),
+                "shell",
+            )?;
+            Ok(())
+        }
+        "registry" => {
+            require_present("agent.install.id", install.id.as_deref())?;
+            reject_present_for_type("agent.install.shell", install.shell.as_deref(), "registry")?;
+            if let Some(registry_url) = &install.registry_url {
+                validate_https_url_prefix("agent.install.registry_url", registry_url)?;
+            }
+            Ok(())
+        }
+        _ => Err(StackError::InvalidAgentInstallType),
+    }
+}
+
+fn validate_nonempty(field: &'static str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(StackError::MissingField { field });
+    }
+    Ok(())
+}
+
+fn reject_present_for_type(
+    field: &'static str,
+    value: Option<&str>,
+    type_value: &'static str,
+) -> Result<()> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Err(StackError::InvalidConfigFieldForType {
+            field,
+            type_field: "agent.install.type",
+            type_value,
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn validate_http_url_prefix(field: &'static str, value: &str) -> Result<()> {
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Ok(());
+    }
+    Err(StackError::UrlMustBeHttp { field })
+}
+
+fn validate_https_url_prefix(field: &'static str, value: &str) -> Result<()> {
+    if value.starts_with("https://") {
+        return Ok(());
+    }
+    Err(StackError::UrlMustBeHttps { field })
 }

@@ -111,7 +111,7 @@ struct SessionsTargetArgs {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
-    /// Run the configured `[agent.install]` shell installer.
+    /// Install the configured ACP agent or adapter.
     Install,
     /// Ask the running daemon to start the configured agent.
     Start,

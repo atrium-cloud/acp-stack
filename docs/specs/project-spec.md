@@ -36,11 +36,11 @@ ACP defines how clients and agents communicate. `acp-stack` supplies the surroun
 
 ## Runtime Boundaries
 
-`acp-stack` owns the runtime environment around a configured ACP agent. It does not redefine ACP, implement a new agent protocol, or replace the agent itself.
+`acp-stack` owns the runtime environment around a configured ACP agent process. That process may be a native ACP agent or a registry-distributed adapter such as `codex-acp` that wraps an upstream agent. `acp-stack` does not redefine ACP, implement a new agent protocol, or replace the agent itself.
 
 The daemon, agent, MCP servers, and mediated commands run as an unprivileged runtime user by default, normally `acp`. The workspace is ordinary filesystem storage owned by the deployment environment: container volume, VM disk, bare-metal disk, network storage, or hosted workspace volume.
 
-The 0.0.x line is scoped to headless agents that accept direct API keys through environment variables or config files. Agents that require browser OAuth or interactive account login are unsupported in the initial line.
+The 0.0.x line is scoped to headless agents or adapters published through the ACP registry and compatible with direct API keys through environment variables or config files. Agents that require browser OAuth or interactive account login are unsupported in the initial line.
 
 ## Config And State
 
@@ -84,7 +84,6 @@ Add TypeScript and Python client SDKs, richer CLI UX, log query filters and pagi
 ## Out Of Scope For 0.0.x
 
 - multiple active agents per runtime
-- agent registry resolution
 - broad cross-distro package/runtime reconciliation
 - complete OS-level interception of arbitrary shell activity
 - built-in TLS termination, persistent IP allowlists, and advanced edge/WAF policy
