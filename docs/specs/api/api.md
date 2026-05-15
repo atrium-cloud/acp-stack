@@ -65,8 +65,18 @@ Errors:
 - `POST /v1/sessions/{id}/prompt`
 - `POST /v1/sessions/{id}/cancel`
 - `DELETE /v1/sessions/{id}`
+- `GET /v1/sessions/{id}/prompts/{prompt_id}`
+- `GET /v1/sessions/{id}/events`
 
 These map to ACP session methods where supported by the configured agent.
+
+`POST /v1/sessions/{id}/prompt` is fire-and-forget: it enqueues the prompt on
+a background task and returns `{ prompt_id, status }` immediately. Clients may
+subscribe to `sessions.{id}` on `/v1/ws` for live ACP `session/update` fanout,
+poll `GET /v1/sessions/{id}/prompts/{prompt_id}` for terminal prompt state
+(`completed`, `errored`, or `cancelled`), and poll
+`GET /v1/sessions/{id}/events?after=<event_id>&limit=<n>` for durable
+session-scoped history.
 
 ### Workspace API
 
@@ -154,13 +164,16 @@ GET /v1/ws
 
 The WebSocket multiplexes runtime events. Clients subscribe to topics:
 
-- `sessions.{id}`
+- `sessions.{id}` (implemented for live ACP `session/update` events)
 - `commands.{id}`
 - `permissions`
 - `workspace`
 - `agent`
 - `status`
 - `logs`
+
+The non-session topics are reserved by the contract but do not yet have live
+producers.
 
 Example client message:
 
@@ -180,8 +193,14 @@ Example server event:
   "topic": "sessions.sess_123",
   "createdAt": "2026-05-12T00:00:00Z",
   "payload": {
-    "kind": "agent_message_chunk",
-    "text": "Done"
+    "kind": "session.update",
+    "data": {
+      "sessionId": "sess_123",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "content": { "type": "text", "text": "Done" }
+      }
+    }
   }
 }
 ```

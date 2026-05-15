@@ -56,6 +56,57 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionsCommand {
+    /// List sessions newest-first.
+    List(SessionsListArgs),
+    /// Create a new session through the running daemon.
+    New(SessionsNewArgs),
+    /// Send a prompt to a session. Polls until completion unless `--no-wait`.
+    Prompt(SessionsPromptArgs),
+    /// Cancel any in-flight prompts and notify the agent.
+    Cancel(SessionsTargetArgs),
+    /// Close the session on the agent side and mark it closed locally.
+    Close(SessionsTargetArgs),
+}
+
+#[derive(Debug, Args)]
+struct SessionsListArgs {
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+}
+
+#[derive(Debug, Args)]
+struct SessionsNewArgs {
+    /// Optional working directory for the new session; defaults to
+    /// `workspace.root` configured for the runtime.
+    #[arg(long)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct SessionsPromptArgs {
+    session_id: String,
+    /// Prompt text. If omitted, the CLI reads stdin until EOF.
+    text: Option<String>,
+    /// Return immediately with the prompt id without polling completion.
+    #[arg(long)]
+    no_wait: bool,
+    /// Maximum seconds to wait before giving up on the prompt (ignored when
+    /// `--no-wait` is set). The daemon keeps the task running regardless.
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+}
+
+#[derive(Debug, Args)]
+struct SessionsTargetArgs {
+    session_id: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -196,6 +247,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Config { command } => run_config_command(command),
         Command::Logs { command } => run_logs_command(command),
         Command::Agent { command } => run_agent_command(command),
+        Command::Sessions { command } => run_sessions_command(command),
     };
 
     if let Err(error) = &result {
@@ -588,6 +640,18 @@ fn run_serve(args: ServeArgs) -> Result<()> {
     store.migrate()?;
     set_owner_only_file(&state_path)?;
 
+    // Reconcile any prompts left in-flight by a previous crash/restart.
+    // The in-memory task registry is empty at startup, so a `pending` or
+    // `running` row from before would never get a terminal status without
+    // this sweep, leaving CLI/HTTP clients polling forever.
+    let reconciled = store.reconcile_orphaned_prompts("daemon restart")?;
+    if reconciled > 0 {
+        tracing::info!(
+            reconciled,
+            "marked orphaned in-flight prompts as errored on startup"
+        );
+    }
+
     let secret_store = SecretStore::open(&home)?;
     let session_ref = config.auth.session_key_ref.clone();
     let admin_ref = config.auth.admin_key_ref.clone();
@@ -655,33 +719,63 @@ fn run_serve(args: ServeArgs) -> Result<()> {
 /// ACP agent terminates when the client drops the connection).
 ///
 /// Recognizes:
-/// - `initialize` -> protocolVersion = 1, agentCapabilities empty, agentInfo set.
-/// - any other method -> JSON-RPC method-not-found error.
+/// - `initialize` -> protocolVersion = 1, agentCapabilities with
+///   `loadSession` and `sessionCapabilities.{resume,close}` set unless the
+///   matching `--no-cap-*` flag is supplied, agentInfo set.
+/// - `session/new` -> deterministic `sess_fake_{counter}` id.
+/// - `session/load`, `session/resume`, `session/close` -> empty ok.
+/// - `session/prompt` -> emits two `session/update` notifications with agent
+///   message chunks, then returns `{ stopReason: "end_turn" }`. With
+///   `--prompt-cancel` it returns `{ stopReason: "cancelled" }` instead.
+/// - any other request -> JSON-RPC method-not-found.
 ///
-/// Notifications (messages without an `id`) are silently dropped.
+/// `session/cancel` notification flips the in-process flag so the next
+/// `session/prompt` response uses `stopReason: cancelled`.
 ///
 /// Compiled only into debug builds — release binaries do not expose this code
 /// path.
 #[cfg(debug_assertions)]
 fn run_fake_agent(args: Vec<String>) -> Result<()> {
     use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     let mut title = "acps fake agent".to_owned();
+    let mut load_session_cap = true;
+    let mut resume_session_cap = true;
+    let mut close_session_cap = true;
+    let mut prompt_emits_updates = true;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == "--assert-env-absent" {
-            if let Some(name) = iter.next() {
-                title = if std::env::var_os(name).is_some() {
-                    format!("env leaked: {name}")
-                } else {
-                    "env absent".to_owned()
-                };
+        match arg.as_str() {
+            "--assert-env-absent" => {
+                if let Some(name) = iter.next() {
+                    title = if std::env::var_os(name).is_some() {
+                        format!("env leaked: {name}")
+                    } else {
+                        "env absent".to_owned()
+                    };
+                }
             }
+            "--no-cap-load-session" => {
+                load_session_cap = false;
+            }
+            "--no-cap-resume-session" => {
+                resume_session_cap = false;
+            }
+            "--no-cap-close-session" => {
+                close_session_cap = false;
+            }
+            "--prompt-silent" => {
+                prompt_emits_updates = false;
+            }
+            _ => {}
         }
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut stdin = stdin.lock();
-    let mut stdout = stdout.lock();
+    let stdout_handle = std::sync::Mutex::new(stdout.lock());
+    let session_counter = AtomicU64::new(0);
+    let cancel_requested = AtomicBool::new(false);
     let mut buf = String::new();
     loop {
         buf.clear();
@@ -700,25 +794,108 @@ fn run_fake_agent(args: Vec<String>) -> Result<()> {
         };
         let id = value.get("id");
         let method = value.get("method").and_then(serde_json::Value::as_str);
-        // Notifications have no id; ignore them.
+        // Notifications have no id; act on the ones we recognize and ignore
+        // anything else. `session/cancel` toggles the flag so the next
+        // `session/prompt` response returns `cancelled`.
         let Some(id) = id else {
+            if method == Some("session/cancel") {
+                cancel_requested.store(true, Ordering::SeqCst);
+            }
             continue;
         };
         let response = match method {
-            Some("initialize") => serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": 1,
-                    "agentCapabilities": {},
-                    "agentInfo": {
-                        "name": "acps-fake-agent",
-                        "title": title,
-                        "version": "0.0.1"
-                    },
-                    "authMethods": []
+            Some("initialize") => {
+                let mut agent_caps = serde_json::Map::new();
+                agent_caps.insert(
+                    "loadSession".to_owned(),
+                    serde_json::Value::Bool(load_session_cap),
+                );
+                let mut session_caps = serde_json::Map::new();
+                if resume_session_cap {
+                    session_caps.insert("resume".to_owned(), serde_json::json!({}));
                 }
-            }),
+                if close_session_cap {
+                    session_caps.insert("close".to_owned(), serde_json::json!({}));
+                }
+                agent_caps.insert(
+                    "sessionCapabilities".to_owned(),
+                    serde_json::Value::Object(session_caps),
+                );
+                agent_caps.insert("promptCapabilities".to_owned(), serde_json::json!({}));
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": agent_caps,
+                        "agentInfo": {
+                            "name": "acps-fake-agent",
+                            "title": title,
+                            "version": "0.0.1"
+                        },
+                        "authMethods": []
+                    }
+                })
+            }
+            Some("session/new") => {
+                let counter = session_counter.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "sessionId": format!("sess_fake_{counter}") }
+                })
+            }
+            Some("session/load") | Some("session/resume") | Some("session/close") => {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                })
+            }
+            Some("session/prompt") => {
+                let session_id = value
+                    .get("params")
+                    .and_then(|p| p.get("sessionId"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("sess_fake_unknown")
+                    .to_owned();
+                if prompt_emits_updates {
+                    // Push two notifications before the response. The bridge's
+                    // SessionEventSink persists them keyed by session_id; tests
+                    // assert on the `events.session_id` column.
+                    for text in ["chunk-1", "chunk-2"] {
+                        let note = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": { "type": "text", "text": text }
+                                }
+                            }
+                        });
+                        let mut guard = stdout_handle
+                            .lock()
+                            .expect("fake-agent stdout mutex poisoned");
+                        writeln!(*guard, "{note}")
+                            .map_err(|source| StackError::ServeIo { source })?;
+                        guard
+                            .flush()
+                            .map_err(|source| StackError::ServeIo { source })?;
+                    }
+                }
+                let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
+                    "cancelled"
+                } else {
+                    "end_turn"
+                };
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "stopReason": stop }
+                })
+            }
             _ => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -728,8 +905,11 @@ fn run_fake_agent(args: Vec<String>) -> Result<()> {
                 }
             }),
         };
-        writeln!(stdout, "{response}").map_err(|source| StackError::ServeIo { source })?;
-        stdout
+        let mut guard = stdout_handle
+            .lock()
+            .expect("fake-agent stdout mutex poisoned");
+        writeln!(*guard, "{response}").map_err(|source| StackError::ServeIo { source })?;
+        guard
             .flush()
             .map_err(|source| StackError::ServeIo { source })?;
     }
@@ -796,6 +976,131 @@ async fn post_agent_daemon(
     serde_json::from_str(&body).map_err(|err| StackError::AgentInitializeFailed {
         reason: format!("agent API response was not JSON: {err}"),
     })
+}
+
+/// Tier of the API key used for a daemon-RPC call. Session-tier matches the
+/// strict-tiering invariant: read/operate on session state with the session
+/// key; never use the admin key for routine session operations. The single
+/// variant is an enum so future admin-tier CLI helpers slot in without
+/// reshaping the helper signatures.
+#[derive(Debug, Clone, Copy)]
+enum CliKey {
+    Session,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CliMethod {
+    Get,
+    Post,
+    Delete,
+}
+
+/// Generalized daemon-RPC helper. Loads the configured key from the secret
+/// store, builds the URL, dispatches, and parses the success envelope.
+async fn daemon_request(
+    base_url: &str,
+    method: CliMethod,
+    path: &str,
+    key: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    // Static `path` is the spec contract for error reporting; keep it pinned
+    // to a small set of known prefixes so `AgentApiRequest::path` stays a
+    // useful diagnostic and we don't accidentally leak path params to logs.
+    let path_label: &'static str = static_path_label(path);
+    let client = reqwest::Client::new();
+    let request = match method {
+        CliMethod::Get => client.get(&url),
+        CliMethod::Post => client.post(&url),
+        CliMethod::Delete => client.delete(&url),
+    }
+    .bearer_auth(key);
+    let request = if let Some(body) = body {
+        request.json(body)
+    } else {
+        request
+    };
+    let response = request
+        .send()
+        .await
+        .map_err(|source| StackError::AgentApiRequest {
+            path: path_label,
+            source,
+        })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|source| StackError::AgentApiRequest {
+            path: path_label,
+            source,
+        })?;
+    if !status.is_success() {
+        return Err(StackError::AgentApiStatus {
+            path: path_label,
+            status,
+            body,
+        });
+    }
+    serde_json::from_str(&body).map_err(|err| StackError::AgentInitializeFailed {
+        reason: format!("daemon response was not JSON: {err}"),
+    })
+}
+
+fn static_path_label(path: &str) -> &'static str {
+    // Strip the query string before bucketing so callers passing `?limit=` etc.
+    // still resolve to the canonical path label.
+    let bare = path.split('?').next().unwrap_or(path);
+    if bare == "/v1/sessions" {
+        "/v1/sessions"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/prompt") {
+        "/v1/sessions/{id}/prompt"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/cancel") {
+        "/v1/sessions/{id}/cancel"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/load") {
+        "/v1/sessions/{id}/load"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/resume") {
+        "/v1/sessions/{id}/resume"
+    } else if bare.starts_with("/v1/sessions/") && bare.contains("/prompts/") {
+        "/v1/sessions/{id}/prompts/{prompt_id}"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/events") {
+        "/v1/sessions/{id}/events"
+    } else if bare.starts_with("/v1/sessions/") {
+        "/v1/sessions/{id}"
+    } else {
+        // The remaining callers in this CLI pass static literals listed
+        // explicitly in this match.
+        "/v1/agent"
+    }
+}
+
+/// Percent-encode a single URL path segment using the "unreserved" RFC 3986
+/// allowlist. ACP session and prompt IDs are opaque strings — an agent that
+/// returned `sess_a/b` (with a slash) would otherwise be routed as a
+/// different resource entirely, which is both a correctness bug and a
+/// path-injection vector for any client that forwards untrusted IDs.
+fn encode_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.as_bytes() {
+        let b = *byte;
+        let is_unreserved =
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
+        if is_unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn open_cli_key(config: &Config, home: &std::path::Path, key: CliKey) -> Result<String> {
+    let store = SecretStore::open(home)?;
+    let name = match key {
+        CliKey::Session => &config.auth.session_key_ref,
+    };
+    Ok(store.get(name)?.to_owned())
 }
 
 fn daemon_base_url(public_url: Option<&str>, bind: &str) -> Result<String> {
@@ -899,6 +1204,162 @@ fn run_agent_status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_sessions_command(command: SessionsCommand) -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let session_key = open_cli_key(&config, &home, CliKey::Session)?;
+    let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    runtime.block_on(async move {
+        match command {
+            SessionsCommand::List(args) => {
+                let path = format!("/v1/sessions?limit={}", args.limit);
+                let body =
+                    daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
+                let sessions = body["data"]["sessions"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if sessions.is_empty() {
+                    println!("(no sessions)");
+                } else {
+                    for session in sessions {
+                        let id = session["id"].as_str().unwrap_or("?");
+                        let status = session["status"].as_str().unwrap_or("?");
+                        let cwd = session["cwd"].as_str().unwrap_or("");
+                        let updated = session["updated_at"].as_str().unwrap_or("?");
+                        println!("{updated} {status} {id} {cwd}");
+                    }
+                }
+                Ok(())
+            }
+            SessionsCommand::New(args) => {
+                let body = serde_json::json!({
+                    "cwd": args.cwd,
+                    "mcp_servers": [],
+                });
+                let response = daemon_request(
+                    &base_url,
+                    CliMethod::Post,
+                    "/v1/sessions",
+                    &session_key,
+                    Some(&body),
+                )
+                .await?;
+                let id = response["data"]["id"].as_str().unwrap_or("?");
+                let cwd = response["data"]["cwd"].as_str().unwrap_or("");
+                println!("session: {id}");
+                if !cwd.is_empty() {
+                    println!("cwd: {cwd}");
+                }
+                Ok(())
+            }
+            SessionsCommand::Prompt(args) => {
+                run_sessions_prompt(&base_url, &session_key, args).await
+            }
+            SessionsCommand::Cancel(args) => {
+                let encoded = encode_path_segment(&args.session_id);
+                let path = format!("/v1/sessions/{encoded}/cancel");
+                daemon_request(&base_url, CliMethod::Post, &path, &session_key, None).await?;
+                println!("session cancel: requested");
+                println!("session: {}", args.session_id);
+                Ok(())
+            }
+            SessionsCommand::Close(args) => {
+                let encoded = encode_path_segment(&args.session_id);
+                let path = format!("/v1/sessions/{encoded}");
+                let response =
+                    daemon_request(&base_url, CliMethod::Delete, &path, &session_key, None).await?;
+                let status = response["data"]["status"].as_str().unwrap_or("closed");
+                println!("session close: {status}");
+                println!("session: {}", args.session_id);
+                Ok(())
+            }
+        }
+    })
+}
+
+async fn run_sessions_prompt(
+    base_url: &str,
+    session_key: &str,
+    args: SessionsPromptArgs,
+) -> Result<()> {
+    let prompt_text = match args.text {
+        Some(text) => text,
+        None => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buffer)
+                .map_err(|source| StackError::StdinRead { source })?;
+            buffer
+        }
+    };
+    let body = serde_json::json!({ "prompt": prompt_text });
+    let encoded_session = encode_path_segment(&args.session_id);
+    let path = format!("/v1/sessions/{encoded_session}/prompt");
+    let response =
+        daemon_request(base_url, CliMethod::Post, &path, session_key, Some(&body)).await?;
+    let prompt_id = response["data"]["prompt_id"]
+        .as_str()
+        .ok_or_else(|| StackError::AgentInitializeFailed {
+            reason: "daemon prompt response missing prompt_id".to_owned(),
+        })?
+        .to_owned();
+    if args.no_wait {
+        println!("prompt: pending");
+        println!("prompt_id: {prompt_id}");
+        return Ok(());
+    }
+
+    let encoded_prompt = encode_path_segment(&prompt_id);
+    let status_path = format!("/v1/sessions/{encoded_session}/prompts/{encoded_prompt}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout_secs);
+    let mut delay_ms: u64 = 250;
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err(StackError::AgentInitializeFailed {
+                reason: format!(
+                    "prompt did not settle within {}s (prompt_id={})",
+                    args.timeout_secs, prompt_id
+                ),
+            });
+        }
+        let poll =
+            daemon_request(base_url, CliMethod::Get, &status_path, session_key, None).await?;
+        let status = poll["data"]["status"].as_str().unwrap_or("");
+        match status {
+            "completed" => {
+                let stop = poll["data"]["stop_reason"].as_str().unwrap_or("end_turn");
+                println!("prompt: completed");
+                println!("prompt_id: {prompt_id}");
+                println!("stop_reason: {stop}");
+                return Ok(());
+            }
+            "errored" => {
+                let code = poll["data"]["error_code"].as_str().unwrap_or("agent.error");
+                let message = poll["data"]["error_message"].as_str().unwrap_or("");
+                return Err(StackError::AgentRequestFailed {
+                    method: "session/prompt",
+                    message: format!("{code}: {message}"),
+                });
+            }
+            "cancelled" => {
+                println!("prompt: cancelled");
+                println!("prompt_id: {prompt_id}");
+                return Ok(());
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                // Linear back-off capped at 2s so a long-running prompt does
+                // not spam the daemon every 250ms for minutes on end.
+                delay_ms = (delay_ms + 250).min(2000);
+            }
+        }
+    }
 }
 
 fn run_logs_command(command: LogsCommand) -> Result<()> {

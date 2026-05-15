@@ -65,11 +65,11 @@
 - [x] Implement status routes.
 - [ ] Implement config API routes.
 - [x] Implement agent lifecycle API routes.
-- [ ] Implement session API route stubs wired to the ACP bridge.
+- [x] Implement session API route stubs wired to the ACP bridge.
 - [ ] Implement workspace file API routes.
 - [ ] Implement command API routes.
 - [x] Implement log query API routes.
-- [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs.
+- [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs. (`sessions.{id}` is complete for ACP `session/update`; command, workspace, agent, status, and log producers remain pending.)
 
 ## ACP Agent Bridge
 
@@ -77,9 +77,9 @@
 - [x] Set agent cwd to `agent.cwd` or `workspace.root`.
 - [x] Inject only environment variables referenced by `[agent].env`.
 - [x] Send ACP `initialize` and persist returned capabilities.
-- [ ] Map session create/load/resume/close/prompt/cancel to ACP session methods where supported.
-- [ ] Forward ACP `session/update` notifications to WebSocket and SQLite.
-- [ ] Return typed unsupported-capability errors instead of emulating missing ACP features.
+- [x] Map session create/load/resume/close/prompt/cancel to ACP session methods where supported.
+- [x] Forward ACP `session/update` notifications to WebSocket and SQLite.
+- [x] Return typed unsupported-capability errors instead of emulating missing ACP features.
 
 ## Agent Installation
 
@@ -111,11 +111,11 @@
 - [x] Implement `acps serve`.
 - [x] Implement `acps status`.
 - [x] Implement `acps reset [--yes]`.
-- [ ] Implement `acps sessions list`.
-- [ ] Implement `acps sessions new`.
-- [ ] Implement `acps sessions prompt <session-id>`.
-- [ ] Implement `acps sessions cancel <session-id>`.
-- [ ] Implement `acps sessions close <session-id>`.
+- [x] Implement `acps sessions list`.
+- [x] Implement `acps sessions new`.
+- [x] Implement `acps sessions prompt <session-id>`.
+- [x] Implement `acps sessions cancel <session-id>`.
+- [x] Implement `acps sessions close <session-id>`.
 - [ ] Implement `acps logs tail`.
 - [x] Implement `acps logs query`.
 
@@ -124,8 +124,8 @@
 - [x] A user can initialize config and state with `acps init`.
 - [x] A user can start the daemon with `acps serve`.
 - [x] A direct-key ACP agent can be installed or configured.
-- [ ] A session can be created through CLI or HTTP.
-- [ ] A prompt can be sent and streamed over WebSocket.
+- [x] A session can be created through CLI or HTTP.
+- [x] A prompt can be sent and streamed over WebSocket.
 - [ ] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.
 - [ ] A mediated shell command can be run and logged.
 - [x] Durable logs can be queried from SQLite.

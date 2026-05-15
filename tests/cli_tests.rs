@@ -299,7 +299,7 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 3"))
+        .stdout(predicates::str::contains("schema_version: 4"))
         .stdout(predicates::str::contains("latest_event:"));
 }
 
@@ -325,6 +325,104 @@ async fn agent_start_and_stop_call_running_daemon() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent stop: stopped"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_new_list_prompt_close_round_trip() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    // Start the agent first so /v1/sessions has a live ACP connection.
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .success();
+
+    let new_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "new"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(new_output).expect("utf8");
+    let session_id = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .expect("session: <id> line")
+        .trim()
+        .to_owned();
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(session_id.as_str()));
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "prompt", &session_id, "hello"])
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("prompt: completed"))
+        .stdout(predicates::str::contains("stop_reason: end_turn"));
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "close", &session_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session close: closed"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_prompt_no_wait_returns_immediately() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .success();
+
+    let new_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "new"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(new_output).expect("utf8");
+    let session_id = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .expect("session: <id> line")
+        .trim()
+        .to_owned();
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "prompt", &session_id, "ping", "--no-wait"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("prompt: pending"))
+        .stdout(predicates::str::contains("prompt_id: "));
 }
 
 #[tokio::test(flavor = "multi_thread")]

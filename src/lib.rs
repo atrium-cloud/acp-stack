@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod envelope;
 pub mod error;
+pub mod events;
 pub mod fs_util;
 pub mod secrets;
 pub mod state;

@@ -280,6 +280,33 @@ pub enum StackError {
         status: StatusCode,
         body: String,
     },
+
+    #[error("agent request to {method} failed: {message}")]
+    AgentRequestFailed {
+        method: &'static str,
+        message: String,
+    },
+
+    #[error("session `{id}` was not found")]
+    SessionNotFound { id: String },
+
+    #[error("session `{id}` is closed")]
+    SessionClosed { id: String },
+
+    #[error("prompt `{id}` was not found")]
+    PromptNotFound { id: String },
+
+    #[error("session `{session_id}` does not own prompt `{prompt_id}`")]
+    PromptSessionMismatch {
+        session_id: String,
+        prompt_id: String,
+    },
+
+    #[error("prompt body must include at least one content block")]
+    PromptBodyEmpty,
+
+    #[error("prompt body is not valid ACP content: {0}")]
+    PromptBodyInvalid(String),
 }
 
 impl StackError {
@@ -352,6 +379,13 @@ impl StackError {
             AgentUnsupportedCapability { .. } => "agent.unsupported_capability",
             AgentApiRequest { .. } => "agent.api_request_failed",
             AgentApiStatus { .. } => "agent.api_status_failed",
+            AgentRequestFailed { .. } => "agent.request_failed",
+            SessionNotFound { .. } => "session.not_found",
+            SessionClosed { .. } => "session.closed",
+            PromptNotFound { .. } => "prompt.not_found",
+            PromptSessionMismatch { .. } => "prompt.session_mismatch",
+            PromptBodyEmpty => "prompt.body_empty",
+            PromptBodyInvalid(_) => "prompt.body_invalid",
         }
     }
 
@@ -467,6 +501,18 @@ impl StackError {
             AgentApiStatus { path, status, .. } => {
                 format!("agent API request to {path} failed with status {status}")
             }
+            AgentRequestFailed { method, .. } => {
+                format!("agent rejected `{method}` request")
+            }
+            SessionNotFound { id } => format!("session `{id}` was not found"),
+            SessionClosed { id } => format!("session `{id}` is closed"),
+            PromptNotFound { id } => format!("prompt `{id}` was not found"),
+            PromptSessionMismatch {
+                session_id,
+                prompt_id,
+            } => format!("session `{session_id}` does not own prompt `{prompt_id}`"),
+            PromptBodyEmpty => "prompt body must include at least one content block".to_owned(),
+            PromptBodyInvalid(_) => "prompt body is not valid ACP content".to_owned(),
         }
     }
 
@@ -548,6 +594,13 @@ impl StackError {
             | AgentSpawnFailed { .. }
             | AgentApiRequest { .. }
             | AgentApiStatus { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            // Session/prompt errors map to the standard HTTP shapes:
+            // not found, conflict for state, gateway for upstream agent errors,
+            // and bad request for client-provided malformed payloads.
+            SessionNotFound { .. } | PromptNotFound { .. } => StatusCode::NOT_FOUND,
+            SessionClosed { .. } | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
+            PromptBodyEmpty | PromptBodyInvalid(_) => StatusCode::BAD_REQUEST,
+            AgentRequestFailed { .. } => StatusCode::BAD_GATEWAY,
         }
     }
 }

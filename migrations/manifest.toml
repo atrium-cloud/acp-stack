@@ -12,3 +12,8 @@ sqlite_file = "002_auth_failures_schema.sqlite.sql"
 id = 3
 name = "agent_capabilities"
 sqlite_file = "003_agent_capabilities.sqlite.sql"
+
+[[migration]]
+id = 4
+name = "sessions"
+sqlite_file = "004_sessions.sqlite.sql"
