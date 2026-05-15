@@ -1,11 +1,75 @@
+use acp_stack::api::{self, AppState};
+use acp_stack::config::load_config_from_str;
+use acp_stack::secrets::SecretStore;
+use acp_stack::state::StateStore;
 use assert_cmd::Command;
 use base64::Engine;
 use predicates::prelude::PredicateBooleanExt as _;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use tempfile::TempDir;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
+const SESSION_KEY: &str = "acps_session_cccccccccccccccccccccccccccccccccccccccccccc";
+const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd";
+
+struct AgentCliHarness {
+    base_url: String,
+    join: JoinHandle<acp_stack::error::Result<()>>,
+    _tempdir: TempDir,
+}
+
+impl AgentCliHarness {
+    async fn spawn() -> Self {
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&path).expect("state open");
+        store.migrate().expect("migrate");
+        let mut config = load_config_from_str(VALID_CONFIG).expect("config parses");
+        config.agent.command = env!("CARGO_BIN_EXE_acps").to_owned();
+        config.agent.args = vec!["__acps-test-fake-agent".into()];
+        config.agent.env = vec![];
+        config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
+        config.agent.expected_sha256 = None;
+        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("local"));
+        let join = tokio::spawn(async move { api::serve(app_state, listener).await });
+        Self {
+            base_url,
+            join,
+            _tempdir: tempdir,
+        }
+    }
+}
+
+impl Drop for AgentCliHarness {
+    fn drop(&mut self) {
+        self.join.abort();
+    }
+}
+
+fn write_cli_home(home: &std::path::Path, base_url: &str, admin_key: &str) {
+    let config_dir = home.join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(
+            r#"public_url = "https://agent.example.com""#,
+            &format!(r#"public_url = "{base_url}""#),
+        )
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []");
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    store
+        .set_many([
+            ("ACP_STACK_SESSION_KEY", SESSION_KEY),
+            ("ACP_STACK_ADMIN_KEY", admin_key),
+        ])
+        .expect("auth keys should be stored");
+}
 
 #[test]
 fn prints_version() {
@@ -235,8 +299,53 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 2"))
+        .stdout(predicates::str::contains("schema_version: 3"))
         .stdout(predicates::str::contains("latest_event:"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_start_and_stop_call_running_daemon() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent start: running"))
+        .stdout(predicates::str::contains("pid: "));
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "stop"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent stop: stopped"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_start_reports_daemon_auth_failure() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(
+        home.path(),
+        &harness.base_url,
+        "acps_admin_wrongwrongwrongwrongwrongwrongwrongwrongwrong",
+    );
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent API request to /v1/agent/start failed with status 401",
+        ));
 }
 
 #[cfg(unix)]

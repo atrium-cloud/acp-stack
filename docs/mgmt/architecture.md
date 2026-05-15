@@ -41,7 +41,7 @@ This document captures the management-level architecture for `acp-stack`. For co
 - `Permissions` - durable request/decision lifecycle for ACP permission requests and stack-mediated commands.
 - `Events` - normalizes WebSocket messages and durable event records.
 
-The current Rust crate exposes a library behind the `acps` binary. The implemented foundation includes focused `cli`, `config`, `error`, `state`, `tracing_init`, `auth`, `secrets`, `envelope`, `fs_util`, `api`, and `supervisor` modules; ACP bridge, workspace, and command gateway modules will be added with their first real behavior rather than as empty placeholders. `api` owns the axum HTTP layer (router, auth middleware, response envelope wiring) and `supervisor` records the daemon's lifecycle transitions into `agent_lifecycle`.
+The current Rust crate exposes a library behind the `acps` binary. The implemented foundation includes focused `cli`, `config`, `error`, `state`, `tracing_init`, `auth`, `secrets`, `envelope`, `fs_util`, `api`, `supervisor`, `acp_bridge`, and `agent_installer` modules; workspace and command gateway modules will be added with their first real behavior rather than as empty placeholders. `api` owns the axum HTTP layer (router, auth middleware, response envelope wiring), `supervisor` records the daemon's lifecycle transitions and owns the spawned ACP agent's lifecycle (`AgentSupervisor`), `acp_bridge` wraps the `agent-client-protocol` SDK to spawn and initialize the configured agent, and `agent_installer` runs the operator-declared install recipe.
 
 ### Config vs State
 
