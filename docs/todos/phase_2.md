@@ -30,7 +30,7 @@
 - [x] Pass HTTP MCP server declarations to agents when supported.
 - [x] Persist MCP process lifecycle events.
 - [ ] Add Slack MCP example.
-- [ ] Add Linear MCP example.
+- [x] Add Linear MCP example.
 - [ ] Add generic HTTP MCP example.
 
 ## Dependency Checks
