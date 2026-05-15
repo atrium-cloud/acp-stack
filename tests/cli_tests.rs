@@ -299,7 +299,7 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 5"))
+        .stdout(predicates::str::contains("schema_version: 6"))
         .stdout(predicates::str::contains("latest_event:"));
 }
 

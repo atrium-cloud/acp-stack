@@ -9,7 +9,8 @@ This document records the implementation technologies chosen for the standalone 
 - `thiserror` - typed application errors.
 - `tokio` - async runtime.
 - `axum` (`ws`) - HTTP server, route/middleware composition, and WebSocket upgrades for `/v1/ws`.
-- `tower`, `tower-http` - middleware composition (body limits, tracing) for the axum layer.
+- `tower`, `tower-http` (`cors`, `limit`, `trace`) - middleware composition for the axum layer: request body size enforcement, structured tracing, and the CORS allowlist applied when `[security.http].allowed_origins` is non-empty.
+- `dashmap` - concurrent maps backing the in-process auth-failure IP blocker (`http_hardening::AuthFailureBlocker`) and the rate limiter (`http_hardening::RateLimiter`). The limiter ships three token-bucket maps: per-IP (always on), per-key (post-auth, keyed by a sha256-truncated fingerprint of the bearer), and unauthenticated (stricter, pre-bearer-match). All state is in-process and clears on daemon restart.
 - `http` - shared HTTP types (`StatusCode`, headers) used by the response envelope mapping.
 - `reqwest` with rustls and blocking support - CLI HTTP client for daemon-backed commands such as `acps agent start` and `acps agent stop`, HTTPS `public_url` targets, and synchronous ACP registry fetches during agent installation.
 - `zeroize` - scrubbing cached API key material on drop.

@@ -7,7 +7,7 @@ use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_dir, set_owner_only_file, write_new_file_owner_only,
 };
-use crate::secrets::{SecretStore, age_key_path, secret_store_path};
+use crate::secrets::{SecretStore, age_key_path, reject_auth_ref_mutation, secret_store_path};
 use crate::state::{EventFilter, StateStore, default_state_path};
 use crate::supervisor::ServerLifecycle;
 use base64::Engine;
@@ -60,6 +60,16 @@ enum Command {
         #[command(subcommand)]
         command: SessionsCommand,
     },
+    Deps {
+        #[command(subcommand)]
+        command: DepsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DepsCommand {
+    /// Print declared dependency status.
+    Check,
 }
 
 #[derive(Debug, Subcommand)]
@@ -258,6 +268,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Logs { command } => run_logs_command(command),
         Command::Agent { command } => run_agent_command(command),
         Command::Sessions { command } => run_sessions_command(command),
+        Command::Deps { command } => run_deps_command(command),
     };
 
     if let Err(error) = &result {
@@ -347,20 +358,7 @@ fn run_config_import(args: ConfigImportArgs) -> Result<()> {
         // going through `acps reset --yes` — bypassing the documented
         // reset-only rotation path for the admin key.
         let current = Config::load_from_path(&target)?;
-        if current.auth.session_key_ref != config.auth.session_key_ref {
-            return Err(StackError::ImportChangesAuthRef {
-                field: "session_key_ref",
-                current: current.auth.session_key_ref,
-                incoming: config.auth.session_key_ref,
-            });
-        }
-        if current.auth.admin_key_ref != config.auth.admin_key_ref {
-            return Err(StackError::ImportChangesAuthRef {
-                field: "admin_key_ref",
-                current: current.auth.admin_key_ref,
-                incoming: config.auth.admin_key_ref,
-            });
-        }
+        config::compare_auth_refs(&current.auth, &config.auth)?;
         // Atomic replace via temp file + rename, with owner-only mode on both
         // the temp and the final file. Avoids leaving a truncated config on
         // crash mid-write, which would otherwise brick the next `acps` run.
@@ -441,25 +439,6 @@ fn run_secrets_command(command: SecretsCommand) -> Result<()> {
             Ok(())
         }
     }
-}
-
-/// `acps secrets set/delete` must not touch the configured auth refs.
-/// Direct manipulation would bypass the regenerate-session-key flow and the
-/// "admin key never regenerable in place" invariant.
-fn reject_auth_ref_mutation(name: &str, config: &Config) -> Result<()> {
-    if name == config.auth.session_key_ref {
-        return Err(StackError::SecretReservedForAuth {
-            name: name.to_owned(),
-            kind: "session",
-        });
-    }
-    if name == config.auth.admin_key_ref {
-        return Err(StackError::SecretReservedForAuth {
-            name: name.to_owned(),
-            kind: "admin",
-        });
-    }
-    Ok(())
 }
 
 fn run_reset(args: ResetArgs) -> Result<()> {
@@ -671,6 +650,19 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         tracing::info!(
             reconciled = reconciled_commands,
             "marked orphaned in-flight commands as failed on startup"
+        );
+    }
+
+    // Reconcile pending permission rows. ACP-source rows are canceled (the
+    // request channel is gone after restart); command-source rows are
+    // expired so the spec's "clients never see them stay pending forever"
+    // promise holds across restart.
+    let (perm_canceled, perm_expired) = store.reconcile_orphaned_permissions()?;
+    if perm_canceled > 0 || perm_expired > 0 {
+        tracing::info!(
+            canceled = perm_canceled,
+            expired = perm_expired,
+            "settled orphaned permission requests on startup"
         );
     }
 
@@ -1229,6 +1221,38 @@ fn run_agent_status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_deps_command(command: DepsCommand) -> Result<()> {
+    match command {
+        DepsCommand::Check => {
+            let config = Config::load_from_default_path()?;
+            let report = crate::deps::check_dependencies(&config);
+            if report.dependencies.is_empty() {
+                println!("no dependencies declared in [dependencies]");
+                return Ok(());
+            }
+            for entry in &report.dependencies {
+                let status = if entry.available {
+                    if let Some(path) = &entry.path {
+                        format!("OK  {path}")
+                    } else {
+                        "OK".to_owned()
+                    }
+                } else {
+                    let reason = entry.reason.as_deref().unwrap_or("unavailable");
+                    format!("MISS {reason}")
+                };
+                let required = if entry.required { "*" } else { " " };
+                println!(
+                    "{required}{kind:<8} {name:<24} {status}",
+                    kind = format!("{:?}", entry.kind).to_lowercase(),
+                    name = entry.name,
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 fn run_sessions_command(command: SessionsCommand) -> Result<()> {

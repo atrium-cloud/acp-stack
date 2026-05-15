@@ -621,3 +621,197 @@ fn rejects_empty_auth_admin_key_ref() {
         "got: {error}",
     );
 }
+
+#[test]
+fn permissions_timeout_action_defaults_to_deny() {
+    let config = load_config_from_str(VALID_CONFIG).expect("valid config");
+    assert!(matches!(
+        config.permissions.effective_timeout_action(),
+        acp_stack::config::PermissionTimeoutAction::Deny
+    ));
+    assert_eq!(
+        config.permissions.effective_request_timeout(),
+        std::time::Duration::from_secs(300)
+    );
+}
+
+#[test]
+fn rejects_invalid_permissions_timeout_action() {
+    let bad = VALID_CONFIG.replace(
+        "[agent]",
+        "[permissions]\nmode = \"auto\"\ntimeout_action = \"foo\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&bad).expect_err("invalid timeout_action must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("permissions.timeout_action must be one of"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_invalid_permissions_request_timeout() {
+    let bad = VALID_CONFIG.replace(
+        "[agent]",
+        "[permissions]\nmode = \"auto\"\nrequest_timeout = \"\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&bad).expect_err("invalid request_timeout must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("permissions.request_timeout must be a duration"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn accepts_explicit_permissions_timeout() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[permissions]\nmode = \"auto\"\nrequest_timeout = \"30s\"\ntimeout_action = \"approve\"\n\n[agent]",
+    );
+    let config = load_config_from_str(&updated).expect("valid permissions section");
+    assert_eq!(
+        config.permissions.effective_request_timeout(),
+        std::time::Duration::from_secs(30)
+    );
+    assert!(matches!(
+        config.permissions.effective_timeout_action(),
+        acp_stack::config::PermissionTimeoutAction::Approve
+    ));
+}
+
+#[test]
+fn accepts_trusted_proxies() {
+    let updated = VALID_CONFIG.replace(
+        "trust_proxy_headers = false",
+        "trust_proxy_headers = true\ntrusted_proxies = [\"127.0.0.1\", \"10.0.0.1\"]",
+    );
+    let config = load_config_from_str(&updated).expect("trusted proxies must parse");
+    assert_eq!(config.security.http.trusted_proxies.len(), 2);
+}
+
+#[test]
+fn rejects_invalid_trusted_proxy() {
+    let updated = VALID_CONFIG.replace(
+        "trust_proxy_headers = false",
+        "trust_proxy_headers = true\ntrusted_proxies = [\"not-an-ip\"]",
+    );
+    let error = load_config_from_str(&updated).expect_err("must reject");
+    assert!(
+        error
+            .to_string()
+            .contains("security.http.trusted_proxies entry"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_secret_ref_colliding_with_session_key() {
+    let updated = VALID_CONFIG.replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        r#"env = ["ACP_STACK_SESSION_KEY"]"#,
+    );
+    let error = load_config_from_str(&updated).expect_err("ref aliasing auth must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("collides with the configured auth key ref"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn rejects_duplicate_secret_ref_across_categories() {
+    let updated = VALID_CONFIG.replace(
+        r#"api_key_ref = "SUPABASE_SECRET_KEY""#,
+        r#"api_key_ref = "OPENCODE_API_KEY""#,
+    );
+    let error = load_config_from_str(&updated).expect_err("duplicate refs must be rejected");
+    assert!(
+        error.to_string().contains("declared more than once"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn accepts_dependencies_section() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[dependencies]\ncommands = [{ name = \"git\", required = true }]\n\n[agent]",
+    );
+    let config = load_config_from_str(&updated).expect("dependencies parse");
+    assert_eq!(config.dependencies.commands.len(), 1);
+    assert_eq!(config.dependencies.commands[0].name, "git");
+    assert!(config.dependencies.commands[0].required);
+}
+
+#[test]
+fn rejects_duplicate_dependency_names() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[dependencies]\ncommands = [{ name = \"git\" }, { name = \"git\" }]\n\n[agent]",
+    );
+    let error = load_config_from_str(&updated).expect_err("duplicate must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("dependencies.commands contains duplicate"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn accepts_stdio_mcp_server() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[[mcp.servers]]\ntype = \"stdio\"\nname = \"slack\"\ncommand = \"slack-mcp\"\nenv = [\"SLACK_BOT_TOKEN\"]\n\n[agent]",
+    );
+    let config = load_config_from_str(&updated).expect("stdio mcp parses");
+    assert_eq!(config.mcp.servers.len(), 1);
+    assert_eq!(config.mcp.servers[0].name(), "slack");
+}
+
+#[test]
+fn rejects_duplicate_mcp_server_names() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[[mcp.servers]]\ntype = \"stdio\"\nname = \"slack\"\ncommand = \"a\"\n\n[[mcp.servers]]\ntype = \"stdio\"\nname = \"slack\"\ncommand = \"b\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&updated).expect_err("duplicate names must fail");
+    assert!(error.to_string().contains("duplicate name"), "got: {error}",);
+}
+
+#[test]
+fn rejects_duplicate_mcp_server_names_across_kinds() {
+    // Cross-transport name collisions (stdio + http with the same `name`) must
+    // also be rejected: the agent identifies servers by name regardless of
+    // transport, so allowing duplicates would silently overwrite the first
+    // entry's wiring.
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"shared\"\ncommand = \"a\"\n\n",
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"shared\"\nurl = \"https://example/x\"\n\n",
+            "[agent]"
+        ),
+    );
+    let error = load_config_from_str(&updated).expect_err("cross-kind duplicates must fail");
+    assert!(error.to_string().contains("duplicate name"), "got: {error}",);
+}
+
+#[test]
+fn rejects_http_mcp_with_bad_url() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[[mcp.servers]]\ntype = \"http\"\nname = \"linear\"\nurl = \"ftp://x\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&updated).expect_err("bad url must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must start with http:// or https://"),
+        "got: {error}",
+    );
+}

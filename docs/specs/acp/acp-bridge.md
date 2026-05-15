@@ -63,6 +63,18 @@ MCP examples should focus on external services such as Slack, Linear, GitHub, or
 
 ## Permission Passthrough
 
-ACP permission requests enter the same durable permission pipeline as stack-mediated commands. The runtime persists each request, publishes it over WebSocket, exposes it through the permissions API, records the decision, and then resumes, rejects, or times out the blocked ACP operation.
+ACP `session/request_permission` requests enter the same durable permission pipeline as stack-mediated commands. The bridge registers an `on_receive_request` handler that:
+
+- builds a `NewPermission { source: Acp, requester: format!("session:{session_id}"), subject_id: Some(session_id), detail: serialized RequestPermissionRequest }` and submits it to the runtime's `PermissionService`,
+- awaits the resulting `oneshot::Receiver<PermissionOutcome>` until an operator decides (or the per-request timer fires),
+- translates the outcome back to an ACP `RequestPermissionOutcome`:
+  - `Approved { option_id }` → `Selected { option_id }`. When the operator omits `option_id` on the approve body, the first option from the original request is used.
+  - `Denied` / `Canceled` / `Expired` (with `timeout_action = "deny"`) → `Cancelled`.
+  - `Expired` with `timeout_action = "approve"` is auto-approved with no option_id, which the bridge handles by selecting the first option from the original request.
+
+Cancellation paths:
+
+- If the originating session is closed or canceled while a request is still pending, the runtime cancels every pending ACP-source permission row whose `subject_id` matches the session id; the awaited outcome is `Canceled`, the bridge replies `Cancelled`, and the agent settles its prompt turn.
+- If the daemon restarts with rows still pending, startup reconciliation marks every ACP-source pending row `canceled` (with a `system` / `daemon-restart` decision). The agent will have already abandoned its turn; the durable audit trail reflects that.
 
 See [project-spec](../project-spec.md) and [api](../api/api.md#permissions-api) for the shared permission lifecycle and HTTP contract.

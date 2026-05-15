@@ -132,6 +132,23 @@ impl EventHub {
         });
     }
 
+    /// Fan out a permission-lifecycle row (`permission.*`) on the `permissions`
+    /// topic. The persistent record lives in `permission_requests` /
+    /// `permission_decisions`; this is the live-stream mirror. Payload shape
+    /// matches the other publish_* helpers: `{ kind, data }`.
+    pub fn publish_permission_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
+        self.publish(LiveEvent {
+            event_type: "event",
+            id: id.to_owned(),
+            topic: "permissions".to_owned(),
+            created_at: created_at.to_owned(),
+            payload: json!({
+                "kind": kind,
+                "data": data,
+            }),
+        });
+    }
+
     /// Fan out every `events` row on the `logs` topic so `acps logs tail` and
     /// any other generic log consumer can see the same stream the SQLite
     /// query routes serve. Payload mirrors `Event` rather than parsing

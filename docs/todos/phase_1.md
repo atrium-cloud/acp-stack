@@ -63,7 +63,7 @@
 - [x] Implement the standard success/error response envelope.
 - [x] Add request body size limits from config.
 - [x] Implement status routes.
-- [ ] Implement config API routes.
+- [x] Implement config API routes.
 - [x] Implement agent lifecycle API routes.
 - [x] Implement session API route stubs wired to the ACP bridge.
 - [x] Implement workspace file API routes.

@@ -43,9 +43,9 @@ Errors:
 
 ### Config API
 
-- `GET /v1/config/export` - returns canonical TOML.
-- `POST /v1/config/import` - validates and applies TOML.
-- `POST /v1/config/validate` - validates TOML without applying.
+- `GET /v1/config/export` (session-tier) - returns canonical TOML.
+- `POST /v1/config/import` (admin-tier) - parses TOML from the raw body, refuses any change to `[auth].session_key_ref` or `[auth].admin_key_ref`, then atomically writes the canonical form to `~/.config/acp-stack/acp-stack.toml`. Response: `{ imported: true, restart_required: true }`. The running daemon does not hot-reload — clients must restart the daemon for the new config to take effect. A `server.config_imported` event is appended to the events table.
+- `POST /v1/config/validate` (session-tier) - parses and validates the raw body without applying.
 
 ### Agent API
 
@@ -165,10 +165,21 @@ Execution model (0.0.1):
   rejected with `command.env_not_allowed`. Secrets are never injected
   implicitly; the gateway uses `env_clear` and then sets only the names
   passed in the request body.
-- Policy: `[permissions].deny` glob matches reject the submission with
-  `command.denied`. `[permissions].review` matches behave like `deny` in
-  `supervised`/`locked` modes (no approval queue in 0.0.1) and proceed in
-  `auto` mode (a `command.review_flagged` event is emitted).
+- Policy:
+  - `[permissions].deny` glob matches reject the submission synchronously
+    with `command.denied`.
+  - `[permissions].review` matches in `auto` mode proceed and emit a
+    `command.review_flagged` event.
+  - `[permissions].review` matches in `supervised` or `locked` mode, and
+    unmatched submissions in `locked` mode, create a pending
+    `permission_requests` row (`source = "command"`, `subject_id =
+    command_id`), emit a `permission.created` event on the `permissions`
+    WebSocket topic, and block subprocess spawn until an operator decides
+    through `/v1/permissions/{id}/approve` (transitions the command to
+    `running` then its exit status) or `/v1/permissions/{id}/deny` (the
+    command finalizes as `failed` without ever spawning). The pending row
+    expires automatically after `[permissions].request_timeout` (default
+    `5m`); the row's terminal state then follows `[permissions].timeout_action`.
 - Output: stdout and stderr are read in bounded chunks (up to 4 KiB per
   read). Each chunk becomes one `command.stdout` / `command.stderr` event
   and is also fanned out on `commands.{id}`; chunk boundaries are not
@@ -182,37 +193,40 @@ Execution model (0.0.1):
 
 ### Permissions API
 
-Planned routes (deferred to the dedicated permissions module — none of these are served in 0.0.1):
+All four routes are session-tier (per `docs/specs/security.md` — the operator already has a session when deciding on a permission; admin keys are reserved for management/destructive actions).
 
-- `GET /v1/permissions/pending`
-- `GET /v1/permissions/{id}`
-- `POST /v1/permissions/{id}/approve`
-- `POST /v1/permissions/{id}/deny`
+- `GET /v1/permissions/pending` — list pending rows, oldest-first. Response: `{ permissions: [ { id, created_at, updated_at, status, source, requester, subject_id, detail, expires_at } ] }`.
+- `GET /v1/permissions/{id}` — single row by id.
+- `POST /v1/permissions/{id}/approve` — body `{ option_id?: string, reason?: string }`. `option_id` is forwarded to ACP-source requests as the chosen `PermissionOptionId`; if omitted on an ACP-source row, the first option from the original request is used.
+- `POST /v1/permissions/{id}/deny` — body `{ reason?: string }`.
+
+A pending request can resolve in four ways: `approved`, `denied`, `expired` (per-row timer from `[permissions].request_timeout`, default `5m`, action from `[permissions].timeout_action`, default `deny`), or `canceled` (the originating session was canceled, the daemon restarted with an unresolved row, or a command awaiting approval was canceled by its caller).
 
 Permission requests can originate from:
 
-- ACP `session/request_permission`
-- `acp-stack` mediated command policy
-- future runtime modules
+- ACP `session/request_permission` (`subject_id` = session id)
+- `acp-stack` mediated command policy under `review`/`locked` modes (`subject_id` = command id)
 
-Until those routes ship, the runtime honors only the static `deny` and `review` glob lists declared in `[permissions]` at submit time (see `docs/specs/security.md`).
+Decisions are recorded in `permission_decisions` with the resolved tier as `deciding_principal` ("session-key" today; "system" for timeout/restart settlements).
 
 ### Secrets API
 
 Admin key required.
 
-- `GET /v1/secrets` - lists names and metadata only.
-- `POST /v1/secrets` - adds or updates a secret.
-- `DELETE /v1/secrets/{name}` - removes a secret.
+- `GET /v1/secrets` - response `{ names: [...] }`. Values are never returned.
+- `POST /v1/secrets` - body `{ name, value }`. Response `{ name, action: "set" | "updated" }`. Names matching the configured `[auth].session_key_ref` or `[auth].admin_key_ref` are rejected with `secrets.reserved_for_auth` (400) — the auth refs rotate only through `acps auth regenerate-session-key` or `acps reset --yes` + re-init.
+- `DELETE /v1/secrets/{name}` - response `{ name, deleted: true }`. Same auth-ref protection as POST.
 
-Secret values are never returned.
+Secret values are never returned through API, CLI logs, errors, metrics, or WebSocket events.
 
 ### Dependencies API
+
+Session-tier.
 
 - `GET /v1/deps` - returns declared dependencies and satisfaction status.
 - `POST /v1/deps/check` - re-runs validation.
 
-0.0.2 reports missing dependencies but does not attempt broad installation by default.
+0.0.2 reports missing dependencies but does not attempt broad installation by default. Commands are checked via PATH lookup. Packages, runtimes, and MCP cross-references are declarative-only and report `available = false` with a `<kind>-check-not-implemented` reason in this milestone (MCP entries cross-reference `[[mcp.servers]]` for declaration presence).
 
 ### Status, Logs, and Metrics API
 
@@ -235,7 +249,7 @@ The 0.0.1 daemon implements the status/log/metrics subset against local config, 
 - `GET /v1/status/connections` returns the current in-process active HTTP request count.
 - `GET /v1/security/check` is admin-tier and returns the current security self-check envelope. In 0.0.1 it reports findings for the effective listener bind (including `acps serve --bind` overrides), wildcard CORS on public binds, proxy-header trust without a trusted proxy allowlist, empty cached API keys, and auth-failure counts in the last minute at or above the configured threshold.
 - `GET /v1/logs/events` returns durable event rows and supports `limit` plus exact `level` filtering.
-- `GET /v1/logs/commands`, `GET /v1/logs/sessions`, and `GET /v1/logs/security` return rows from the corresponding SQLite tables. Security logs expose auth-failure metadata only; attempted token values are never stored or returned.
+- `GET /v1/logs/commands` and `GET /v1/logs/sessions` return rows from the corresponding SQLite tables. `GET /v1/logs/security` returns `{ auth_failures, events }`: `auth_failures` contains durable auth rejection rows, and `events` contains durable `security.*` rows such as rate-limit hits, IP blocks, denied origins, and oversized request rejections. Attempted token values are never stored or returned.
 - `GET /v1/logs/permissions` returns durable events whose kind starts with `permission.` or `permissions.` until the dedicated permissions schema lands.
 - `GET /v1/metrics/summary` returns local row counts for events, sessions, commands, auth failures, agent lifecycle records, installer runs, and agent capability snapshots.
 
@@ -251,7 +265,7 @@ The WebSocket multiplexes runtime events. Clients subscribe to topics:
 
 - `sessions.{id}` (implemented for live ACP `session/update` events)
 - `commands.{id}` (implemented; emits `command.started`, `command.stdout`, `command.stderr`, `command.exited`, `command.failed`, `command.canceled`, `command.timeout`, `command.output_truncated`, `command.review_flagged`)
-- `permissions` (reserved; no live producer until the permissions module lands)
+- `permissions` (implemented; emits `permission.created`, `permission.approved`, `permission.denied`, `permission.canceled`, `permission.expired`)
 - `workspace` (implemented; emits `workspace.write`, `workspace.upload`, `workspace.delete`)
 - `agent` (implemented; emits `agent.starting`, `agent.started`, `agent.spawn_failed`, `agent.stopped`)
 - `status` (implemented; emits `server.started`, `server.stopped`)

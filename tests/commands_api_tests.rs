@@ -175,6 +175,7 @@ async fn deny_pattern_rejects_submission() {
         mode: "auto".to_owned(),
         review: vec![],
         deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: Some(permissions),
@@ -188,11 +189,12 @@ async fn deny_pattern_rejects_submission() {
 }
 
 #[tokio::test]
-async fn review_pattern_blocks_in_supervised_mode() {
+async fn review_pattern_enqueues_permission_in_supervised_mode() {
     let permissions = PermissionsConfig {
         mode: "supervised".to_owned(),
         review: vec!["sudo *".to_owned()],
         deny: vec![],
+        ..PermissionsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: Some(permissions),
@@ -200,17 +202,50 @@ async fn review_pattern_blocks_in_supervised_mode() {
     })
     .await;
     let response = submit(&harness, serde_json::json!({"command": "sudo apt update"})).await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Row is created in pending state; permission decision lands out-of-band.
+    assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "command.denied");
+    assert_eq!(body["data"]["status"], "pending");
+    let cmd_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending_body: Value = pending.json().await.expect("json");
+    let permissions_list = pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array");
+    let entry = permissions_list
+        .iter()
+        .find(|p| p["subject_id"].as_str() == Some(&cmd_id))
+        .expect("pending permission row for command");
+    let perm_id = entry["id"].as_str().unwrap().to_owned();
+
+    let deny_response = auth(session_client().post(format!(
+        "{}/v1/permissions/{}/deny",
+        harness.base_url, perm_id
+    )))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(deny_response.status(), StatusCode::OK);
+
+    let final_body = wait_for_terminal(&harness, &cmd_id).await;
+    assert_eq!(final_body["data"]["status"], "failed");
+    assert_eq!(final_body["data"]["exit_status"], Value::Null);
 }
 
 #[tokio::test]
-async fn locked_mode_rejects_unmatched_commands() {
+async fn locked_mode_enqueues_permission_and_approval_runs() {
     let permissions = PermissionsConfig {
         mode: "locked".to_owned(),
         review: vec![],
         deny: vec![],
+        ..PermissionsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: Some(permissions),
@@ -218,9 +253,189 @@ async fn locked_mode_rejects_unmatched_commands() {
     })
     .await;
     let response = submit(&harness, serde_json::json!({"command": "echo hi"})).await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "command.denied");
+    assert_eq!(body["data"]["status"], "pending");
+    let cmd_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    let pending_body: Value = pending.json().await.expect("json");
+    let permissions_list = pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array");
+    let perm_id = permissions_list
+        .iter()
+        .find(|p| p["subject_id"].as_str() == Some(&cmd_id))
+        .expect("permission row")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let approve_response = auth(session_client().post(format!(
+        "{}/v1/permissions/{}/approve",
+        harness.base_url, perm_id
+    )))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(approve_response.status(), StatusCode::OK);
+
+    let final_body = wait_for_terminal(&harness, &cmd_id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+    assert_eq!(final_body["data"]["exit_status"], 0);
+
+    // GET /v1/logs/permissions must surface the durable permission.* events
+    // generated for this command's lifecycle (created + approved). Without
+    // this assertion, a regression in PermissionService event persistence
+    // would silently leave the log route returning an empty array.
+    let logs = auth(session_client().get(format!("{}/v1/logs/permissions", harness.base_url)))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(logs.status(), StatusCode::OK);
+    let logs_body: Value = logs.json().await.expect("json");
+    let kinds: Vec<&str> = logs_body["data"]["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"permission.created"),
+        "expected permission.created event, saw: {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&"permission.approved"),
+        "expected permission.approved event, saw: {kinds:?}",
+    );
+}
+
+#[tokio::test]
+async fn review_supervised_mode_approve_runs_command() {
+    // Quadrant: supervised + review-match + APPROVE → command transitions
+    // to running and exits cleanly. Complements the existing supervised-deny
+    // and locked-approve tests so all four review/locked outcomes are
+    // covered end-to-end.
+    let permissions = PermissionsConfig {
+        mode: "supervised".to_owned(),
+        review: vec!["echo *".to_owned()],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "echo allowed"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let cmd_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    let pending_body: Value = pending.json().await.expect("json");
+    let perm_id = pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .find(|p| p["subject_id"].as_str() == Some(&cmd_id))
+        .expect("permission row")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let approve_response = auth(session_client().post(format!(
+        "{}/v1/permissions/{}/approve",
+        harness.base_url, perm_id
+    )))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(approve_response.status(), StatusCode::OK);
+
+    let final_body = wait_for_terminal(&harness, &cmd_id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+    assert_eq!(final_body["data"]["exit_status"], 0);
+}
+
+#[tokio::test]
+async fn locked_mode_deny_marks_command_failed() {
+    // Quadrant: locked + DENY → command transitions to failed without ever
+    // spawning a child. Completes the four-quadrant policy matrix.
+    let permissions = PermissionsConfig {
+        mode: "locked".to_owned(),
+        review: vec![],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "echo blocked"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let cmd_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    let pending_body: Value = pending.json().await.expect("json");
+    let perm_id = pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .find(|p| p["subject_id"].as_str() == Some(&cmd_id))
+        .expect("permission row")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let deny_response = auth(session_client().post(format!(
+        "{}/v1/permissions/{}/deny",
+        harness.base_url, perm_id
+    )))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(deny_response.status(), StatusCode::OK);
+
+    let final_body = wait_for_terminal(&harness, &cmd_id).await;
+    assert_eq!(final_body["data"]["status"], "failed");
+    // exit_status is null because the child never ran.
+    assert_eq!(final_body["data"]["exit_status"], Value::Null);
+
+    // GET /v1/logs/permissions must surface permission.denied for this row.
+    let logs = auth(session_client().get(format!("{}/v1/logs/permissions", harness.base_url)))
+        .send()
+        .await
+        .expect("send");
+    let logs_body: Value = logs.json().await.expect("json");
+    let kinds: Vec<&str> = logs_body["data"]["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"permission.denied"),
+        "expected permission.denied event, saw: {kinds:?}",
+    );
 }
 
 #[tokio::test]
@@ -229,6 +444,7 @@ async fn review_pattern_allowed_in_auto_mode() {
         mode: "auto".to_owned(),
         review: vec!["echo *".to_owned()],
         deny: vec![],
+        ..PermissionsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: Some(permissions),

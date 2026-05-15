@@ -75,6 +75,7 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
         fake_env(),
         std::env::temp_dir(),
         null_sink(),
+        None,
     )
     .await
     .expect("bridge spawns");
@@ -91,6 +92,7 @@ async fn shutdown_terminates_the_child() {
         fake_env(),
         std::env::temp_dir(),
         null_sink(),
+        None,
     )
     .await
     .expect("spawn ok");
@@ -126,7 +128,7 @@ async fn spawn_does_not_forward_unlisted_parent_environment() {
         .args
         .extend(["--assert-env-absent".into(), "PATH".into()]);
 
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink())
+    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await
         .expect("bridge spawns");
     let caps = bridge.capabilities();
@@ -145,6 +147,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         fake_env(),
         std::env::temp_dir(),
         sink_dyn,
+        None,
     )
     .await
     .expect("spawn");
@@ -189,7 +192,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
 async fn load_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-load-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink())
+    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await
         .expect("spawn");
     assert!(!bridge.capabilities().supports_load_session());
@@ -216,7 +219,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
 async fn resume_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-resume-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink())
+    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await
         .expect("spawn");
 
@@ -242,7 +245,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
 async fn close_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-close-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink())
+    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await
         .expect("spawn");
 
@@ -307,6 +310,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
             fake_env(),
             std::env::temp_dir(),
             sink_dyn,
+            None,
         )
         .await
         .expect("spawn"),
@@ -357,6 +361,7 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
         fake_env(),
         std::env::temp_dir(),
         null_sink(),
+        None,
     )
     .await
     .expect("spawn");

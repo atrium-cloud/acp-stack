@@ -32,7 +32,8 @@ tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "time", "process", "io-util"] }
 axum = { version = "0.8.9", features = ["ws", "multipart"] }
 tower = "0.5.3"
-tower-http = { version = "0.6.10", features = ["limit", "trace"] }
+tower-http = { version = "0.6.10", features = ["limit", "trace", "cors"] }
+dashmap = "6.1.0"
 zeroize = "1.8.2"
 http = "1.3.2"
 reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "rustls", "multipart"] }

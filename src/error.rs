@@ -403,6 +403,65 @@ pub enum StackError {
 
     #[error("command timed out before the subprocess produced an exit status")]
     CommandTimeout,
+
+    #[error(
+        "secret ref `{ref_name}` (referenced from {kind}) collides with the configured auth key ref; rename the secret"
+    )]
+    SecretRefReservedForAuth {
+        ref_name: String,
+        kind: &'static str,
+    },
+
+    #[error("secret ref name `{name}` is invalid; use ASCII letters, digits, and underscores")]
+    InvalidSecretRefName { name: String },
+
+    #[error("secret ref name `{name}` is declared more than once across the config")]
+    DuplicateSecretRef { name: String },
+
+    #[error("permissions.timeout_action must be one of deny, approve")]
+    InvalidTimeoutAction,
+
+    #[error("security.http.trusted_proxies entry `{value}` is not a valid IP address")]
+    InvalidTrustedProxy { value: String },
+
+    #[error("mcp.servers entry `{name}` is invalid: {reason}")]
+    InvalidMcpServer { name: String, reason: &'static str },
+
+    #[error("mcp.servers contains duplicate name `{name}`")]
+    DuplicateMcpServer { name: String },
+
+    #[error("dependencies.{category} entry has empty name")]
+    DependencyMissingName { category: &'static str },
+
+    #[error("dependencies.{category} contains duplicate name `{name}`")]
+    DuplicateDependency {
+        category: &'static str,
+        name: String,
+    },
+
+    #[error("permission `{id}` was not found")]
+    PermissionNotFound { id: String },
+
+    #[error(
+        "permission `{id}` cannot transition from `{from}` to `{to}`; the request is already terminal"
+    )]
+    InvalidPermissionTransition {
+        id: String,
+        from: &'static str,
+        to: &'static str,
+    },
+
+    #[error("durable JSON corruption in `{field}`: {reason}")]
+    StateInvalidJson { field: &'static str, reason: String },
+
+    #[error("rate limit exceeded; retry later")]
+    RateLimited,
+
+    #[error("IP `{ip}` is temporarily blocked due to repeated auth failures")]
+    IpBlocked { ip: String },
+
+    #[error("Origin `{origin}` is not in the configured allowlist")]
+    OriginNotAllowed { origin: String },
 }
 
 impl StackError {
@@ -510,6 +569,21 @@ impl StackError {
             CommandEnvNotAllowed { .. } => "command.env_not_allowed",
             CommandSpawnFailed { .. } => "command.spawn_failed",
             CommandTimeout => "command.timeout",
+            SecretRefReservedForAuth { .. } => "secrets.reserved_for_auth",
+            InvalidSecretRefName { .. }
+            | DuplicateSecretRef { .. }
+            | InvalidTimeoutAction
+            | InvalidTrustedProxy { .. }
+            | InvalidMcpServer { .. }
+            | DuplicateMcpServer { .. }
+            | DependencyMissingName { .. }
+            | DuplicateDependency { .. } => "config.invalid",
+            PermissionNotFound { .. } => "permission.not_found",
+            InvalidPermissionTransition { .. } => "permission.invalid_transition",
+            StateInvalidJson { .. } => "state.invalid_json",
+            RateLimited => "auth.rate_limited",
+            IpBlocked { .. } => "auth.ip_blocked",
+            OriginNotAllowed { .. } => "auth.origin_not_allowed",
         }
     }
 
@@ -697,6 +771,39 @@ impl StackError {
             CommandTimeout => {
                 "command timed out before the subprocess produced an exit status".to_owned()
             }
+            SecretRefReservedForAuth { ref_name, kind } => {
+                format!("secret ref `{ref_name}` (from {kind}) collides with the auth key ref")
+            }
+            InvalidSecretRefName { name } => format!("secret ref name `{name}` is invalid"),
+            DuplicateSecretRef { name } => {
+                format!("secret ref `{name}` is declared more than once")
+            }
+            InvalidTimeoutAction => {
+                "permissions.timeout_action must be one of deny, approve".to_owned()
+            }
+            InvalidTrustedProxy { value } => {
+                format!("security.http.trusted_proxies entry `{value}` is not a valid IP address")
+            }
+            InvalidMcpServer { name, reason } => {
+                format!("mcp.servers entry `{name}` is invalid: {reason}")
+            }
+            DuplicateMcpServer { name } => {
+                format!("mcp.servers contains duplicate name `{name}`")
+            }
+            DependencyMissingName { category } => {
+                format!("dependencies.{category} entry has empty name")
+            }
+            DuplicateDependency { category, name } => {
+                format!("dependencies.{category} contains duplicate name `{name}`")
+            }
+            PermissionNotFound { id } => format!("permission `{id}` was not found"),
+            InvalidPermissionTransition { id, from, to } => {
+                format!("permission `{id}` cannot transition from `{from}` to `{to}`")
+            }
+            StateInvalidJson { field, .. } => format!("durable JSON corruption in `{field}`"),
+            RateLimited => "rate limit exceeded".to_owned(),
+            IpBlocked { .. } => "client IP is temporarily blocked".to_owned(),
+            OriginNotAllowed { .. } => "origin is not allowed".to_owned(),
         }
     }
 
@@ -814,6 +921,20 @@ impl StackError {
             WorkspaceUploadsNotUnderRoot => StatusCode::BAD_REQUEST,
             CommandNotFound { .. } => StatusCode::NOT_FOUND,
             CommandSpawnFailed { .. } | CommandTimeout => StatusCode::INTERNAL_SERVER_ERROR,
+            SecretRefReservedForAuth { .. }
+            | InvalidSecretRefName { .. }
+            | DuplicateSecretRef { .. }
+            | InvalidTimeoutAction
+            | InvalidTrustedProxy { .. }
+            | InvalidMcpServer { .. }
+            | DuplicateMcpServer { .. }
+            | DependencyMissingName { .. }
+            | DuplicateDependency { .. }
+            | InvalidPermissionTransition { .. } => StatusCode::BAD_REQUEST,
+            PermissionNotFound { .. } => StatusCode::NOT_FOUND,
+            StateInvalidJson { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            RateLimited | IpBlocked { .. } => StatusCode::TOO_MANY_REQUESTS,
+            OriginNotAllowed { .. } => StatusCode::FORBIDDEN,
         }
     }
 }
