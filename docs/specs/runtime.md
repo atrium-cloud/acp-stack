@@ -114,6 +114,18 @@ secret_key_ref = "AWS_SECRET_ACCESS_KEY"
 region = "us-east-1"
 ```
 
+## Command Gateway
+
+The Command Gateway is the runtime path for `POST /v1/commands`. Each submitted shell string is evaluated against `[permissions].deny` and `[permissions].review` glob lists, then spawned via `[workspace].default_shell -c <command>` with the child process in a fresh process group. The supervisor:
+
+- resolves `cwd` under `workspace.root` (relative paths join the root, absolute paths must canonicalize inside);
+- clears the child environment and forwards only the variables explicitly listed in the request, each one cross-checked against `[commands].env_allowlist`. The `commands` row records the env *names* only — never values — so SQLite history does not become a secondary plaintext store for credentials that callers pass via env;
+- reads stdout/stderr in bounded chunks (up to 4 KiB per read), persisting each chunk as a `command.stdout` / `command.stderr` event and fanning it out on the `commands.{id}` WebSocket topic — chunk boundaries are not guaranteed to align with newlines;
+- caps total persisted bytes at `[commands].max_output_bytes`, after which it drains the pipes and sets the row's `truncated` flag;
+- enforces the per-request `timeout` (or `[commands].default_timeout`) and the explicit `POST /v1/commands/{id}/cancel` path with a two-stage SIGTERM → SIGKILL transition separated by `[commands].cancel_grace`.
+
+The 0.0.1 gateway does not yet hold submissions in an approval queue; `review` glob matches behave like `deny` outside of `mode = "auto"`.
+
 ## Dependencies And MCP
 
 The dependency manifest is part of the reusable environment config.

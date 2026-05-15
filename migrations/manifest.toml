@@ -17,3 +17,8 @@ sqlite_file = "003_agent_capabilities.sqlite.sql"
 id = 4
 name = "sessions"
 sqlite_file = "004_sessions.sqlite.sql"
+
+[[migration]]
+id = 5
+name = "commands_schema"
+sqlite_file = "005_commands_schema.sqlite.sql"
