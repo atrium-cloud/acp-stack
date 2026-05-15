@@ -179,6 +179,13 @@ pub enum StackError {
         source_type: &'static str,
     },
 
+    #[error("{field} is not valid when {type_field} is {type_value}")]
+    InvalidConfigFieldForType {
+        field: &'static str,
+        type_field: &'static str,
+        type_value: &'static str,
+    },
+
     #[error("{field} must be a socket address")]
     InvalidSocketAddress { field: &'static str },
 
@@ -199,6 +206,15 @@ pub enum StackError {
 
     #[error("agent.expected_sha256 must be exactly 64 lowercase hex characters")]
     InvalidExpectedSha256,
+
+    #[error("agent.install.type must be one of shell, registry")]
+    InvalidAgentInstallType,
+
+    #[error("{field} must start with http:// or https://")]
+    UrlMustBeHttp { field: &'static str },
+
+    #[error("{field} must start with https://")]
+    UrlMustBeHttps { field: &'static str },
 
     #[error(
         "auth.session_key_ref and auth.admin_key_ref must be different names; aliasing them would collapse the session/admin boundary"
@@ -245,6 +261,25 @@ pub enum StackError {
 
     #[error("agent installer hit the 10-minute timeout")]
     AgentInstallerTimeout,
+
+    #[error("failed to fetch ACP registry from {url}: {source}")]
+    AgentRegistryFetch {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("failed to parse ACP registry response: {source}")]
+    AgentRegistryParse {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("ACP registry does not contain agent `{id}`")]
+    AgentRegistryMissing { id: String },
+
+    #[error("ACP registry entry `{id}` has no supported install distribution")]
+    AgentRegistryUnsupportedDistribution { id: String },
 
     #[error("agent binary sha256 mismatch: expected {expected}, got {actual}")]
     AgentSha256Mismatch { expected: String, actual: String },
@@ -386,6 +421,7 @@ impl StackError {
             MissingSection { .. }
             | MissingField { .. }
             | InvalidWorkspaceSourceField { .. }
+            | InvalidConfigFieldForType { .. }
             | InvalidSocketAddress { .. }
             | NonZeroRequired { .. }
             | PathMustBeAbsolute { .. }
@@ -393,6 +429,9 @@ impl StackError {
             | InvalidWorkspaceSourceType
             | InvalidAgentRestart
             | InvalidExpectedSha256
+            | InvalidAgentInstallType
+            | UrlMustBeHttp { .. }
+            | UrlMustBeHttps { .. }
             | AuthRefsNotDistinct => "config.invalid",
             SecretReservedForAuth { .. } => "secrets.reserved_for_auth",
             ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
@@ -402,6 +441,12 @@ impl StackError {
             AgentInstallerFailed { .. } => "agent.installer_failed",
             AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
             AgentInstallerTimeout => "agent.installer_timeout",
+            AgentRegistryFetch { .. } => "agent.registry_fetch_failed",
+            AgentRegistryParse { .. } => "agent.registry_parse_failed",
+            AgentRegistryMissing { .. } => "agent.registry_missing",
+            AgentRegistryUnsupportedDistribution { .. } => {
+                "agent.registry_unsupported_distribution"
+            }
             AgentSha256Mismatch { .. } => "agent.sha256_mismatch",
             AgentSpawnFailed { .. } => "agent.spawn_failed",
             AgentAlreadyRunning => "agent.already_running",
@@ -491,6 +536,13 @@ impl StackError {
             InvalidWorkspaceSourceField { field, source_type } => {
                 format!("{field} is not valid when workspace.source.type is {source_type}")
             }
+            InvalidConfigFieldForType {
+                field,
+                type_field,
+                type_value,
+            } => {
+                format!("{field} is not valid when {type_field} is {type_value}")
+            }
             InvalidSocketAddress { field } => format!("{field} must be a socket address"),
             NonZeroRequired { field } => format!("{field} must be greater than zero"),
             PathMustBeAbsolute { field } => format!("{field} must be absolute"),
@@ -502,6 +554,11 @@ impl StackError {
             InvalidExpectedSha256 => {
                 "agent.expected_sha256 must be exactly 64 lowercase hex characters".to_owned()
             }
+            InvalidAgentInstallType => {
+                "agent.install.type must be one of shell, registry".to_owned()
+            }
+            UrlMustBeHttp { field } => format!("{field} must start with http:// or https://"),
+            UrlMustBeHttps { field } => format!("{field} must start with https://"),
             AuthRefsNotDistinct => {
                 "auth.session_key_ref and auth.admin_key_ref must be different names".to_owned()
             }
@@ -523,6 +580,14 @@ impl StackError {
                 format!("agent installer ran but `creates = {name}` did not resolve afterwards")
             }
             AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
+            AgentRegistryFetch { .. } => "failed to fetch ACP registry".to_owned(),
+            AgentRegistryParse { .. } => "failed to parse ACP registry response".to_owned(),
+            AgentRegistryMissing { id } => {
+                format!("ACP registry does not contain agent `{id}`")
+            }
+            AgentRegistryUnsupportedDistribution { id } => {
+                format!("ACP registry entry `{id}` has no supported install distribution")
+            }
             AgentSha256Mismatch { expected, actual } => {
                 format!("agent binary sha256 mismatch: expected {expected}, got {actual}")
             }
@@ -592,6 +657,7 @@ impl StackError {
             | MissingSection { .. }
             | MissingField { .. }
             | InvalidWorkspaceSourceField { .. }
+            | InvalidConfigFieldForType { .. }
             | InvalidSocketAddress { .. }
             | NonZeroRequired { .. }
             | PathMustBeAbsolute { .. }
@@ -599,6 +665,9 @@ impl StackError {
             | InvalidWorkspaceSourceType
             | InvalidAgentRestart
             | InvalidExpectedSha256
+            | InvalidAgentInstallType
+            | UrlMustBeHttp { .. }
+            | UrlMustBeHttps { .. }
             | AuthRefsNotDistinct
             | SecretReservedForAuth { .. }
             | ImportChangesAuthRef { .. } => StatusCode::BAD_REQUEST,
@@ -650,6 +719,10 @@ impl StackError {
             AgentInstallerFailed { .. }
             | AgentInstallerCreatesMissing { .. }
             | AgentInstallerTimeout
+            | AgentRegistryFetch { .. }
+            | AgentRegistryParse { .. }
+            | AgentRegistryMissing { .. }
+            | AgentRegistryUnsupportedDistribution { .. }
             | AgentSha256Mismatch { .. }
             | AgentSpawnFailed { .. }
             | AgentApiRequest { .. }

@@ -2,6 +2,32 @@ use acp_stack::config::{Config, load_config_from_str};
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
 
+fn with_codex_adapter(input: &str) -> String {
+    input.replace(
+        r#"restart = "on-crash""#,
+        r#"restart = "on-crash"
+
+[agent.adapter]
+id = "codex-acp"
+name = "Codex ACP Adapter"
+upstream_agent = "codex-cli"
+source_url = "https://github.com/zed-industries/codex-acp""#,
+    )
+}
+
+fn with_registry_install(input: &str) -> String {
+    input.replace(
+        r#"[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode""#,
+        r#"[agent.install]
+type = "registry"
+id = "opencode"
+creates = "opencode""#,
+    )
+}
+
 #[test]
 fn parses_valid_config_and_exports_canonical_toml() {
     let config = load_config_from_str(VALID_CONFIG).expect("valid config should parse");
@@ -17,8 +43,33 @@ fn parses_valid_config_and_exports_canonical_toml() {
         toml::from_str(&canonical).expect("canonical TOML should parse as config");
 
     assert_eq!(round_tripped.agent.id, "opencode");
+    assert!(round_tripped.agent.adapter.is_none());
     assert!(canonical.contains("[security.http]"));
+    assert!(!canonical.contains("[agent.adapter]"));
     assert!(canonical.contains("[agent.install]"));
+}
+
+#[test]
+fn parses_agent_adapter_metadata_and_exports_canonical_toml() {
+    let config = load_config_from_str(&with_codex_adapter(VALID_CONFIG))
+        .expect("adapter config should parse");
+
+    let canonical = config
+        .to_canonical_toml()
+        .expect("canonical TOML should serialize");
+    let round_tripped: Config =
+        toml::from_str(&canonical).expect("canonical TOML should parse as config");
+
+    assert_eq!(
+        round_tripped
+            .agent
+            .adapter
+            .as_ref()
+            .expect("adapter metadata")
+            .id,
+        "codex-acp"
+    );
+    assert!(canonical.contains("[agent.adapter]"));
 }
 
 #[test]
@@ -391,6 +442,137 @@ fn rejects_short_expected_sha256() {
         error
             .to_string()
             .contains("agent.expected_sha256 must be exactly 64 lowercase hex characters")
+    );
+}
+
+#[test]
+fn parses_native_agent_without_adapter_metadata() {
+    let parsed = load_config_from_str(VALID_CONFIG).expect("native agent config should parse");
+    assert!(parsed.agent.adapter.is_none());
+}
+
+#[test]
+fn rejects_empty_agent_adapter_id() {
+    let config = with_codex_adapter(VALID_CONFIG).replace(r#"id = "codex-acp""#, r#"id = """#);
+    let error = load_config_from_str(&config).expect_err("empty adapter id should fail");
+    assert!(
+        error.to_string().contains("agent.adapter.id is required"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_empty_agent_adapter_name() {
+    let config =
+        with_codex_adapter(VALID_CONFIG).replace(r#"name = "Codex ACP Adapter""#, r#"name = """#);
+    let error = load_config_from_str(&config).expect_err("empty adapter name should fail");
+    assert!(
+        error.to_string().contains("agent.adapter.name is required"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_empty_agent_adapter_upstream_agent() {
+    let config = with_codex_adapter(VALID_CONFIG)
+        .replace(r#"upstream_agent = "codex-cli""#, r#"upstream_agent = """#);
+    let error = load_config_from_str(&config).expect_err("empty upstream agent should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.adapter.upstream_agent is required"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_non_http_agent_adapter_source_url() {
+    let config = with_codex_adapter(VALID_CONFIG).replace(
+        r#"source_url = "https://github.com/zed-industries/codex-acp""#,
+        r#"source_url = "git@github.com:zed-industries/codex-acp.git""#,
+    );
+    let error = load_config_from_str(&config).expect_err("non-http source url should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.adapter.source_url must start with http:// or https://"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parses_registry_agent_install() {
+    let parsed = load_config_from_str(&with_registry_install(VALID_CONFIG))
+        .expect("registry install config should parse");
+    let install = parsed.agent.install.expect("install config");
+    assert_eq!(install.install_type, "registry");
+    assert_eq!(install.id.as_deref(), Some("opencode"));
+    assert!(install.shell.is_none());
+}
+
+#[test]
+fn rejects_registry_agent_install_with_shell() {
+    let config = with_registry_install(VALID_CONFIG).replace(
+        r#"creates = "opencode""#,
+        r#"creates = "opencode"
+shell = "curl -fsSL https://example.com/install | sh""#,
+    );
+    let error = load_config_from_str(&config).expect_err("registry shell should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.install.shell is not valid when agent.install.type is registry"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_registry_agent_install_without_id() {
+    let config = with_registry_install(VALID_CONFIG).replace(
+        r#"[agent.install]
+type = "registry"
+id = "opencode"
+creates = "opencode""#,
+        r#"[agent.install]
+type = "registry"
+creates = "opencode""#,
+    );
+    let error = load_config_from_str(&config).expect_err("registry id should be required");
+    assert!(
+        error.to_string().contains("agent.install.id is required"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_shell_agent_install_without_shell() {
+    let config = VALID_CONFIG.replace(
+        r#"shell = "curl -fsSL https://opencode.ai/install | bash"
+"#,
+        "",
+    );
+    let error = load_config_from_str(&config).expect_err("shell install should require shell");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.install.shell is required"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_non_https_registry_url() {
+    let config = with_registry_install(VALID_CONFIG).replace(
+        r#"creates = "opencode""#,
+        r#"creates = "opencode"
+registry_url = "http://localhost:8080/registry.json""#,
+    );
+    let error = load_config_from_str(&config).expect_err("registry url should require https");
+    assert!(
+        error
+            .to_string()
+            .contains("agent.install.registry_url must start with https://"),
+        "{error}"
     );
 }
 

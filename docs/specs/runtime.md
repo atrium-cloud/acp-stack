@@ -26,27 +26,40 @@ Runtime process behavior:
 
 ## Agent Installation
 
-0.0.1 supports declared installer commands for agents with stable non-interactive installation flows. This is intentionally simpler than registry resolution.
+The normal `acps` installation flow should install only agents or adapters published through the ACP registry. The registry supplies the agent id, package metadata, and distribution options such as platform-specific binaries or package-manager launchers. If an upstream agent needs an adapter, the registry entry for the adapter is the install unit and `[agent.adapter]` records the relationship to the upstream agent.
 
 Example:
 
 ```toml
+[agent]
+id = "opencode"
+name = "OpenCode"
+command = "opencode"
+args = ["--acp"]
+cwd = "/workspace"
+env = ["OPENCODE_API_KEY"]
+restart = "on-crash"
+
 [agent.install]
-shell = "curl -fsSL https://opencode.ai/install | bash"
+type = "registry"
+id = "opencode"
 creates = "opencode"
 ```
+
+Adapter-backed agents use the adapter as the installed and launched ACP process. As of 2026-05-15, the externally identified adapter-backed agents are Claude Agent, Codex CLI, and Pi. For API-key Codex deployments, `acps` should resolve to a `codex-acp` registry entry, install the adapter distribution, and record `[agent.adapter]` metadata that identifies `codex-cli` as the upstream agent. Browser OAuth sessions and account cookies are not passed through `acp-stack`; agents that require interactive OAuth remain outside the initial supported runtime path.
 
 Install behavior:
 
 - `acps init` may run the installer after explicit user confirmation.
-- `acps agent install` runs the configured installer.
+- `acps agent install` resolves the configured agent or adapter from the ACP registry before installing.
 - `creates` is checked before and after installation to detect whether the command is already available.
 - installer stdout/stderr and exit status are written to SQLite logs.
 - in 0.0.1, installer execution is admin-tier and logged; permission-pipeline mediation lands with the 0.0.2 permission system.
 - the resulting command still launches through the normal `[agent]` command, args, cwd, env, and hash verification path.
+- registry `npx` package distributions install through `npm install -g`; registry `uvx` package distributions install through `uv tool install`; binary registry distributions are not installed until archive extraction support lands.
 - binary URL installers download to an explicit destination, verify `sha256` when provided, mark the file executable, and then check `creates`.
 
-The 0.0.x line does not resolve agents from an ACP registry. Future registry installers should resolve into the same `[agent]` and `[agent.install]` shape.
+Direct shell recipes are a low-level/manual escape hatch. They are not the default way operators discover or install agents because arbitrary install scripts bypass the ACP registry's curated list and metadata.
 
 ## Workspace And Files
 
