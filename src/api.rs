@@ -46,7 +46,7 @@ use zeroize::Zeroizing;
 use crate::acp_bridge::AgentCapabilitiesDto;
 use crate::agent_installer::run_installer_capture;
 use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_failure};
-use crate::config::Config;
+use crate::config::{AgentAdapterConfig, Config};
 use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
@@ -702,6 +702,7 @@ struct AgentStatusJson {
     args: Vec<String>,
     cwd: Option<String>,
     restart: String,
+    adapter: Option<AgentAdapterConfig>,
 }
 
 #[derive(Serialize)]
@@ -730,6 +731,7 @@ async fn status_agent_handler(
             args: agent.args.clone(),
             cwd: agent.cwd.clone(),
             restart: agent.restart.clone(),
+            adapter: agent.adapter.clone(),
         },
         process_state: format!("{:?}", snapshot.state).to_lowercase(),
         pid: snapshot.pid,
@@ -1256,6 +1258,7 @@ async fn agent_stop_handler(
 #[derive(Serialize)]
 struct AgentCapabilitiesResponseBody {
     agent_id: String,
+    adapter: Option<AgentAdapterConfig>,
     captured_at: String,
     capabilities: serde_json::Value,
     process_state: String,
@@ -1277,6 +1280,7 @@ async fn agent_capabilities_handler(
     })?;
     Ok(ApiSuccess::new(AgentCapabilitiesResponseBody {
         agent_id: record.agent_id,
+        adapter: state.config.agent.adapter.clone(),
         captured_at: record.captured_at,
         capabilities,
         process_state: format!("{:?}", snapshot.state).to_lowercase(),
