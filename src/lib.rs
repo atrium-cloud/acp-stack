@@ -12,5 +12,6 @@ pub mod secrets;
 pub mod state;
 pub mod supervisor;
 pub mod tracing_init;
+pub mod workspace;
 
 pub use error::{Result, StackError};
