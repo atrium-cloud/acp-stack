@@ -1,3 +1,4 @@
+use crate::agent_installer::run_installer;
 use crate::api::{self, AppState};
 use crate::auth::generate_api_key;
 use crate::config::{self, Config};
@@ -11,7 +12,9 @@ use crate::state::{EventFilter, StateStore, default_state_path};
 use crate::supervisor::ServerLifecycle;
 use base64::Engine;
 use clap::{Args, Parser, Subcommand};
+use std::collections::HashMap;
 use std::io::BufRead as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -49,6 +52,22 @@ enum Command {
         #[command(subcommand)]
         command: LogsCommand,
     },
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// Run the configured `[agent.install]` shell installer.
+    Install,
+    /// Ask the running daemon to start the configured agent.
+    Start,
+    /// Ask the running daemon to stop the configured agent.
+    Stop,
+    /// Print the latest persisted agent state from SQLite.
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -138,6 +157,21 @@ struct LogsQueryArgs {
 }
 
 pub fn run() -> Result<()> {
+    // Test fixture, debug builds only: an internal argv sentinel makes this
+    // binary behave as a minimal ACP agent for integration tests instead of
+    // parsing CLI args. Production release builds compile this branch out.
+    #[cfg(debug_assertions)]
+    {
+        let mut args = std::env::args_os();
+        let _program = args.next();
+        if args.next().as_deref() == Some(std::ffi::OsStr::new("__acps-test-fake-agent")) {
+            let fake_args = args
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            return run_fake_agent(fake_args);
+        }
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -161,6 +195,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Secrets { command } => run_secrets_command(command),
         Command::Config { command } => run_config_command(command),
         Command::Logs { command } => run_logs_command(command),
+        Command::Agent { command } => run_agent_command(command),
     };
 
     if let Err(error) = &result {
@@ -593,7 +628,13 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         let state_handle = app_state.state.clone();
         lifecycle.started(&state_handle, &local).await?;
         eprintln!("acps serve: listening on {local}");
+        let agent_supervisor = app_state.agent_supervisor.clone();
         let serve_result = api::serve(app_state, listener).await;
+        // Tear down the agent BEFORE recording server.stopped so the
+        // durable trail shows the agent went down first. A leaked agent
+        // process outliving the daemon is a real bug, not a theoretical
+        // one: see superflous-restart guarantees in security.md.
+        agent_supervisor.shutdown_on_serve_exit(&state_handle).await;
         let reason = match &serve_result {
             Ok(()) => "signal",
             Err(_) => "error",
@@ -606,6 +647,258 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         eprintln!("acps serve: stopped ({reason})");
         serve_result
     })
+}
+
+/// Minimal ACP agent fixture used only by integration tests. Reads NDJSON
+/// JSON-RPC from stdin and writes hardcoded responses to stdout. Stays alive
+/// until stdin closes, at which point it exits cleanly (mirroring how a real
+/// ACP agent terminates when the client drops the connection).
+///
+/// Recognizes:
+/// - `initialize` -> protocolVersion = 1, agentCapabilities empty, agentInfo set.
+/// - any other method -> JSON-RPC method-not-found error.
+///
+/// Notifications (messages without an `id`) are silently dropped.
+///
+/// Compiled only into debug builds — release binaries do not expose this code
+/// path.
+#[cfg(debug_assertions)]
+fn run_fake_agent(args: Vec<String>) -> Result<()> {
+    use std::io::{BufRead, Write};
+    let mut title = "acps fake agent".to_owned();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--assert-env-absent" {
+            if let Some(name) = iter.next() {
+                title = if std::env::var_os(name).is_some() {
+                    format!("env leaked: {name}")
+                } else {
+                    "env absent".to_owned()
+                };
+            }
+        }
+    }
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut stdin = stdin.lock();
+    let mut stdout = stdout.lock();
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        match stdin.read_line(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(source) => return Err(StackError::StdinRead { source }),
+        }
+        let trimmed = buf.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id = value.get("id");
+        let method = value.get("method").and_then(serde_json::Value::as_str);
+        // Notifications have no id; ignore them.
+        let Some(id) = id else {
+            continue;
+        };
+        let response = match method {
+            Some("initialize") => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "agentInfo": {
+                        "name": "acps-fake-agent",
+                        "title": title,
+                        "version": "0.0.1"
+                    },
+                    "authMethods": []
+                }
+            }),
+            _ => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": "method not found"
+                }
+            }),
+        };
+        writeln!(stdout, "{response}").map_err(|source| StackError::ServeIo { source })?;
+        stdout
+            .flush()
+            .map_err(|source| StackError::ServeIo { source })?;
+    }
+}
+
+fn run_agent_command(command: AgentCommand) -> Result<()> {
+    match command {
+        AgentCommand::Install => run_agent_install(),
+        AgentCommand::Start => run_agent_daemon_post("/v1/agent/start", "start"),
+        AgentCommand::Stop => run_agent_daemon_post("/v1/agent/stop", "stop"),
+        AgentCommand::Status => run_agent_status(),
+    }
+}
+
+fn run_agent_daemon_post(path: &'static str, label: &'static str) -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let store = SecretStore::open(&home)?;
+    let admin_key = store.get(&config.auth.admin_key_ref)?.to_owned();
+    let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    let body = runtime.block_on(post_agent_daemon(&base_url, path, &admin_key))?;
+    if label == "start" {
+        let pid = body["data"]["pid"]
+            .as_u64()
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        println!("agent start: running");
+        println!("pid: {pid}");
+    } else {
+        let exit_status = body["data"]["exit_status"]
+            .as_i64()
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        println!("agent stop: stopped");
+        println!("exit_status: {exit_status}");
+    }
+    Ok(())
+}
+
+async fn post_agent_daemon(
+    base_url: &str,
+    path: &'static str,
+    admin_key: &str,
+) -> Result<serde_json::Value> {
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let response = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(admin_key)
+        .send()
+        .await
+        .map_err(|source| StackError::AgentApiRequest { path, source })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|source| StackError::AgentApiRequest { path, source })?;
+    if !status.is_success() {
+        return Err(StackError::AgentApiStatus { path, status, body });
+    }
+    serde_json::from_str(&body).map_err(|err| StackError::AgentInitializeFailed {
+        reason: format!("agent API response was not JSON: {err}"),
+    })
+}
+
+fn daemon_base_url(public_url: Option<&str>, bind: &str) -> Result<String> {
+    if let Some(public_url) = public_url.filter(|value| !value.trim().is_empty()) {
+        return Ok(public_url.trim_end_matches('/').to_owned());
+    }
+    let socket: SocketAddr = bind
+        .parse()
+        .map_err(|_| StackError::InvalidSocketAddress { field: "api.bind" })?;
+    let host = match socket.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST).to_string(),
+        IpAddr::V6(ip) if ip.is_unspecified() => format!("[{}]", Ipv6Addr::LOCALHOST),
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    Ok(format!("http://{host}:{}", socket.port()))
+}
+
+fn run_agent_install() -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let install = config
+        .agent
+        .install
+        .clone()
+        .ok_or(StackError::AgentNotConfigured)?;
+    let expected_sha256 = config.agent.expected_sha256.clone();
+
+    let state_path = default_state_path(&home);
+    let state_dir = parent_dir(&state_path)?;
+    create_dir_owner_only(state_dir)?;
+    pre_create_owner_only(&state_path)?;
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    set_owner_only_file(&state_path)?;
+
+    let env = resolve_agent_env_for_cli(&home, &config)?;
+    let workspace_root = std::path::PathBuf::from(config.workspace.root.clone());
+    let outcome = run_installer(
+        &install,
+        expected_sha256.as_deref(),
+        env,
+        &workspace_root,
+        &store,
+    )?;
+
+    println!("agent install: {}", outcome.label());
+    println!("path: {}", outcome.path().display());
+    println!("sha256: {}", outcome.sha256());
+    Ok(())
+}
+
+fn resolve_agent_env_for_cli(
+    home: &std::path::Path,
+    config: &Config,
+) -> Result<HashMap<String, String>> {
+    if config.agent.env.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let store = SecretStore::open(home)?;
+    let mut env = HashMap::with_capacity(config.agent.env.len());
+    for name in &config.agent.env {
+        let value = store.get(name)?;
+        env.insert(name.clone(), value.to_owned());
+    }
+    Ok(env)
+}
+
+fn run_agent_status() -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let state_path = default_state_path(&home);
+    let state_dir = parent_dir(&state_path)?;
+    create_dir_owner_only(state_dir)?;
+    pre_create_owner_only(&state_path)?;
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    set_owner_only_file(&state_path)?;
+
+    println!("agent: {} ({})", config.agent.name, config.agent.id);
+    println!("command: {}", config.agent.command);
+
+    match store.latest_agent_capabilities(&config.agent.id)? {
+        Some(record) => {
+            println!("latest capabilities captured: {}", record.captured_at);
+            println!("capabilities_json: {}", record.capabilities_json);
+        }
+        None => println!("latest capabilities: none recorded yet"),
+    }
+
+    let lifecycle = store.query_agent_lifecycle(10)?;
+    if lifecycle.is_empty() {
+        println!("recent lifecycle: (no rows)");
+    } else {
+        println!("recent lifecycle:");
+        for event in lifecycle {
+            println!(
+                "  {} {} {}",
+                event.created_at, event.event_kind, event.message
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_logs_command(command: LogsCommand) -> Result<()> {
@@ -736,7 +1029,7 @@ creates = "acp-agent"
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{daemon_base_url, strip_ansi};
 
     #[test]
     fn strip_ansi_removes_csi_sequences() {
@@ -756,5 +1049,33 @@ mod tests {
     fn strip_ansi_preserves_other_control_characters() {
         // Tabs, newlines, and other control chars survive: serde_json escapes them downstream.
         assert_eq!(strip_ansi("a\tb\nc"), "a\tb\nc");
+    }
+
+    #[test]
+    fn daemon_base_url_prefers_public_url() {
+        assert_eq!(
+            daemon_base_url(Some("https://agent.example.com/root"), "0.0.0.0:7700").expect("url"),
+            "https://agent.example.com/root"
+        );
+    }
+
+    #[test]
+    fn daemon_base_url_rewrites_wildcard_binds_to_loopback() {
+        assert_eq!(
+            daemon_base_url(None, "0.0.0.0:7700").expect("url"),
+            "http://127.0.0.1:7700"
+        );
+        assert_eq!(
+            daemon_base_url(None, "[::]:7700").expect("url"),
+            "http://[::1]:7700"
+        );
+    }
+
+    #[test]
+    fn daemon_base_url_preserves_explicit_loopback_bind() {
+        assert_eq!(
+            daemon_base_url(None, "127.0.0.1:7700").expect("url"),
+            "http://127.0.0.1:7700"
+        );
     }
 }
