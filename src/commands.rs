@@ -30,6 +30,7 @@ use tokio::time::{Instant, sleep, timeout};
 use crate::config::{Config, PermissionsConfig, parse_duration_string};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
+use crate::permissions::{NewPermission, PermissionOutcome, PermissionService, PermissionSource};
 use crate::state::{CommandRecord, CommandStatus, NewCommandRecord, StateStore};
 
 /// Inputs for `CommandGateway::submit`. Mirror the HTTP request body shape
@@ -60,6 +61,11 @@ pub struct CommandGateway {
     event_hub: EventHub,
     config: Arc<Config>,
     running: Arc<TokioMutex<HashMap<String, RunningCommand>>>,
+    permissions: PermissionService,
+    /// Map command id → pending permission id, so cancel() can also cancel the
+    /// permission row when a caller cancels a command that is still awaiting
+    /// approval. Cleared by the supervisor task once the decision lands.
+    awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
 }
 
 impl CommandGateway {
@@ -67,12 +73,15 @@ impl CommandGateway {
         state: Arc<TokioMutex<StateStore>>,
         event_hub: EventHub,
         config: Arc<Config>,
+        permissions: PermissionService,
     ) -> Self {
         Self {
             state,
             event_hub,
             config,
             running: Arc::new(TokioMutex::new(HashMap::new())),
+            permissions,
+            awaiting_permission: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
@@ -80,36 +89,22 @@ impl CommandGateway {
     /// Returns the freshly-inserted record (status = pending → running once
     /// the supervisor confirms the spawn).
     pub async fn submit(&self, request: SubmitRequest) -> Result<CommandRecord> {
-        // 1. Policy. Reject up front so a denied row never lands in SQLite.
+        // 1. Policy. `deny` rejects synchronously; `review`/`locked` route
+        //    through the permission pipeline so an out-of-band approver can
+        //    decide before the subprocess is spawned. The row is still
+        //    inserted in `pending` so the caller has an id to poll/cancel.
         let decision = evaluate_policy(&request.command, &self.config.permissions);
-        let review_flagged =
-            matches!(decision, PolicyDecision::Review) && self.config.permissions.mode == "auto";
-        match decision {
+        let mode = self.config.permissions.mode.as_str();
+        let review_flagged = matches!(decision, PolicyDecision::Review) && mode == "auto";
+        let needs_approval = match decision {
             PolicyDecision::Deny => {
                 return Err(StackError::CommandDenied {
                     reason: "matched [permissions].deny pattern",
                 });
             }
-            PolicyDecision::Review => {
-                if self.config.permissions.mode != "auto" {
-                    return Err(StackError::CommandDenied {
-                        reason: "matched [permissions].review pattern; approval queue not implemented",
-                    });
-                }
-            }
-            PolicyDecision::Allow => {
-                // `locked` mode requires explicit approval for every command,
-                // but there is no approval queue in phase 1 (see
-                // docs/specs/security.md:139-148). Reject unmatched submissions
-                // up front so the spec's "approve every command" promise is not
-                // silently weakened to "approve a few named patterns".
-                if self.config.permissions.mode == "locked" {
-                    return Err(StackError::CommandDenied {
-                        reason: "permissions.mode is locked; approval queue not implemented",
-                    });
-                }
-            }
-        }
+            PolicyDecision::Review => mode == "supervised" || mode == "locked",
+            PolicyDecision::Allow => mode == "locked",
+        };
 
         // 2. cwd resolution under workspace.root (must stay inside).
         let resolved_cwd = match &request.cwd {
@@ -193,10 +188,52 @@ impl CommandGateway {
             running.insert(record.id.clone(), RunningCommand { cancel_tx });
         }
 
+        // 7. If policy needs approval, create a pending permission row tied to
+        //    this command. The row's `detail_json` lists the command, cwd, and
+        //    env *names* — never values — so the durable record cannot leak
+        //    secrets even if the events table is replicated downstream.
+        let pending_permission = if needs_approval {
+            let env_names: Vec<String> = request
+                .env
+                .as_ref()
+                .map(|env| {
+                    let mut names: Vec<String> = env.keys().cloned().collect();
+                    names.sort();
+                    names
+                })
+                .unwrap_or_default();
+            let (perm_record, perm_rx) = self
+                .permissions
+                .request(NewPermission {
+                    source: PermissionSource::Command,
+                    requester: Some(format!("command:{}", record.id)),
+                    subject_id: Some(record.id.clone()),
+                    detail: json!({
+                        "command": request.command,
+                        "cwd": cwd_owned,
+                        "env_names": env_names,
+                        "policy_decision": match decision {
+                            PolicyDecision::Review => "review",
+                            PolicyDecision::Allow => "locked-default",
+                            PolicyDecision::Deny => "deny",
+                        },
+                    }),
+                })
+                .await?;
+            self.awaiting_permission
+                .lock()
+                .await
+                .insert(record.id.clone(), perm_record.id.clone());
+            Some(perm_rx)
+        } else {
+            None
+        };
+
         let task = SupervisorTask {
             state: self.state.clone(),
             event_hub: self.event_hub.clone(),
             running: self.running.clone(),
+            awaiting_permission: self.awaiting_permission.clone(),
             command_id: record.id.clone(),
             shell: self.config.workspace.default_shell.clone(),
             command: request.command.clone(),
@@ -208,6 +245,7 @@ impl CommandGateway {
             cancel_rx,
             max_output_bytes: self.config.commands.max_output_bytes as usize,
             review_flagged,
+            permission_rx: pending_permission,
         };
         tokio::spawn(task.run());
 
@@ -228,8 +266,24 @@ impl CommandGateway {
 
     /// Signal the running command to cancel. The supervisor task is
     /// responsible for issuing SIGTERM, waiting `cancel_grace`, and SIGKILLing
-    /// if the child has not exited. Returns the latest stored row.
+    /// if the child has not exited. Returns the latest stored row. If the
+    /// command is still awaiting a permission decision, also cancels the
+    /// permission row so its durable status reflects the operator's intent.
     pub async fn cancel(&self, id: &str) -> Result<CommandRecord> {
+        // Cancel the permission row first if any — the supervisor's select!
+        // on perm_rx will resolve as Canceled and finalize the command row
+        // without ever spawning a child.
+        let perm_id = self.awaiting_permission.lock().await.remove(id);
+        if let Some(perm_id) = perm_id {
+            if let Err(error) = self.permissions.cancel(&perm_id, "command-canceled").await {
+                tracing::warn!(
+                    error = %error,
+                    command_id = %id,
+                    permission_id = %perm_id,
+                    "failed to cancel pending permission alongside command cancel",
+                );
+            }
+        }
         let sender = {
             let running = self.running.lock().await;
             running.get(id).map(|entry| entry.cancel_tx.clone())
@@ -269,6 +323,7 @@ struct SupervisorTask {
     state: Arc<TokioMutex<StateStore>>,
     event_hub: EventHub,
     running: Arc<TokioMutex<HashMap<String, RunningCommand>>>,
+    awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
     command_id: String,
     shell: String,
     command: String,
@@ -280,10 +335,69 @@ struct SupervisorTask {
     cancel_rx: watch::Receiver<bool>,
     max_output_bytes: usize,
     review_flagged: bool,
+    permission_rx: Option<oneshot::Receiver<PermissionOutcome>>,
 }
 
 impl SupervisorTask {
     async fn run(mut self) {
+        // If a permission was required, wait for the decision (or a cancel)
+        // before spawning the child. The cancel watch is consulted alongside
+        // the permission receiver so an in-flight cancel resolves the
+        // permission row + the command row even if no operator decides.
+        if let Some(rx) = self.permission_rx.take() {
+            let outcome: PermissionOutcome = tokio::select! {
+                outcome = rx => match outcome {
+                    Ok(value) => value,
+                    Err(_) => PermissionOutcome::Expired,
+                },
+                changed = self.cancel_rx.changed() => {
+                    if changed.is_ok() && *self.cancel_rx.borrow() {
+                        PermissionOutcome::Canceled { reason: "command-canceled".to_owned() }
+                    } else {
+                        PermissionOutcome::Expired
+                    }
+                }
+            };
+            self.awaiting_permission
+                .lock()
+                .await
+                .remove(&self.command_id);
+            match outcome {
+                PermissionOutcome::Approved { .. } => {
+                    // fallthrough to spawn
+                }
+                PermissionOutcome::Denied { .. } => {
+                    self.finalize_without_spawn(
+                        CommandStatus::Failed,
+                        "command.permission_denied",
+                        json!({"command_id": self.command_id, "reason": "permission denied"}),
+                    )
+                    .await;
+                    self.deregister().await;
+                    return;
+                }
+                PermissionOutcome::Canceled { reason } => {
+                    self.finalize_without_spawn(
+                        CommandStatus::Canceled,
+                        "command.canceled",
+                        json!({"command_id": self.command_id, "reason": reason}),
+                    )
+                    .await;
+                    self.deregister().await;
+                    return;
+                }
+                PermissionOutcome::Expired => {
+                    self.finalize_without_spawn(
+                        CommandStatus::Failed,
+                        "command.permission_expired",
+                        json!({"command_id": self.command_id}),
+                    )
+                    .await;
+                    self.deregister().await;
+                    return;
+                }
+            }
+        }
         let started = Instant::now();
         let spawn_result = self.spawn_child();
         let mut child = match spawn_result {
@@ -622,6 +736,32 @@ impl SupervisorTask {
     async fn deregister(&self) {
         let mut running = self.running.lock().await;
         running.remove(&self.command_id);
+    }
+
+    /// Settle a command row that never reached the spawn step. Sets the
+    /// terminal status (`failed` for denied/expired, `canceled` for
+    /// caller-initiated cancel) and emits the corresponding event.
+    async fn finalize_without_spawn(
+        &self,
+        status: CommandStatus,
+        kind: &'static str,
+        payload: Value,
+    ) {
+        if let Err(error) = {
+            let store = self.state.lock().await;
+            store.finish_command(&self.command_id, status, None, None)
+        } {
+            tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command without spawn");
+        }
+        let payload_text = payload.to_string();
+        let event = {
+            let store = self.state.lock().await;
+            store.append_event("info", kind, "", &payload_text)
+        };
+        if let Ok(event) = event {
+            self.event_hub
+                .publish_command_event(&self.command_id, &event, payload);
+        }
     }
 }
 
@@ -976,6 +1116,7 @@ mod tests {
             mode: "auto".to_owned(),
             review: vec!["rm *".to_owned()],
             deny: vec!["rm *".to_owned()],
+            ..PermissionsConfig::default()
         };
         assert_eq!(
             evaluate_policy("rm -rf /", &permissions),
@@ -989,6 +1130,7 @@ mod tests {
             mode: "auto".to_owned(),
             review: vec!["sudo *".to_owned()],
             deny: vec!["shutdown".to_owned()],
+            ..PermissionsConfig::default()
         };
         assert_eq!(
             evaluate_policy("ls -la", &permissions),

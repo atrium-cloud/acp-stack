@@ -25,6 +25,8 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("installer_runs", 1),
     ("agent_capabilities", 3),
     ("prompts", 4),
+    ("permission_requests", 6),
+    ("permission_decisions", 6),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../migrations/manifest.toml");
@@ -35,6 +37,7 @@ const SQL_003_AGENT_CAPABILITIES: &str =
     include_str!("../migrations/003_agent_capabilities.sqlite.sql");
 const SQL_004_SESSIONS: &str = include_str!("../migrations/004_sessions.sqlite.sql");
 const SQL_005_COMMANDS_SCHEMA: &str = include_str!("../migrations/005_commands_schema.sqlite.sql");
+const SQL_006_PERMISSIONS: &str = include_str!("../migrations/006_permissions.sqlite.sql");
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUTH_FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -43,6 +46,8 @@ static INSTALLER_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static COMMAND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static PERMISSION_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static PERMISSION_DECISION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
@@ -163,6 +168,63 @@ impl CommandStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequestRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub source: String,
+    pub requester: Option<String>,
+    pub subject_id: Option<String>,
+    pub detail_json: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPermissionRequest<'a> {
+    pub source: &'a str,
+    pub requester: Option<&'a str>,
+    pub subject_id: Option<&'a str>,
+    pub detail_json: &'a str,
+    pub expires_at: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDecisionRecord {
+    pub id: String,
+    pub request_id: String,
+    pub created_at: String,
+    pub decision: String,
+    pub deciding_principal: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Canceled,
+}
+
+impl PermissionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PermissionStatus::Pending => "pending",
+            PermissionStatus::Approved => "approved",
+            PermissionStatus::Denied => "denied",
+            PermissionStatus::Expired => "expired",
+            PermissionStatus::Canceled => "canceled",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, PermissionStatus::Pending)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EventFilter<'a> {
     pub limit: u32,
@@ -236,6 +298,8 @@ pub struct StateCounts {
     pub installer_runs: i64,
     pub agent_capabilities: i64,
     pub prompts: i64,
+    pub permission_requests: i64,
+    pub permission_decisions: i64,
 }
 
 pub struct StateStore {
@@ -434,6 +498,25 @@ impl StateStore {
             SELECT id, created_at, level, kind, message, payload_json
             FROM events
             WHERE kind LIKE 'permission.%' OR kind LIKE 'permissions.%'
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_event)?;
+        Ok(collect_events(rows)?)
+    }
+
+    /// Query durable `events` rows whose kind starts with `security.*`.
+    /// Used by `GET /v1/logs/security` to surface rate-limit hits, IP-block
+    /// transitions, denied origins, oversized requests, and related defensive
+    /// events alongside the dedicated `auth_failures` table.
+    pub fn query_security_events(&self, limit: u32) -> Result<Vec<Event>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, level, kind, message, payload_json
+            FROM events
+            WHERE kind LIKE 'security.%'
             ORDER BY created_at DESC, id DESC
             LIMIT ?1
             "#,
@@ -1144,6 +1227,298 @@ impl StateStore {
             .optional()?)
     }
 
+    /// Insert a `permission_requests` row in the `pending` state. Returns the
+    /// fully-populated record so callers can publish it without re-reading.
+    pub fn append_permission_request(
+        &self,
+        input: NewPermissionRequest<'_>,
+    ) -> Result<PermissionRequestRecord> {
+        validate_json_payload(&self.connection, input.detail_json)?;
+        let now = current_timestamp();
+        let record = PermissionRequestRecord {
+            id: next_permission_request_id(),
+            created_at: now.clone(),
+            updated_at: now,
+            status: PermissionStatus::Pending.as_str().to_owned(),
+            source: input.source.to_owned(),
+            requester: input.requester.map(str::to_owned),
+            subject_id: input.subject_id.map(str::to_owned),
+            detail_json: input.detail_json.to_owned(),
+            expires_at: input.expires_at.map(str::to_owned),
+        };
+        self.connection.execute(
+            r#"
+            INSERT INTO permission_requests
+                (id, created_at, updated_at, status, source,
+                 requester, subject_id, detail_json, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                record.id,
+                record.created_at,
+                record.updated_at,
+                record.status,
+                record.source,
+                record.requester,
+                record.subject_id,
+                record.detail_json,
+                record.expires_at,
+            ],
+        )?;
+        Ok(record)
+    }
+
+    /// Transition a permission request to a terminal status. Returns the
+    /// pre-update status so the caller can validate the transition.
+    pub fn transition_permission_status(
+        &self,
+        id: &str,
+        new_status: PermissionStatus,
+    ) -> Result<PermissionStatus> {
+        let row: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM permission_requests WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current = row.ok_or_else(|| StackError::PermissionNotFound { id: id.to_owned() })?;
+        let current_status = parse_permission_status(&current);
+
+        // Reject any decision attempt once the row is terminal. Two competing
+        // session-key holders trying to approve the same request — or a client
+        // retrying after the first approve quietly landed — must see a clear
+        // "already decided" error rather than a silent success that re-fires
+        // the waiter (which has already been consumed).
+        if current_status.is_terminal() {
+            return Err(StackError::InvalidPermissionTransition {
+                id: id.to_owned(),
+                from: status_str(current_status),
+                to: status_str(new_status),
+            });
+        }
+
+        let affected = self.connection.execute(
+            r#"
+            UPDATE permission_requests
+            SET status = ?1, updated_at = ?2
+            WHERE id = ?3
+            "#,
+            params![new_status.as_str(), current_timestamp(), id],
+        )?;
+        if affected == 0 {
+            return Err(StackError::PermissionNotFound { id: id.to_owned() });
+        }
+        Ok(current_status)
+    }
+
+    /// Atomically transition the request to a terminal status AND insert the
+    /// matching `permission_decisions` row. Used by `PermissionService` so a
+    /// partial failure between the two writes cannot leave the audit trail
+    /// inconsistent (terminal row with no decision row). Returns the inserted
+    /// decision.
+    pub fn decide_permission(
+        &self,
+        id: &str,
+        new_status: PermissionStatus,
+        deciding_principal: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<PermissionDecisionRecord> {
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let row: Option<String> = transaction
+            .query_row(
+                "SELECT status FROM permission_requests WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current = row.ok_or_else(|| StackError::PermissionNotFound { id: id.to_owned() })?;
+        let current_status = parse_permission_status(&current);
+        if current_status.is_terminal() {
+            return Err(StackError::InvalidPermissionTransition {
+                id: id.to_owned(),
+                from: status_str(current_status),
+                to: status_str(new_status),
+            });
+        }
+        let affected = transaction.execute(
+            r#"
+            UPDATE permission_requests
+            SET status = ?1, updated_at = ?2
+            WHERE id = ?3
+            "#,
+            params![new_status.as_str(), current_timestamp(), id],
+        )?;
+        if affected == 0 {
+            return Err(StackError::PermissionNotFound { id: id.to_owned() });
+        }
+        let decision = PermissionDecisionRecord {
+            id: next_permission_decision_id(),
+            request_id: id.to_owned(),
+            created_at: current_timestamp(),
+            decision: new_status.as_str().to_owned(),
+            deciding_principal: deciding_principal.map(str::to_owned),
+            reason: reason.map(str::to_owned),
+        };
+        transaction.execute(
+            r#"
+            INSERT INTO permission_decisions
+                (id, request_id, created_at, decision, deciding_principal, reason)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                decision.id,
+                decision.request_id,
+                decision.created_at,
+                decision.decision,
+                decision.deciding_principal,
+                decision.reason,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(decision)
+    }
+
+    pub fn record_permission_decision(
+        &self,
+        request_id: &str,
+        decision: PermissionStatus,
+        deciding_principal: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<PermissionDecisionRecord> {
+        let record = PermissionDecisionRecord {
+            id: next_permission_decision_id(),
+            request_id: request_id.to_owned(),
+            created_at: current_timestamp(),
+            decision: decision.as_str().to_owned(),
+            deciding_principal: deciding_principal.map(str::to_owned),
+            reason: reason.map(str::to_owned),
+        };
+        self.connection.execute(
+            r#"
+            INSERT INTO permission_decisions
+                (id, request_id, created_at, decision, deciding_principal, reason)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                record.id,
+                record.request_id,
+                record.created_at,
+                record.decision,
+                record.deciding_principal,
+                record.reason,
+            ],
+        )?;
+        Ok(record)
+    }
+
+    pub fn get_permission_request(&self, id: &str) -> Result<Option<PermissionRequestRecord>> {
+        Ok(self
+            .connection
+            .query_row(
+                r#"
+                SELECT id, created_at, updated_at, status, source,
+                       requester, subject_id, detail_json, expires_at
+                FROM permission_requests
+                WHERE id = ?1
+                "#,
+                params![id],
+                row_to_permission_request,
+            )
+            .optional()?)
+    }
+
+    pub fn query_pending_permissions(&self, limit: u32) -> Result<Vec<PermissionRequestRecord>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, created_at, updated_at, status, source,
+                   requester, subject_id, detail_json, expires_at
+            FROM permission_requests
+            WHERE status = 'pending'
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], row_to_permission_request)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// On daemon startup, mark every `pending` permission row as terminal so
+    /// clients polling the row see it settle. ACP-source rows become
+    /// `canceled` (the ACP request channel is gone after restart). Command-
+    /// source rows become `expired` so the caller's understanding (the
+    /// command never executed) is preserved. Returns `(canceled, expired)`.
+    pub fn reconcile_orphaned_permissions(&self) -> Result<(usize, usize)> {
+        // Wrap the row transitions and the matching decision inserts in one
+        // transaction so the audit-trail invariant — every terminal request
+        // row has a corresponding `permission_decisions` row — holds even
+        // across a crash mid-reconcile. Without the decision-row inserts the
+        // bulk UPDATEs would re-introduce the very inconsistency that the
+        // atomic `decide_permission` helper exists to prevent.
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let now = current_timestamp();
+
+        // ACP-source pending rows become `canceled` — the request channel is
+        // gone after restart.
+        let acp_ids: Vec<String> = {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM permission_requests WHERE status = 'pending' AND source = 'acp'",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let canceled = acp_ids.len();
+        for id in &acp_ids {
+            transaction.execute(
+                "UPDATE permission_requests SET status = 'canceled', updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+            let decision_id = next_permission_decision_id();
+            transaction.execute(
+                r#"
+                INSERT INTO permission_decisions
+                    (id, request_id, created_at, decision, deciding_principal, reason)
+                VALUES (?1, ?2, ?3, 'canceled', 'system', 'daemon-restart')
+                "#,
+                params![decision_id, id, now],
+            )?;
+        }
+
+        // Command-source pending rows become `expired` — the command never
+        // executed, so an expired decision (rather than canceled) preserves
+        // the caller's understanding that the policy timer ran out.
+        let cmd_ids: Vec<String> = {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM permission_requests WHERE status = 'pending' AND source = 'command'",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let expired = cmd_ids.len();
+        for id in &cmd_ids {
+            transaction.execute(
+                "UPDATE permission_requests SET status = 'expired', updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+            let decision_id = next_permission_decision_id();
+            transaction.execute(
+                r#"
+                INSERT INTO permission_decisions
+                    (id, request_id, created_at, decision, deciding_principal, reason)
+                VALUES (?1, ?2, ?3, 'expired', 'system', 'daemon-restart')
+                "#,
+                params![decision_id, id, now],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok((canceled, expired))
+    }
+
     pub fn counts(&self) -> Result<StateCounts> {
         Ok(StateCounts {
             events: self.count_table("events")?,
@@ -1154,6 +1529,8 @@ impl StateStore {
             installer_runs: self.count_table("installer_runs")?,
             agent_capabilities: self.count_table("agent_capabilities")?,
             prompts: self.count_table("prompts")?,
+            permission_requests: self.count_table("permission_requests")?,
+            permission_decisions: self.count_table("permission_decisions")?,
         })
     }
 
@@ -1167,6 +1544,8 @@ impl StateStore {
             "installer_runs" => "SELECT COUNT(*) FROM installer_runs",
             "agent_capabilities" => "SELECT COUNT(*) FROM agent_capabilities",
             "prompts" => "SELECT COUNT(*) FROM prompts",
+            "permission_requests" => "SELECT COUNT(*) FROM permission_requests",
+            "permission_decisions" => "SELECT COUNT(*) FROM permission_decisions",
             _ => unreachable!("count_table only accepts known migrated tables"),
         };
         Ok(self.connection.query_row(sql, [], |row| row.get(0))?)
@@ -1269,6 +1648,7 @@ fn sqlite_sql_for(entry: &ManifestEntry) -> Result<&'static str> {
         (3, "003_agent_capabilities.sqlite.sql") => Ok(SQL_003_AGENT_CAPABILITIES),
         (4, "004_sessions.sqlite.sql") => Ok(SQL_004_SESSIONS),
         (5, "005_commands_schema.sqlite.sql") => Ok(SQL_005_COMMANDS_SCHEMA),
+        (6, "006_permissions.sqlite.sql") => Ok(SQL_006_PERMISSIONS),
         _ => Err(StackError::UnknownMigrationId { id: entry.id }),
     }
 }
@@ -1375,6 +1755,34 @@ fn row_to_auth_failure(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthFailure>
     })
 }
 
+fn row_to_permission_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PermissionRequestRecord> {
+    Ok(PermissionRequestRecord {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        updated_at: row.get(2)?,
+        status: row.get(3)?,
+        source: row.get(4)?,
+        requester: row.get(5)?,
+        subject_id: row.get(6)?,
+        detail_json: row.get(7)?,
+        expires_at: row.get(8)?,
+    })
+}
+
+fn parse_permission_status(value: &str) -> PermissionStatus {
+    match value {
+        "approved" => PermissionStatus::Approved,
+        "denied" => PermissionStatus::Denied,
+        "expired" => PermissionStatus::Expired,
+        "canceled" => PermissionStatus::Canceled,
+        _ => PermissionStatus::Pending,
+    }
+}
+
+fn status_str(value: PermissionStatus) -> &'static str {
+    value.as_str()
+}
+
 fn row_to_agent_lifecycle(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentLifecycleEvent> {
     Ok(AgentLifecycleEvent {
         id: row.get(0)?,
@@ -1447,6 +1855,20 @@ pub fn next_command_id() -> String {
     let sequence = COMMAND_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("cmd_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+pub fn next_permission_request_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = PERMISSION_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("perm_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+pub fn next_permission_decision_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = PERMISSION_DECISION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("pdec_{nanos:020}_{sequence:010}_{pid:010}")
 }
 
 /// Defense-in-depth cap on installer_runs row size. The agent_installer module

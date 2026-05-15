@@ -231,6 +231,7 @@ impl AgentSupervisor {
         env: HashMap<String, String>,
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: EventHub,
+        permissions: Option<crate::permissions::PermissionService>,
     ) -> Result<AgentCapabilitiesDto> {
         // First lock: atomically transition Stopped -> Starting. Refusing
         // any other start under the same lock prevents concurrent spawns.
@@ -247,7 +248,7 @@ impl AgentSupervisor {
         }
 
         match self
-            .do_start(agent, workspace_root, env, state, event_hub)
+            .do_start(agent, workspace_root, env, state, event_hub, permissions)
             .await
         {
             Ok((capabilities, bridge)) => {
@@ -282,6 +283,7 @@ impl AgentSupervisor {
         env: HashMap<String, String>,
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: EventHub,
+        permissions: Option<crate::permissions::PermissionService>,
     ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
         let cwd = resolve_agent_cwd(agent, workspace_root);
 
@@ -318,7 +320,7 @@ impl AgentSupervisor {
 
         let sink: Arc<dyn SessionEventSink> =
             Arc::new(StateStoreSessionSink::new(state.clone(), event_hub.clone()));
-        let bridge = match AcpBridge::spawn(agent, env, cwd, sink).await {
+        let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions).await {
             Ok(bridge) => bridge,
             Err(err) => {
                 let failure_data = json!({
