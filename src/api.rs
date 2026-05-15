@@ -46,6 +46,7 @@ use zeroize::Zeroizing;
 use crate::acp_bridge::AgentCapabilitiesDto;
 use crate::agent_installer::run_installer_capture;
 use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_failure};
+use crate::commands::{CommandGateway, SubmitRequest};
 use crate::config::{AgentAdapterConfig, Config};
 use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
@@ -71,6 +72,7 @@ pub struct AppState {
     pub active_requests: Arc<AtomicU64>,
     pub agent_supervisor: Arc<AgentSupervisor>,
     pub event_hub: EventHub,
+    pub commands: CommandGateway,
 }
 
 impl AppState {
@@ -87,7 +89,7 @@ impl AppState {
     /// effective listener, while config export still returns the stored config.
     pub fn with_effective_bind(
         config: Config,
-        state: StateStore,
+        mut state: StateStore,
         session_key: String,
         admin_key: String,
         effective_bind: String,
@@ -96,19 +98,28 @@ impl AppState {
         let security_cap = config.security.http.max_request_bytes;
         let cap = api_cap.min(security_cap);
         let event_hub = EventHub::new();
+        // Wire the hub into the store now so that every `append_event` write
+        // also fans out on the `logs` topic. CLI tools that open the store
+        // outside the daemon leave it unattached.
+        state.attach_event_hub(event_hub.clone());
         // SQLite is local and `usize::MAX` covers any byte count we'd allow on
         // a HTTP request. Saturating cast keeps 32-bit targets safe.
         let max_request_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
+        let config_arc = Arc::new(config);
+        let state_arc = Arc::new(TokioMutex::new(state));
+        let commands =
+            CommandGateway::new(state_arc.clone(), event_hub.clone(), config_arc.clone());
         Self {
-            config: Arc::new(config),
+            config: config_arc,
             effective_bind: Arc::new(effective_bind),
-            state: Arc::new(TokioMutex::new(state)),
+            state: state_arc,
             session_key: Arc::new(Zeroizing::new(session_key)),
             admin_key: Arc::new(Zeroizing::new(admin_key)),
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
             agent_supervisor: Arc::new(AgentSupervisor::new()),
             event_hub,
+            commands,
         }
     }
 }
@@ -174,6 +185,12 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/files/upload", post(files_upload_handler))
         .route("/v1/files/download", get(files_download_handler))
+        .route(
+            "/v1/commands",
+            get(commands_list_handler).post(commands_submit_handler),
+        )
+        .route("/v1/commands/{id}", get(commands_get_handler))
+        .route("/v1/commands/{id}/cancel", post(commands_cancel_handler))
         .layer(RequestBodyLimitLayer::new(limit))
         // Axum's per-extractor default body limit (2 MiB) would silently cap
         // String/Json/etc handlers below the configured runtime limit. Disable
@@ -337,7 +354,13 @@ async fn handle_ws_client_message(subscribed_topics: &mut HashSet<String>, text:
         return;
     }
     for topic in message.topics {
-        if topic.starts_with("sessions.") || topic == "workspace" {
+        if topic.starts_with("sessions.")
+            || topic.starts_with("commands.")
+            || topic == "workspace"
+            || topic == "agent"
+            || topic == "status"
+            || topic == "logs"
+        {
             subscribed_topics.insert(topic);
         } else {
             tracing::debug!(topic = %topic, "dropping unsupported websocket subscription topic");
@@ -924,6 +947,96 @@ async fn logs_commands_handler(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct CommandSubmitRequest {
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Option<std::collections::HashMap<String, String>>,
+    #[serde(default, rename = "timeout")]
+    timeout_override: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CommandResponse {
+    id: String,
+    created_at: String,
+    updated_at: String,
+    status: String,
+    command: String,
+    exit_status: Option<i64>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    cwd: Option<String>,
+    duration_ms: Option<i64>,
+    truncated: bool,
+}
+
+impl From<crate::state::CommandRecord> for CommandResponse {
+    fn from(record: crate::state::CommandRecord) -> Self {
+        Self {
+            id: record.id,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            status: record.status,
+            command: record.command,
+            exit_status: record.exit_status,
+            started_at: record.started_at,
+            finished_at: record.finished_at,
+            cwd: record.cwd,
+            duration_ms: record.duration_ms,
+            truncated: record.truncated,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CommandsListResponse {
+    items: Vec<CommandResponse>,
+}
+
+async fn commands_submit_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CommandSubmitRequest>,
+) -> std::result::Result<ApiSuccess<CommandResponse>, StackError> {
+    let request = SubmitRequest {
+        command: body.command,
+        cwd: body.cwd,
+        env: body.env,
+        timeout_override: body.timeout_override,
+    };
+    let record = state.commands.submit(request).await?;
+    Ok(ApiSuccess::new(record.into()))
+}
+
+async fn commands_get_handler(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<CommandResponse>, StackError> {
+    let record = state.commands.get(&id).await?;
+    Ok(ApiSuccess::new(record.into()))
+}
+
+async fn commands_list_handler(
+    Query(params): Query<LogsLimitParams>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<CommandsListResponse>, StackError> {
+    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let records = state.commands.list(limit).await?;
+    Ok(ApiSuccess::new(CommandsListResponse {
+        items: records.into_iter().map(CommandResponse::from).collect(),
+    }))
+}
+
+async fn commands_cancel_handler(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<CommandResponse>, StackError> {
+    let record = state.commands.cancel(&id).await?;
+    Ok(ApiSuccess::new(record.into()))
+}
+
 async fn logs_permissions_handler(
     Query(params): Query<LogsLimitParams>,
     State(state): State<AppState>,
@@ -1247,7 +1360,10 @@ struct AgentStopResponse {
 async fn agent_stop_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
-    let exit_status = state.agent_supervisor.stop(&state.state).await?;
+    let exit_status = state
+        .agent_supervisor
+        .stop(&state.state, &state.event_hub)
+        .await?;
     let stopped_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
     Ok(ApiSuccess::new(AgentStopResponse {
         stopped_at,
