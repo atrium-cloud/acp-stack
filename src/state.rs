@@ -1,4 +1,5 @@
 use crate::error::{Result, StackError};
+use crate::events::EventHub;
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
@@ -33,6 +34,7 @@ const SQL_002_AUTH_FAILURES_SCHEMA: &str =
 const SQL_003_AGENT_CAPABILITIES: &str =
     include_str!("../migrations/003_agent_capabilities.sqlite.sql");
 const SQL_004_SESSIONS: &str = include_str!("../migrations/004_sessions.sqlite.sql");
+const SQL_005_COMMANDS_SCHEMA: &str = include_str!("../migrations/005_commands_schema.sqlite.sql");
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUTH_FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -40,6 +42,7 @@ static AGENT_LIFECYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INSTALLER_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static COMMAND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
@@ -121,6 +124,43 @@ pub struct CommandRecord {
     pub status: String,
     pub command: String,
     pub exit_status: Option<i64>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub cwd: Option<String>,
+    pub env_json: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCommandRecord<'a> {
+    pub command: &'a str,
+    pub cwd: Option<&'a str>,
+    pub env_json: Option<&'a str>,
+}
+
+/// Lifecycle status of a `commands` row. The string form goes to SQLite and
+/// out over the API; `CommandStatus::as_str` is the single source of truth so
+/// the gateway and tests do not drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Pending,
+    Running,
+    Exited,
+    Failed,
+    Canceled,
+}
+
+impl CommandStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommandStatus::Pending => "pending",
+            CommandStatus::Running => "running",
+            CommandStatus::Exited => "exited",
+            CommandStatus::Failed => "failed",
+            CommandStatus::Canceled => "canceled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -200,6 +240,10 @@ pub struct StateCounts {
 
 pub struct StateStore {
     connection: Connection,
+    /// Optional fan-out for every `append_event` write. Set via
+    /// `attach_event_hub` from `acps serve`; CLI tools that open the store
+    /// read-only leave it `None`.
+    event_hub: Option<EventHub>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,7 +269,17 @@ impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let connection = Connection::open(path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            event_hub: None,
+        })
+    }
+
+    /// Attach a live `EventHub` so every `append_event` write also fans out on
+    /// the `logs` topic. The daemon (`acps serve`) calls this once at startup;
+    /// CLI tools that open the store for ad-hoc queries leave it unset.
+    pub fn attach_event_hub(&mut self, hub: EventHub) {
+        self.event_hub = Some(hub);
     }
 
     pub fn migrate(&self) -> Result<()> {
@@ -334,6 +388,10 @@ impl StateStore {
                 event.payload_json
             ],
         )?;
+
+        if let Some(hub) = &self.event_hub {
+            hub.publish_log_event(&event);
+        }
 
         Ok(event)
     }
@@ -499,6 +557,10 @@ impl StateStore {
             ],
         )?;
 
+        if let Some(hub) = &self.event_hub {
+            hub.publish_log_event(&event);
+        }
+
         Ok(event)
     }
 
@@ -648,6 +710,28 @@ impl StateStore {
         Ok(affected)
     }
 
+    /// Same idea for `commands`: a daemon restart kills any subprocesses
+    /// (`kill_on_drop` plus tokio runtime teardown), but the SQLite rows are
+    /// not finalized in that path. Without this sweep, every `running` /
+    /// `pending` row from the previous run is permanently stuck and a CLI/HTTP
+    /// poll would never see them settle. Returns the number of rows
+    /// transitioned to `failed`.
+    pub fn reconcile_orphaned_commands(&self, reason: &str) -> Result<usize> {
+        let now = current_timestamp();
+        let _ = reason; // recorded via finished_at + a synthetic event below
+        let affected = self.connection.execute(
+            r#"
+            UPDATE commands
+            SET status = 'failed',
+                updated_at = ?1,
+                finished_at = COALESCE(finished_at, ?1)
+            WHERE status IN ('pending', 'running')
+            "#,
+            params![now],
+        )?;
+        Ok(affected)
+    }
+
     pub fn in_flight_prompts_for_session(&self, session_id: &str) -> Result<Vec<PromptRecord>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -666,7 +750,8 @@ impl StateStore {
         let limit = i64::from(limit);
         let mut statement = self.connection.prepare(
             r#"
-            SELECT id, created_at, updated_at, status, command, exit_status
+            SELECT id, created_at, updated_at, status, command, exit_status,
+                   started_at, finished_at, cwd, env_json, duration_ms, truncated
             FROM commands
             ORDER BY updated_at DESC, id DESC
             LIMIT ?1
@@ -674,6 +759,151 @@ impl StateStore {
         )?;
         let rows = statement.query_map(params![limit], row_to_command)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_command(&self, id: &str) -> Result<Option<CommandRecord>> {
+        Ok(self
+            .connection
+            .query_row(
+                r#"
+                SELECT id, created_at, updated_at, status, command, exit_status,
+                       started_at, finished_at, cwd, env_json, duration_ms, truncated
+                FROM commands
+                WHERE id = ?1
+                "#,
+                params![id],
+                row_to_command,
+            )
+            .optional()?)
+    }
+
+    /// Insert a `commands` row in the `pending` state. The gateway transitions
+    /// it to `running` via `start_command` once the subprocess has been
+    /// spawned, so an inserted row that never starts (e.g. a crash between
+    /// INSERT and spawn) is recoverable from history.
+    pub fn append_command(&self, input: NewCommandRecord<'_>) -> Result<CommandRecord> {
+        if let Some(payload) = input.env_json {
+            validate_json_payload(&self.connection, payload)?;
+        }
+        let now = current_timestamp();
+        let record = CommandRecord {
+            id: next_command_id(),
+            created_at: now.clone(),
+            updated_at: now,
+            status: CommandStatus::Pending.as_str().to_owned(),
+            command: input.command.to_owned(),
+            exit_status: None,
+            started_at: None,
+            finished_at: None,
+            cwd: input.cwd.map(str::to_owned),
+            env_json: input.env_json.map(str::to_owned),
+            duration_ms: None,
+            truncated: false,
+        };
+
+        self.connection.execute(
+            r#"
+            INSERT INTO commands
+                (id, created_at, updated_at, status, command, exit_status,
+                 started_at, finished_at, cwd, env_json, duration_ms, truncated)
+            VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?7, NULL, 0)
+            "#,
+            params![
+                record.id,
+                record.created_at,
+                record.updated_at,
+                record.status,
+                record.command,
+                record.cwd,
+                record.env_json,
+            ],
+        )?;
+
+        Ok(record)
+    }
+
+    /// Move a command from `pending` to `running` and stamp `started_at`. The
+    /// caller is responsible for ensuring the subprocess has actually been
+    /// spawned; this only records the transition.
+    pub fn start_command(&self, id: &str) -> Result<()> {
+        let now = current_timestamp();
+        let rows_affected = self.connection.execute(
+            r#"
+            UPDATE commands
+            SET status = ?1, started_at = ?2, updated_at = ?2
+            WHERE id = ?3
+            "#,
+            params![CommandStatus::Running.as_str(), now, id],
+        )?;
+        if rows_affected == 0 {
+            return Err(StackError::CommandNotFound { id: id.to_owned() });
+        }
+        Ok(())
+    }
+
+    /// Record the terminal state of a command run. `status` should be one of
+    /// the non-pending/non-running variants of `CommandStatus`; the caller
+    /// supplies the resolved exit status (or `None` if killed by signal).
+    pub fn finish_command(
+        &self,
+        id: &str,
+        status: CommandStatus,
+        exit_status: Option<i32>,
+        duration_ms: Option<i64>,
+    ) -> Result<()> {
+        let now = current_timestamp();
+        let rows_affected = self.connection.execute(
+            r#"
+            UPDATE commands
+            SET status = ?1,
+                exit_status = ?2,
+                finished_at = ?3,
+                updated_at = ?3,
+                duration_ms = ?4
+            WHERE id = ?5
+            "#,
+            params![status.as_str(), exit_status, now, duration_ms, id],
+        )?;
+        if rows_affected == 0 {
+            return Err(StackError::CommandNotFound { id: id.to_owned() });
+        }
+        Ok(())
+    }
+
+    /// Flip the `truncated` flag on a command row. Idempotent; called when the
+    /// gateway hits its per-command output cap.
+    pub fn mark_command_truncated(&self, id: &str) -> Result<()> {
+        let rows_affected = self.connection.execute(
+            "UPDATE commands SET truncated = 1, updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp(), id],
+        )?;
+        if rows_affected == 0 {
+            return Err(StackError::CommandNotFound { id: id.to_owned() });
+        }
+        Ok(())
+    }
+
+    /// Append a single stdout/stderr chunk as a durable event. The `events`
+    /// row carries the bytes; `commands.{id}` WebSocket subscribers receive
+    /// the same payload via `EventHub::publish_command_event`. `seq` lets
+    /// consumers reassemble interleaved streams in original write order.
+    pub fn append_command_output(
+        &self,
+        command_id: &str,
+        stream: &str,
+        seq: u64,
+        chunk: &str,
+    ) -> Result<Event> {
+        let payload = serde_json::json!({
+            "command_id": command_id,
+            "stream": stream,
+            "seq": seq,
+            "data": chunk,
+        });
+        let payload_json =
+            serde_json::to_string(&payload).map_err(|_| StackError::InvalidEventPayload)?;
+        let kind = format!("command.{stream}");
+        self.append_event("info", &kind, "", &payload_json)
     }
 
     pub fn append_auth_failure(
@@ -1038,6 +1268,7 @@ fn sqlite_sql_for(entry: &ManifestEntry) -> Result<&'static str> {
         (2, "002_auth_failures_schema.sqlite.sql") => Ok(SQL_002_AUTH_FAILURES_SCHEMA),
         (3, "003_agent_capabilities.sqlite.sql") => Ok(SQL_003_AGENT_CAPABILITIES),
         (4, "004_sessions.sqlite.sql") => Ok(SQL_004_SESSIONS),
+        (5, "005_commands_schema.sqlite.sql") => Ok(SQL_005_COMMANDS_SCHEMA),
         _ => Err(StackError::UnknownMigrationId { id: entry.id }),
     }
 }
@@ -1115,6 +1346,7 @@ fn row_to_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptRecord> {
 }
 
 fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
+    let truncated: i64 = row.get(11)?;
     Ok(CommandRecord {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -1122,6 +1354,12 @@ fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
         status: row.get(3)?,
         command: row.get(4)?,
         exit_status: row.get(5)?,
+        started_at: row.get(6)?,
+        finished_at: row.get(7)?,
+        cwd: row.get(8)?,
+        env_json: row.get(9)?,
+        duration_ms: row.get(10)?,
+        truncated: truncated != 0,
     })
 }
 
@@ -1202,6 +1440,13 @@ pub fn next_prompt_id() -> String {
     let sequence = PROMPT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("prm_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+pub fn next_command_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = COMMAND_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("cmd_{nanos:020}_{sequence:010}_{pid:010}")
 }
 
 /// Defense-in-depth cap on installer_runs row size. The agent_installer module

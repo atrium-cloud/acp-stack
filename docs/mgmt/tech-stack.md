@@ -19,7 +19,7 @@ This document records the implementation technologies chosen for the standalone 
 - `futures` - shared async primitives used in concert with the ACP SDK.
 - `libc` - process-group signaling (`kill(-pid, SIGKILL)`) for terminating runaway installers along with their grandchildren on Unix.
 - `serde`, `serde_json`, `toml` - API payloads, config files, durable event payloads, and migration manifest parsing.
-- `tokio-tungstenite` - WebSocket client used by integration tests to verify `/v1/ws` upgrade/auth/subscription behavior.
+- `tokio-tungstenite` - WebSocket client. Powers `acps logs tail` for live `/v1/ws` subscription and is reused by integration tests to verify upgrade/auth/subscription behavior.
 - `chrono` - RFC3339 timestamps for durable state records.
 - `rusqlite` - SQLite state and migrations.
 - `tokio::process` - agent, MCP, and command execution.

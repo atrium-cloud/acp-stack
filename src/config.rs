@@ -13,6 +13,10 @@ pub struct Config {
     pub workspace: WorkspaceConfig,
     pub logging: LoggingConfig,
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
+    #[serde(default)]
+    pub commands: CommandsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +142,47 @@ pub struct AgentAdapterConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PermissionsConfig {
+    pub mode: String,
+    #[serde(default)]
+    pub review: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_owned(),
+            review: Vec::new(),
+            deny: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandsConfig {
+    pub default_timeout: String,
+    pub cancel_grace: String,
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    pub max_output_bytes: u64,
+}
+
+impl Default for CommandsConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout: "10m".to_owned(),
+            cancel_grace: "5s".to_owned(),
+            env_allowlist: Vec::new(),
+            max_output_bytes: 1_048_576,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentInstallConfig {
     #[serde(rename = "type")]
     pub install_type: String,
@@ -159,6 +204,10 @@ struct RawConfig {
     workspace: Option<WorkspaceConfig>,
     logging: Option<LoggingConfig>,
     agent: Option<AgentConfig>,
+    #[serde(default)]
+    permissions: Option<PermissionsConfig>,
+    #[serde(default)]
+    commands: Option<CommandsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +273,8 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
         agent: raw
             .agent
             .ok_or(StackError::MissingSection { section: "agent" })?,
+        permissions: raw.permissions.unwrap_or_default(),
+        commands: raw.commands.unwrap_or_default(),
     };
 
     config.validate()?;
@@ -284,8 +335,71 @@ impl Config {
         if let Some(install) = &self.agent.install {
             validate_agent_install(install)?;
         }
+        validate_permissions(&self.permissions)?;
+        validate_commands(&self.commands)?;
 
         Ok(())
+    }
+}
+
+fn validate_permissions(permissions: &PermissionsConfig) -> Result<()> {
+    match permissions.mode.as_str() {
+        "auto" | "supervised" | "locked" => Ok(()),
+        _ => Err(StackError::InvalidPermissionsMode),
+    }
+}
+
+fn validate_commands(commands: &CommandsConfig) -> Result<()> {
+    let timeout = parse_duration_string(&commands.default_timeout).ok_or(
+        StackError::InvalidDurationField {
+            field: "commands.default_timeout",
+        },
+    )?;
+    if timeout.is_zero() {
+        return Err(StackError::NonZeroRequired {
+            field: "commands.default_timeout",
+        });
+    }
+    parse_duration_string(&commands.cancel_grace).ok_or(StackError::InvalidDurationField {
+        field: "commands.cancel_grace",
+    })?;
+    if commands.max_output_bytes == 0 {
+        return Err(StackError::NonZeroRequired {
+            field: "commands.max_output_bytes",
+        });
+    }
+    for name in &commands.env_allowlist {
+        if name.trim().is_empty()
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || name.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return Err(StackError::InvalidEnvName { name: name.clone() });
+        }
+    }
+    Ok(())
+}
+
+/// Parse a duration string like "10m", "5s", "2h", "750ms". Returns `None` on
+/// any invalid input. Empty string and pure-numeric inputs (no suffix) are
+/// rejected so config typos surface at load time rather than meaning seconds.
+pub fn parse_duration_string(input: &str) -> Option<std::time::Duration> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (number_part, unit_part) = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|idx| trimmed.split_at(idx))?;
+    if number_part.is_empty() {
+        return None;
+    }
+    let value: u64 = number_part.parse().ok()?;
+    match unit_part {
+        "ms" => Some(std::time::Duration::from_millis(value)),
+        "s" => Some(std::time::Duration::from_secs(value)),
+        "m" => Some(std::time::Duration::from_secs(value.checked_mul(60)?)),
+        "h" => Some(std::time::Duration::from_secs(value.checked_mul(3_600)?)),
+        _ => None,
     }
 }
 

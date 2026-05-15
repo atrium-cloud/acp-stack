@@ -69,7 +69,10 @@ pub struct ServerLifecycle {
 impl ServerLifecycle {
     /// Record `server.starting` while the store is still a direct handle, then
     /// hand back a lifecycle handle that tracks elapsed wall time for the
-    /// `server.stopped` payload.
+    /// `server.stopped` payload. No `status` topic fan-out here because the
+    /// event hub is constructed inside `AppState::with_effective_bind`, which
+    /// has not run yet at this point — and a subscriber cannot exist before
+    /// the listener accepts its first connection anyway.
     pub fn starting(state: &StateStore, bind: &str) -> Result<Self> {
         let payload = json!({ "bind": bind }).to_string();
         state.append_agent_lifecycle("server.starting", "acps serve starting", &payload)?;
@@ -80,21 +83,38 @@ impl ServerLifecycle {
 
     /// Record `server.started` after the listener is bound. Async-aware so the
     /// caller can hold the same `Arc<Mutex<StateStore>>` it later hands to
-    /// axum handlers.
-    pub async fn started(&self, state: &Arc<TokioMutex<StateStore>>, bind: &str) -> Result<()> {
-        let payload = json!({ "bind": bind }).to_string();
+    /// axum handlers. Publishes the row to the `status` topic.
+    pub async fn started(
+        &self,
+        state: &Arc<TokioMutex<StateStore>>,
+        event_hub: &EventHub,
+        bind: &str,
+    ) -> Result<()> {
+        let data = json!({ "bind": bind });
+        let payload = data.to_string();
         let guard = state.lock().await;
-        guard.append_agent_lifecycle("server.started", "acps serve listening", &payload)?;
+        let row =
+            guard.append_agent_lifecycle("server.started", "acps serve listening", &payload)?;
+        drop(guard);
+        event_hub.publish_status_event(&row.id, &row.created_at, "server.started", data);
         Ok(())
     }
 
     /// Record `server.stopped` with elapsed wall time. Called from the shutdown
     /// arm after axum's graceful-shutdown future resolves.
-    pub async fn stopped(&self, state: &Arc<TokioMutex<StateStore>>, reason: &str) -> Result<()> {
+    pub async fn stopped(
+        &self,
+        state: &Arc<TokioMutex<StateStore>>,
+        event_hub: &EventHub,
+        reason: &str,
+    ) -> Result<()> {
         let elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let payload = json!({ "reason": reason, "elapsed_ms": elapsed_ms }).to_string();
+        let data = json!({ "reason": reason, "elapsed_ms": elapsed_ms });
+        let payload = data.to_string();
         let guard = state.lock().await;
-        guard.append_agent_lifecycle("server.stopped", "acps serve stopped", &payload)?;
+        let row = guard.append_agent_lifecycle("server.stopped", "acps serve stopped", &payload)?;
+        drop(guard);
+        event_hub.publish_status_event(&row.id, &row.created_at, "server.stopped", data);
         Ok(())
     }
 }
@@ -275,37 +295,53 @@ impl AgentSupervisor {
             verify_agent_binary_sha256(&agent.command, &cwd, expected)?;
         }
 
-        let starting_payload = json!({
+        let starting_data = json!({
             "agent_id": agent.id,
             "command": agent.command,
             "adapter": agent.adapter,
-        })
-        .to_string();
-        {
+        });
+        let starting_payload = starting_data.to_string();
+        let starting_row = {
             let guard = state.lock().await;
             guard.append_agent_lifecycle(
                 "agent.starting",
                 "starting acp agent",
                 &starting_payload,
-            )?;
-        }
+            )?
+        };
+        event_hub.publish_agent_event(
+            &starting_row.id,
+            &starting_row.created_at,
+            "agent.starting",
+            starting_data,
+        );
 
         let sink: Arc<dyn SessionEventSink> =
-            Arc::new(StateStoreSessionSink::new(state.clone(), event_hub));
+            Arc::new(StateStoreSessionSink::new(state.clone(), event_hub.clone()));
         let bridge = match AcpBridge::spawn(agent, env, cwd, sink).await {
             Ok(bridge) => bridge,
             Err(err) => {
-                let failure_payload = json!({
+                let failure_data = json!({
                     "agent_id": agent.id,
                     "reason": err.to_string(),
-                })
-                .to_string();
-                let guard = state.lock().await;
-                let _ = guard.append_agent_lifecycle(
-                    "agent.spawn_failed",
-                    "agent spawn failed",
-                    &failure_payload,
-                );
+                });
+                let failure_payload = failure_data.to_string();
+                let row_result = {
+                    let guard = state.lock().await;
+                    guard.append_agent_lifecycle(
+                        "agent.spawn_failed",
+                        "agent spawn failed",
+                        &failure_payload,
+                    )
+                };
+                if let Ok(row) = row_result {
+                    event_hub.publish_agent_event(
+                        &row.id,
+                        &row.created_at,
+                        "agent.spawn_failed",
+                        failure_data,
+                    );
+                }
                 return Err(err);
             }
         };
@@ -317,24 +353,35 @@ impl AgentSupervisor {
         // Persist capabilities and the started event AFTER the bridge is
         // live. If any write fails, shut the bridge down before returning
         // so a failed start never leaks the child.
-        let persist_result: Result<()> = {
+        let started_data = json!({
+            "agent_id": agent.id,
+            "pid": pid,
+            "adapter": agent.adapter,
+        });
+        let started_row_result: Result<crate::state::AgentLifecycleEvent> = {
             let guard = state.lock().await;
-            let inner: Result<()> = (|| {
+            (|| {
                 guard.upsert_agent_capabilities(&agent.id, &caps_json)?;
-                let started_payload = json!({
-                    "agent_id": agent.id,
-                    "pid": pid,
-                    "adapter": agent.adapter,
-                })
-                .to_string();
-                guard.append_agent_lifecycle(
+                let started_payload = started_data.to_string();
+                let row = guard.append_agent_lifecycle(
                     "agent.started",
                     "agent initialized",
                     &started_payload,
                 )?;
+                Ok(row)
+            })()
+        };
+        let persist_result: Result<()> = match started_row_result {
+            Ok(row) => {
+                event_hub.publish_agent_event(
+                    &row.id,
+                    &row.created_at,
+                    "agent.started",
+                    started_data,
+                );
                 Ok(())
-            })();
-            inner
+            }
+            Err(err) => Err(err),
         };
 
         if let Err(err) = persist_result {
@@ -353,7 +400,11 @@ impl AgentSupervisor {
 
     /// Tear down the running agent. Returns the agent's exit status if
     /// available. Records `agent.stopped` regardless of clean exit.
-    pub async fn stop(&self, state: &Arc<TokioMutex<StateStore>>) -> Result<Option<i32>> {
+    pub async fn stop(
+        &self,
+        state: &Arc<TokioMutex<StateStore>>,
+        event_hub: &EventHub,
+    ) -> Result<Option<i32>> {
         // Extract the bridge under the lock and mark Stopping so a parallel
         // start cannot race with our shutdown work.
         let bridge = {
@@ -391,14 +442,22 @@ impl AgentSupervisor {
         // does not mask the original shutdown outcome — the supervisor is
         // already in a coherent state thanks to the transition above.
         let exit = shutdown_result?;
-        let payload = json!({
+        let data = json!({
             "exit_status": exit,
             "elapsed_ms": elapsed_ms,
-        })
-        .to_string();
-        let guard = state.lock().await;
-        if let Err(err) = guard.append_agent_lifecycle("agent.stopped", "agent stopped", &payload) {
-            tracing::warn!(error = %err, "failed to record agent.stopped lifecycle row");
+        });
+        let payload = data.to_string();
+        let row = {
+            let guard = state.lock().await;
+            guard.append_agent_lifecycle("agent.stopped", "agent stopped", &payload)
+        };
+        match row {
+            Ok(row) => {
+                event_hub.publish_agent_event(&row.id, &row.created_at, "agent.stopped", data);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to record agent.stopped lifecycle row");
+            }
         }
 
         Ok(exit)
@@ -409,14 +468,18 @@ impl AgentSupervisor {
     /// agent process past the daemon. Errors are logged but never returned —
     /// the serve path must continue to record `server.stopped` even if the
     /// agent teardown was messy.
-    pub async fn shutdown_on_serve_exit(&self, state: &Arc<TokioMutex<StateStore>>) {
+    pub async fn shutdown_on_serve_exit(
+        &self,
+        state: &Arc<TokioMutex<StateStore>>,
+        event_hub: &EventHub,
+    ) {
         // Determine whether there's anything to stop without holding the
         // lock across the entire shutdown sequence.
         let needs_stop = matches!(*self.state.lock().await, AgentState::Running(_));
         if !needs_stop {
             return;
         }
-        if let Err(err) = self.stop(state).await {
+        if let Err(err) = self.stop(state, event_hub).await {
             tracing::warn!(error = %err, "agent supervisor: shutdown on serve exit failed");
         }
     }

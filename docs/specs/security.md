@@ -124,11 +124,13 @@ Policy example:
 ```toml
 [permissions]
 mode = "auto"
-timeout = "5m"
-timeout_action = "deny"
 review = ["rm *", "git push *", "chmod *", "curl * | sh", "sudo *"]
-deny = ["shutdown", "reboot"]
+deny = ["shutdown*", "reboot*"]
 ```
+
+Patterns are full-string shell-style globs matched against the raw command line. `*` matches any sequence of characters (including the empty string); `?` matches exactly one. They are anchored at both ends, so a bare `shutdown` matches only the literal `shutdown` and not `shutdown now` — explicit args should be covered with `shutdown*` or `shutdown *`. Patterns do not currently introspect shell composition (`;`, `&&`, pipelines), so `true; shutdown now` would not be matched by `shutdown*` — denylist coverage of shell composition is deferred to the permissions module.
+
+The `timeout` and `timeout_action` knobs documented here in earlier drafts are reserved for the permissions module that owns the approval queue; the phase-1 config schema does not accept them yet.
 
 Modes:
 
@@ -139,6 +141,8 @@ Modes:
 Important 0.0.x boundary:
 
 The Command Gateway controls commands launched through `acp-stack` and terminal capabilities that `acp-stack` mediates. It does not claim to intercept arbitrary process activity outside its control path.
+
+0.0.1 enforces only the static `deny` and `review` glob lists at submission time. There is no pending-approval queue, no `permissions` WebSocket topic producer, and no `/v1/permissions/...` routes — those land with the dedicated permissions module. Until then, `review` matches behave like `deny` when `mode` is `supervised` or `locked`, and emit a `command.review_flagged` event while proceeding when `mode = "auto"`.
 
 ## Security Self-Check
 
