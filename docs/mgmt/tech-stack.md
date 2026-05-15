@@ -8,17 +8,18 @@ This document records the implementation technologies chosen for the standalone 
 - `clap` - operator-facing CLI parsing.
 - `thiserror` - typed application errors.
 - `tokio` - async runtime.
-- `axum` - HTTP server and WebSocket upgrades.
+- `axum` (`ws`) - HTTP server, route/middleware composition, and WebSocket upgrades for `/v1/ws`.
 - `tower`, `tower-http` - middleware composition (body limits, tracing) for the axum layer.
 - `http` - shared HTTP types (`StatusCode`, headers) used by the response envelope mapping.
 - `reqwest` with rustls - CLI HTTP client for daemon-backed commands such as `acps agent start` and `acps agent stop`, including HTTPS `public_url` targets.
 - `zeroize` - scrubbing cached API key material on drop.
-- `agent-client-protocol` - the published Rust SDK for the Agent Client Protocol. We act as the ACP client and rely on it for JSON-RPC framing, request/response correlation, and the protocol schema.
+- `agent-client-protocol` - the published Rust SDK for the Agent Client Protocol. We act as the ACP client and rely on it for JSON-RPC framing, request/response correlation, and the protocol schema. The `unstable_session_close` and `unstable_session_resume` SDK features are enabled so the bridge can wire every spec-required session method (`session/new`, `session/load`, `session/resume`, `session/close`, `session/prompt`, `session/cancel`).
 - `sha2` - SHA-256 hashing of installed agent binaries for the optional `expected_sha256` integrity check.
-- `tokio-util` (`compat`) - bridges tokio's `AsyncRead`/`AsyncWrite` traits to the `futures` traits the ACP SDK expects when constructing `ByteStreams` over child stdio.
+- `tokio-util` (`compat`, `rt`) - bridges tokio's `AsyncRead`/`AsyncWrite` traits to the `futures` traits the ACP SDK expects when constructing `ByteStreams` over child stdio. The `rt` feature exposes `CancellationToken` for cancelling in-flight prompts when the supervisor receives `session/cancel` or shuts the agent down.
 - `futures` - shared async primitives used in concert with the ACP SDK.
 - `libc` - process-group signaling (`kill(-pid, SIGKILL)`) for terminating runaway installers along with their grandchildren on Unix.
 - `serde`, `serde_json`, `toml` - API payloads, config files, durable event payloads, and migration manifest parsing.
+- `tokio-tungstenite` - WebSocket client used by integration tests to verify `/v1/ws` upgrade/auth/subscription behavior.
 - `chrono` - RFC3339 timestamps for durable state records.
 - `rusqlite` - SQLite state and migrations.
 - `tokio::process` - agent, MCP, and command execution.
