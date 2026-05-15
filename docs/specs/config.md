@@ -79,7 +79,22 @@ restart = "on-crash"
 type = "registry"
 id = "opencode"
 creates = "opencode"
+
+[permissions]
+mode = "auto"            # auto | supervised | locked
+review = ["sudo *", "rm *"]
+deny = ["shutdown*", "reboot*"]
+
+[commands]
+default_timeout = "10m"  # 5s, 750ms, 1h all accepted
+cancel_grace = "5s"
+env_allowlist = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
+max_output_bytes = 1048576
 ```
+
+`[permissions]` controls how `POST /v1/commands` evaluates each submitted shell string. In phase 1, only static glob matchers are honored — patterns on `deny` reject the submission with `command.denied`; patterns on `review` reject in `supervised`/`locked` modes and proceed (emitting a `command.review_flagged` event) in `auto` mode. A full approval queue with `permissions` topic and `/v1/permissions/...` routes is deferred to a later phase.
+
+`[commands]` controls the Command Gateway runtime. `default_timeout` and `cancel_grace` accept short duration suffixes (`ms`, `s`, `m`, `h`). `env_allowlist` is the closed set of environment variable names the daemon will forward into command children; secrets from the encrypted store are never injected implicitly. `max_output_bytes` caps the total bytes persisted per run; once exceeded the row's `truncated` flag is set and further output is drained but not stored.
 
 `[agent]` names the ACP process that `acp-stack` launches. For a native ACP agent such as OpenCode, omit `[agent.adapter]`. OpenCode remains a good direct-key example because it uses API keys rather than browser OAuth.
 

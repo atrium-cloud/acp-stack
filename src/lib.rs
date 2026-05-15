@@ -3,6 +3,7 @@ pub mod agent_installer;
 pub mod api;
 pub mod auth;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod envelope;
 pub mod error;

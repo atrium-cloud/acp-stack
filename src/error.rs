@@ -373,6 +373,36 @@ pub enum StackError {
 
     #[error("workspace.uploads must be inside workspace.root")]
     WorkspaceUploadsNotUnderRoot,
+
+    #[error("permissions.mode must be one of auto, supervised, locked")]
+    InvalidPermissionsMode,
+
+    #[error("{field} must be a duration like \"10m\", \"5s\", or \"100ms\"")]
+    InvalidDurationField { field: &'static str },
+
+    #[error("env variable name `{name}` is not a valid POSIX identifier")]
+    InvalidEnvName { name: String },
+
+    #[error("command `{id}` was not found")]
+    CommandNotFound { id: String },
+
+    #[error("command rejected by policy: {reason}")]
+    CommandDenied { reason: &'static str },
+
+    #[error("command cwd `{requested}` resolves outside the workspace root")]
+    CommandCwdOutsideWorkspace { requested: String },
+
+    #[error("command env variable `{name}` is not on commands.env_allowlist")]
+    CommandEnvNotAllowed { name: String },
+
+    #[error("failed to spawn command subprocess: {source}")]
+    CommandSpawnFailed {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("command timed out before the subprocess produced an exit status")]
+    CommandTimeout,
 }
 
 impl StackError {
@@ -432,7 +462,10 @@ impl StackError {
             | InvalidAgentInstallType
             | UrlMustBeHttp { .. }
             | UrlMustBeHttps { .. }
-            | AuthRefsNotDistinct => "config.invalid",
+            | AuthRefsNotDistinct
+            | InvalidPermissionsMode
+            | InvalidDurationField { .. }
+            | InvalidEnvName { .. } => "config.invalid",
             SecretReservedForAuth { .. } => "secrets.reserved_for_auth",
             ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
             ServeBind { .. } => "serve.bind_failed",
@@ -471,6 +504,12 @@ impl StackError {
             WorkspaceIo { .. } => "workspace.io_failed",
             WorkspaceEncodingInvalid { .. } => "workspace.encoding_invalid",
             WorkspaceUploadsNotUnderRoot => "config.invalid",
+            CommandNotFound { .. } => "command.not_found",
+            CommandDenied { .. } => "command.denied",
+            CommandCwdOutsideWorkspace { .. } => "command.cwd_outside_workspace",
+            CommandEnvNotAllowed { .. } => "command.env_not_allowed",
+            CommandSpawnFailed { .. } => "command.spawn_failed",
+            CommandTimeout => "command.timeout",
         }
     }
 
@@ -637,6 +676,27 @@ impl StackError {
             WorkspaceUploadsNotUnderRoot => {
                 "workspace.uploads must be inside workspace.root".to_owned()
             }
+            InvalidPermissionsMode => {
+                "permissions.mode must be one of auto, supervised, locked".to_owned()
+            }
+            InvalidDurationField { field } => {
+                format!("{field} must be a duration like \"10m\", \"5s\", or \"100ms\"")
+            }
+            InvalidEnvName { name } => {
+                format!("env variable name `{name}` is not a valid POSIX identifier")
+            }
+            CommandNotFound { id } => format!("command `{id}` was not found"),
+            CommandDenied { reason } => format!("command rejected by policy: {reason}"),
+            CommandCwdOutsideWorkspace { requested } => {
+                format!("command cwd `{requested}` resolves outside the workspace root")
+            }
+            CommandEnvNotAllowed { name } => {
+                format!("command env variable `{name}` is not on commands.env_allowlist")
+            }
+            CommandSpawnFailed { .. } => "failed to spawn command subprocess".to_owned(),
+            CommandTimeout => {
+                "command timed out before the subprocess produced an exit status".to_owned()
+            }
         }
     }
 
@@ -670,7 +730,13 @@ impl StackError {
             | UrlMustBeHttps { .. }
             | AuthRefsNotDistinct
             | SecretReservedForAuth { .. }
-            | ImportChangesAuthRef { .. } => StatusCode::BAD_REQUEST,
+            | ImportChangesAuthRef { .. }
+            | InvalidPermissionsMode
+            | InvalidDurationField { .. }
+            | InvalidEnvName { .. }
+            | CommandDenied { .. }
+            | CommandCwdOutsideWorkspace { .. }
+            | CommandEnvNotAllowed { .. } => StatusCode::BAD_REQUEST,
             // Not found / conflict
             SecretNotFound { .. } => StatusCode::NOT_FOUND,
             ConfigExists { .. } => StatusCode::CONFLICT,
@@ -746,6 +812,8 @@ impl StackError {
             WorkspaceTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             WorkspaceIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             WorkspaceUploadsNotUnderRoot => StatusCode::BAD_REQUEST,
+            CommandNotFound { .. } => StatusCode::NOT_FOUND,
+            CommandSpawnFailed { .. } | CommandTimeout => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

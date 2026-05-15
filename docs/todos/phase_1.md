@@ -11,7 +11,7 @@
 ## Runtime And Project Skeleton
 
 - [x] Create the Rust workspace and primary `acps` binary.
-- [ ] Add config, API, auth, state, workspace, command, and logs modules (agent bridge, supervisor, and workspace modules complete; command gateway pending).
+- [x] Add config, API, auth, state, workspace, command, and logs modules.
 - [x] Add structured tracing initialization.
 - [x] Add baseline error type and response-envelope mapping.
 - [x] Add unit/integration test harness.
@@ -67,9 +67,9 @@
 - [x] Implement agent lifecycle API routes.
 - [x] Implement session API route stubs wired to the ACP bridge.
 - [x] Implement workspace file API routes.
-- [ ] Implement command API routes.
+- [x] Implement command API routes.
 - [x] Implement log query API routes.
-- [ ] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs. (`sessions.{id}` and `workspace` are complete; command, agent, status, and log producers remain pending.)
+- [x] Implement `/v1/ws` subscriptions for sessions, commands, workspace, agent, status, and logs (permissions topic deferred to the dedicated module).
 
 ## ACP Agent Bridge
 
@@ -101,9 +101,9 @@
 - [x] Implement explicit binary downloads.
 - [x] Implement atomic writes where practical.
 - [x] Implement file upload and delete.
-- [ ] Implement daemon-mediated shell command execution.
-- [ ] Capture command stdout, stderr, exit status, and timing.
-- [ ] Stream command output over WebSocket.
+- [x] Implement daemon-mediated shell command execution.
+- [x] Capture command stdout, stderr, exit status, and timing.
+- [x] Stream command output over WebSocket.
 
 ## CLI Surface
 
@@ -116,7 +116,7 @@
 - [x] Implement `acps sessions prompt <session-id>`.
 - [x] Implement `acps sessions cancel <session-id>`.
 - [x] Implement `acps sessions close <session-id>`.
-- [ ] Implement `acps logs tail`.
+- [x] Implement `acps logs tail`.
 - [x] Implement `acps logs query`.
 
 ## Acceptance
@@ -127,5 +127,5 @@
 - [x] A session can be created through CLI or HTTP.
 - [x] A prompt can be sent and streamed over WebSocket.
 - [x] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.
-- [ ] A mediated shell command can be run and logged.
+- [x] A mediated shell command can be run and logged.
 - [x] Durable logs can be queried from SQLite.

@@ -112,6 +112,7 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps agent stop`
 - `acps agent status`
 - `acps logs query [--limit <n>] [--level <level>]`
+- `acps logs tail [--topic <name>]...`
 - `acps serve [--bind <addr>]`
 
 When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-stack.toml`. Export currently reads the same default path and writes canonical TOML to stdout unless `--output` is provided.
@@ -125,3 +126,5 @@ When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-
 `acps status` validates the default config, opens or migrates local state, records `status.checked`, and prints config, state, schema version, and latest event status.
 
 `acps logs query` reads durable SQLite events newest-first. `--limit` defaults to `50`, and `--level` filters by exact event level.
+
+`acps logs tail` opens a WebSocket subscription to the running daemon and prints each frame as it arrives until SIGINT. `--topic <name>` may be repeated to subscribe to multiple topics; the default is `logs`. Authentication uses the session key from the encrypted secret store, so the daemon must be reachable at `[api].public_url` (or the loopback rewrite of `[api].bind`).

@@ -125,7 +125,64 @@ Every workspace mutation (`workspace.write`, `workspace.upload`, `workspace.dele
 
 Commands launched through this API are mediated by the Command Gateway. They are logged, evaluated against policy, and streamed over WebSocket.
 
+`POST /v1/commands` request body:
+
+```json
+{
+  "command": "<shell string>",
+  "cwd": "<optional workspace-relative or absolute path under workspace.root>",
+  "env": { "<name>": "<value>" },
+  "timeout": "<optional duration like 30s, 10m>"
+}
+```
+
+Response data (also returned by `GET` and `POST /cancel`):
+
+```json
+{
+  "id": "cmd_…",
+  "created_at": "<RFC3339>",
+  "updated_at": "<RFC3339>",
+  "status": "pending|running|exited|failed|canceled",
+  "command": "<string>",
+  "exit_status": 0,
+  "started_at": "<RFC3339|null>",
+  "finished_at": "<RFC3339|null>",
+  "cwd": "<absolute path|null>",
+  "duration_ms": 123,
+  "truncated": false
+}
+```
+
+Execution model (0.0.1):
+
+- Shell-string spawn: `[workspace].default_shell -c <command>` with a fresh
+  process group on Unix.
+- `cwd` resolves under `workspace.root` (relative paths join the root,
+  absolute paths must canonicalize inside). Anything else returns
+  `command.cwd_outside_workspace`.
+- `env` keys must appear on `[commands].env_allowlist` or the submission is
+  rejected with `command.env_not_allowed`. Secrets are never injected
+  implicitly; the gateway uses `env_clear` and then sets only the names
+  passed in the request body.
+- Policy: `[permissions].deny` glob matches reject the submission with
+  `command.denied`. `[permissions].review` matches behave like `deny` in
+  `supervised`/`locked` modes (no approval queue in 0.0.1) and proceed in
+  `auto` mode (a `command.review_flagged` event is emitted).
+- Output: stdout and stderr are read in bounded chunks (up to 4 KiB per
+  read). Each chunk becomes one `command.stdout` / `command.stderr` event
+  and is also fanned out on `commands.{id}`; chunk boundaries are not
+  guaranteed to line up with newlines. Once a run exceeds
+  `[commands].max_output_bytes` further bytes are drained but not
+  persisted, the row's `truncated` flag is set, and a
+  `command.output_truncated` event is emitted.
+- Cancel / timeout: SIGTERM is sent to the process group; if the child
+  hasn't exited after `[commands].cancel_grace`, SIGKILL is sent. Timeouts
+  produce `status = failed`; explicit cancels produce `status = canceled`.
+
 ### Permissions API
+
+Planned routes (deferred to the dedicated permissions module — none of these are served in 0.0.1):
 
 - `GET /v1/permissions/pending`
 - `GET /v1/permissions/{id}`
@@ -137,6 +194,8 @@ Permission requests can originate from:
 - ACP `session/request_permission`
 - `acp-stack` mediated command policy
 - future runtime modules
+
+Until those routes ship, the runtime honors only the static `deny` and `review` glob lists declared in `[permissions]` at submit time (see `docs/specs/security.md`).
 
 ### Secrets API
 
@@ -191,14 +250,12 @@ GET /v1/ws
 The WebSocket multiplexes runtime events. Clients subscribe to topics:
 
 - `sessions.{id}` (implemented for live ACP `session/update` events)
-- `commands.{id}`
-- `permissions`
+- `commands.{id}` (implemented; emits `command.started`, `command.stdout`, `command.stderr`, `command.exited`, `command.failed`, `command.canceled`, `command.timeout`, `command.output_truncated`, `command.review_flagged`)
+- `permissions` (reserved; no live producer until the permissions module lands)
 - `workspace` (implemented; emits `workspace.write`, `workspace.upload`, `workspace.delete`)
-- `agent`
-- `status`
-- `logs`
-
-The other reserved topics do not yet have live producers.
+- `agent` (implemented; emits `agent.starting`, `agent.started`, `agent.spawn_failed`, `agent.stopped`)
+- `status` (implemented; emits `server.started`, `server.stopped`)
+- `logs` (implemented; emits every event-table row regardless of source)
 
 Example client message:
 

@@ -197,6 +197,7 @@ struct ConfigImportArgs {
 #[derive(Debug, Subcommand)]
 enum LogsCommand {
     Query(LogsQueryArgs),
+    Tail(LogsTailArgs),
 }
 
 #[derive(Debug, Args)]
@@ -205,6 +206,15 @@ struct LogsQueryArgs {
     limit: u32,
     #[arg(long)]
     level: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct LogsTailArgs {
+    /// WebSocket topic to subscribe to. May be passed multiple times. Defaults
+    /// to `logs`. Valid: `logs`, `workspace`, `agent`, `status`,
+    /// `sessions.{id}`, `commands.{id}`.
+    #[arg(long = "topic")]
+    topics: Vec<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -652,6 +662,18 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         );
     }
 
+    // Same sweep for the command gateway: a daemon restart kills any
+    // mediated subprocesses via `kill_on_drop`, but their `commands` rows
+    // are not finalized along the way. Mark them `failed` so polling
+    // clients see them settle.
+    let reconciled_commands = store.reconcile_orphaned_commands("daemon restart")?;
+    if reconciled_commands > 0 {
+        tracing::info!(
+            reconciled = reconciled_commands,
+            "marked orphaned in-flight commands as failed on startup"
+        );
+    }
+
     let secret_store = SecretStore::open(&home)?;
     let session_ref = config.auth.session_key_ref.clone();
     let admin_ref = config.auth.admin_key_ref.clone();
@@ -690,7 +712,8 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         let app_state =
             AppState::with_effective_bind(config, store, session_key, admin_key, local.clone());
         let state_handle = app_state.state.clone();
-        lifecycle.started(&state_handle, &local).await?;
+        let event_hub = app_state.event_hub.clone();
+        lifecycle.started(&state_handle, &event_hub, &local).await?;
         eprintln!("acps serve: listening on {local}");
         let agent_supervisor = app_state.agent_supervisor.clone();
         let serve_result = api::serve(app_state, listener).await;
@@ -698,14 +721,16 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         // durable trail shows the agent went down first. A leaked agent
         // process outliving the daemon is a real bug, not a theoretical
         // one: see superflous-restart guarantees in security.md.
-        agent_supervisor.shutdown_on_serve_exit(&state_handle).await;
+        agent_supervisor
+            .shutdown_on_serve_exit(&state_handle, &event_hub)
+            .await;
         let reason = match &serve_result {
             Ok(()) => "signal",
             Err(_) => "error",
         };
         // Always record stopped, even on error. Failures from the second
         // lifecycle write are logged but do not mask the original serve error.
-        if let Err(err) = lifecycle.stopped(&state_handle, reason).await {
+        if let Err(err) = lifecycle.stopped(&state_handle, &event_hub, reason).await {
             tracing::error!(error = %err, "failed to record server.stopped");
         }
         eprintln!("acps serve: stopped ({reason})");
@@ -1387,7 +1412,105 @@ fn run_logs_command(command: LogsCommand) -> Result<()> {
 
             Ok(())
         }
+        LogsCommand::Tail(args) => run_logs_tail(args),
     }
+}
+
+fn run_logs_tail(args: LogsTailArgs) -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let session_key = open_cli_key(&config, &home, CliKey::Session)?;
+    let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
+    let topics = if args.topics.is_empty() {
+        vec!["logs".to_owned()]
+    } else {
+        args.topics
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    runtime.block_on(tail_ws_loop(&base_url, &session_key, topics))
+}
+
+async fn tail_ws_loop(base_url: &str, session_key: &str, topics: Vec<String>) -> Result<()> {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    let ws_url = http_to_ws_url(base_url)?;
+    let url = format!("{ws_url}/v1/ws");
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|source| StackError::ServeIo {
+            source: std::io::Error::other(format!("invalid websocket url: {source}")),
+        })?;
+    request.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {session_key}")
+            .parse()
+            .map_err(|_| StackError::ServeIo {
+                source: std::io::Error::other("session key produced invalid header value"),
+            })?,
+    );
+
+    let (stream, _response) =
+        tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|source| StackError::ServeIo {
+                source: std::io::Error::other(format!("websocket connect failed: {source}")),
+            })?;
+    let (mut writer, mut reader) = stream.split();
+
+    let subscribe = serde_json::json!({"type": "subscribe", "topics": topics});
+    writer
+        .send(Message::Text(subscribe.to_string().into()))
+        .await
+        .map_err(|source| StackError::ServeIo {
+            source: std::io::Error::other(format!("subscribe failed: {source}")),
+        })?;
+
+    eprintln!(
+        "acps logs tail: subscribed to {} at {url}",
+        topics.join(", ")
+    );
+
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut ctrl_c => {
+                let _ = writer.send(Message::Close(None)).await;
+                return Ok(());
+            }
+            frame = reader.next() => {
+                let Some(frame) = frame else { return Ok(()); };
+                let message = frame.map_err(|source| StackError::ServeIo {
+                    source: std::io::Error::other(format!("websocket read failed: {source}")),
+                })?;
+                match message {
+                    Message::Text(text) => println!("{text}"),
+                    Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                    Message::Close(_) => return Ok(()),
+                    Message::Frame(_) => {}
+                }
+            }
+        }
+    }
+}
+
+fn http_to_ws_url(base: &str) -> Result<String> {
+    let trimmed = base.trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        return Ok(format!("wss://{rest}"));
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        return Ok(format!("ws://{rest}"));
+    }
+    Err(StackError::ServeIo {
+        source: std::io::Error::other("daemon base url must start with http:// or https://"),
+    })
 }
 
 fn record_cli_error_message(error_message: &str) {
