@@ -59,7 +59,7 @@ MCP servers declared in config are launched or referenced during session creatio
 - secret interpolation for env vars and HTTP headers
 - dependency status reporting for MCP commands
 
-MCP examples should focus on external services such as Slack, Linear, GitHub, or databases. Filesystem MCP is not a primary example because the agent already has workspace access through bash and the `acp-stack` Workspace API.
+The initial MCP example focuses on Linear as an external service. Filesystem MCP is not a primary example because the agent already has workspace access through bash and the `acp-stack` Workspace API. The worked Linear example lives in [../mcp.md](../mcp.md).
 
 ## Permission Passthrough
 

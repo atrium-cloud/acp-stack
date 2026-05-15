@@ -99,19 +99,12 @@ max_output_bytes = 1048576
 commands = [{ name = "git" }, { name = "ripgrep", required = false }]
 packages = []
 runtimes = []
-mcp = [{ name = "slack" }]    # cross-references [[mcp.servers]] names
-
-[[mcp.servers]]
-type = "stdio"
-name = "slack"
-command = "slack-mcp"
-args = []
-env = ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"]
+mcp = [{ name = "linear" }]    # cross-references [[mcp.servers]] names
 
 [[mcp.servers]]
 type = "http"
 name = "linear"
-url = "https://api.linear.app/mcp"
+url = "https://mcp.linear.app/mcp"
 headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 ```
 
@@ -123,7 +116,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[dependencies]` declares external programs, packages, runtimes, and MCP servers that the operator expects to be available. The runtime reports their satisfaction status via `GET /v1/deps` and `acps deps check` but does not install anything. Today only `commands` are checked (PATH lookup); `packages` and `runtimes` are declarative-only with `<kind>-check-not-implemented` reasons; `mcp` cross-references `[[mcp.servers]]` for declaration presence.
 
-`[mcp.servers]` declares MCP servers passed to the agent at session create/load/resume time. Each entry is either `type = "stdio"` (with `command`, optional `args`, and an `env` list of secret-ref names) or `type = "http"` (with `url` and a `headers` list of `{ name, value_ref }`). Stdio env values and HTTP header values are resolved from the encrypted secret store on every session call — they never enter the durable event log or any HTTP response. `mcp.session_attached` events record only the server names attached to a session.
+`[mcp.servers]` declares MCP servers passed to the agent at session create/load/resume time. Each entry is either `type = "stdio"` (with `command`, optional `args`, and an `env` list of secret-ref names) or `type = "http"` (with `url` and a `headers` list of `{ name, value_ref }`). Stdio env values and HTTP header values are resolved from the encrypted secret store on every session call — they never enter the durable event log or any HTTP response. `mcp.session_attached` events record only the server names attached to a session. See [mcp.md](mcp.md) for the Linear HTTP MCP example with secret setup.
 
 `[security.http].trusted_proxies` is a list of exact IP-address strings (no CIDR) trusted to populate `X-Forwarded-For` / `Forwarded` headers. When `trust_proxy_headers = true` and the socket peer matches an entry, the leftmost forwarded IP is used as the client IP for auth-failure tracking. With `trust_proxy_headers = false` or an empty list, the socket peer is always used.
 
