@@ -27,8 +27,9 @@ use std::time::Duration;
 use agent_client_protocol::schema::{
     AgentNotification, CancelNotification, CloseSessionRequest, InitializeRequest,
     InitializeResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
-    PromptRequest, ProtocolVersion, ResumeSessionRequest, SessionId, SessionNotification,
-    StopReason,
+    PermissionOptionId, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionId, SessionNotification, StopReason,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
+use crate::permissions::{NewPermission, PermissionOutcome, PermissionService, PermissionSource};
 use crate::state::StateStore;
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
@@ -363,6 +365,7 @@ impl AcpBridge {
         env: HashMap<String, String>,
         cwd: PathBuf,
         sink: Arc<dyn SessionEventSink>,
+        permissions: Option<PermissionService>,
     ) -> Result<Self> {
         let command_path = resolve_command_path(&agent.command, &cwd).ok_or_else(|| {
             StackError::AgentInitializeFailed {
@@ -428,9 +431,24 @@ impl AcpBridge {
         // loop until the closure returns. We spawn it as a tokio task so the
         // bridge handle can outlive the call site, and we use a oneshot
         // shutdown signal to ask the closure to wrap up cleanly.
+        let permissions_for_task = permissions.clone();
         let connection_task: JoinHandle<()> = tokio::spawn(async move {
             let run = Client
                 .builder()
+                .on_receive_request(
+                    async move |request: RequestPermissionRequest, responder, _cx| {
+                        let outcome = match permissions_for_task.as_ref() {
+                            Some(service) => resolve_acp_permission(service, request).await,
+                            None => {
+                                // No permission service attached — tests that
+                                // never decide must not block the agent.
+                                RequestPermissionOutcome::Cancelled
+                            }
+                        };
+                        responder.respond(RequestPermissionResponse::new(outcome))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
                 .on_receive_notification(
                     async move |notification: AgentNotification, _cx| {
                         match notification {
@@ -725,6 +743,60 @@ impl AcpBridge {
     }
 }
 
+/// Forward a `session/request_permission` request through the durable
+/// PermissionService, await the decision, and translate the result back to
+/// the ACP `RequestPermissionOutcome`. Falls back to `Cancelled` on every
+/// failure so the agent's prompt turn always settles deterministically.
+pub(crate) async fn resolve_acp_permission(
+    service: &PermissionService,
+    request: RequestPermissionRequest,
+) -> RequestPermissionOutcome {
+    // Serialize the full request for the durable detail record. The schema
+    // type is JSON-friendly; failure here only happens for non-JSON-safe
+    // values, which the schema does not contain.
+    let detail = match serde_json::to_value(&request) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize permission request");
+            return RequestPermissionOutcome::Cancelled;
+        }
+    };
+    let session_id = request.session_id.0.to_string();
+    let first_option_id = request
+        .options
+        .first()
+        .map(|opt| opt.option_id.0.to_string());
+
+    let (_record, rx) = match service
+        .request(NewPermission {
+            source: PermissionSource::Acp,
+            requester: Some(format!("session:{session_id}")),
+            subject_id: Some(session_id),
+            detail,
+        })
+        .await
+    {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::warn!(error = %err, "permission service rejected ACP passthrough");
+            return RequestPermissionOutcome::Cancelled;
+        }
+    };
+
+    match rx.await {
+        Ok(PermissionOutcome::Approved { option_id, .. }) => {
+            let chosen = option_id.or(first_option_id);
+            match chosen {
+                Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                    PermissionOptionId::new(id),
+                )),
+                None => RequestPermissionOutcome::Cancelled,
+            }
+        }
+        _ => RequestPermissionOutcome::Cancelled,
+    }
+}
+
 fn enqueue_session_notification(
     sink: Arc<dyn SessionEventSink>,
     drain: Arc<NotificationDrain>,
@@ -808,4 +880,108 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf>
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PermissionTimeoutAction;
+    use crate::permissions::PermissionService;
+    use crate::state::StateStore;
+    use agent_client_protocol::schema::{
+        PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionRequest,
+        SessionId, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    };
+    use std::time::Duration;
+    use tokio::sync::Mutex as TokioMutex;
+
+    fn fake_request(session_id: &str) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new(session_id),
+            ToolCallUpdate::new(ToolCallId::new("tc_1"), ToolCallUpdateFields::default()),
+            vec![PermissionOption::new(
+                PermissionOptionId::new("allow"),
+                "Allow",
+                PermissionOptionKind::AllowOnce,
+            )],
+        )
+    }
+
+    async fn fresh_service() -> (tempfile::TempDir, PermissionService) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.sqlite");
+        let store = StateStore::open(&path).expect("open");
+        store.migrate().expect("migrate");
+        let state = Arc::new(TokioMutex::new(store));
+        let events = EventHub::new();
+        (
+            dir,
+            PermissionService::new(
+                state,
+                events,
+                Duration::from_secs(60),
+                PermissionTimeoutAction::Deny,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn approve_passthrough_returns_selected_option() {
+        let (_dir, service) = fresh_service().await;
+        let request = fake_request("sess_test");
+        let service_for_task = service.clone();
+        let outcome_task =
+            tokio::spawn(async move { resolve_acp_permission(&service_for_task, request).await });
+
+        // Drain the new permission row + approve it.
+        let mut id = None;
+        for _ in 0..50 {
+            let pending = service.pending(10).await.expect("pending");
+            if let Some(first) = pending.first() {
+                id = Some(first.id.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let perm_id = id.expect("permission row must appear");
+        service
+            .approve(&perm_id, Some("allow".to_owned()), None, "session-key")
+            .await
+            .expect("approve");
+
+        let outcome = outcome_task.await.expect("task joins");
+        match outcome {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
+                assert_eq!(option_id.0.as_ref(), "allow");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_passthrough_returns_cancelled() {
+        let (_dir, service) = fresh_service().await;
+        let request = fake_request("sess_test");
+        let service_for_task = service.clone();
+        let outcome_task =
+            tokio::spawn(async move { resolve_acp_permission(&service_for_task, request).await });
+
+        let mut id = None;
+        for _ in 0..50 {
+            let pending = service.pending(10).await.expect("pending");
+            if let Some(first) = pending.first() {
+                id = Some(first.id.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let perm_id = id.expect("permission row must appear");
+        service
+            .deny(&perm_id, None, "session-key")
+            .await
+            .expect("deny");
+
+        let outcome = outcome_task.await.expect("task joins");
+        assert!(matches!(outcome, RequestPermissionOutcome::Cancelled));
+    }
 }

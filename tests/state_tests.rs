@@ -1,4 +1,7 @@
-use acp_stack::state::{AuthFailureFilter, EventFilter, StateStore, default_state_path};
+use acp_stack::state::{
+    AuthFailureFilter, EventFilter, NewPermissionRequest, PermissionStatus, StateStore,
+    default_state_path,
+};
 use rusqlite::Connection;
 use rusqlite::params;
 
@@ -29,7 +32,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        5
+        6
     );
 }
 
@@ -134,7 +137,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 5")
+            .contains("state schema version 99 is newer than supported version 6")
     );
 }
 
@@ -331,4 +334,130 @@ fn event_ids_stay_sorted_when_appended_in_quick_succession() {
             "descending query must yield strictly decreasing ids",
         );
     }
+}
+
+fn fresh_state(name: &str) -> (tempfile::TempDir, StateStore) {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join(name);
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migrate");
+    (tempdir, store)
+}
+
+#[test]
+fn permission_request_lifecycle_pending_to_approved() {
+    let (_dir, store) = fresh_state("perms.sqlite");
+    let record = store
+        .append_permission_request(NewPermissionRequest {
+            source: "command",
+            requester: Some("test-suite"),
+            subject_id: Some("cmd_x"),
+            detail_json: "{\"reason\":\"unit-test\"}",
+            expires_at: None,
+        })
+        .expect("append");
+    assert_eq!(record.status, "pending");
+
+    let previous = store
+        .transition_permission_status(&record.id, PermissionStatus::Approved)
+        .expect("transition");
+    assert_eq!(previous, PermissionStatus::Pending);
+
+    let view = store
+        .get_permission_request(&record.id)
+        .expect("get")
+        .expect("row");
+    assert_eq!(view.status, "approved");
+}
+
+#[test]
+fn permission_transition_terminal_to_other_is_rejected() {
+    let (_dir, store) = fresh_state("perms.sqlite");
+    let record = store
+        .append_permission_request(NewPermissionRequest {
+            source: "command",
+            requester: None,
+            subject_id: None,
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("append");
+    store
+        .transition_permission_status(&record.id, PermissionStatus::Denied)
+        .expect("first transition");
+
+    let error = store
+        .transition_permission_status(&record.id, PermissionStatus::Approved)
+        .expect_err("must reject terminal->approved");
+    assert!(error.to_string().contains("cannot transition"), "{error}");
+}
+
+#[test]
+fn permission_reconcile_orphans_categorizes_by_source() {
+    let (_dir, store) = fresh_state("perms.sqlite");
+    let acp_pending = store
+        .append_permission_request(NewPermissionRequest {
+            source: "acp",
+            requester: Some("sess_a"),
+            subject_id: Some("sess_a"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("acp row");
+    let cmd_pending = store
+        .append_permission_request(NewPermissionRequest {
+            source: "command",
+            requester: Some("cmd_a"),
+            subject_id: Some("cmd_a"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("cmd row");
+
+    let (canceled, expired) = store.reconcile_orphaned_permissions().expect("reconcile");
+    assert_eq!(canceled, 1);
+    assert_eq!(expired, 1);
+
+    let after_acp = store
+        .get_permission_request(&acp_pending.id)
+        .expect("get")
+        .expect("row");
+    assert_eq!(after_acp.status, "canceled");
+
+    let after_cmd = store
+        .get_permission_request(&cmd_pending.id)
+        .expect("get")
+        .expect("row");
+    assert_eq!(after_cmd.status, "expired");
+
+    // Audit-trail invariant: every terminal request row must have a matching
+    // permission_decisions row. Reconcile must insert these to honor the
+    // same contract `decide_permission` upholds during normal operation.
+    let counts = store.counts().expect("counts");
+    assert_eq!(counts.permission_decisions, 2, "expected 2 decision rows");
+}
+
+#[test]
+fn permission_decisions_persist_with_principal() {
+    let (_dir, store) = fresh_state("perms.sqlite");
+    let request = store
+        .append_permission_request(NewPermissionRequest {
+            source: "command",
+            requester: None,
+            subject_id: None,
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("append");
+    let decision = store
+        .record_permission_decision(
+            &request.id,
+            PermissionStatus::Approved,
+            Some("session-key"),
+            Some("operator"),
+        )
+        .expect("decision");
+    assert_eq!(decision.request_id, request.id);
+    assert_eq!(decision.decision, "approved");
+    assert_eq!(decision.deciding_principal.as_deref(), Some("session-key"));
 }

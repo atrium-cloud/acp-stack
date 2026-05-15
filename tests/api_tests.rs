@@ -63,6 +63,17 @@ impl ServerHarness {
         let row = rows.into_iter().next().expect("at least one auth failure");
         (row.key_kind, row.reason)
     }
+
+    async fn latest_auth_failure_client_ip(&self) -> Option<String> {
+        let guard = self.state.lock().await;
+        let rows = guard
+            .query_auth_failures(AuthFailureFilter { limit: 1 })
+            .expect("query auth failures");
+        rows.into_iter()
+            .next()
+            .expect("at least one auth failure")
+            .client_ip
+    }
 }
 
 impl Drop for ServerHarness {
@@ -205,6 +216,31 @@ async fn status_rejects_admin_key_under_strict_tiering() {
     let (kind, reason) = harness.latest_auth_failure().await;
     assert_eq!(kind, "admin");
     assert_eq!(reason, "wrong_kind");
+}
+
+#[tokio::test]
+async fn wrong_kind_auth_failure_uses_trusted_forwarded_client_ip() {
+    let mut config = test_config();
+    config.security.http.trust_proxy_headers = true;
+    config.security.http.trusted_proxies = vec!["127.0.0.1".to_owned()];
+    let harness = ServerHarness::spawn_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/status", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .header("X-Forwarded-For", "203.0.113.9")
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let (kind, reason) = harness.latest_auth_failure().await;
+    assert_eq!(kind, "admin");
+    assert_eq!(reason, "wrong_kind");
+    assert_eq!(
+        harness.latest_auth_failure_client_ip().await.as_deref(),
+        Some("203.0.113.9")
+    );
 }
 
 #[tokio::test]
@@ -798,4 +834,294 @@ async fn oversize_request_body_returns_413() {
         .await
         .expect("send");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn oversize_request_body_records_security_event() {
+    let mut config = test_config();
+    config.api.max_request_bytes = 16;
+    config.security.http.max_request_bytes = 16;
+    let harness = ServerHarness::spawn_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/validate", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .body(vec![b'a'; 17])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "request.too_large");
+
+    let logs_response = reqwest::Client::new()
+        .get(format!("{}/v1/logs/security", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs_body: Value = logs_response.json().await.expect("json");
+    let events = logs_body["data"]["events"]
+        .as_array()
+        .expect("events array");
+    let event = events
+        .iter()
+        .find(|e| e["kind"] == "security.request_oversized")
+        .expect("expected oversized security event");
+    let payload: Value =
+        serde_json::from_str(event["payload_json"].as_str().expect("payload_json"))
+            .expect("payload json");
+    assert_eq!(payload["route"], "/v1/config/validate");
+    assert_eq!(payload["method"], "POST");
+    assert_eq!(payload["limit_bytes"], 16);
+    assert!(payload.get("body").is_none());
+    assert!(payload.get("bearer").is_none());
+}
+
+#[tokio::test]
+async fn disallowed_http_origin_returns_403_and_records_security_event() {
+    let mut config = test_config();
+    config.security.http.allowed_origins = vec!["https://allowed.example".to_owned()];
+    let harness = ServerHarness::spawn_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/status", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .header("Origin", "https://blocked.example")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "auth.origin_not_allowed");
+
+    let logs_response = reqwest::Client::new()
+        .get(format!("{}/v1/logs/security", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs_body: Value = logs_response.json().await.expect("json");
+    let events = logs_body["data"]["events"]
+        .as_array()
+        .expect("events array");
+    let event = events
+        .iter()
+        .find(|e| e["kind"] == "security.cors_origin_denied")
+        .expect("expected cors denial security event");
+    let payload: Value =
+        serde_json::from_str(event["payload_json"].as_str().expect("payload_json"))
+            .expect("payload json");
+    assert_eq!(payload["origin"], "https://blocked.example");
+    assert_eq!(payload["route"], "/v1/status");
+    assert_eq!(payload["method"], "GET");
+}
+
+#[tokio::test]
+async fn allowed_http_origin_succeeds_with_cors_header() {
+    let mut config = test_config();
+    config.security.http.allowed_origins = vec!["https://allowed.example".to_owned()];
+    let harness = ServerHarness::spawn_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/status", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .header("Origin", "https://allowed.example")
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("https://allowed.example")
+    );
+}
+
+#[tokio::test]
+async fn wildcard_origin_accepts_http_and_websocket_without_denial_events() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut config = test_config();
+    config.security.http.allowed_origins = vec!["*".to_owned()];
+    let harness = ServerHarness::spawn_with_config(config).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/status", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .header("Origin", "https://any.example")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+
+    let ws_url = harness.base_url.replacen("http://", "ws://", 1) + "/v1/ws";
+    let mut request = ws_url.into_client_request().expect("websocket request");
+    request.headers_mut().insert(
+        "Authorization",
+        http::HeaderValue::from_str(&format!("Bearer {SESSION_KEY}")).expect("auth header"),
+    );
+    request.headers_mut().insert(
+        "Origin",
+        http::HeaderValue::from_static("https://any.example"),
+    );
+    let (mut stream, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("websocket connects");
+    assert_eq!(response.status().as_u16(), 101);
+    stream.close(None).await.expect("close websocket");
+
+    let logs_response = reqwest::Client::new()
+        .get(format!("{}/v1/logs/security", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs_body: Value = logs_response.json().await.expect("json");
+    let events = logs_body["data"]["events"]
+        .as_array()
+        .expect("events array");
+    assert!(
+        events
+            .iter()
+            .all(|event| event["kind"] != "security.cors_origin_denied"
+                && event["kind"] != "security.ws_origin_denied"),
+        "wildcard origins should not create denial events: {events:?}",
+    );
+}
+
+#[tokio::test]
+async fn unauthenticated_rate_limit_returns_429_envelope_and_security_event() {
+    // burst=8 → per-IP cap 8, unauth cap ceil(8/4)=2. Auth'd requests don't
+    // tick the unauth bucket, so the test can issue many unauth probes (tied
+    // to the per-IP cap of 8 from the same IP) and then still read the audit
+    // trail with the session key.
+    let mut config = test_config();
+    config.security.http.burst = 8;
+    config.security.http.rate_limit_per_minute = 60;
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let status_url = format!("{}/v1/status", harness.base_url);
+
+    let mut limited = false;
+    let mut limited_body: Value = Value::Null;
+    for _ in 0..6 {
+        let response = reqwest::Client::new()
+            .get(&status_url)
+            .send()
+            .await
+            .expect("send");
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited_body = response.json().await.expect("json");
+            limited = true;
+            break;
+        }
+    }
+    assert!(
+        limited,
+        "must hit 429 within 6 unauth requests at burst=8 (unauth cap=2)"
+    );
+    assert_eq!(limited_body["ok"], false);
+    assert_eq!(limited_body["error"]["code"], "auth.rate_limited");
+
+    // GET /v1/logs/security must surface a security.rate_limited event.
+    let logs_response = reqwest::Client::new()
+        .get(format!("{}/v1/logs/security", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs_body: Value = logs_response.json().await.expect("json");
+    let events = logs_body["data"]["events"]
+        .as_array()
+        .expect("events array");
+    let rate_limited = events
+        .iter()
+        .find(|e| e["kind"] == "security.rate_limited")
+        .expect("expected security.rate_limited event");
+    let payload: Value =
+        serde_json::from_str(rate_limited["payload_json"].as_str().expect("payload_json"))
+            .expect("payload is JSON");
+    // Scope label is `unauthenticated` since the trip happened on a
+    // bearer-less request. (per_ip would also be acceptable if the auth'd
+    // probe used the same IP and exhausted that bucket first, but with
+    // burst=8 we hit unauth first.)
+    let scope = payload["scope"].as_str().unwrap_or("");
+    assert!(
+        scope == "unauthenticated" || scope == "per_ip",
+        "unexpected scope: {scope}",
+    );
+    // The raw bearer must never appear in a security event payload.
+    assert!(payload.get("bearer").is_none());
+    assert!(payload.get("key").is_none());
+}
+
+#[tokio::test]
+async fn per_key_rate_limit_returns_429_for_authd_burst() {
+    // burst=3 → per-IP cap 3 AND per-key cap 3. Either bucket will trip
+    // before 6 requests at 60/min refill. The point of this test is that
+    // an authenticated burst is rate-limited (i.e., a valid key cannot
+    // bypass the limiter), not which scope fires first. The fingerprint
+    // round-trip and "no raw bearer in payload" guarantees are covered by
+    // the unit tests in `http_hardening.rs`.
+    let mut config = test_config();
+    config.security.http.burst = 3;
+    config.security.http.rate_limit_per_minute = 60;
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let status_url = format!("{}/v1/status", harness.base_url);
+
+    let mut limited = false;
+    for _ in 0..6 {
+        let response = reqwest::Client::new()
+            .get(&status_url)
+            .header("Authorization", format!("Bearer {SESSION_KEY}"))
+            .send()
+            .await
+            .expect("send");
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let body: Value = response.json().await.expect("json");
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["error"]["code"], "auth.rate_limited");
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "auth'd burst must trip the limiter");
+}
+
+#[tokio::test]
+async fn rate_limit_envelope_uses_standard_shape() {
+    let mut config = test_config();
+    config.security.http.burst = 1;
+    config.security.http.rate_limit_per_minute = 60;
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let url = format!("{}/v1/status", harness.base_url);
+    let mut last: Option<reqwest::Response> = None;
+    for _ in 0..3 {
+        let response = reqwest::Client::new().get(&url).send().await.expect("send");
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            last = Some(response);
+            break;
+        }
+    }
+    let response = last.expect("must rate-limit within 3 requests at burst=1");
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], false);
+    assert!(body["error"]["code"].is_string());
+    assert!(body["error"]["message"].is_string());
+    // `details` must always be present (object), even when empty, per envelope spec.
+    assert!(body["error"]["details"].is_object());
 }

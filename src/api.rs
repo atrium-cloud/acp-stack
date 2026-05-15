@@ -52,10 +52,11 @@ use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::fs_util::home_dir;
+use crate::permissions::PermissionService;
 use crate::secrets::SecretStore;
 use crate::state::InstallerRunInput;
 use crate::state::{AuthFailureFilter, EventFilter, PromptRecord, SessionRecord, StateStore};
-use crate::supervisor::{AgentSnapshot, AgentSupervisor, parse_mcp_servers, parse_prompt_blocks};
+use crate::supervisor::{AgentSnapshot, AgentSupervisor, parse_prompt_blocks};
 use crate::workspace::{
     self, FileMetadata, FileRead, PathIntent, WorkspaceListing, resolve_workspace_path,
 };
@@ -73,6 +74,9 @@ pub struct AppState {
     pub agent_supervisor: Arc<AgentSupervisor>,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
+    pub permissions: PermissionService,
+    pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
+    pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
 }
 
 impl AppState {
@@ -107,8 +111,24 @@ impl AppState {
         let max_request_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
         let config_arc = Arc::new(config);
         let state_arc = Arc::new(TokioMutex::new(state));
-        let commands =
-            CommandGateway::new(state_arc.clone(), event_hub.clone(), config_arc.clone());
+        let permissions = PermissionService::new(
+            state_arc.clone(),
+            event_hub.clone(),
+            config_arc.permissions.effective_request_timeout(),
+            config_arc.permissions.effective_timeout_action(),
+        );
+        let commands = CommandGateway::new(
+            state_arc.clone(),
+            event_hub.clone(),
+            config_arc.clone(),
+            permissions.clone(),
+        );
+        let auth_failure_blocker = Arc::new(
+            crate::http_hardening::AuthFailureBlocker::from_config(&config_arc.security.http),
+        );
+        let rate_limiter = Arc::new(crate::http_hardening::RateLimiter::from_config(
+            &config_arc.security.http,
+        ));
         Self {
             config: config_arc,
             effective_bind: Arc::new(effective_bind),
@@ -120,6 +140,9 @@ impl AppState {
             agent_supervisor: Arc::new(AgentSupervisor::new()),
             event_hub,
             commands,
+            permissions,
+            auth_failure_blocker,
+            rate_limiter,
         }
     }
 }
@@ -191,6 +214,15 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/commands/{id}", get(commands_get_handler))
         .route("/v1/commands/{id}/cancel", post(commands_cancel_handler))
+        .route("/v1/deps", get(deps_get_handler))
+        .route("/v1/deps/check", post(deps_check_handler))
+        .route("/v1/permissions/pending", get(permissions_pending_handler))
+        .route("/v1/permissions/{id}", get(permissions_get_handler))
+        .route(
+            "/v1/permissions/{id}/approve",
+            post(permissions_approve_handler),
+        )
+        .route("/v1/permissions/{id}/deny", post(permissions_deny_handler))
         .layer(RequestBodyLimitLayer::new(limit))
         // Axum's per-extractor default body limit (2 MiB) would silently cap
         // String/Json/etc handlers below the configured runtime limit. Disable
@@ -206,17 +238,35 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/agent/install", post(agent_install_handler))
         .route("/v1/agent/start", post(agent_start_handler))
         .route("/v1/agent/stop", post(agent_stop_handler))
+        .route("/v1/config/import", post(config_import_handler))
+        .route(
+            "/v1/secrets",
+            get(secrets_list_handler).post(secrets_set_handler),
+        )
+        .route(
+            "/v1/secrets/{name}",
+            axum::routing::delete(secrets_delete_handler),
+        )
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
 
-    Router::new()
+    let cors_layer = crate::http_hardening::build_cors_layer(&state.config.security.http);
+
+    let mut router = Router::new()
         .merge(session_routes)
         .merge(admin_routes)
         // Authenticate runs OUTSIDE the tier gate. It sets the resolved
         // KeyKind on the request extensions; require_session then matches
         // against the tier required by this router.
-        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate));
+    if let Some(cors) = cors_layer {
+        router = router.layer(cors).layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_http_origin,
+        ));
+    }
+    router
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -226,7 +276,10 @@ pub fn build_router(state: AppState) -> Router {
         // 413, axum's malformed-query 400, malformed-body 400, fallback 404)
         // and rewraps them in the standard envelope so every error response
         // the client sees has the documented `{ok:false, error:{...}}` shape.
-        .layer(middleware::from_fn(ensure_envelope))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            ensure_envelope,
+        ))
         .with_state(state)
 }
 
@@ -293,7 +346,34 @@ struct WsClientMessage {
     topics: Vec<String>,
 }
 
-async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+async fn ws_handler(
+    State(state): State<AppState>,
+    headers: http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Enforce Origin allowlist on upgrade. Browser clients always send an
+    // Origin header; CLI/local clients don't. We honor the allowlist only
+    // when an Origin is present, so local tools continue to work. The
+    // self-check already warns about wildcard origins on public binds.
+    let origin = headers
+        .get(http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    if !crate::http_hardening::origin_allowed(origin, &state.config.security.http) {
+        let origin_text = origin.unwrap_or("").to_owned();
+        persist_security_event(
+            &state,
+            "warn",
+            "security.ws_origin_denied",
+            "rejected ws upgrade with disallowed Origin",
+            serde_json::json!({"origin": origin_text}),
+        )
+        .await;
+        return reject(
+            StatusCode::FORBIDDEN,
+            "auth.origin_not_allowed",
+            "Origin is not in the configured allowlist",
+        );
+    }
     let event_hub = state.event_hub.clone();
     ws.on_upgrade(move |socket| ws_connection(socket, event_hub))
         .into_response()
@@ -360,6 +440,7 @@ async fn handle_ws_client_message(subscribed_topics: &mut HashSet<String>, text:
             || topic == "agent"
             || topic == "status"
             || topic == "logs"
+            || topic == "permissions"
         {
             subscribed_topics.insert(topic);
         } else {
@@ -379,10 +460,54 @@ async fn authenticate(
     next: Next,
 ) -> Response {
     let route = req.uri().path().to_owned();
-    let client_ip = req
+    let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip().to_string());
+        .map(|info| info.0.ip());
+    let resolved_ip = peer
+        .map(|ip| crate::http_hardening::client_ip(req.headers(), ip, &state.config.security.http));
+    let client_ip = resolved_ip.map(|ip| ip.to_string());
+
+    // Short-circuit blocked IPs before bearer comparison. The blocker entry
+    // is reset on successful authenticate via record_success below.
+    if let Some(ip) = resolved_ip {
+        if let Some(until) = state.auth_failure_blocker.check(ip) {
+            let until_secs = until
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs();
+            persist_security_event(
+                &state,
+                "warn",
+                "security.ip_block_active",
+                "blocked IP attempted auth",
+                serde_json::json!({
+                    "ip": ip.to_string(),
+                    "remaining_seconds": until_secs,
+                    "route": route,
+                }),
+            )
+            .await;
+            return reject(
+                StatusCode::TOO_MANY_REQUESTS,
+                "auth.ip_blocked",
+                "IP temporarily blocked due to repeated auth failures",
+            );
+        }
+    }
+
+    // Per-IP rate limit ticks on every request before bearer parsing. This is
+    // the always-on cap; bursts that exceed it cost the attacker zero local
+    // CPU since we reject before constant-time compare runs.
+    if let Some(ip) = resolved_ip {
+        if let Err(scope) = state.rate_limiter.check_per_ip(ip) {
+            persist_rate_limit_event(&state, &route, ip, scope, None).await;
+            return reject(
+                StatusCode::TOO_MANY_REQUESTS,
+                "auth.rate_limited",
+                "rate limit exceeded",
+            );
+        }
+    }
 
     // Spec hardening (`docs/specs/security.md`): reject duplicate or malformed
     // Authorization headers. `headers().get_all` exposes every value, so we
@@ -392,6 +517,9 @@ async fn authenticate(
     let mut auth_values = req.headers().get_all(AUTHORIZATION).iter();
     let header = match (auth_values.next(), auth_values.next()) {
         (None, _) => {
+            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+                return response;
+            }
             return match log_failure(
                 &state,
                 KeyKind::Unknown,
@@ -410,6 +538,9 @@ async fn authenticate(
             };
         }
         (Some(_), Some(_)) => {
+            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+                return response;
+            }
             return match log_failure(
                 &state,
                 KeyKind::Unknown,
@@ -433,6 +564,9 @@ async fn authenticate(
     let bearer = match parse_bearer(header) {
         Some(token) => token,
         None => {
+            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+                return response;
+            }
             return match log_failure(
                 &state,
                 KeyKind::Unknown,
@@ -463,26 +597,102 @@ async fn authenticate(
 
     match matched {
         Some(kind) => {
+            // Per-key rate limit. Fingerprint is sha256 of the bearer truncated
+            // to 16 hex chars; the raw key never enters the limiter map or any
+            // event payload.
+            let fingerprint = crate::http_hardening::key_fingerprint(&bearer);
+            if let Err(scope) = state.rate_limiter.check_per_key(&fingerprint) {
+                if let Some(ip) = resolved_ip {
+                    persist_rate_limit_event(&state, &route, ip, scope, Some(&fingerprint)).await;
+                }
+                return reject(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "auth.rate_limited",
+                    "rate limit exceeded",
+                );
+            }
+            if let Some(ip) = resolved_ip {
+                state.auth_failure_blocker.record_success(ip);
+            }
             req.extensions_mut().insert(kind);
             next.run(req).await
         }
-        None => match log_failure(
-            &state,
-            KeyKind::Unknown,
-            AuthFailureReason::Invalid,
-            client_ip.as_deref(),
-            &route,
-        )
-        .await
-        {
-            Ok(()) => reject(
-                StatusCode::UNAUTHORIZED,
-                "auth.invalid",
-                "invalid credential",
-            ),
-            Err(state_err) => state_err,
-        },
+        None => {
+            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+                return response;
+            }
+            match log_failure(
+                &state,
+                KeyKind::Unknown,
+                AuthFailureReason::Invalid,
+                client_ip.as_deref(),
+                &route,
+            )
+            .await
+            {
+                Ok(()) => reject(
+                    StatusCode::UNAUTHORIZED,
+                    "auth.invalid",
+                    "invalid credential",
+                ),
+                Err(state_err) => state_err,
+            }
+        }
     }
+}
+
+/// Check the unauthenticated rate limit and return a 429 response if the
+/// IP's unauthenticated bucket is exhausted. Called from every auth-failure
+/// branch so floods of bad credentials are throttled below the
+/// auth-failure-block threshold without burning bearer-compare CPU.
+async fn check_unauthenticated_rate(
+    state: &AppState,
+    resolved_ip: Option<std::net::IpAddr>,
+    route: &str,
+) -> Option<Response> {
+    let ip = resolved_ip?;
+    match state.rate_limiter.check_unauthenticated(ip) {
+        Ok(()) => None,
+        Err(scope) => {
+            persist_rate_limit_event(state, route, ip, scope, None).await;
+            Some(reject(
+                StatusCode::TOO_MANY_REQUESTS,
+                "auth.rate_limited",
+                "rate limit exceeded",
+            ))
+        }
+    }
+}
+
+/// Append a `security.rate_limited` durable event with scope label and
+/// (when authenticated) the truncated key fingerprint. The raw bearer is
+/// never persisted.
+async fn persist_rate_limit_event(
+    state: &AppState,
+    route: &str,
+    ip: std::net::IpAddr,
+    scope: crate::http_hardening::RateLimitScope,
+    key_fingerprint: Option<&str>,
+) {
+    let mut payload = serde_json::json!({
+        "scope": scope.as_str(),
+        "ip": ip.to_string(),
+        "route": route,
+    });
+    if let (Some(fp), Some(map)) = (key_fingerprint, payload.as_object_mut()) {
+        map.insert(
+            "key_fingerprint".to_owned(),
+            serde_json::Value::String(fp.to_owned()),
+        );
+    }
+    persist_security_event(
+        state,
+        "warn",
+        "security.rate_limited",
+        "rate limit exceeded",
+        payload,
+    )
+    .await;
 }
 
 /// Per-route tier gate: rejects valid keys of the wrong tier with 401 and
@@ -539,7 +749,14 @@ async fn enforce_tier(
             let client_ip = req
                 .extensions()
                 .get::<ConnectInfo<SocketAddr>>()
-                .map(|info| info.0.ip().to_string());
+                .map(|info| {
+                    crate::http_hardening::client_ip(
+                        req.headers(),
+                        info.0.ip(),
+                        &state.config.security.http,
+                    )
+                    .to_string()
+                });
             match log_failure(
                 &state,
                 kind,
@@ -578,7 +795,13 @@ async fn enforce_tier(
 /// auth middleware) pass through untouched. Original HTTP semantic headers
 /// (e.g. `Allow` on a 405) are copied onto the rewrapped response so
 /// downstream method-discovery and similar conventions keep working.
-async fn ensure_envelope(req: Request<Body>, next: Next) -> Response {
+async fn ensure_envelope(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let route = req.uri().path().to_owned();
+    let method = req.method().as_str().to_owned();
     let response = next.run(req).await;
     let status = response.status();
     if !status.is_client_error() && !status.is_server_error() {
@@ -592,6 +815,20 @@ async fn ensure_envelope(req: Request<Body>, next: Next) -> Response {
         .unwrap_or(false);
     if is_json {
         return response;
+    }
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        persist_security_event(
+            &state,
+            "warn",
+            "security.request_oversized",
+            "rejected oversized request body",
+            serde_json::json!({
+                "route": route,
+                "method": method,
+                "limit_bytes": state.max_request_bytes,
+            }),
+        )
+        .await;
     }
     let (parts, _body) = response.into_parts();
     let mut new_response = ApiError::new(error_code_for_status(status), message_for_status(status))
@@ -608,6 +845,46 @@ async fn ensure_envelope(req: Request<Body>, next: Next) -> Response {
             .append(name.clone(), value.clone());
     }
     new_response
+}
+
+/// Reject disallowed browser HTTP origins before `CorsLayer` handles the
+/// request so the denial is both JSON-shaped and durable. WebSocket upgrades
+/// are left to `ws_handler`, which publishes `security.ws_origin_denied`.
+async fn enforce_http_origin(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if req.uri().path() == "/v1/ws" {
+        return next.run(req).await;
+    }
+    let origin = req
+        .headers()
+        .get(http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    if !crate::http_hardening::origin_allowed(origin, &state.config.security.http) {
+        let route = req.uri().path().to_owned();
+        let method = req.method().as_str().to_owned();
+        let origin_text = origin.unwrap_or("").to_owned();
+        persist_security_event(
+            &state,
+            "warn",
+            "security.cors_origin_denied",
+            "rejected HTTP request with disallowed Origin",
+            serde_json::json!({
+                "origin": origin_text,
+                "route": route,
+                "method": method,
+            }),
+        )
+        .await;
+        return reject(
+            StatusCode::FORBIDDEN,
+            "auth.origin_not_allowed",
+            "Origin is not in the configured allowlist",
+        );
+    }
+    next.run(req).await
 }
 
 fn error_code_for_status(status: StatusCode) -> &'static str {
@@ -671,7 +948,53 @@ async fn log_failure(
             "internal state error while recording auth failure",
         ));
     }
+    drop(store);
+    // Tick the in-memory blocker. If this failure just tripped the threshold,
+    // emit a security.ip_block_applied event so operators see the block via
+    // GET /v1/logs/security.
+    if let Some(ip_str) = client_ip {
+        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+            if state.auth_failure_blocker.record_failure(ip) {
+                let block_secs = state.auth_failure_blocker.block_duration().as_secs();
+                persist_security_event(
+                    state,
+                    "warn",
+                    "security.ip_block_applied",
+                    "IP blocked due to repeated auth failures",
+                    serde_json::json!({
+                        "ip": ip_str,
+                        "block_duration_seconds": block_secs,
+                        "route": route,
+                    }),
+                )
+                .await;
+            }
+        }
+    }
     Ok(())
+}
+
+/// Append a `security.*` event. Best-effort: if the events table write fails,
+/// log a warning rather than failing the surrounding request. The event lands
+/// on the `logs` WS topic and is merged into `GET /v1/logs/security`.
+async fn persist_security_event(
+    state: &AppState,
+    level: &str,
+    kind: &str,
+    message: &str,
+    data: serde_json::Value,
+) {
+    let payload = match serde_json::to_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize security event payload");
+            return;
+        }
+    };
+    let store = state.state.lock().await;
+    if let Err(err) = store.append_event(level, kind, message, &payload) {
+        tracing::warn!(error = %err, kind, "failed to persist security event");
+    }
 }
 
 fn reject(status: StatusCode, code: &str, message: &str) -> Response {
@@ -808,8 +1131,129 @@ struct ConfigValidateResponse {
 async fn config_validate_handler(
     body: String,
 ) -> std::result::Result<ApiSuccess<ConfigValidateResponse>, StackError> {
-    let _ = crate::config::load_config_from_str(&body)?;
+    crate::config::load_config_from_str(&body)?;
     Ok(ApiSuccess::new(ConfigValidateResponse { valid: true }))
+}
+
+#[derive(Serialize)]
+struct ConfigImportResponse {
+    imported: bool,
+    restart_required: bool,
+}
+
+/// POST /v1/config/import (admin-tier). Parses TOML from the raw body,
+/// rejects auth-ref changes, atomically writes the canonical form to the
+/// default config path, and records a `server.config_imported` audit event.
+/// The running daemon retains its old `AppState`; the client must restart
+/// the daemon for the new config to take effect.
+async fn config_import_handler(
+    State(state): State<AppState>,
+    body: String,
+) -> std::result::Result<ApiSuccess<ConfigImportResponse>, StackError> {
+    let incoming = crate::config::load_config_from_str(&body)?;
+    crate::config::compare_auth_refs(&state.config.auth, &incoming.auth)?;
+    let canonical = incoming.to_canonical_toml()?;
+    let target = crate::config::default_config_path()?;
+    if let Some(parent) = target.parent() {
+        crate::fs_util::create_dir_owner_only(parent)?;
+    }
+    crate::fs_util::atomic_write_owner_only(&target, canonical.as_bytes())?;
+
+    // Audit event: durable record that an import landed. Pin the path so the
+    // operator's `acps logs events` shows which file changed. The import has
+    // already succeeded on disk, so an event-write failure must not fail the
+    // response — but it must also not be silently dropped (CLAUDE.md error
+    // rule). Log at warn so monitoring sees the divergence.
+    let payload = serde_json::json!({
+        "path": target.to_string_lossy(),
+        "size_bytes": canonical.len(),
+    });
+    match serde_json::to_string(&payload) {
+        Ok(payload_text) => {
+            let store = state.state.lock().await;
+            if let Err(err) = store.append_event(
+                "info",
+                "server.config_imported",
+                "config imported via /v1/config/import",
+                &payload_text,
+            ) {
+                tracing::warn!(error = %err, "failed to record server.config_imported audit event");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize config-import audit payload");
+        }
+    }
+
+    Ok(ApiSuccess::new(ConfigImportResponse {
+        imported: true,
+        restart_required: true,
+    }))
+}
+
+#[derive(Serialize)]
+struct SecretsListResponse {
+    names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SecretsSetBody {
+    name: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct SecretsSetResponse {
+    name: String,
+    action: &'static str,
+}
+
+#[derive(Serialize)]
+struct SecretsDeleteResponse {
+    name: String,
+    deleted: bool,
+}
+
+async fn secrets_list_handler(
+    State(_state): State<AppState>,
+) -> std::result::Result<ApiSuccess<SecretsListResponse>, StackError> {
+    let home = home_dir()?;
+    let store = crate::secrets::SecretStore::open(&home)?;
+    let names = store.list_names().iter().map(|s| (*s).to_owned()).collect();
+    Ok(ApiSuccess::new(SecretsListResponse { names }))
+}
+
+async fn secrets_set_handler(
+    State(state): State<AppState>,
+    Json(body): Json<SecretsSetBody>,
+) -> std::result::Result<ApiSuccess<SecretsSetResponse>, StackError> {
+    crate::secrets::reject_auth_ref_mutation(&body.name, &state.config)?;
+    let home = home_dir()?;
+    let mut store = crate::secrets::SecretStore::open(&home)?;
+    let action = if store.contains(&body.name) {
+        "updated"
+    } else {
+        "set"
+    };
+    store.set(&body.name, &body.value)?;
+    Ok(ApiSuccess::new(SecretsSetResponse {
+        name: body.name,
+        action,
+    }))
+}
+
+async fn secrets_delete_handler(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<SecretsDeleteResponse>, StackError> {
+    crate::secrets::reject_auth_ref_mutation(&name, &state.config)?;
+    let home = home_dir()?;
+    let mut store = crate::secrets::SecretStore::open(&home)?;
+    store.delete(&name)?;
+    Ok(ApiSuccess::new(SecretsDeleteResponse {
+        name,
+        deleted: true,
+    }))
 }
 
 /// Per-request cap on `GET /v1/logs/events?limit=`. An authenticated session
@@ -1037,6 +1481,90 @@ async fn commands_cancel_handler(
     Ok(ApiSuccess::new(record.into()))
 }
 
+#[derive(Serialize)]
+struct PermissionsListResponse {
+    permissions: Vec<crate::permissions::PermissionRequestView>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PermissionApproveBody {
+    option_id: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PermissionDenyBody {
+    reason: Option<String>,
+}
+
+async fn permissions_pending_handler(
+    Query(params): Query<LogsLimitParams>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<PermissionsListResponse>, StackError> {
+    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let permissions = state.permissions.pending(limit).await?;
+    Ok(ApiSuccess::new(PermissionsListResponse { permissions }))
+}
+
+async fn permissions_get_handler(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<crate::permissions::PermissionRequestView>, StackError> {
+    let view = state.permissions.get(&id).await?;
+    Ok(ApiSuccess::new(view))
+}
+
+async fn permissions_approve_handler(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    body: Option<Json<PermissionApproveBody>>,
+) -> std::result::Result<ApiSuccess<crate::permissions::PermissionDecisionView>, StackError> {
+    let Json(body) = body.unwrap_or_default();
+    // The deciding principal is the bearer-token tier. These routes are
+    // session-tier (per docs/specs/security.md:20); the principal is always
+    // "session-key" and that's what's recorded in `permission_decisions`. If
+    // the tier policy ever splits approve vs deny across keys, surface the
+    // resolved KeyKind from the request extension here.
+    let decision = state
+        .permissions
+        .approve(&id, body.option_id, body.reason, "session-key")
+        .await?;
+    Ok(ApiSuccess::new(decision))
+}
+
+async fn deps_get_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<crate::deps::DepsReport>, StackError> {
+    Ok(ApiSuccess::new(crate::deps::check_dependencies(
+        &state.config,
+    )))
+}
+
+async fn deps_check_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<crate::deps::DepsReport>, StackError> {
+    Ok(ApiSuccess::new(crate::deps::check_dependencies(
+        &state.config,
+    )))
+}
+
+async fn permissions_deny_handler(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    body: Option<Json<PermissionDenyBody>>,
+) -> std::result::Result<ApiSuccess<crate::permissions::PermissionDecisionView>, StackError> {
+    let Json(body) = body.unwrap_or_default();
+    // Hardcoded "session-key" mirrors `permissions_approve_handler`; see the
+    // rationale comment there.
+    let decision = state
+        .permissions
+        .deny(&id, body.reason, "session-key")
+        .await?;
+    Ok(ApiSuccess::new(decision))
+}
+
 async fn logs_permissions_handler(
     Query(params): Query<LogsLimitParams>,
     State(state): State<AppState>,
@@ -1062,6 +1590,7 @@ async fn logs_permissions_handler(
 #[derive(Serialize)]
 struct LogsSecurityResponse {
     auth_failures: Vec<AuthFailureJson>,
+    events: Vec<LogEventJson>,
 }
 
 #[derive(Serialize)]
@@ -1075,6 +1604,11 @@ struct AuthFailureJson {
     payload_json: String,
 }
 
+/// `GET /v1/logs/security` returns both `auth_failures` rows (durable record
+/// of every rejected authentication) and `events` rows whose `kind` starts
+/// with `security.*` (rate-limit hits, IP blocks, denied origins, oversized
+/// requests, etc.). Two independent streams keep their existing schemas;
+/// clients merge them on `created_at` for a unified timeline.
 async fn logs_security_handler(
     Query(params): Query<LogsLimitParams>,
     State(state): State<AppState>,
@@ -1082,6 +1616,7 @@ async fn logs_security_handler(
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let store = state.state.lock().await;
     let auth_failures = store.query_auth_failures(AuthFailureFilter { limit })?;
+    let security_events = store.query_security_events(limit)?;
     drop(store);
     Ok(ApiSuccess::new(LogsSecurityResponse {
         auth_failures: auth_failures
@@ -1094,6 +1629,17 @@ async fn logs_security_handler(
                 client_ip: failure.client_ip,
                 route: failure.route,
                 payload_json: failure.payload_json,
+            })
+            .collect(),
+        events: security_events
+            .into_iter()
+            .map(|e| LogEventJson {
+                id: e.id,
+                created_at: e.created_at,
+                level: e.level,
+                kind: e.kind,
+                message: e.message,
+                payload_json: e.payload_json,
             })
             .collect(),
     }))
@@ -1316,6 +1862,18 @@ fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, S
     Ok(env)
 }
 
+/// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer`
+/// type. Returns an empty Vec when no MCP servers are configured, so the
+/// secret store is only opened when there's something to resolve.
+fn open_mcp_servers(config: &Config) -> Result<Vec<agent_client_protocol::schema::McpServer>> {
+    if config.mcp.servers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let home = home_dir()?;
+    let store = SecretStore::open(&home)?;
+    crate::mcp::resolve_mcp_servers(&config.mcp, &store)
+}
+
 #[derive(Serialize)]
 struct AgentStartResponse {
     started_at: String,
@@ -1340,6 +1898,7 @@ async fn agent_start_handler(
             env,
             &state.state,
             state.event_hub.clone(),
+            Some(state.permissions.clone()),
         )
         .await?;
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
@@ -1473,16 +2032,19 @@ async fn sessions_create_handler(
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
     let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
+    let mcp_servers = open_mcp_servers(&state.config)?;
+    let server_names = crate::mcp::server_names(&mcp_servers);
     let record = state
         .agent_supervisor
         .create_session(
             &state.config.agent,
             &state.config.workspace.root,
             Some(cwd),
-            parse_mcp_servers(None)?,
+            mcp_servers,
             &state.state,
         )
         .await?;
+    persist_mcp_attached(&state, &record.id, &server_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
@@ -1515,16 +2077,19 @@ async fn sessions_load_handler(
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
+    let mcp_servers = open_mcp_servers(&state.config)?;
+    let server_names = crate::mcp::server_names(&mcp_servers);
     let record = state
         .agent_supervisor
         .load_session(
             &id,
             cwd,
-            parse_mcp_servers(None)?,
+            mcp_servers,
             &state.config.workspace.root,
             &state.state,
         )
         .await?;
+    persist_mcp_attached(&state, &record.id, &server_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
@@ -1538,17 +2103,41 @@ async fn sessions_resume_handler(
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
+    let mcp_servers = open_mcp_servers(&state.config)?;
+    let server_names = crate::mcp::server_names(&mcp_servers);
     let record = state
         .agent_supervisor
         .resume_session(
             &id,
             cwd,
-            parse_mcp_servers(None)?,
+            mcp_servers,
             &state.config.workspace.root,
             &state.state,
         )
         .await?;
+    persist_mcp_attached(&state, &record.id, &server_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "server_names": names,
+    });
+    let payload_text = payload.to_string();
+    let store = state.state.lock().await;
+    if let Err(err) = store.append_session_event(
+        session_id,
+        "info",
+        "mcp.session_attached",
+        "mcp servers attached to session",
+        &payload_text,
+    ) {
+        tracing::warn!(error = %err, session_id, "failed to record mcp.session_attached event");
+    }
 }
 
 /// Resolve and validate a session `cwd` against `workspace.root`. Returns
@@ -1723,6 +2312,7 @@ async fn sessions_cancel_handler(
         .agent_supervisor
         .cancel_session(&id, &state.state)
         .await?;
+    cancel_pending_acp_permissions_for_session(&state, &id, "session-canceled").await;
     Ok(ApiSuccess::new(SessionsCancelResponse { session_id: id }))
 }
 
@@ -1734,7 +2324,46 @@ async fn sessions_close_handler(
         .agent_supervisor
         .close_session(&id, &state.state)
         .await?;
+    cancel_pending_acp_permissions_for_session(&state, &id, "session-closed").await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
+/// When a session closes or is canceled, any in-flight ACP-source permission
+/// rows for that session must be settled — otherwise the operator UI shows
+/// stale "pending" rows that won't resolve until the per-request timer fires
+/// (default 5 minutes). The ACP-side prompt-turn is already dead; the durable
+/// row should reflect that immediately.
+async fn cancel_pending_acp_permissions_for_session(
+    state: &AppState,
+    session_id: &str,
+    reason: &str,
+) {
+    // Read every pending row, filter by source=acp + subject_id=session.
+    // The list is small in practice (one prompt turn at a time); no need to
+    // push the filter into SQL.
+    let pending = match state.permissions.pending(MAX_LOGS_LIMIT).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, session_id, "failed to load pending permissions for session close");
+            return;
+        }
+    };
+    for row in pending {
+        if row.source != "acp" {
+            continue;
+        }
+        if row.subject_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        if let Err(err) = state.permissions.cancel(&row.id, reason).await {
+            tracing::warn!(
+                error = %err,
+                permission_id = %row.id,
+                session_id,
+                "failed to cancel pending ACP permission on session teardown",
+            );
+        }
+    }
 }
 
 // ----- Workspace files ------------------------------------------------------

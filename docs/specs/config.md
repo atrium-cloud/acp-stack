@@ -40,6 +40,7 @@ auth_failures_per_minute = 5
 auth_block_duration = "15m"
 allowed_origins = ["https://agent.example.com"]
 trust_proxy_headers = false
+trusted_proxies = []
 
 [workspace]
 root = "/workspace"
@@ -81,20 +82,50 @@ id = "opencode"
 creates = "opencode"
 
 [permissions]
-mode = "auto"            # auto | supervised | locked
+mode = "auto"                # auto | supervised | locked
 review = ["sudo *", "rm *"]
 deny = ["shutdown*", "reboot*"]
+request_timeout = "5m"       # how long a pending row sits before the timer fires
+timeout_action = "deny"      # deny | approve — what the timer does on expiry
 
 [commands]
-default_timeout = "10m"  # 5s, 750ms, 1h all accepted
+default_timeout = "10m"      # 5s, 750ms, 1h all accepted
 cancel_grace = "5s"
 env_allowlist = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
 max_output_bytes = 1048576
+
+[dependencies]
+# Each entry: { name, required = true, feature = "<optional label>" }
+commands = [{ name = "git" }, { name = "ripgrep", required = false }]
+packages = []
+runtimes = []
+mcp = [{ name = "slack" }]    # cross-references [[mcp.servers]] names
+
+[[mcp.servers]]
+type = "stdio"
+name = "slack"
+command = "slack-mcp"
+args = []
+env = ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"]
+
+[[mcp.servers]]
+type = "http"
+name = "linear"
+url = "https://api.linear.app/mcp"
+headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 ```
 
-`[permissions]` controls how `POST /v1/commands` evaluates each submitted shell string. In phase 1, only static glob matchers are honored — patterns on `deny` reject the submission with `command.denied`; patterns on `review` reject in `supervised`/`locked` modes and proceed (emitting a `command.review_flagged` event) in `auto` mode. A full approval queue with `permissions` topic and `/v1/permissions/...` routes is deferred to a later phase.
+`[permissions]` controls how `POST /v1/commands` evaluates each submitted shell string AND how ACP `session/request_permission` requests are gated. Patterns on `deny` reject the submission immediately with `command.denied`. Patterns on `review` and unmatched submissions in `locked` mode create a pending row in `permission_requests`, publish a `permission.created` event on the `permissions` WebSocket topic, and block the request until an operator decides via `/v1/permissions/{id}/approve` or `/v1/permissions/{id}/deny`. In `auto` mode, `review` matches still proceed and emit a `command.review_flagged` event for audit.
+
+`request_timeout` is the per-row duration before the timer fires; `timeout_action` chooses how the timer settles a still-pending row (`deny` writes `expired`; `approve` auto-approves with no `option_id`). Defaults are `5m` / `deny`.
 
 `[commands]` controls the Command Gateway runtime. `default_timeout` and `cancel_grace` accept short duration suffixes (`ms`, `s`, `m`, `h`). `env_allowlist` is the closed set of environment variable names the daemon will forward into command children; secrets from the encrypted store are never injected implicitly. `max_output_bytes` caps the total bytes persisted per run; once exceeded the row's `truncated` flag is set and further output is drained but not stored.
+
+`[dependencies]` declares external programs, packages, runtimes, and MCP servers that the operator expects to be available. The runtime reports their satisfaction status via `GET /v1/deps` and `acps deps check` but does not install anything. Today only `commands` are checked (PATH lookup); `packages` and `runtimes` are declarative-only with `<kind>-check-not-implemented` reasons; `mcp` cross-references `[[mcp.servers]]` for declaration presence.
+
+`[mcp.servers]` declares MCP servers passed to the agent at session create/load/resume time. Each entry is either `type = "stdio"` (with `command`, optional `args`, and an `env` list of secret-ref names) or `type = "http"` (with `url` and a `headers` list of `{ name, value_ref }`). Stdio env values and HTTP header values are resolved from the encrypted secret store on every session call — they never enter the durable event log or any HTTP response. `mcp.session_attached` events record only the server names attached to a session.
+
+`[security.http].trusted_proxies` is a list of exact IP-address strings (no CIDR) trusted to populate `X-Forwarded-For` / `Forwarded` headers. When `trust_proxy_headers = true` and the socket peer matches an entry, the leftmost forwarded IP is used as the client IP for auth-failure tracking. With `trust_proxy_headers = false` or an empty list, the socket peer is always used.
 
 `[agent]` names the ACP process that `acp-stack` launches. For a native ACP agent such as OpenCode, omit `[agent.adapter]`. OpenCode remains a good direct-key example because it uses API keys rather than browser OAuth.
 

@@ -25,7 +25,7 @@ Both keys are presented as `Authorization: Bearer <key>`. The server determines 
 
 ## Auth Failure Logging
 
-Every rejected authentication is recorded as a row in the `auth_failures` table. Rows capture the request route, the resolved key kind (`session`, `admin`, or `unknown` when no match), and the reason code (`missing`, `malformed_header`, `invalid`, `wrong_kind`). The attempted token value is never stored; only the kind that was expected and why it failed. In 0.0.1 rows carry the socket client IP when available; proxy-header interpretation behind `security.http.trust_proxy_headers` belongs with the later proxy hardening work. Rows also carry a small JSON payload for forward-compatible context (rate-limit hints, etc.).
+Every rejected authentication is recorded as a row in the `auth_failures` table. Rows capture the request route, the resolved key kind (`session`, `admin`, or `unknown` when no match), and the reason code (`missing`, `malformed_header`, `invalid`, `wrong_kind`). The attempted token value is never stored; only the kind that was expected and why it failed. Rows carry the trusted-proxy-aware client IP when `security.http.trust_proxy_headers` is enabled and the socket peer is configured in `security.http.trusted_proxies`; otherwise they carry the socket client IP when available. Rows also carry a small JSON payload for forward-compatible context (rate-limit hints, etc.).
 
 ## Baseline Posture
 
@@ -130,7 +130,9 @@ deny = ["shutdown*", "reboot*"]
 
 Patterns are full-string shell-style globs matched against the raw command line. `*` matches any sequence of characters (including the empty string); `?` matches exactly one. They are anchored at both ends, so a bare `shutdown` matches only the literal `shutdown` and not `shutdown now` — explicit args should be covered with `shutdown*` or `shutdown *`. Patterns do not currently introspect shell composition (`;`, `&&`, pipelines), so `true; shutdown now` would not be matched by `shutdown*` — denylist coverage of shell composition is deferred to the permissions module.
 
-The `timeout` and `timeout_action` knobs documented here in earlier drafts are reserved for the permissions module that owns the approval queue; the phase-1 config schema does not accept them yet.
+The `[permissions].request_timeout` (duration string, default `5m`) and `[permissions].timeout_action` (`"deny"` | `"approve"`, default `"deny"`) keys govern per-request expiry. When a pending request crosses `request_timeout`, the timer transitions it to `expired` (or `approved` when `timeout_action = "approve"`) and records a `system`-principal decision.
+
+`[security.http].trusted_proxies` is an array of exact IP-address strings (no CIDR). When `trust_proxy_headers = true`, the runtime consults `X-Forwarded-For` / `Forwarded` headers only when the socket peer matches an entry; otherwise the socket peer is used as the client IP for auth-failure tracking and rate-limit accounting.
 
 Modes:
 
@@ -142,7 +144,20 @@ Important 0.0.x boundary:
 
 The Command Gateway controls commands launched through `acp-stack` and terminal capabilities that `acp-stack` mediates. It does not claim to intercept arbitrary process activity outside its control path.
 
-0.0.1 enforces only the static `deny` and `review` glob lists at submission time. There is no pending-approval queue, no `permissions` WebSocket topic producer, and no `/v1/permissions/...` routes — those land with the dedicated permissions module. Until then, `review` matches behave like `deny` when `mode` is `supervised` or `locked`, and emit a `command.review_flagged` event while proceeding when `mode = "auto"`.
+The Phase 1+2 permissions module is in place. `review` matches now create a pending permission row when `mode` is `supervised` or `locked` (the row's `subject_id` is the command id); operators decide through `/v1/permissions/{id}/approve` or `/v1/permissions/{id}/deny`. `locked` mode also gates every non-deny submission through the same pipeline. In `auto` mode, `review` matches still proceed with a `command.review_flagged` event for audit. ACP `session/request_permission` requests follow the same path with `subject_id = session_id`.
+
+Two independent defensive layers gate every HTTP request:
+
+1. **Auth-failure IP block** (`http_hardening::AuthFailureBlocker`): every rejected authentication increments a per-IP counter in a 60-second rolling window. When the count crosses `[security.http].auth_failures_per_minute`, the IP is blocked for `[security.http].auth_block_duration` and a `security.ip_block_applied` event is appended. Blocked IPs are short-circuited before bearer comparison; the block clears on successful authentication, on window roll-over after the configured duration, or on daemon restart (state is in-memory only — persistent IP blocks belong in a reverse proxy). This layer targets brute-force key guessing.
+
+2. **Rate limiter** (`http_hardening::RateLimiter`): three independent token buckets enforce the per-window throughput contract from `[security.http].rate_limit_per_minute` and `[security.http].burst`.
+   - **Per-IP** — ticked on every request before bearer parsing, keyed by the trusted-proxy-aware client IP. Capacity `burst`; refill `rate_limit_per_minute / 60` tokens/second.
+   - **Per-key** — ticked on requests that successfully match an API key, keyed by `sha256(bearer)` truncated to 16 hex characters. The raw bearer is never stored. Same capacity/refill as per-IP.
+   - **Unauthenticated** — ticked on requests that fail bearer parse/match, keyed by client IP, with a stricter capacity/refill (one-quarter of the authenticated tier). Defense-in-depth against bad-credential floods below the auth-failure-block threshold.
+
+Rate-limit rejections return `429 auth.rate_limited` in the standard envelope and append a `security.rate_limited` event whose payload carries the scope (`per_ip` / `per_key` / `unauthenticated`), the client IP, the route, and (for per-key) the key fingerprint. Bucket state is in-process only.
+
+HTTP requests with a disallowed `Origin` return `403 auth.origin_not_allowed` and append `security.cors_origin_denied`. WebSocket upgrades use the same allowlist, return the same error code on rejection, and append `security.ws_origin_denied`. Framework-generated oversized request-body rejections return `413 request.too_large` and append `security.request_oversized` with method, route, and configured byte limit.
 
 ## Security Self-Check
 
