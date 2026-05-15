@@ -77,12 +77,14 @@ Migration layout:
 migrations/
   manifest.toml
   001_init.sqlite.sql
-  001_init.postgres.sql
-  002_permissions.sqlite.sql
-  002_permissions.postgres.sql
-  003_usage_metrics.sqlite.sql
-  003_usage_metrics.postgres.sql
+  002_auth_failures_schema.sqlite.sql
+  003_agent_capabilities.sqlite.sql
+  004_sessions.sqlite.sql
+  005_commands_schema.sqlite.sql
+  006_permissions.sqlite.sql
 ```
+
+Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
 
 Rules:
 

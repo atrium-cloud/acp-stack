@@ -22,3 +22,8 @@ sqlite_file = "004_sessions.sqlite.sql"
 id = 5
 name = "commands_schema"
 sqlite_file = "005_commands_schema.sqlite.sql"
+
+[[migration]]
+id = 6
+name = "permissions"
+sqlite_file = "006_permissions.sqlite.sql"
