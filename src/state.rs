@@ -9,23 +9,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // chrono's SecondsFormat::Nanos always emits 9 fractional digits, which keeps the
 // ORDER BY consistent with chronological order.
 
-const MIGRATED_TABLES: &[&str] = &[
-    "events",
-    "sessions",
-    "commands",
-    "agent_lifecycle",
-    "auth_failures",
-    "installer_runs",
+/// Tables managed by migrations, paired with the migration id that introduces
+/// them. Used by the pre-flight check to verify a non-fresh DB looks intact:
+/// only tables introduced by migrations <= the DB's current schema version
+/// are expected to exist before we run `migrate()`. Without the
+/// `introduced_in` pairing, a DB at schema_version 2 would incorrectly fail
+/// because `agent_capabilities` (introduced in 3) doesn't exist yet.
+const MIGRATED_TABLES: &[(&str, i64)] = &[
+    ("events", 1),
+    ("sessions", 1),
+    ("commands", 1),
+    ("agent_lifecycle", 1),
+    ("auth_failures", 1),
+    ("installer_runs", 1),
+    ("agent_capabilities", 3),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../migrations/manifest.toml");
 const SQL_001_INIT: &str = include_str!("../migrations/001_init.sqlite.sql");
 const SQL_002_AUTH_FAILURES_SCHEMA: &str =
     include_str!("../migrations/002_auth_failures_schema.sqlite.sql");
+const SQL_003_AGENT_CAPABILITIES: &str =
+    include_str!("../migrations/003_agent_capabilities.sqlite.sql");
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUTH_FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AGENT_LIFECYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static INSTALLER_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
@@ -86,6 +96,38 @@ pub struct AgentLifecycleEvent {
     pub payload_json: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCapabilitiesRecord {
+    pub agent_id: String,
+    pub captured_at: String,
+    pub capabilities_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallerRun {
+    pub id: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallerRunInput<'a> {
+    pub started_at: &'a str,
+    pub finished_at: Option<&'a str>,
+    pub status: &'a str,
+    pub stdout: &'a str,
+    pub stderr: &'a str,
+    pub exit_status: Option<i32>,
+}
+
+/// Per-stream byte cap applied before INSERT to keep installer_runs rows bounded.
+/// A runaway installer that streams MB to stdout would otherwise bloat SQLite.
+pub const INSTALLER_OUTPUT_CAP_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateCounts {
     pub events: i64,
@@ -93,6 +135,8 @@ pub struct StateCounts {
     pub commands: i64,
     pub auth_failures: i64,
     pub agent_lifecycle: i64,
+    pub installer_runs: i64,
+    pub agent_capabilities: i64,
 }
 
 pub struct StateStore {
@@ -129,8 +173,9 @@ impl StateStore {
         self.reject_newer_schema_version()?;
         self.reject_unversioned_managed_tables()?;
         self.ensure_migrations_table()?;
-        if self.schema_version()? > 0 {
-            self.assert_required_tables_present()?;
+        let starting_version = self.schema_version()?;
+        if starting_version > 0 {
+            self.assert_tables_for_version(starting_version)?;
         }
 
         let manifest = parse_manifest()?;
@@ -170,8 +215,21 @@ impl StateStore {
     }
 
     fn assert_required_tables_present(&self) -> Result<()> {
-        for &table in MIGRATED_TABLES {
+        for &(table, _) in MIGRATED_TABLES {
             if !self.table_exists(table)? {
+                return Err(StackError::MissingMigratedTable { table });
+            }
+        }
+        Ok(())
+    }
+
+    /// Like `assert_required_tables_present`, but only checks tables
+    /// introduced by migrations whose id is <= `version`. Lets the pre-flight
+    /// check succeed on partially-migrated databases without lowering the
+    /// post-flight bar.
+    fn assert_tables_for_version(&self, version: i64) -> Result<()> {
+        for &(table, introduced_in) in MIGRATED_TABLES {
+            if introduced_in <= version && !self.table_exists(table)? {
                 return Err(StackError::MissingMigratedTable { table });
             }
         }
@@ -405,6 +463,123 @@ impl StateStore {
         Ok(event)
     }
 
+    /// Upsert the latest capabilities for an agent. We keep one row per agent_id;
+    /// history lives in `agent_lifecycle` (`agent.started` events). `ON CONFLICT`
+    /// ensures re-initialization after a restart simply refreshes the snapshot.
+    pub fn upsert_agent_capabilities(
+        &self,
+        agent_id: &str,
+        capabilities_json: &str,
+    ) -> Result<AgentCapabilitiesRecord> {
+        validate_json_payload(&self.connection, capabilities_json)?;
+        let record = AgentCapabilitiesRecord {
+            agent_id: agent_id.to_owned(),
+            captured_at: current_timestamp(),
+            capabilities_json: capabilities_json.to_owned(),
+        };
+
+        self.connection.execute(
+            r#"
+            INSERT INTO agent_capabilities (agent_id, captured_at, capabilities_json)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                captured_at = excluded.captured_at,
+                capabilities_json = excluded.capabilities_json
+            "#,
+            params![
+                record.agent_id,
+                record.captured_at,
+                record.capabilities_json
+            ],
+        )?;
+
+        Ok(record)
+    }
+
+    pub fn latest_agent_capabilities(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentCapabilitiesRecord>> {
+        Ok(self
+            .connection
+            .query_row(
+                r#"
+                SELECT agent_id, captured_at, capabilities_json
+                FROM agent_capabilities
+                WHERE agent_id = ?1
+                "#,
+                params![agent_id],
+                |row| {
+                    Ok(AgentCapabilitiesRecord {
+                        agent_id: row.get(0)?,
+                        captured_at: row.get(1)?,
+                        capabilities_json: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Append a row to `installer_runs`. Caller is responsible for capping
+    /// stdout/stderr at `INSTALLER_OUTPUT_CAP_BYTES`; we re-truncate here as
+    /// defense-in-depth so a buggy installer module cannot bloat the table.
+    pub fn append_installer_run(&self, input: InstallerRunInput<'_>) -> Result<InstallerRun> {
+        let stdout = truncate_for_storage(input.stdout);
+        let stderr = truncate_for_storage(input.stderr);
+        let run = InstallerRun {
+            id: next_installer_run_id(),
+            started_at: input.started_at.to_owned(),
+            finished_at: input.finished_at.map(str::to_owned),
+            status: input.status.to_owned(),
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+            exit_status: input.exit_status,
+        };
+
+        self.connection.execute(
+            r#"
+            INSERT INTO installer_runs
+                (id, started_at, finished_at, status, stdout, stderr, exit_status)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                run.id,
+                run.started_at,
+                run.finished_at,
+                run.status,
+                stdout,
+                stderr,
+                run.exit_status,
+            ],
+        )?;
+
+        Ok(run)
+    }
+
+    pub fn query_installer_runs(&self, limit: u32) -> Result<Vec<InstallerRun>> {
+        let limit = i64::from(limit);
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, started_at, finished_at, status, stdout, stderr, exit_status
+            FROM installer_runs
+            ORDER BY started_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit], |row| {
+            Ok(InstallerRun {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                finished_at: row.get(2)?,
+                status: row.get(3)?,
+                stdout: row.get(4)?,
+                stderr: row.get(5)?,
+                exit_status: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn latest_event_timestamp(&self) -> Result<Option<String>> {
         Ok(self
             .connection
@@ -423,6 +598,8 @@ impl StateStore {
             commands: self.count_table("commands")?,
             auth_failures: self.count_table("auth_failures")?,
             agent_lifecycle: self.count_table("agent_lifecycle")?,
+            installer_runs: self.count_table("installer_runs")?,
+            agent_capabilities: self.count_table("agent_capabilities")?,
         })
     }
 
@@ -433,6 +610,8 @@ impl StateStore {
             "commands" => "SELECT COUNT(*) FROM commands",
             "auth_failures" => "SELECT COUNT(*) FROM auth_failures",
             "agent_lifecycle" => "SELECT COUNT(*) FROM agent_lifecycle",
+            "installer_runs" => "SELECT COUNT(*) FROM installer_runs",
+            "agent_capabilities" => "SELECT COUNT(*) FROM agent_capabilities",
             _ => unreachable!("count_table only accepts known migrated tables"),
         };
         Ok(self.connection.query_row(sql, [], |row| row.get(0))?)
@@ -479,7 +658,7 @@ impl StateStore {
             return Ok(());
         }
 
-        for &table in MIGRATED_TABLES {
+        for &(table, _) in MIGRATED_TABLES {
             if self.table_exists(table)? {
                 return Err(StackError::UnmanagedStateTable { table });
             }
@@ -532,6 +711,7 @@ fn sqlite_sql_for(entry: &ManifestEntry) -> Result<&'static str> {
     match (entry.id, entry.sqlite_file.as_str()) {
         (1, "001_init.sqlite.sql") => Ok(SQL_001_INIT),
         (2, "002_auth_failures_schema.sqlite.sql") => Ok(SQL_002_AUTH_FAILURES_SCHEMA),
+        (3, "003_agent_capabilities.sqlite.sql") => Ok(SQL_003_AGENT_CAPABILITIES),
         _ => Err(StackError::UnknownMigrationId { id: entry.id }),
     }
 }
@@ -657,6 +837,31 @@ fn next_agent_lifecycle_id() -> String {
     let sequence = AGENT_LIFECYCLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("agl_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+fn next_installer_run_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = INSTALLER_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("ins_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+/// Defense-in-depth cap on installer_runs row size. The agent_installer module
+/// caps as it captures; this re-truncates so a future regression upstream
+/// cannot still bloat SQLite. Truncates on a UTF-8 char boundary.
+fn truncate_for_storage(input: &str) -> String {
+    if input.len() <= INSTALLER_OUTPUT_CAP_BYTES {
+        return input.to_owned();
+    }
+    let mut cutoff = INSTALLER_OUTPUT_CAP_BYTES;
+    while cutoff > 0 && !input.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    let mut out = String::with_capacity(cutoff + 64);
+    out.push_str(&input[..cutoff]);
+    let dropped = input.len() - cutoff;
+    out.push_str(&format!("\n... [truncated, {dropped} bytes]"));
+    out
 }
 
 #[cfg(test)]

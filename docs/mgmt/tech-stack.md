@@ -11,8 +11,13 @@ This document records the implementation technologies chosen for the standalone 
 - `axum` - HTTP server and WebSocket upgrades.
 - `tower`, `tower-http` - middleware composition (body limits, tracing) for the axum layer.
 - `http` - shared HTTP types (`StatusCode`, headers) used by the response envelope mapping.
+- `reqwest` with rustls - CLI HTTP client for daemon-backed commands such as `acps agent start` and `acps agent stop`, including HTTPS `public_url` targets.
 - `zeroize` - scrubbing cached API key material on drop.
-- `agentclientprotocol/rust-sdk` - ACP protocol implementation where suitable.
+- `agent-client-protocol` - the published Rust SDK for the Agent Client Protocol. We act as the ACP client and rely on it for JSON-RPC framing, request/response correlation, and the protocol schema.
+- `sha2` - SHA-256 hashing of installed agent binaries for the optional `expected_sha256` integrity check.
+- `tokio-util` (`compat`) - bridges tokio's `AsyncRead`/`AsyncWrite` traits to the `futures` traits the ACP SDK expects when constructing `ByteStreams` over child stdio.
+- `futures` - shared async primitives used in concert with the ACP SDK.
+- `libc` - process-group signaling (`kill(-pid, SIGKILL)`) for terminating runaway installers along with their grandchildren on Unix.
 - `serde`, `serde_json`, `toml` - API payloads, config files, durable event payloads, and migration manifest parsing.
 - `chrono` - RFC3339 timestamps for durable state records.
 - `rusqlite` - SQLite state and migrations.

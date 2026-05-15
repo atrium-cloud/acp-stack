@@ -42,7 +42,7 @@ Install behavior:
 - `acps agent install` runs the configured installer.
 - `creates` is checked before and after installation to detect whether the command is already available.
 - installer stdout/stderr and exit status are written to SQLite logs.
-- installer execution is mediated by the permission pipeline.
+- in 0.0.1, installer execution is admin-tier and logged; permission-pipeline mediation lands with the 0.0.2 permission system.
 - the resulting command still launches through the normal `[agent]` command, args, cwd, env, and hash verification path.
 - binary URL installers download to an explicit destination, verify `sha256` when provided, mark the file executable, and then check `creates`.
 

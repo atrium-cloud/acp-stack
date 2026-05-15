@@ -40,11 +40,17 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use zeroize::Zeroizing;
 
+use crate::acp_bridge::AgentCapabilitiesDto;
+use crate::agent_installer::run_installer_capture;
 use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_failure};
 use crate::config::Config;
 use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
+use crate::fs_util::home_dir;
+use crate::secrets::SecretStore;
+use crate::state::InstallerRunInput;
 use crate::state::{AuthFailureFilter, EventFilter, StateStore};
+use crate::supervisor::{AgentSnapshot, AgentSupervisor};
 
 /// Shared handler/middleware state. Cheap to clone (Arc-only inside).
 #[derive(Clone)]
@@ -56,6 +62,7 @@ pub struct AppState {
     pub admin_key: Arc<Zeroizing<String>>,
     pub max_request_bytes: usize,
     pub active_requests: Arc<AtomicU64>,
+    pub agent_supervisor: Arc<AgentSupervisor>,
 }
 
 impl AppState {
@@ -91,6 +98,7 @@ impl AppState {
             admin_key: Arc::new(Zeroizing::new(admin_key)),
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
+            agent_supervisor: Arc::new(AgentSupervisor::new()),
         }
     }
 }
@@ -113,9 +121,14 @@ pub fn build_router(state: AppState) -> Router {
     let session_routes = Router::new()
         .route("/v1/status", get(status_handler))
         .route("/v1/status/agent", get(status_agent_handler))
+        // Alias for `docs/specs/api/api.md` which documents the same handler
+        // under both the Status API (`/v1/status/agent`) and the Agent API
+        // (`/v1/agent/status`).
+        .route("/v1/agent/status", get(status_agent_handler))
         .route("/v1/status/connections", get(status_connections_handler))
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
+        .route("/v1/agent/capabilities", get(agent_capabilities_handler))
         .route("/v1/logs/events", get(logs_events_handler))
         .route("/v1/logs/commands", get(logs_commands_handler))
         .route("/v1/logs/permissions", get(logs_permissions_handler))
@@ -134,6 +147,9 @@ pub fn build_router(state: AppState) -> Router {
 
     let admin_routes = Router::new()
         .route("/v1/security/check", get(security_check_handler))
+        .route("/v1/agent/install", post(agent_install_handler))
+        .route("/v1/agent/start", post(agent_start_handler))
+        .route("/v1/agent/stop", post(agent_stop_handler))
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
@@ -557,6 +573,8 @@ async fn status_handler(
 struct StatusAgentResponse {
     configured: bool,
     agent: AgentStatusJson,
+    process_state: String,
+    pid: Option<u32>,
     lifecycle_events: Vec<AgentLifecycleJson>,
 }
 
@@ -585,6 +603,7 @@ async fn status_agent_handler(
     let store = state.state.lock().await;
     let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
     drop(store);
+    let snapshot = state.agent_supervisor.snapshot().await;
     let agent = &state.config.agent;
     Ok(ApiSuccess::new(StatusAgentResponse {
         configured: true,
@@ -596,6 +615,8 @@ async fn status_agent_handler(
             cwd: agent.cwd.clone(),
             restart: agent.restart.clone(),
         },
+        process_state: format!("{:?}", snapshot.state).to_lowercase(),
+        pid: snapshot.pid,
         lifecycle_events: lifecycle_events
             .into_iter()
             .map(|event| AgentLifecycleJson {
@@ -854,6 +875,8 @@ struct MetricsSummaryResponse {
     commands: i64,
     auth_failures: i64,
     agent_lifecycle: i64,
+    installer_runs: i64,
+    agent_capabilities: i64,
 }
 
 async fn metrics_summary_handler(
@@ -868,6 +891,8 @@ async fn metrics_summary_handler(
         commands: counts.commands,
         auth_failures: counts.auth_failures,
         agent_lifecycle: counts.agent_lifecycle,
+        installer_runs: counts.installer_runs,
+        agent_capabilities: counts.agent_capabilities,
     }))
 }
 
@@ -980,6 +1005,163 @@ impl SecurityFindingJson {
             message: message.to_owned(),
         }
     }
+}
+
+// ----- Agent handlers -------------------------------------------------------
+
+#[derive(Serialize)]
+struct AgentInstallResponse {
+    outcome: &'static str,
+    path: String,
+    sha256: String,
+}
+
+async fn agent_install_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
+    let install = state
+        .config
+        .agent
+        .install
+        .clone()
+        .ok_or(StackError::AgentNotConfigured)?;
+    let expected_sha256 = state.config.agent.expected_sha256.clone();
+    // Resolve agent env from the secret store. The installer should only
+    // see the same names the agent itself will see (security.md:91).
+    let env = open_agent_env(&state.config)?;
+    let workspace_root = std::path::PathBuf::from(state.config.workspace.root.clone());
+
+    // Run the synchronous installer on a blocking thread so its
+    // up-to-10-minute timeout window cannot pin a tokio runtime worker.
+    // Critically, we do NOT hold the state lock while it runs — that would
+    // make every other state-backed endpoint (incl. auth-failure logging)
+    // wait behind the install.
+    let result = tokio::task::spawn_blocking(move || {
+        run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
+    })
+    .await
+    .map_err(|err| StackError::AgentInitializeFailed {
+        reason: format!("installer thread join failed: {err}"),
+    })?;
+
+    // Persist the row briefly under the state lock. The lock is held only
+    // for the single INSERT, not for the installer's runtime.
+    {
+        let store = state.state.lock().await;
+        store.append_installer_run(InstallerRunInput {
+            started_at: &result.row.started_at,
+            finished_at: result.row.finished_at.as_deref(),
+            status: &result.row.status,
+            stdout: &result.row.stdout,
+            stderr: &result.row.stderr,
+            exit_status: result.row.exit_status,
+        })?;
+    }
+
+    let outcome = result.outcome?;
+    let outcome_label = outcome.label();
+    let path = outcome.path().to_string_lossy().into_owned();
+    let sha256 = outcome.sha256().to_owned();
+    Ok(ApiSuccess::new(AgentInstallResponse {
+        outcome: outcome_label,
+        path,
+        sha256,
+    }))
+}
+
+fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, String>> {
+    if config.agent.env.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let home = home_dir()?;
+    let store = SecretStore::open(&home)?;
+    let mut env = std::collections::HashMap::with_capacity(config.agent.env.len());
+    for name in &config.agent.env {
+        let value = store.get(name)?;
+        env.insert(name.clone(), value.to_owned());
+    }
+    Ok(env)
+}
+
+#[derive(Serialize)]
+struct AgentStartResponse {
+    started_at: String,
+    capabilities: AgentCapabilitiesDto,
+    pid: Option<u32>,
+}
+
+async fn agent_start_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
+    // Resolve env BEFORE invoking the supervisor so the secret store is only
+    // opened when [agent].env is non-empty. Production deployments always
+    // have a populated store; tests with empty agent.env skip the open
+    // entirely. open_agent_env enforces the same allowlist semantics
+    // (security.md:91) regardless of caller.
+    let env = open_agent_env(&state.config)?;
+    let capabilities = state
+        .agent_supervisor
+        .start(
+            &state.config.agent,
+            &state.config.workspace.root,
+            env,
+            &state.state,
+        )
+        .await?;
+    let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let pid = state.agent_supervisor.snapshot().await.pid;
+    Ok(ApiSuccess::new(AgentStartResponse {
+        started_at,
+        capabilities,
+        pid,
+    }))
+}
+
+#[derive(Serialize)]
+struct AgentStopResponse {
+    stopped_at: String,
+    exit_status: Option<i32>,
+}
+
+async fn agent_stop_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
+    let exit_status = state.agent_supervisor.stop(&state.state).await?;
+    let stopped_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    Ok(ApiSuccess::new(AgentStopResponse {
+        stopped_at,
+        exit_status,
+    }))
+}
+
+#[derive(Serialize)]
+struct AgentCapabilitiesResponseBody {
+    agent_id: String,
+    captured_at: String,
+    capabilities: serde_json::Value,
+    process_state: String,
+}
+
+async fn agent_capabilities_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<AgentCapabilitiesResponseBody>, StackError> {
+    let agent_id = state.config.agent.id.clone();
+    let snapshot: AgentSnapshot = state.agent_supervisor.snapshot().await;
+    let store = state.state.lock().await;
+    let record = store.latest_agent_capabilities(&agent_id)?;
+    drop(store);
+    let record = record.ok_or(StackError::AgentNotInitialized)?;
+    let capabilities = serde_json::from_str(&record.capabilities_json).map_err(|err| {
+        StackError::AgentInitializeFailed {
+            reason: format!("stored capabilities are unparseable: {err}"),
+        }
+    })?;
+    Ok(ApiSuccess::new(AgentCapabilitiesResponseBody {
+        agent_id: record.agent_id,
+        captured_at: record.captured_at,
+        capabilities,
+        process_state: format!("{:?}", snapshot.state).to_lowercase(),
+    }))
 }
 
 // ----- Tests ----------------------------------------------------------------

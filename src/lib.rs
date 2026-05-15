@@ -1,3 +1,5 @@
+pub mod acp_bridge;
+pub mod agent_installer;
 pub mod api;
 pub mod auth;
 pub mod cli;

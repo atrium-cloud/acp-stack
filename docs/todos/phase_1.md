@@ -11,7 +11,7 @@
 ## Runtime And Project Skeleton
 
 - [x] Create the Rust workspace and primary `acps` binary.
-- [ ] Add config, API, auth, state, agent bridge, workspace, command, logs, and supervisor modules.
+- [ ] Add config, API, auth, state, workspace, command, and logs modules (agent bridge and supervisor modules complete; workspace and command gateway pending).
 - [x] Add structured tracing initialization.
 - [x] Add baseline error type and response-envelope mapping.
 - [x] Add unit/integration test harness.
@@ -64,7 +64,7 @@
 - [x] Add request body size limits from config.
 - [x] Implement status routes.
 - [ ] Implement config API routes.
-- [ ] Implement agent lifecycle API routes.
+- [x] Implement agent lifecycle API routes.
 - [ ] Implement session API route stubs wired to the ACP bridge.
 - [ ] Implement workspace file API routes.
 - [ ] Implement command API routes.
@@ -73,24 +73,24 @@
 
 ## ACP Agent Bridge
 
-- [ ] Launch one configured ACP agent per runtime.
-- [ ] Set agent cwd to `agent.cwd` or `workspace.root`.
-- [ ] Inject only environment variables referenced by `[agent].env`.
-- [ ] Send ACP `initialize` and persist returned capabilities.
+- [x] Launch one configured ACP agent per runtime.
+- [x] Set agent cwd to `agent.cwd` or `workspace.root`.
+- [x] Inject only environment variables referenced by `[agent].env`.
+- [x] Send ACP `initialize` and persist returned capabilities.
 - [ ] Map session create/load/resume/close/prompt/cancel to ACP session methods where supported.
 - [ ] Forward ACP `session/update` notifications to WebSocket and SQLite.
 - [ ] Return typed unsupported-capability errors instead of emulating missing ACP features.
 
 ## Agent Installation
 
-- [ ] Implement declared shell installer execution.
-- [ ] Check `creates` before and after install.
-- [ ] Capture installer stdout, stderr, exit status, and timestamps.
-- [ ] Implement `acps agent install`.
-- [ ] Implement `acps agent start`.
-- [ ] Implement `acps agent stop`.
-- [ ] Implement `acps agent status`.
-- [ ] Verify expected binary hash when `expected_sha256` is configured.
+- [x] Implement declared shell installer execution.
+- [x] Check `creates` before and after install.
+- [x] Capture installer stdout, stderr, exit status, and timestamps.
+- [x] Implement `acps agent install`.
+- [x] Implement `acps agent start`.
+- [x] Implement `acps agent stop`.
+- [x] Implement `acps agent status`.
+- [x] Verify expected binary hash when `expected_sha256` is configured.
 
 ## Workspace And Commands
 
@@ -123,7 +123,7 @@
 
 - [x] A user can initialize config and state with `acps init`.
 - [x] A user can start the daemon with `acps serve`.
-- [ ] A direct-key ACP agent can be installed or configured.
+- [x] A direct-key ACP agent can be installed or configured.
 - [ ] A session can be created through CLI or HTTP.
 - [ ] A prompt can be sent and streamed over WebSocket.
 - [ ] Workspace files can be browsed, read, written, uploaded, downloaded, and deleted.

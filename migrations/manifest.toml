@@ -7,3 +7,8 @@ sqlite_file = "001_init.sqlite.sql"
 id = 2
 name = "auth_failures_schema"
 sqlite_file = "002_auth_failures_schema.sqlite.sql"
+
+[[migration]]
+id = 3
+name = "agent_capabilities"
+sqlite_file = "003_agent_capabilities.sqlite.sql"

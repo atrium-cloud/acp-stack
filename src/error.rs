@@ -227,6 +227,59 @@ pub enum StackError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("agent is not configured; populate `[agent.install]` before running the installer")]
+    AgentNotConfigured,
+
+    #[error("agent installer exited with status {exit:?}: {stderr_tail}")]
+    AgentInstallerFailed {
+        exit: Option<i32>,
+        stderr_tail: String,
+    },
+
+    #[error("agent installer ran but `creates = {name}` did not resolve afterwards")]
+    AgentInstallerCreatesMissing { name: String },
+
+    #[error("agent installer hit the 10-minute timeout")]
+    AgentInstallerTimeout,
+
+    #[error("agent binary sha256 mismatch: expected {expected}, got {actual}")]
+    AgentSha256Mismatch { expected: String, actual: String },
+
+    #[error("failed to spawn agent subprocess: {source}")]
+    AgentSpawnFailed {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("agent is already running")]
+    AgentAlreadyRunning,
+
+    #[error("agent is not running")]
+    AgentNotRunning,
+
+    #[error("agent failed to initialize: {reason}")]
+    AgentInitializeFailed { reason: String },
+
+    #[error("agent has not been initialized yet")]
+    AgentNotInitialized,
+
+    #[error("agent does not support `{name}`")]
+    AgentUnsupportedCapability { name: &'static str },
+
+    #[error("agent API request to {path} failed: {source}")]
+    AgentApiRequest {
+        path: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("agent API request to {path} failed with status {status}: {body}")]
+    AgentApiStatus {
+        path: &'static str,
+        status: StatusCode,
+        body: String,
+    },
 }
 
 impl StackError {
@@ -286,6 +339,19 @@ impl StackError {
             ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
             ServeBind { .. } => "serve.bind_failed",
             ServeIo { .. } => "serve.io_error",
+            AgentNotConfigured => "agent.not_configured",
+            AgentInstallerFailed { .. } => "agent.installer_failed",
+            AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
+            AgentInstallerTimeout => "agent.installer_timeout",
+            AgentSha256Mismatch { .. } => "agent.sha256_mismatch",
+            AgentSpawnFailed { .. } => "agent.spawn_failed",
+            AgentAlreadyRunning => "agent.already_running",
+            AgentNotRunning => "agent.not_running",
+            AgentInitializeFailed { .. } => "agent.initialize_failed",
+            AgentNotInitialized => "agent.not_initialized",
+            AgentUnsupportedCapability { .. } => "agent.unsupported_capability",
+            AgentApiRequest { .. } => "agent.api_request_failed",
+            AgentApiStatus { .. } => "agent.api_status_failed",
         }
     }
 
@@ -370,6 +436,37 @@ impl StackError {
             }
             ServeBind { .. } => "failed to bind HTTP listener".to_owned(),
             ServeIo { .. } => "HTTP server error".to_owned(),
+            AgentNotConfigured => {
+                "agent is not configured; populate [agent.install] before running the installer"
+                    .to_owned()
+            }
+            AgentInstallerFailed { exit, .. } => match exit {
+                Some(code) => format!("agent installer exited with status {code}"),
+                None => "agent installer terminated without an exit status".to_owned(),
+            },
+            AgentInstallerCreatesMissing { name } => {
+                format!("agent installer ran but `creates = {name}` did not resolve afterwards")
+            }
+            AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
+            AgentSha256Mismatch { expected, actual } => {
+                format!("agent binary sha256 mismatch: expected {expected}, got {actual}")
+            }
+            AgentSpawnFailed { .. } => "failed to spawn agent subprocess".to_owned(),
+            AgentAlreadyRunning => "agent is already running".to_owned(),
+            AgentNotRunning => "agent is not running".to_owned(),
+            AgentInitializeFailed { reason } => {
+                format!("agent failed to initialize: {reason}")
+            }
+            AgentNotInitialized => "agent has not been initialized yet".to_owned(),
+            AgentUnsupportedCapability { name } => {
+                format!("agent does not support `{name}`")
+            }
+            AgentApiRequest { path, .. } => {
+                format!("agent API request to {path} failed")
+            }
+            AgentApiStatus { path, status, .. } => {
+                format!("agent API request to {path} failed with status {status}")
+            }
         }
     }
 
@@ -436,6 +533,21 @@ impl StackError {
             | StdinRead { .. }
             | ServeBind { .. }
             | ServeIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            // Agent-related: classify client-facing vs internal vs upstream.
+            AgentNotConfigured => StatusCode::BAD_REQUEST,
+            AgentAlreadyRunning | AgentNotRunning => StatusCode::CONFLICT,
+            AgentNotInitialized => StatusCode::NOT_FOUND,
+            AgentUnsupportedCapability { .. } => StatusCode::NOT_IMPLEMENTED,
+            // The agent is upstream: handshake failures are gateway errors,
+            // not our internal faults.
+            AgentInitializeFailed { .. } => StatusCode::BAD_GATEWAY,
+            AgentInstallerFailed { .. }
+            | AgentInstallerCreatesMissing { .. }
+            | AgentInstallerTimeout
+            | AgentSha256Mismatch { .. }
+            | AgentSpawnFailed { .. }
+            | AgentApiRequest { .. }
+            | AgentApiStatus { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

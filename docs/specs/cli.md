@@ -74,6 +74,14 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 
 `acps serve` requires both API keys to already exist in the encrypted secret store under the names declared in `[auth]`; missing keys fail startup before the listener binds.
 
+## Agent Commands
+
+`acps agent install` runs the configured `[agent.install]` recipe locally, records the installer run in SQLite, verifies `creates`, and checks `expected_sha256` when configured.
+
+`acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
+
+`acps agent status` reads local config and SQLite state, including the latest persisted capability snapshot and recent lifecycle rows.
+
 ## Security Self-Check
 
 `acps security check` runs the local self-check described in [security](security.md).
@@ -99,6 +107,10 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps secrets list`
 - `acps secrets set <name>`
 - `acps secrets delete <name>`
+- `acps agent install`
+- `acps agent start`
+- `acps agent stop`
+- `acps agent status`
 - `acps logs query [--limit <n>] [--level <level>]`
 - `acps serve [--bind <addr>]`
 
