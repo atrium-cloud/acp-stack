@@ -70,13 +70,13 @@ env = ["OPENCODE_API_KEY"]
 service_role_key_ref = "SUPABASE_SERVICE_ROLE_KEY"
 
 [[mcp.servers]]
-name = "slack"
-env = ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"]
-
-[[mcp.servers]]
+type = "http"
 name = "linear"
-env = ["LINEAR_API_KEY"]
+url = "https://mcp.linear.app/mcp"
+headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 ```
+
+See [mcp.md](mcp.md) for the full Linear MCP example, including `acps secrets set` commands and HTTP header layout.
 
 Secret values are managed by CLI or API:
 
@@ -89,7 +89,7 @@ acps secrets delete OPENCODE_API_KEY
 Scoped injection rules:
 
 - the agent receives only names listed in `[agent].env`
-- an MCP server receives only names listed in its `env`
+- a stdio MCP server receives only names listed in its `env`
 - HTTP MCP headers may interpolate referenced secrets
 - the Supabase sink receives only the configured `service_role_key_ref` when external logging is enabled
 - the full secret store is never injected into any child process

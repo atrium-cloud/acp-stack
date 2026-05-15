@@ -20,6 +20,7 @@ References:
 - CLI: docs/specs/cli.md
 - Runtime: docs/specs/runtime.md
 - Security: docs/specs/security.md
+- Linear MCP example: docs/specs/mcp.md
 - State and logging: docs/specs/state-logging.md
 - Architecture: docs/mgmt/architecture.md
 - Tech stack: docs/mgmt/tech-stack.md
