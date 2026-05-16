@@ -1,0 +1,374 @@
+use crate::api::{self, AppState};
+use crate::config::{self, Config};
+use crate::error::{Result, StackError};
+use crate::fs_util::{
+    create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
+    set_owner_only_file,
+};
+use crate::secrets::SecretStore;
+use crate::state::{StateStore, default_state_path};
+use crate::supervisor::ServerLifecycle;
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Override the `api.bind` address from config.
+    #[arg(long)]
+    bind: Option<String>,
+}
+
+pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
+    let home = home_dir()?;
+    let config_path = config::default_config_path()?;
+    let config_dir = parent_dir(&config_path)?;
+    if config_dir.exists() {
+        set_owner_only_dir(config_dir)?;
+    }
+    if config_path.exists() {
+        set_owner_only_file(&config_path)?;
+    }
+    let config = Config::load_from_path(&config_path)?;
+
+    let state_path = default_state_path(&home);
+    let state_dir = parent_dir(&state_path)?;
+    create_dir_owner_only(state_dir)?;
+    pre_create_owner_only(&state_path)?;
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    set_owner_only_file(&state_path)?;
+
+    // Reconcile any prompts left in-flight by a previous crash/restart.
+    // The in-memory task registry is empty at startup, so a `pending` or
+    // `running` row from before would never get a terminal status without
+    // this sweep, leaving CLI/HTTP clients polling forever.
+    let reconciled = store.reconcile_orphaned_prompts("daemon restart")?;
+    if reconciled > 0 {
+        tracing::info!(
+            reconciled,
+            "marked orphaned in-flight prompts as errored on startup"
+        );
+    }
+
+    // Same sweep for the command gateway: a daemon restart kills any
+    // mediated subprocesses via `kill_on_drop`, but their `commands` rows
+    // are not finalized along the way. Mark them `failed` so polling
+    // clients see them settle.
+    let reconciled_commands = store.reconcile_orphaned_commands("daemon restart")?;
+    if reconciled_commands > 0 {
+        tracing::info!(
+            reconciled = reconciled_commands,
+            "marked orphaned in-flight commands as failed on startup"
+        );
+    }
+
+    // Reconcile pending permission rows. ACP-source rows are canceled (the
+    // request channel is gone after restart); command-source rows are
+    // expired so the spec's "clients never see them stay pending forever"
+    // promise holds across restart.
+    let (perm_canceled, perm_expired) = store.reconcile_orphaned_permissions()?;
+    if perm_canceled > 0 || perm_expired > 0 {
+        tracing::info!(
+            canceled = perm_canceled,
+            expired = perm_expired,
+            "settled orphaned permission requests on startup"
+        );
+    }
+
+    let secret_store = SecretStore::open(&home)?;
+    let session_ref = config.auth.session_key_ref.clone();
+    let admin_ref = config.auth.admin_key_ref.clone();
+    if !secret_store.contains(&session_ref) {
+        return Err(StackError::MissingSessionKey { name: session_ref });
+    }
+    if !secret_store.contains(&admin_ref) {
+        return Err(StackError::MissingAdminKey { name: admin_ref });
+    }
+    let session_key = secret_store.get(&session_ref)?.to_owned();
+    let admin_key = secret_store.get(&admin_ref)?.to_owned();
+
+    let bind = args.bind.unwrap_or_else(|| config.api.bind.clone());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+
+    runtime.block_on(async move {
+        // Bind first, then record `server.starting`. Recording before bind
+        // would leave a dangling start row whenever the address is already
+        // in use; pairing the lifecycle write with a successful bind keeps
+        // the durable trail truthful.
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .map_err(|source| StackError::ServeBind {
+                bind: bind.clone(),
+                source,
+            })?;
+        let local = listener
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| bind.clone());
+        let (socket_path, parent_policy) = match config.acpctl.socket_path.as_deref() {
+            Some(path) => (
+                std::path::PathBuf::from(path),
+                crate::local_listener::ParentPolicy::ValidateOwnerOnly,
+            ),
+            None => (
+                crate::local_listener::default_socket_path()?,
+                crate::local_listener::ParentPolicy::RepairOwnerOnly,
+            ),
+        };
+        // Bind the acpctl UDS *and* record `server.starting` only after every
+        // listener is ready. A bind failure here is a startup-time error, not
+        // a post-start regression — emitting `server.starting` first would
+        // leave a dangling lifecycle row whenever the UDS bind fails.
+        let bound_local = crate::local_listener::bind_local(&socket_path, parent_policy).await?;
+        let lifecycle = ServerLifecycle::starting(&store, &local)?;
+        let app_state =
+            AppState::with_effective_bind(config, store, session_key, admin_key, local.clone());
+        let state_handle = app_state.state.clone();
+        let event_hub = app_state.event_hub.clone();
+        lifecycle.started(&state_handle, &event_hub, &local).await?;
+        eprintln!("acps serve: listening on {local}");
+        eprintln!("acps serve: acpctl socket at {}", socket_path.display());
+        let agent_supervisor = app_state.agent_supervisor.clone();
+        // The acpctl UDS server runs alongside the TCP server. Both subscribe
+        // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
+        // so a single signal stops both. If the TCP serve exits first, the
+        // local task is aborted; its `SocketGuard::drop` unlinks the socket.
+        let local_handle = tokio::spawn(crate::local_listener::serve_local(
+            app_state.clone(),
+            bound_local,
+        ));
+        let serve_result = api::serve(app_state, listener).await;
+        local_handle.abort();
+        match local_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!(error = %err, "acpctl local listener exited with error"),
+            Err(join_err) if join_err.is_cancelled() => {}
+            Err(join_err) => {
+                tracing::warn!(error = %join_err, "acpctl local listener task panicked")
+            }
+        }
+        // Tear down the agent BEFORE recording server.stopped so the
+        // durable trail shows the agent went down first. A leaked agent
+        // process outliving the daemon is a real bug, not a theoretical
+        // one: see superflous-restart guarantees in security.md.
+        agent_supervisor
+            .shutdown_on_serve_exit(&state_handle, &event_hub)
+            .await;
+        let reason = match &serve_result {
+            Ok(()) => "signal",
+            Err(_) => "error",
+        };
+        // Always record stopped, even on error. Failures from the second
+        // lifecycle write are logged but do not mask the original serve error.
+        if let Err(err) = lifecycle.stopped(&state_handle, &event_hub, reason).await {
+            tracing::error!(error = %err, "failed to record server.stopped");
+        }
+        eprintln!("acps serve: stopped ({reason})");
+        serve_result
+    })
+}
+
+/// Minimal ACP agent fixture used only by integration tests. Reads NDJSON
+/// JSON-RPC from stdin and writes hardcoded responses to stdout. Stays alive
+/// until stdin closes, at which point it exits cleanly (mirroring how a real
+/// ACP agent terminates when the client drops the connection).
+///
+/// Recognizes:
+/// - `initialize` -> protocolVersion = 1, agentCapabilities with
+///   `loadSession` and `sessionCapabilities.{resume,close}` set unless the
+///   matching `--no-cap-*` flag is supplied, agentInfo set.
+/// - `session/new` -> deterministic `sess_fake_{counter}` id.
+/// - `session/load`, `session/resume`, `session/close` -> empty ok.
+/// - `session/prompt` -> emits two `session/update` notifications with agent
+///   message chunks, then returns `{ stopReason: "end_turn" }`. With
+///   `--prompt-cancel` it returns `{ stopReason: "cancelled" }` instead.
+/// - any other request -> JSON-RPC method-not-found.
+///
+/// `session/cancel` notification flips the in-process flag so the next
+/// `session/prompt` response uses `stopReason: cancelled`.
+///
+/// Compiled only into debug builds — release binaries do not expose this code
+/// path.
+#[cfg(debug_assertions)]
+pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
+    use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let mut title = "acps fake agent".to_owned();
+    let mut load_session_cap = true;
+    let mut resume_session_cap = true;
+    let mut close_session_cap = true;
+    let mut prompt_emits_updates = true;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--assert-env-absent" => {
+                if let Some(name) = iter.next() {
+                    title = if std::env::var_os(name).is_some() {
+                        format!("env leaked: {name}")
+                    } else {
+                        "env absent".to_owned()
+                    };
+                }
+            }
+            "--no-cap-load-session" => {
+                load_session_cap = false;
+            }
+            "--no-cap-resume-session" => {
+                resume_session_cap = false;
+            }
+            "--no-cap-close-session" => {
+                close_session_cap = false;
+            }
+            "--prompt-silent" => {
+                prompt_emits_updates = false;
+            }
+            _ => {}
+        }
+    }
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut stdin = stdin.lock();
+    let stdout_handle = std::sync::Mutex::new(stdout.lock());
+    let session_counter = AtomicU64::new(0);
+    let cancel_requested = AtomicBool::new(false);
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        match stdin.read_line(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(source) => return Err(StackError::StdinRead { source }),
+        }
+        let trimmed = buf.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id = value.get("id");
+        let method = value.get("method").and_then(serde_json::Value::as_str);
+        // Notifications have no id; act on the ones we recognize and ignore
+        // anything else. `session/cancel` toggles the flag so the next
+        // `session/prompt` response returns `cancelled`.
+        let Some(id) = id else {
+            if method == Some("session/cancel") {
+                cancel_requested.store(true, Ordering::SeqCst);
+            }
+            continue;
+        };
+        let response = match method {
+            Some("initialize") => {
+                let mut agent_caps = serde_json::Map::new();
+                agent_caps.insert(
+                    "loadSession".to_owned(),
+                    serde_json::Value::Bool(load_session_cap),
+                );
+                let mut session_caps = serde_json::Map::new();
+                if resume_session_cap {
+                    session_caps.insert("resume".to_owned(), serde_json::json!({}));
+                }
+                if close_session_cap {
+                    session_caps.insert("close".to_owned(), serde_json::json!({}));
+                }
+                agent_caps.insert(
+                    "sessionCapabilities".to_owned(),
+                    serde_json::Value::Object(session_caps),
+                );
+                agent_caps.insert("promptCapabilities".to_owned(), serde_json::json!({}));
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": agent_caps,
+                        "agentInfo": {
+                            "name": "acps-fake-agent",
+                            "title": title,
+                            "version": "0.0.1"
+                        },
+                        "authMethods": []
+                    }
+                })
+            }
+            Some("session/new") => {
+                let counter = session_counter.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "sessionId": format!("sess_fake_{counter}") }
+                })
+            }
+            Some("session/load") | Some("session/resume") | Some("session/close") => {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                })
+            }
+            Some("session/prompt") => {
+                let session_id = value
+                    .get("params")
+                    .and_then(|p| p.get("sessionId"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("sess_fake_unknown")
+                    .to_owned();
+                if prompt_emits_updates {
+                    // Push two notifications before the response. The bridge's
+                    // SessionEventSink persists them keyed by session_id; tests
+                    // assert on the `events.session_id` column.
+                    for text in ["chunk-1", "chunk-2"] {
+                        let note = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": { "type": "text", "text": text }
+                                }
+                            }
+                        });
+                        let mut guard = stdout_handle
+                            .lock()
+                            .expect("fake-agent stdout mutex poisoned");
+                        writeln!(*guard, "{note}")
+                            .map_err(|source| StackError::ServeIo { source })?;
+                        guard
+                            .flush()
+                            .map_err(|source| StackError::ServeIo { source })?;
+                    }
+                }
+                let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
+                    "cancelled"
+                } else {
+                    "end_turn"
+                };
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "stopReason": stop }
+                })
+            }
+            _ => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": "method not found"
+                }
+            }),
+        };
+        let mut guard = stdout_handle
+            .lock()
+            .expect("fake-agent stdout mutex poisoned");
+        writeln!(*guard, "{response}").map_err(|source| StackError::ServeIo { source })?;
+        guard
+            .flush()
+            .map_err(|source| StackError::ServeIo { source })?;
+    }
+}

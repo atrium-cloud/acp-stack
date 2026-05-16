@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "acpctl"
-path = "src/bin/acpctl.rs"
+path = "src/bin/acpctl/main.rs"
 
 [dependencies]
 base64 = "0.22.1"

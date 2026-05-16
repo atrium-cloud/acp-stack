@@ -1,0 +1,11 @@
+pub(crate) mod agent;
+pub(crate) mod commands;
+pub(crate) mod config;
+pub(crate) mod deps;
+pub(crate) mod logs;
+pub(crate) mod metrics;
+pub(crate) mod permissions;
+pub(crate) mod security;
+pub(crate) mod sessions;
+pub(crate) mod status;
+pub(crate) mod workspace;

@@ -41,7 +41,86 @@ This document captures the management-level architecture for `acp-stack`. For co
 - `Permissions` - durable request/decision lifecycle for ACP permission requests and stack-mediated commands.
 - `Events` - normalizes WebSocket messages and durable event records.
 
-The current Rust crate exposes a library behind the `acps` daemon binary and the `acpctl` local-agent binary. The implemented foundation includes focused `cli`, `commands`, `config`, `deps`, `error`, `events`, `http_hardening`, `local_listener`, `mcp`, `permissions`, `security`, `state`, `time_util`, `tracing_init`, `auth`, `secrets`, `envelope`, `fs_util`, `api`, `supervisor`, `acp_bridge`, `agent_installer`, and `workspace` modules. `local_listener` owns the Unix-domain-socket transport that serves `acpctl`: it builds an explicit-allowlist Axum router on top of `api` handlers, stamps every request with `KeyKind::Local` via a small middleware, and binds the socket at owner-only (0600 file in a 0700 directory) permissions inside `~/.local/share/acp-stack/`. The `security` module owns the runtime security self-check (`security::check`) called by both the admin-tier HTTP route and the local UDS route. `time_util` parses operator-facing duration suffixes (`30m` / `1h` / `2d` / `1w`) used by `acps logs query` and the metrics summary endpoints; the rest of the runtime continues to use chrono's RFC3339 helpers directly. `permissions` owns the durable permission lifecycle (request/decide/cancel/expire) and the in-process waiter map that resolves blocked operations once a decision lands; `deps` reports declared dependency status without installing; `mcp` resolves `[mcp.servers]` entries against the secret store and hands the SDK `McpServer` list to the bridge at session create/load/resume time; `http_hardening` owns `client_ip` selection under trusted proxies, the CORS layer construction, the WebSocket Origin allowlist check, and the in-process auth-failure IP blocker that short-circuits brute-force attempts before bearer comparison. `commands` owns the Command Gateway: it evaluates `[permissions]` glob policy, spawns shell children through `[workspace].default_shell -c`, streams stdout/stderr through `EventHub` to `commands.{id}` subscribers, persists bounded output chunks to the `events` table, and handles cancel/timeout via process-group signals. `api` owns the axum HTTP/WebSocket layer (router, auth middleware, response envelope wiring, `/v1/ws` subscription handling), `events` owns the in-process broadcast hub and stable live event envelope, `supervisor` records the daemon's lifecycle transitions and owns the spawned ACP agent's lifecycle (`AgentSupervisor`), `acp_bridge` wraps the `agent-client-protocol` SDK to spawn and initialize the configured agent, `agent_installer` runs the operator-declared install recipe, and `workspace` provides the workspace-path resolver and the list/read/write/upload/delete primitives behind `/v1/workspace` and `/v1/files*`.
+The current Rust crate exposes a library behind the `acps` daemon binary and the `acpctl` local-agent binary. Public compatibility modules remain at the crate root, while implementation files are grouped by domain: runtime services live under `runtime/` (`commands`, `deps`, `mcp`, `permissions`, `supervisor`, `acp_bridge`, `agent_installer`); the HTTP API surface splits into per-route-group leaves under `api/routes/` plus auth/ws middleware leaves under `api/`; durable SQLite state splits into per-table leaves under `state/`; the CLI splits per subcommand group under `cli/`; and the local `acpctl` listener keeps a public `local_listener` facade with router/socket internals under `local_listener/`. The `acpctl` binary entrypoint is `src/bin/acpctl/main.rs`, with command dispatch, UDS HTTP client, helpers, and formatters in sibling modules.
+
+### Source tree
+
+```text
+src/
+  lib.rs                          public crate exports + backward-compat re-exports
+  main.rs                         acps daemon entry
+  api.rs                          public api surface; re-exports from leaves
+  api/
+    core.rs                       AppState, build_router, serve, shutdown_signal
+    auth.rs                       auth + tier + envelope + request-tracking middleware
+    ws.rs                         /v1/ws upgrade and subscription loop
+    routes.rs                     route submodule declarations
+    routes/
+      agent.rs                    /v1/agent/* handlers
+      commands.rs                 /v1/commands* handlers
+      config.rs                   /v1/config/* + /v1/secrets/* handlers
+      deps.rs                     /v1/deps* handlers
+      logs.rs                     /v1/logs/* handlers + shared paging helpers
+      metrics.rs                  /v1/metrics/summary + JSON view types
+      permissions.rs              /v1/permissions/* handlers
+      security.rs                 /v1/security/check
+      sessions.rs                 /v1/sessions/* handlers + session helpers
+      status.rs                   /v1/status* handlers
+      workspace.rs                /v1/workspace + /v1/files* handlers
+  state.rs                        public state surface; re-exports from leaves
+  state/
+    core.rs                       StateStore + connection lifecycle + accessors
+    schema.rs                     migration runner + embedded DDL
+    ids.rs                        record id generators + current_timestamp
+    rows.rs                       shared json validation + events-query predicates
+    records.rs                    shared filter DTOs (LogFilter / Session / Command)
+    events.rs                     events table + EVENT_SOURCE_* labels
+    sessions.rs                   sessions + prompts persistence
+    commands.rs                   commands table persistence + output chunks
+    permissions.rs                permission_requests + permission_decisions
+    auth.rs                       auth_failures persistence
+    agent.rs                      agent_lifecycle + capabilities + installer_runs
+    metrics.rs                    derived metrics aggregations
+  cli.rs                          re-exports Cli, run
+  cli/
+    core.rs                       top-level Cli enum + run() dispatch + shared helpers
+    init.rs, serve.rs, status.rs, reset.rs, agent.rs, sessions.rs, logs.rs,
+    auth.rs, secrets.rs, config.rs, deps.rs, metrics.rs   per-subcommand handlers
+  runtime.rs                      runtime module declarations
+  runtime/
+    acp_bridge.rs                 ACP client wrapping agent-client-protocol SDK
+    agent_installer.rs            shell installer execution + capture
+    commands.rs                   command gateway (policy + spawn + stream)
+    deps.rs                       declarative dependency checker
+    mcp.rs                        MCP server resolution from config + secrets
+    permissions.rs                permission lifecycle service + waiter map
+    supervisor.rs                 agent process supervisor + prompt registry
+  local_listener.rs               UDS listener public surface
+  local_listener/
+    router.rs                     allowlist axum router on top of api handlers
+    socket.rs                     UDS bind / permissions / lifecycle
+  bin/acpctl/                     local-agent CLI binary
+    main.rs                       entry point
+    app.rs                        command dispatch
+    cli_defs.rs                   clap definitions
+    client.rs                     UDS HTTP client
+    formatters.rs                 stdout/JSON formatters
+    helpers.rs                    socket-path + url-encoding helpers
+  auth.rs                         KeyKind + constant-time compare + failure recording
+  config.rs                       TOML schema, load/validate/canonicalize
+  envelope.rs                     ApiSuccess / ApiError + IntoResponse for StackError
+  error.rs                        StackError + Result type
+  events.rs                       in-process broadcast hub + live event envelope
+  fs_util.rs                      owner-only fs helpers
+  http_hardening.rs               IP block + rate limit + CORS + origin allowlist
+  secrets.rs                      age-encrypted secret store
+  security.rs                     runtime security self-check
+  time_util.rs                    duration-suffix parsing
+  tracing_init.rs                 structured tracing setup
+  workspace.rs                    workspace path resolver + file operations
+```
+
+`local_listener` owns the Unix-domain-socket transport that serves `acpctl`: it builds an explicit-allowlist Axum router on top of `api` handlers, stamps every request with `KeyKind::Local` via a small middleware, and binds the socket at owner-only (0600 file in a 0700 directory) permissions inside `~/.local/share/acp-stack/`. The `security` module owns the runtime security self-check (`security::check`) called by both the admin-tier HTTP route and the local UDS route. `time_util` parses operator-facing duration suffixes (`30m` / `1h` / `2d` / `1w`) used by `acps logs query` and the metrics summary endpoints; the rest of the runtime continues to use chrono's RFC3339 helpers directly. `permissions` owns the durable permission lifecycle (request/decide/cancel/expire) and the in-process waiter map that resolves blocked operations once a decision lands; `deps` reports declared dependency status without installing; `mcp` resolves `[mcp.servers]` entries against the secret store and hands the SDK `McpServer` list to the bridge at session create/load/resume time; `http_hardening` owns `client_ip` selection under trusted proxies, the CORS layer construction, the WebSocket Origin allowlist check, and the in-process auth-failure IP blocker that short-circuits brute-force attempts before bearer comparison. `commands` owns the Command Gateway: it evaluates `[permissions]` glob policy, spawns shell children through `[workspace].default_shell -c`, streams stdout/stderr through `EventHub` to `commands.{id}` subscribers, persists bounded output chunks to the `events` table, and handles cancel/timeout via process-group signals. `api` owns the axum HTTP/WebSocket layer (router, auth middleware, response envelope wiring, `/v1/ws` subscription handling), `events` owns the in-process broadcast hub and stable live event envelope, `supervisor` records the daemon's lifecycle transitions and owns the spawned ACP agent's lifecycle (`AgentSupervisor`), `acp_bridge` wraps the `agent-client-protocol` SDK to spawn and initialize the configured agent, `agent_installer` runs the operator-declared install recipe, and `workspace` provides the workspace-path resolver and the list/read/write/upload/delete primitives behind `/v1/workspace` and `/v1/files*`.
 
 `AgentSupervisor` also owns the in-flight prompt registry (`HashMap<PromptId, PromptHandle>`). Each `POST /v1/sessions/{id}/prompt` enqueues a fire-and-forget background task that drives ACP `session/prompt` to completion and writes a terminal row into the `prompts` table; `session/cancel` fires the per-prompt `CancellationToken`. `acp_bridge` retains a cloneable `ConnectionTo<Agent>` handle once `initialize` completes so session dispatchers can call `session/new`, `session/load`, `session/resume`, `session/close`, `session/prompt`, and `session/cancel` without holding the supervisor's state lock across the agent's response. Incoming `session/update` notifications are persisted into `events` keyed by `session_id` via a `SessionEventSink` trait, then published live through the `events` broadcast hub to `/v1/ws` subscribers on `sessions.{session_id}`. SQLite remains the durable history source; WebSocket fanout is live only, with current producers for sessions, commands, workspace mutations, agent lifecycle, runtime status, and generic logs.
 
