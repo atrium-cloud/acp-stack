@@ -17,4 +17,7 @@ pub mod tracing_init;
 pub mod workspace;
 
 pub use error::{Result, StackError};
-pub use runtime::{acp_bridge, agent_installer, commands, deps, mcp, permissions, supervisor};
+pub use runtime::{
+    acp_bridge, agent_installer, agent_registry, commands, deps, github_release, mcp, permissions,
+    supervisor,
+};
