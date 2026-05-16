@@ -147,7 +147,7 @@ mod tests {
     };
 
     fn minimal_config(deps: DependenciesConfig, mcp: McpConfig) -> Config {
-        let toml_text = include_str!("../tests/fixtures/valid-acp-stack.toml");
+        let toml_text = include_str!("../../tests/fixtures/valid-acp-stack.toml");
         let mut config = crate::config::load_config_from_str(toml_text).expect("config");
         config.dependencies = deps;
         config.mcp = mcp;
