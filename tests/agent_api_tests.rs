@@ -77,8 +77,6 @@ fn test_config() -> Config {
         install_type: "shell".into(),
         creates: "true".into(),
         shell: Some("true".into()),
-        id: None,
-        registry_url: None,
     });
     config
 }

@@ -4,7 +4,10 @@ use serde::Serialize;
 
 use super::super::core::AppState;
 use crate::acp_bridge::AgentCapabilitiesDto;
-use crate::agent_installer::run_installer_capture;
+use crate::agent_installer::{
+    InstallerSequenceResult, install_resolved_capture, run_installer_capture,
+};
+use crate::agent_registry::RegistryCatalog;
 use crate::config::{AgentAdapterConfig, Config};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
@@ -23,46 +26,71 @@ pub(crate) struct AgentInstallResponse {
 pub(crate) async fn agent_install_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
-    let install = state
-        .config
-        .agent
-        .install
-        .clone()
-        .ok_or(StackError::AgentNotConfigured)?;
-    let expected_sha256 = state.config.agent.expected_sha256.clone();
     // Resolve agent env from the secret store. The installer should only
     // see the same names the agent itself will see (security.md:91).
     let env = open_agent_env(&state.config)?;
     let workspace_root = std::path::PathBuf::from(state.config.workspace.root.clone());
+    let home = home_dir()?;
+    let local_bin = home.join(".local").join("bin");
 
-    // Run the synchronous installer on a blocking thread so its
-    // up-to-10-minute timeout window cannot pin a tokio runtime worker.
-    // Critically, we do NOT hold the state lock while it runs — that would
-    // make every other state-backed endpoint (incl. auth-failure logging)
-    // wait behind the install.
-    let result = tokio::task::spawn_blocking(move || {
-        run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
-    })
-    .await
-    .map_err(|err| StackError::AgentInitializeFailed {
-        reason: format!("installer thread join failed: {err}"),
-    })?;
-
-    // Persist the row briefly under the state lock. The lock is held only
-    // for the single INSERT, not for the installer's runtime.
-    {
-        let store = state.state.lock().await;
-        store.append_installer_run(InstallerRunInput {
-            started_at: &result.row.started_at,
-            finished_at: result.row.finished_at.as_deref(),
-            status: &result.row.status,
-            stdout: &result.row.stdout,
-            stderr: &result.row.stderr,
-            exit_status: result.row.exit_status,
+    let outcome = if let Some(install) = state.config.agent.install.clone() {
+        // Escape-hatch shell recipe. One row, persisted after the shell runs.
+        let expected_sha256 = state.config.agent.expected_sha256.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
+        })
+        .await
+        .map_err(|err| StackError::AgentInitializeFailed {
+            reason: format!("installer thread join failed: {err}"),
         })?;
-    }
+        {
+            let store = state.state.lock().await;
+            store.append_installer_run(InstallerRunInput {
+                started_at: &result.row.started_at,
+                finished_at: result.row.finished_at.as_deref(),
+                status: &result.row.status,
+                stdout: &result.row.stdout,
+                stderr: &result.row.stderr,
+                exit_status: result.row.exit_status,
+                step: &result.row.step,
+            })?;
+        }
+        result.outcome?
+    } else {
+        // Registry-resolved install: one row for native, two for adapter-backed.
+        let override_path = home.join(".config").join("acp-stack").join("registry.toml");
+        let registry = RegistryCatalog::load_with_override(&override_path)?;
+        let entry = registry
+            .lookup(&state.config.agent.id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: state.config.agent.id.clone(),
+            })?
+            .clone();
+        let agent = state.config.agent.clone();
+        let result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
+            install_resolved_capture(&agent, &entry, env, &workspace_root, &local_bin)
+        })
+        .await
+        .map_err(|err| StackError::AgentInitializeFailed {
+            reason: format!("installer thread join failed: {err}"),
+        })?;
+        {
+            let store = state.state.lock().await;
+            for row in &result.rows {
+                store.append_installer_run(InstallerRunInput {
+                    started_at: &row.started_at,
+                    finished_at: row.finished_at.as_deref(),
+                    status: &row.status,
+                    stdout: &row.stdout,
+                    stderr: &row.stderr,
+                    exit_status: row.exit_status,
+                    step: &row.step,
+                })?;
+            }
+        }
+        result.outcome?
+    };
 
-    let outcome = result.outcome?;
     let outcome_label = outcome.label();
     let path = outcome.path().to_string_lossy().into_owned();
     let sha256 = outcome.sha256().to_owned();
