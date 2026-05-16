@@ -2,33 +2,46 @@
 id = 1
 name = "init"
 sqlite_file = "001_init.sqlite.sql"
+postgres_file = "001_init.postgres.sql"
 
 [[migration]]
 id = 2
 name = "auth_failures_schema"
 sqlite_file = "002_auth_failures_schema.sqlite.sql"
+postgres_file = "002_auth_failures_schema.postgres.sql"
 
 [[migration]]
 id = 3
 name = "agent_capabilities"
 sqlite_file = "003_agent_capabilities.sqlite.sql"
+postgres_file = "003_agent_capabilities.postgres.sql"
 
 [[migration]]
 id = 4
 name = "sessions"
 sqlite_file = "004_sessions.sqlite.sql"
+postgres_file = "004_sessions.postgres.sql"
 
 [[migration]]
 id = 5
 name = "commands_schema"
 sqlite_file = "005_commands_schema.sqlite.sql"
+postgres_file = "005_commands_schema.postgres.sql"
 
 [[migration]]
 id = 6
 name = "permissions"
 sqlite_file = "006_permissions.sqlite.sql"
+postgres_file = "006_permissions.postgres.sql"
 
 [[migration]]
 id = 7
 name = "events_source"
 sqlite_file = "007_events_source.sqlite.sql"
+postgres_file = "007_events_source.postgres.sql"
+
+[[migration]]
+id = 8
+name = "sink_outbox"
+sqlite_file = "008_sink_outbox.sqlite.sql"
+postgres_file = "008_sink_outbox.postgres.sql"

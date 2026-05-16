@@ -87,13 +87,13 @@ pub enum StackError {
     #[error("migration manifest is invalid: {0}")]
     MigrationManifestParse(toml::de::Error),
 
-    #[error("migration manifest references id {id} but the binary has no SQL embedded for it")]
-    UnknownMigrationId { id: i64 },
-
     #[error(
         "migration manifest ids must be strictly increasing positive integers; saw {id} after {previous}"
     )]
     InvalidManifestOrder { id: i64, previous: i64 },
+
+    #[error("migration manifest does not match the compiled registry: {reason}")]
+    ManifestRegistryMismatch { reason: String },
 
     #[error(
         "state database is missing the required `{table}` table after migrations; the file may be corrupted"
@@ -166,6 +166,27 @@ pub enum StackError {
         "secret store is non-empty but does not contain the admin key reference `{name}`; reset and re-init"
     )]
     MissingAdminKey { name: String },
+
+    #[error(
+        "secret store is non-empty but does not contain the Supabase secret API key reference `{name}`"
+    )]
+    MissingSupabaseApiKey { name: String },
+
+    #[error(
+        "[logging.supabase].url must start with `https://` when external logging is enabled; got `{url}`"
+    )]
+    InvalidSupabaseUrl { url: String },
+
+    #[error(
+        "[logging.supabase].schema must be a safe Postgres identifier matching `^[a-z_][a-z0-9_]{{0,62}}$`; got `{schema}`"
+    )]
+    InvalidSupabaseSchema { schema: String },
+
+    #[error("Supabase sink rejected upload: {status} {body}")]
+    SupabaseSinkHttp { status: u16, body: String },
+
+    #[error("Supabase sink received a row for unknown source table `{table}`; refusing to upload")]
+    SupabaseSinkUnknownTable { table: String },
 
     #[error("failed to read stdin: {source}")]
     StdinRead { source: std::io::Error },
@@ -493,8 +514,8 @@ impl StackError {
             IncompatibleStateSchema { .. } => "state.incompatible_schema",
             UnmanagedStateTable { .. } => "state.unmanaged_table",
             MigrationManifestParse(_) => "state.migration_manifest_invalid",
-            UnknownMigrationId { .. } => "state.unknown_migration_id",
             InvalidManifestOrder { .. } => "state.invalid_manifest_order",
+            ManifestRegistryMismatch { .. } => "state.manifest_registry_mismatch",
             MissingMigratedTable { .. } => "state.missing_migrated_table",
             InvalidEventPayload => "state.invalid_event_payload",
             InvalidAuthFailurePayload => "state.invalid_auth_failure_payload",
@@ -509,6 +530,11 @@ impl StackError {
             SecretNotFound { .. } => "secrets.not_found",
             MissingSessionKey { .. } => "auth.missing_session_key",
             MissingAdminKey { .. } => "auth.missing_admin_key",
+            MissingSupabaseApiKey { .. } => "logging.supabase.missing_api_key",
+            InvalidSupabaseUrl { .. } => "logging.supabase.invalid_url",
+            InvalidSupabaseSchema { .. } => "logging.supabase.invalid_schema",
+            SupabaseSinkHttp { .. } => "logging.supabase.http_error",
+            SupabaseSinkUnknownTable { .. } => "logging.supabase.unknown_table",
             StdinRead { .. } => "io.stdin_read_failed",
             MissingSection { .. }
             | MissingField { .. }
@@ -621,11 +647,11 @@ impl StackError {
                 format!("existing state table `{table}` is not managed by a recorded migration")
             }
             MigrationManifestParse(_) => "migration manifest is invalid".to_owned(),
-            UnknownMigrationId { id } => {
-                format!("migration manifest references unknown id {id}")
-            }
             InvalidManifestOrder { .. } => {
                 "migration manifest ids must be strictly increasing positive integers".to_owned()
+            }
+            ManifestRegistryMismatch { .. } => {
+                "migration manifest does not match the compiled registry".to_owned()
             }
             MissingMigratedTable { table } => {
                 format!("state database is missing required table `{table}`")
@@ -647,6 +673,21 @@ impl StackError {
             SecretNotFound { .. } => "secret was not found".to_owned(),
             MissingSessionKey { .. } => "secret store is missing session key reference".to_owned(),
             MissingAdminKey { .. } => "secret store is missing admin key reference".to_owned(),
+            MissingSupabaseApiKey { .. } => {
+                "secret store is missing Supabase secret API key reference".to_owned()
+            }
+            InvalidSupabaseUrl { .. } => {
+                "[logging.supabase].url must start with `https://`".to_owned()
+            }
+            InvalidSupabaseSchema { .. } => {
+                "[logging.supabase].schema is not a safe Postgres identifier".to_owned()
+            }
+            SupabaseSinkHttp { status, .. } => {
+                format!("Supabase sink rejected upload with HTTP {status}")
+            }
+            SupabaseSinkUnknownTable { table } => {
+                format!("Supabase sink received a row for unknown source table `{table}`")
+            }
             StdinRead { .. } => "failed to read stdin".to_owned(),
             MissingSection { section } => format!("missing required section `{section}`"),
             MissingField { field } => format!("{field} is required"),
@@ -868,8 +909,8 @@ impl StackError {
             | IncompatibleStateSchema { .. }
             | UnmanagedStateTable { .. }
             | MigrationManifestParse(_)
-            | UnknownMigrationId { .. }
             | InvalidManifestOrder { .. }
+            | ManifestRegistryMismatch { .. }
             | MissingMigratedTable { .. }
             | AgeKeyRead { .. }
             | AgeKeyWrite { .. }
@@ -883,6 +924,11 @@ impl StackError {
             | SecretStorePlaintextNotUtf8 { .. }
             | MissingSessionKey { .. }
             | MissingAdminKey { .. }
+            | MissingSupabaseApiKey { .. }
+            | InvalidSupabaseUrl { .. }
+            | InvalidSupabaseSchema { .. }
+            | SupabaseSinkHttp { .. }
+            | SupabaseSinkUnknownTable { .. }
             | StdinRead { .. }
             | ServeBind { .. }
             | ServeIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,

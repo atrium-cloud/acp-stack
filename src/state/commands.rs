@@ -148,23 +148,26 @@ impl StateStore {
             truncated: false,
         };
 
-        self.connection().execute(
-            r#"
-            INSERT INTO commands
-                (id, created_at, updated_at, status, command, exit_status,
-                 started_at, finished_at, cwd, env_json, duration_ms, truncated)
-            VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?7, NULL, 0)
-            "#,
-            params![
-                record.id,
-                record.created_at,
-                record.updated_at,
-                record.status,
-                record.command,
-                record.cwd,
-                record.env_json,
-            ],
-        )?;
+        self.persist_with_outbox("commands", &record.id, &record.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO commands
+                    (id, created_at, updated_at, status, command, exit_status,
+                     started_at, finished_at, cwd, env_json, duration_ms, truncated)
+                VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?7, NULL, 0)
+                "#,
+                params![
+                    record.id,
+                    record.created_at,
+                    record.updated_at,
+                    record.status,
+                    record.command,
+                    record.cwd,
+                    record.env_json,
+                ],
+            )?;
+            Ok(())
+        })?;
 
         Ok(record)
     }
@@ -174,18 +177,20 @@ impl StateStore {
     /// spawned; this only records the transition.
     pub fn start_command(&self, id: &str) -> Result<()> {
         let now = current_timestamp();
-        let rows_affected = self.connection().execute(
-            r#"
-            UPDATE commands
-            SET status = ?1, started_at = ?2, updated_at = ?2
-            WHERE id = ?3
-            "#,
-            params![CommandStatus::Running.as_str(), now, id],
-        )?;
-        if rows_affected == 0 {
-            return Err(StackError::CommandNotFound { id: id.to_owned() });
-        }
-        Ok(())
+        self.persist_with_outbox("commands", id, &now, |conn| {
+            let rows_affected = conn.execute(
+                r#"
+                UPDATE commands
+                SET status = ?1, started_at = ?2, updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![CommandStatus::Running.as_str(), now, id],
+            )?;
+            if rows_affected == 0 {
+                return Err(StackError::CommandNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
     }
 
     /// Record the terminal state of a command run. `status` should be one of
@@ -199,35 +204,40 @@ impl StateStore {
         duration_ms: Option<i64>,
     ) -> Result<()> {
         let now = current_timestamp();
-        let rows_affected = self.connection().execute(
-            r#"
-            UPDATE commands
-            SET status = ?1,
-                exit_status = ?2,
-                finished_at = ?3,
-                updated_at = ?3,
-                duration_ms = ?4
-            WHERE id = ?5
-            "#,
-            params![status.as_str(), exit_status, now, duration_ms, id],
-        )?;
-        if rows_affected == 0 {
-            return Err(StackError::CommandNotFound { id: id.to_owned() });
-        }
-        Ok(())
+        self.persist_with_outbox("commands", id, &now, |conn| {
+            let rows_affected = conn.execute(
+                r#"
+                UPDATE commands
+                SET status = ?1,
+                    exit_status = ?2,
+                    finished_at = ?3,
+                    updated_at = ?3,
+                    duration_ms = ?4
+                WHERE id = ?5
+                "#,
+                params![status.as_str(), exit_status, now, duration_ms, id],
+            )?;
+            if rows_affected == 0 {
+                return Err(StackError::CommandNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
     }
 
     /// Flip the `truncated` flag on a command row. Idempotent; called when the
     /// gateway hits its per-command output cap.
     pub fn mark_command_truncated(&self, id: &str) -> Result<()> {
-        let rows_affected = self.connection().execute(
-            "UPDATE commands SET truncated = 1, updated_at = ?1 WHERE id = ?2",
-            params![current_timestamp(), id],
-        )?;
-        if rows_affected == 0 {
-            return Err(StackError::CommandNotFound { id: id.to_owned() });
-        }
-        Ok(())
+        let now = current_timestamp();
+        self.persist_with_outbox("commands", id, &now, |conn| {
+            let rows_affected = conn.execute(
+                "UPDATE commands SET truncated = 1, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+            if rows_affected == 0 {
+                return Err(StackError::CommandNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
     }
 
     /// Append a single stdout/stderr chunk as a durable event. The `events`
@@ -262,7 +272,30 @@ impl StateStore {
     pub fn reconcile_orphaned_commands(&self, reason: &str) -> Result<usize> {
         let now = current_timestamp();
         let _ = reason; // recorded via finished_at + a synthetic event below
-        let affected = self.connection().execute(
+        if !self.external_logging_enabled() {
+            let affected = self.connection().execute(
+                r#"
+                UPDATE commands
+                SET status = 'failed',
+                    updated_at = ?1,
+                    finished_at = COALESCE(finished_at, ?1)
+                WHERE status IN ('pending', 'running')
+                "#,
+                params![now],
+            )?;
+            return Ok(affected);
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            self.connection(),
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let ids: Vec<String> = {
+            let mut statement =
+                tx.prepare("SELECT id FROM commands WHERE status IN ('pending', 'running')")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let affected = tx.execute(
             r#"
             UPDATE commands
             SET status = 'failed',
@@ -272,6 +305,10 @@ impl StateStore {
             "#,
             params![now],
         )?;
+        for id in &ids {
+            super::sink_outbox::enqueue(&tx, "commands", id, &now)?;
+        }
+        tx.commit()?;
         Ok(affected)
     }
 }

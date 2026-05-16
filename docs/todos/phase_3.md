@@ -9,19 +9,19 @@
 
 ## External Logging Schema
 
-- [ ] Define the logical migration sequence shared by SQLite and PostgreSQL-compatible sinks.
-- [ ] Add schema for sessions, turns, events, commands, permissions, security events, lifecycle records, and derived metrics.
-- [ ] Document required indexes for local query performance and Supabase/PostgreSQL mirrors.
-- [ ] Add migration compatibility tests between SQLite and PostgreSQL DDL where practical.
+- [x] Define the logical migration sequence shared by SQLite and PostgreSQL-compatible sinks.
+- [x] Add schema for sessions, turns, events, commands, permissions, security events, lifecycle records, and derived metrics.
+- [x] Document required indexes for local query performance and Supabase/PostgreSQL mirrors.
+- [x] Add migration compatibility tests between SQLite and PostgreSQL DDL where practical.
 
 ## Supabase Logging Sink
 
-- [ ] Add `[logging.supabase]` config validation.
-- [ ] Resolve `api_key_ref` from the secret store only when external logging is enabled.
-- [ ] Batch or stream normalized events to Supabase.
-- [ ] Retry transient sink failures without blocking local SQLite writes.
-- [ ] Persist sink delivery status and failure summaries locally.
-- [ ] Ensure external sink payloads never include secret values.
+- [x] Add `[logging.supabase]` config validation.
+- [x] Resolve `api_key_ref` from the secret store only when external logging is enabled.
+- [x] Batch or stream normalized events to Supabase.
+- [x] Retry transient sink failures without blocking local SQLite writes.
+- [x] Persist sink delivery status and failure summaries locally.
+- [x] Ensure external sink payloads never include secret values.
 
 ## Metrics
 
@@ -71,7 +71,7 @@
 ## Acceptance
 
 - [ ] SQLite remains the local source of truth when external logging is enabled.
-- [ ] Supabase logging can be enabled and inspected.
+- [x] Supabase logging can be enabled and inspected.
 - [ ] Derived session, turn, token, context, command, duration, permission, API, WebSocket, and security metrics are queryable.
 - [ ] Agents can use `acpctl` for constrained local inspection.
 - [ ] `acpctl mcp serve` exposes the same constrained local interface through MCP.

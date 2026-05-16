@@ -44,6 +44,14 @@ pub struct SecurityCheckInputs<'a> {
     pub session_key_empty: bool,
     pub admin_key_empty: bool,
     pub recent_auth_failures: i64,
+    /// Count of `sink_outbox` rows that are stuck in pending+failing state.
+    /// Non-zero means the Supabase sink has unfinished work and has retried
+    /// at least once; surfaced so operators know external logging is lagging.
+    pub sink_open_failures: i64,
+    /// Most recent error captured by the sink worker, taken verbatim from
+    /// `sink_failures_summary.last_error`. Truncated by the worker before
+    /// it lands in the table, so passing through here is safe.
+    pub sink_last_error: Option<&'a str>,
 }
 
 /// Compute the list of security findings for the running daemon.
@@ -105,6 +113,21 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
         ));
     }
 
+    if inputs.sink_open_failures > 0 {
+        let suffix = inputs
+            .sink_last_error
+            .filter(|s| !s.is_empty())
+            .map(|err| format!(" (last error: {err})"))
+            .unwrap_or_default();
+        findings.push(SecurityFinding::warning(
+            "logging.supabase.delivery_failing",
+            &format!(
+                "Supabase sink has {} pending rows with retry failures{suffix}",
+                inputs.sink_open_failures
+            ),
+        ));
+    }
+
     findings
 }
 
@@ -125,29 +148,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn loopback_bind_with_keys_returns_no_findings() {
-        let http = baseline_http();
-        let findings = check(SecurityCheckInputs {
+    fn baseline_inputs<'a>(http: &'a SecurityHttpConfig) -> SecurityCheckInputs<'a> {
+        SecurityCheckInputs {
             effective_bind: "127.0.0.1:8080",
-            http: &http,
+            http,
             session_key_empty: false,
             admin_key_empty: false,
             recent_auth_failures: 0,
-        });
+            sink_open_failures: 0,
+            sink_last_error: None,
+        }
+    }
+
+    #[test]
+    fn loopback_bind_with_keys_returns_no_findings() {
+        let http = baseline_http();
+        let findings = check(baseline_inputs(&http));
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn sink_open_failures_surface_warning_with_last_error() {
+        let http = baseline_http();
+        let mut inputs = baseline_inputs(&http);
+        inputs.sink_open_failures = 4;
+        inputs.sink_last_error = Some("HTTP 503: gateway down");
+        let findings = check(inputs);
+        let finding = findings
+            .iter()
+            .find(|f| f.code == "logging.supabase.delivery_failing")
+            .expect("sink finding present");
+        assert!(finding.message.contains("HTTP 503"));
+        assert!(finding.message.contains("4 pending"));
+    }
+
+    #[test]
+    fn sink_zero_failures_does_not_warn() {
+        let http = baseline_http();
+        let findings = check(baseline_inputs(&http));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code == "logging.supabase.delivery_failing"),
+            "{findings:?}"
+        );
     }
 
     #[test]
     fn unspecified_bind_flags_public_warning() {
         let http = baseline_http();
-        let findings = check(SecurityCheckInputs {
-            effective_bind: "0.0.0.0:8080",
-            http: &http,
-            session_key_empty: false,
-            admin_key_empty: false,
-            recent_auth_failures: 0,
-        });
+        let mut inputs = baseline_inputs(&http);
+        inputs.effective_bind = "0.0.0.0:8080";
+        let findings = check(inputs);
         assert!(findings.iter().any(|f| f.code == "api.public_bind"));
     }
 
@@ -155,13 +207,9 @@ mod tests {
     fn wildcard_origin_on_public_bind_is_critical() {
         let mut http = baseline_http();
         http.allowed_origins = vec!["*".to_owned()];
-        let findings = check(SecurityCheckInputs {
-            effective_bind: "0.0.0.0:8080",
-            http: &http,
-            session_key_empty: false,
-            admin_key_empty: false,
-            recent_auth_failures: 0,
-        });
+        let mut inputs = baseline_inputs(&http);
+        inputs.effective_bind = "0.0.0.0:8080";
+        let findings = check(inputs);
         assert!(
             findings
                 .iter()
@@ -173,13 +221,7 @@ mod tests {
     fn proxy_trust_without_allowlist_is_critical() {
         let mut http = baseline_http();
         http.trust_proxy_headers = true;
-        let findings = check(SecurityCheckInputs {
-            effective_bind: "127.0.0.1:8080",
-            http: &http,
-            session_key_empty: false,
-            admin_key_empty: false,
-            recent_auth_failures: 0,
-        });
+        let findings = check(baseline_inputs(&http));
         assert!(
             findings
                 .iter()
@@ -192,13 +234,7 @@ mod tests {
         let mut http = baseline_http();
         http.trust_proxy_headers = true;
         http.trusted_proxies = vec!["10.0.0.1".to_owned()];
-        let findings = check(SecurityCheckInputs {
-            effective_bind: "127.0.0.1:8080",
-            http: &http,
-            session_key_empty: false,
-            admin_key_empty: false,
-            recent_auth_failures: 0,
-        });
+        let findings = check(baseline_inputs(&http));
         assert!(
             !findings
                 .iter()
@@ -210,26 +246,18 @@ mod tests {
     #[test]
     fn empty_session_key_is_critical() {
         let http = baseline_http();
-        let findings = check(SecurityCheckInputs {
-            effective_bind: "127.0.0.1:8080",
-            http: &http,
-            session_key_empty: true,
-            admin_key_empty: false,
-            recent_auth_failures: 0,
-        });
+        let mut inputs = baseline_inputs(&http);
+        inputs.session_key_empty = true;
+        let findings = check(inputs);
         assert!(findings.iter().any(|f| f.code == "auth.session_key_empty"));
     }
 
     #[test]
     fn auth_failure_threshold_warns_when_met() {
         let http = baseline_http();
-        let findings = check(SecurityCheckInputs {
-            effective_bind: "127.0.0.1:8080",
-            http: &http,
-            session_key_empty: false,
-            admin_key_empty: false,
-            recent_auth_failures: 10,
-        });
+        let mut inputs = baseline_inputs(&http);
+        inputs.recent_auth_failures = 10;
+        let findings = check(inputs);
         assert!(findings.iter().any(|f| f.code == "auth.failure_threshold"));
     }
 }

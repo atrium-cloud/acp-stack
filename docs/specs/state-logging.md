@@ -165,7 +165,7 @@ schema = "acp_stack"
 Behavior:
 
 - disabled by default
-- uses a secret reference for the Supabase secret API key
+- uses a secret reference for the Supabase API key
 - batches inserts from normalized local events
 - uses the shared PostgreSQL migration sequence
 - never exports plaintext secrets
@@ -183,3 +183,29 @@ Initial Supabase tables:
 - `security_events`
 - `connection_events`
 - `usage_metrics`
+
+In the shipped Postgres dialect the raw tables (`sessions`, `commands`, `prompts`, `permission_requests`, `permission_decisions`, `events`, `auth_failures`, `agent_lifecycle`) are mirrored with the redacted outbound shapes below, and the eight analytics names above are exposed as `CREATE OR REPLACE VIEW`s authored alongside migration 007. The sink uploads the raw tables only; PostgREST honors the analytics views for read traffic.
+
+## Sink delivery state
+
+External delivery state lives in two local tables introduced in migration 008:
+
+- `sink_outbox(id, source_table, source_id, created_at, status, attempts, next_attempt_at, last_error, last_attempt_at)` — one row per outbound source row. `id` is `"{source_table}:{source_id}"`. Status is `pending`, `sending`, `sent`, or `failed`. Updates to a source row UPSERT the outbox row back to `pending`; the worker re-uploads and Supabase's PostgREST `Prefer: resolution=merge-duplicates` collapses duplicates server-side.
+- `sink_failures_summary(window_started_at, failure_count, last_error, last_observed_at)` — rolled forward every 60 seconds while the worker is failing. The `security check` self-check reads `latest_failure_summary` and surfaces a `logging.supabase.delivery_failing` finding whenever `sink_outbox` has rows with `attempts > 0`.
+
+Per-table redaction enforces the spec's "no plaintext secrets in external sinks" rule before the worker POSTs. JSON allowlists keep only top-level scalar values; nested arrays or objects under allowlisted keys are dropped.
+
+| Source table | Outbound shape |
+| --- | --- |
+| `events.payload_json` / `events.message` | payload keeps allowlisted scalar keys only (`session_id`, `kind`, `duration_ms`, `status`, `exit_code`, `input_tokens`, `output_tokens`, `context_window_max`, `agent_id`, `command_id`, `request_id`, `bind`, `client_label`, `reason_code`); other keys and nested values are dropped; message text replaced with `"[redacted; N bytes]"` |
+| `sessions.metadata_json` / session free text | metadata keeps scalar `agent_id`; `title` is nulled; `cwd` is replaced with `""` to satisfy the Postgres mirror's non-null column |
+| `prompts.prompt_json` / prompt error scalars | prompt JSON replaced wholesale with `{ "redacted": true, "byte_len": N }`; `stop_reason` and `error_message` replaced with `"[redacted; N bytes]"` |
+| `commands.command` | replaced with `"[redacted; N bytes]"` (inline credentials are common in shell invocations) |
+| `commands.cwd` | nulled (may reveal `/var/secrets/...`-style paths) |
+| `commands.env_json` | replaced with `{ "env_var_count": N }` |
+| `permission_requests.detail_json` | same scalar allowlist as events |
+| `auth_failures.payload_json` / request path | payload dropped to `{}`; known structural `reason` codes (`missing`, `invalid`, `wrong_kind`, `malformed_header`) kept; unknown reasons replaced with `"[redacted; N bytes]"`; `route` nulled |
+| `agent_lifecycle.payload_json` | scalar allowlist of `{ bind, agent_id, exit_code, duration_ms, capabilities_hash }`; free-form `message` replaced with `"[redacted; N bytes]"` |
+| `permission_decisions` | scalar columns only; free-form `reason` replaced with `"[redacted; N bytes]"` |
+
+Unknown source tables are rejected with `StackError::SupabaseSinkUnknownTable` so accidentally extending the outbox to a new table fails closed rather than leaking columns.

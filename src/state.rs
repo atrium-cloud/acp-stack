@@ -19,6 +19,7 @@ mod records;
 mod rows;
 mod schema;
 mod sessions;
+pub(crate) mod sink_outbox;
 
 pub use agent::{
     AgentCapabilitiesRecord, AgentLifecycleEvent, INSTALLER_OUTPUT_CAP_BYTES, InstallerRun,

@@ -114,24 +114,32 @@ impl StateStore {
             detail_json: input.detail_json.to_owned(),
             expires_at: input.expires_at.map(str::to_owned),
         };
-        self.connection().execute(
-            r#"
-            INSERT INTO permission_requests
-                (id, created_at, updated_at, status, source,
-                 requester, subject_id, detail_json, expires_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            "#,
-            params![
-                record.id,
-                record.created_at,
-                record.updated_at,
-                record.status,
-                record.source,
-                record.requester,
-                record.subject_id,
-                record.detail_json,
-                record.expires_at,
-            ],
+        self.persist_with_outbox(
+            "permission_requests",
+            &record.id,
+            &record.created_at,
+            |conn| {
+                conn.execute(
+                    r#"
+                    INSERT INTO permission_requests
+                        (id, created_at, updated_at, status, source,
+                         requester, subject_id, detail_json, expires_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "#,
+                    params![
+                        record.id,
+                        record.created_at,
+                        record.updated_at,
+                        record.status,
+                        record.source,
+                        record.requester,
+                        record.subject_id,
+                        record.detail_json,
+                        record.expires_at,
+                    ],
+                )?;
+                Ok(())
+            },
         )?;
         Ok(record)
     }
@@ -167,17 +175,21 @@ impl StateStore {
             });
         }
 
-        let affected = self.connection().execute(
-            r#"
-            UPDATE permission_requests
-            SET status = ?1, updated_at = ?2
-            WHERE id = ?3
-            "#,
-            params![new_status.as_str(), current_timestamp(), id],
-        )?;
-        if affected == 0 {
-            return Err(StackError::PermissionNotFound { id: id.to_owned() });
-        }
+        let now = current_timestamp();
+        self.persist_with_outbox("permission_requests", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE permission_requests
+                SET status = ?1, updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![new_status.as_str(), now, id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::PermissionNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })?;
         Ok(current_status)
     }
 
@@ -211,13 +223,14 @@ impl StateStore {
                 to: status_str(new_status),
             });
         }
+        let now = current_timestamp();
         let affected = transaction.execute(
             r#"
             UPDATE permission_requests
             SET status = ?1, updated_at = ?2
             WHERE id = ?3
             "#,
-            params![new_status.as_str(), current_timestamp(), id],
+            params![new_status.as_str(), now, id],
         )?;
         if affected == 0 {
             return Err(StackError::PermissionNotFound { id: id.to_owned() });
@@ -245,6 +258,15 @@ impl StateStore {
                 decision.reason,
             ],
         )?;
+        if self.external_logging_enabled() {
+            super::sink_outbox::enqueue(&transaction, "permission_requests", id, &now)?;
+            super::sink_outbox::enqueue(
+                &transaction,
+                "permission_decisions",
+                &decision.id,
+                &decision.created_at,
+            )?;
+        }
         transaction.commit()?;
         Ok(decision)
     }
@@ -264,20 +286,28 @@ impl StateStore {
             deciding_principal: deciding_principal.map(str::to_owned),
             reason: reason.map(str::to_owned),
         };
-        self.connection().execute(
-            r#"
-            INSERT INTO permission_decisions
-                (id, request_id, created_at, decision, deciding_principal, reason)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            params![
-                record.id,
-                record.request_id,
-                record.created_at,
-                record.decision,
-                record.deciding_principal,
-                record.reason,
-            ],
+        self.persist_with_outbox(
+            "permission_decisions",
+            &record.id,
+            &record.created_at,
+            |conn| {
+                conn.execute(
+                    r#"
+                    INSERT INTO permission_decisions
+                        (id, request_id, created_at, decision, deciding_principal, reason)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "#,
+                    params![
+                        record.id,
+                        record.request_id,
+                        record.created_at,
+                        record.decision,
+                        record.deciding_principal,
+                        record.reason,
+                    ],
+                )?;
+                Ok(())
+            },
         )?;
         Ok(record)
     }
@@ -330,6 +360,8 @@ impl StateStore {
             Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
         let now = current_timestamp();
 
+        let external = self.external_logging_enabled();
+
         // ACP-source pending rows become `canceled` — the request channel is
         // gone after restart.
         let acp_ids: Vec<String> = {
@@ -354,6 +386,15 @@ impl StateStore {
                 "#,
                 params![decision_id, id, now],
             )?;
+            if external {
+                super::sink_outbox::enqueue(&transaction, "permission_requests", id, &now)?;
+                super::sink_outbox::enqueue(
+                    &transaction,
+                    "permission_decisions",
+                    &decision_id,
+                    &now,
+                )?;
+            }
         }
 
         // Command-source pending rows become `expired` — the command never
@@ -381,6 +422,15 @@ impl StateStore {
                 "#,
                 params![decision_id, id, now],
             )?;
+            if external {
+                super::sink_outbox::enqueue(&transaction, "permission_requests", id, &now)?;
+                super::sink_outbox::enqueue(
+                    &transaction,
+                    "permission_decisions",
+                    &decision_id,
+                    &now,
+                )?;
+            }
         }
 
         transaction.commit()?;

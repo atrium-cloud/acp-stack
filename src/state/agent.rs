@@ -111,19 +111,22 @@ impl StateStore {
             payload_json: payload_json.to_owned(),
         };
 
-        self.connection().execute(
-            r#"
-            INSERT INTO agent_lifecycle (id, created_at, event_kind, message, payload_json)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            "#,
-            params![
-                event.id,
-                event.created_at,
-                event.event_kind,
-                event.message,
-                event.payload_json,
-            ],
-        )?;
+        self.persist_with_outbox("agent_lifecycle", &event.id, &event.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO agent_lifecycle (id, created_at, event_kind, message, payload_json)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![
+                    event.id,
+                    event.created_at,
+                    event.event_kind,
+                    event.message,
+                    event.payload_json,
+                ],
+            )?;
+            Ok(())
+        })?;
 
         Ok(event)
     }
