@@ -15,6 +15,7 @@ use acp_stack::api::AppState;
 use acp_stack::config::{Config, load_config_from_str};
 use acp_stack::local_listener;
 use acp_stack::state::{EventFilter, StateStore};
+use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +25,15 @@ use tokio::task::JoinHandle;
 
 const SESSION_KEY: &str = "acps_session_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn acpctl_binary_help_smoke_test() {
+    Command::cargo_bin("acpctl")
+        .expect("binary should build")
+        .arg("--help")
+        .assert()
+        .success();
+}
 
 struct Harness {
     socket: PathBuf,
