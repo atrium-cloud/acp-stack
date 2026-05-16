@@ -46,18 +46,18 @@
 
 ## Local Agent CLI
 
-- [ ] Implement `acpctl status`.
-- [ ] Implement `acpctl security check`.
-- [ ] Implement `acpctl deps check`.
-- [ ] Implement `acpctl logs query --since <duration>`.
-- [ ] Implement `acpctl workspace list <path>`.
-- [ ] Implement `acpctl workspace read <path>`.
-- [ ] Implement `acpctl workspace write <path>`.
-- [ ] Implement `acpctl command run <command>`.
-- [ ] Implement `acpctl config export`.
-- [ ] Implement `acpctl permissions pending`.
-- [ ] Ensure `acpctl` uses a local capability mechanism rather than public session/admin API keys.
-- [ ] Ensure `acpctl` actions are logged with source `local`.
+- [x] Implement `acpctl status`.
+- [x] Implement `acpctl security check`.
+- [x] Implement `acpctl deps check`.
+- [x] Implement `acpctl logs query --since <duration>`.
+- [x] Implement `acpctl workspace list <path>`.
+- [x] Implement `acpctl workspace read <path>`.
+- [x] Implement `acpctl workspace write <path>`.
+- [x] Implement `acpctl command run <command>`.
+- [x] Implement `acpctl config export`.
+- [x] Implement `acpctl permissions pending`.
+- [x] Ensure `acpctl` uses a local capability mechanism rather than public session/admin API keys.
+- [x] Ensure `acpctl` actions are logged with source `local`.
 
 ## Local MCP Introspection
 

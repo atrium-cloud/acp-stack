@@ -85,7 +85,7 @@ migrations/
   007_events_source.sqlite.sql
 ```
 
-Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Migration 007 adds a `source` column to `events` (default `system`) so log queries can filter by writer origin (`api`, `acp`, `command`, `permission`, `cli`, `local`). Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
+Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Migration 007 adds a `source` column to `events` (default `system`) so log queries can filter by writer origin (`api`, `acp`, `command`, `permission`, `cli`, `local`). The `local` source is produced by the `acpctl` UDS listener (see `acpctl.md`): every call through the Unix-domain socket lands an `api.request` row with `source = "local"` and `key_kind = "local"` in the payload, and workspace mutations triggered through that path inherit the same source. Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
 
 Rules:
 
