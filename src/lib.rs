@@ -1,25 +1,20 @@
-pub mod acp_bridge;
-pub mod agent_installer;
 pub mod api;
 pub mod auth;
 pub mod cli;
-pub mod commands;
 pub mod config;
-pub mod deps;
 pub mod envelope;
 pub mod error;
 pub mod events;
 pub mod fs_util;
 pub mod http_hardening;
 pub mod local_listener;
-pub mod mcp;
-pub mod permissions;
+pub mod runtime;
 pub mod secrets;
 pub mod security;
 pub mod state;
-pub mod supervisor;
 pub mod time_util;
 pub mod tracing_init;
 pub mod workspace;
 
 pub use error::{Result, StackError};
+pub use runtime::{acp_bridge, agent_installer, commands, deps, mcp, permissions, supervisor};
