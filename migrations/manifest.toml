@@ -45,3 +45,9 @@ id = 8
 name = "sink_outbox"
 sqlite_file = "008_sink_outbox.sqlite.sql"
 postgres_file = "008_sink_outbox.postgres.sql"
+
+[[migration]]
+id = 9
+name = "installer_runs_step"
+sqlite_file = "009_installer_runs_step.sqlite.sql"
+postgres_file = "009_installer_runs_step.postgres.sql"

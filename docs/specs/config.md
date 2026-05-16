@@ -120,37 +120,26 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[security.http].trusted_proxies` is a list of exact IP-address strings (no CIDR) trusted to populate `X-Forwarded-For` / `Forwarded` headers. When `trust_proxy_headers = true` and the socket peer matches an entry, the leftmost forwarded IP is used as the client IP for auth-failure tracking. With `trust_proxy_headers = false` or an empty list, the socket peer is always used.
 
-`[agent]` names the ACP process that `acp-stack` launches. For a native ACP agent such as OpenCode, omit `[agent.adapter]`. OpenCode remains a good direct-key example because it uses API keys rather than browser OAuth.
+`[agent]` names the ACP process that `acp-stack` launches. `[agent].id` matches an entry in the embedded `data/registry.toml`; the runtime uses that lookup to decide whether the agent is native or adapter-backed and what install plan to run. Operators do not write `[agent.adapter]` — that block is populated at runtime from the resolved registry entry and is rejected with an unknown-field error if it appears in operator TOML.
 
-For an adapter-backed agent, `[agent.adapter]` records the registry adapter executable and the upstream agent it wraps; `agent.adapter.id` should match the ACP registry entry when the adapter is distributed through `agentclientprotocol/registry`. As of 2026-05-15, the externally identified adapter-backed agents are Claude Agent, Codex CLI, and Pi. Treat that list as ecosystem data resolved from the registry/Zed ACP pages rather than a baked-in allowlist.
+`[agent].harness_version` (optional) pins the harness install to a specific GitHub Release tag for adapter-backed agents whose harness is distributed via `github_release`. Omit to install the latest release at install time.
 
-Example adapter-backed Codex config for API-key deployments:
+Example native OpenCode config for OpenCode Go API-key deployments. Install metadata flows from the embedded registry; operator TOML stays terse:
 
 ```toml
 [agent]
-id = "codex"
-name = "Codex"
-command = "codex-acp"
-args = []
+id = "opencode"
+name = "OpenCode"
+command = "opencode"
+args = ["--acp"]
 cwd = "/workspace"
-env = ["OPENAI_API_KEY"]
+env = ["OPENCODE_API_KEY"]
 restart = "on-crash"
-
-[agent.adapter]
-id = "codex-acp"
-name = "Codex ACP Adapter"
-upstream_agent = "codex-cli"
-source_url = "https://github.com/zed-industries/codex-acp"
-
-[agent.install]
-type = "registry"
-id = "codex-acp"
-creates = "codex-acp"
 ```
 
-Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets. Codex can be used with OAuth in other environments, but the initial `acp-stack` runtime supports headless direct-key operation only, so the Codex adapter example uses `OPENAI_API_KEY`.
+Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets. The initial embedded registry supports only headless direct-key operation, so the OpenCode example uses `OPENCODE_API_KEY`.
 
-The operator-facing installation flow resolves agents from the ACP registry, not arbitrary third-party install scripts. Direct `[agent.install] type = "shell"` recipes are a low-level/manual escape hatch only. Registry installs fetch `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json` by default, select the configured `agent.install.id`, and use supported registry package distributions (`npx` through `npm install -g`, or `uvx` through `uv tool install`) to make `agent.install.creates` available.
+For an agent that is not in the embedded registry (private fork, unreleased build), declare `[agent.install] type = "shell"` as an escape hatch with a free-form install script and a `creates` postcheck. The registry-driven install path is implicit when `[agent.install]` is omitted.
 
 ## Import And Export
 

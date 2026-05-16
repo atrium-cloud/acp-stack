@@ -47,9 +47,6 @@ dist/
 # Dropbox
 .dropbox*
 
-# Demo app data
-data/
-
 # Generated external reference docs
 docs/ref/*
 

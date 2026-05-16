@@ -32,6 +32,7 @@ pub struct InstallerRun {
     pub stdout: String,
     pub stderr: String,
     pub exit_status: Option<i32>,
+    pub step: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub struct InstallerRunInput<'a> {
     pub stdout: &'a str,
     pub stderr: &'a str,
     pub exit_status: Option<i32>,
+    pub step: &'a str,
 }
 
 /// Per-stream byte cap applied before INSERT to keep installer_runs rows bounded.
@@ -202,13 +204,14 @@ impl StateStore {
             stdout: stdout.clone(),
             stderr: stderr.clone(),
             exit_status: input.exit_status,
+            step: input.step.to_owned(),
         };
 
         self.connection().execute(
             r#"
             INSERT INTO installer_runs
-                (id, started_at, finished_at, status, stdout, stderr, exit_status)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (id, started_at, finished_at, status, stdout, stderr, exit_status, step)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
                 run.id,
@@ -218,6 +221,7 @@ impl StateStore {
                 stdout,
                 stderr,
                 run.exit_status,
+                run.step,
             ],
         )?;
 
@@ -228,7 +232,7 @@ impl StateStore {
         let limit = i64::from(limit);
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, started_at, finished_at, status, stdout, stderr, exit_status
+            SELECT id, started_at, finished_at, status, stdout, stderr, exit_status, step
             FROM installer_runs
             ORDER BY started_at DESC, id DESC
             LIMIT ?1
@@ -243,6 +247,7 @@ impl StateStore {
                 stdout: row.get(4)?,
                 stderr: row.get(5)?,
                 exit_status: row.get(6)?,
+                step: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

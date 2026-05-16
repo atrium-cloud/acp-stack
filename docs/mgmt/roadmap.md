@@ -23,6 +23,8 @@ Establish the local daemon shape:
 - authentication failure logging
 - CLI commands that exercise the same core services as the API
 
+The initial installer foundation fetched the upstream ACP registry at runtime. A follow-up still inside 0.0.x closes that gap with an intentionally narrow embedded catalog at `data/registry.toml`, starting with OpenCode as the first verified headless target while preserving the model needed for future adapter-backed agents; see `docs/todos/phase_1.md` under "Agent Registry & Two-Layer Install".
+
 ### 0.0.2 - Secrets, Permissions, and MCP
 
 Add the trust and integration layer:

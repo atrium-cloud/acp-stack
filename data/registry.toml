@@ -1,0 +1,19 @@
+# OpenCode is the first verified headless support target for acp-stack.
+# Keep this embedded registry intentionally narrow until the full deployment,
+# auth, ACP launch, and smoke-test pipeline works with OpenCode + OpenCode Go.
+# Add more agents one at a time only after their headless setup docs and smoke
+# verification are credible.
+
+[[agents]]
+id = "opencode"
+name = "OpenCode"
+kind = "native"
+headless_compatible = true
+homepage = "https://github.com/anomalyco/opencode"
+
+[agents.adapter_install]
+type = "github_release"
+repo = "anomalyco/opencode"
+asset_pattern = "opencode-linux-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "opencode"

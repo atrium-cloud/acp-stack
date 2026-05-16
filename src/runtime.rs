@@ -1,7 +1,9 @@
 pub mod acp_bridge;
 pub mod agent_installer;
+pub mod agent_registry;
 pub mod commands;
 pub mod deps;
+pub mod github_release;
 pub mod mcp;
 pub mod permissions;
 pub mod sink_redaction;

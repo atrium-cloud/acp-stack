@@ -53,13 +53,12 @@ fn fake_agent_config() -> AgentConfig {
         env: vec![],
         expected_sha256: None,
         restart: "never".into(),
+        harness_version: None,
         adapter: None,
         install: Some(AgentInstallConfig {
             install_type: "shell".into(),
             creates: "true".into(),
             shell: Some("true".into()),
-            id: None,
-            registry_url: None,
         }),
     }
 }
@@ -126,7 +125,7 @@ async fn spawn_does_not_forward_unlisted_parent_environment() {
     let mut config = fake_agent_config();
     config
         .args
-        .extend(["--assert-env-absent".into(), "PATH".into()]);
+        .extend(["--assert-env-absent".into(), "HOME".into()]);
 
     let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await

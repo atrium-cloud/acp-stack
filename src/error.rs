@@ -231,7 +231,7 @@ pub enum StackError {
     #[error("agent.expected_sha256 must be exactly 64 lowercase hex characters")]
     InvalidExpectedSha256,
 
-    #[error("agent.install.type must be one of shell, registry")]
+    #[error("agent.install.type must be `shell` (the only operator-facing install type)")]
     InvalidAgentInstallType,
 
     #[error("{field} must start with http:// or https://")]
@@ -271,7 +271,9 @@ pub enum StackError {
         source: std::io::Error,
     },
 
-    #[error("agent is not configured; populate `[agent.install]` before running the installer")]
+    #[error(
+        "agent is not configured; declare `[agent].id` matching a registry entry, or provide a `[agent.install] type = \"shell\"` recipe"
+    )]
     AgentNotConfigured,
 
     #[error("agent installer exited with status {exit:?}: {stderr_tail}")]
@@ -286,24 +288,49 @@ pub enum StackError {
     #[error("agent installer hit the 10-minute timeout")]
     AgentInstallerTimeout,
 
-    #[error("failed to fetch ACP registry from {url}: {source}")]
-    AgentRegistryFetch {
-        url: String,
+    #[error("ACP registry does not contain agent `{id}`")]
+    AgentRegistryMissing { id: String },
+
+    #[error("{name} is not currently supported. Please try a different agent.")]
+    AgentUnsupported { name: String },
+
+    #[error("agent registry could not be loaded: {reason}")]
+    RegistryLoad { reason: String },
+
+    #[error("failed to query GitHub Releases for {repo}: {source}")]
+    GithubReleaseFetch {
+        repo: String,
         #[source]
         source: reqwest::Error,
     },
 
-    #[error("failed to parse ACP registry response: {source}")]
-    AgentRegistryParse {
-        #[source]
-        source: serde_json::Error,
+    #[error("no release asset for {repo} matched pattern `{pattern}`")]
+    GithubReleaseAssetNotFound { repo: String, pattern: String },
+
+    #[error(
+        "{matches} release assets for {repo} matched pattern `{pattern}`; expected exactly one"
+    )]
+    GithubReleaseAssetAmbiguous {
+        repo: String,
+        pattern: String,
+        matches: usize,
     },
 
-    #[error("ACP registry does not contain agent `{id}`")]
-    AgentRegistryMissing { id: String },
+    #[error("failed to extract release archive from {repo}: {reason}")]
+    GithubReleaseArchiveExtract { repo: String, reason: String },
 
-    #[error("ACP registry entry `{id}` has no supported install distribution")]
-    AgentRegistryUnsupportedDistribution { id: String },
+    #[error(
+        "release asset `{asset}` from {repo} failed sha256 verification: expected {expected}, got {actual}"
+    )]
+    GithubReleaseChecksumMismatch {
+        repo: String,
+        asset: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("unsupported host architecture `{arch}` for GitHub Release install")]
+    UnsupportedHostArch { arch: &'static str },
 
     #[error("agent binary sha256 mismatch: expected {expected}, got {actual}")]
     AgentSha256Mismatch { expected: String, actual: String },
@@ -562,12 +589,15 @@ impl StackError {
             AgentInstallerFailed { .. } => "agent.installer_failed",
             AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
             AgentInstallerTimeout => "agent.installer_timeout",
-            AgentRegistryFetch { .. } => "agent.registry_fetch_failed",
-            AgentRegistryParse { .. } => "agent.registry_parse_failed",
             AgentRegistryMissing { .. } => "agent.registry_missing",
-            AgentRegistryUnsupportedDistribution { .. } => {
-                "agent.registry_unsupported_distribution"
-            }
+            AgentUnsupported { .. } => "agent.unsupported",
+            RegistryLoad { .. } => "agent.registry_load_failed",
+            GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
+            GithubReleaseAssetNotFound { .. } => "agent.github_release_asset_not_found",
+            GithubReleaseAssetAmbiguous { .. } => "agent.github_release_asset_ambiguous",
+            GithubReleaseArchiveExtract { .. } => "agent.github_release_archive_extract_failed",
+            GithubReleaseChecksumMismatch { .. } => "agent.github_release_checksum_mismatch",
+            UnsupportedHostArch { .. } => "agent.unsupported_host_arch",
             AgentSha256Mismatch { .. } => "agent.sha256_mismatch",
             AgentSpawnFailed { .. } => "agent.spawn_failed",
             AgentAlreadyRunning => "agent.already_running",
@@ -713,7 +743,7 @@ impl StackError {
                 "agent.expected_sha256 must be exactly 64 lowercase hex characters".to_owned()
             }
             InvalidAgentInstallType => {
-                "agent.install.type must be one of shell, registry".to_owned()
+                "agent.install.type must be `shell` (the only operator-facing install type)".to_owned()
             }
             UrlMustBeHttp { field } => format!("{field} must start with http:// or https://"),
             UrlMustBeHttps { field } => format!("{field} must start with https://"),
@@ -727,7 +757,7 @@ impl StackError {
             ServeBind { .. } => "failed to bind HTTP listener".to_owned(),
             ServeIo { .. } => "HTTP server error".to_owned(),
             AgentNotConfigured => {
-                "agent is not configured; populate [agent.install] before running the installer"
+                "agent is not configured; declare [agent].id matching a registry entry, or provide an [agent.install] shell recipe"
                     .to_owned()
             }
             AgentInstallerFailed { exit, .. } => match exit {
@@ -738,13 +768,39 @@ impl StackError {
                 format!("agent installer ran but `creates = {name}` did not resolve afterwards")
             }
             AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
-            AgentRegistryFetch { .. } => "failed to fetch ACP registry".to_owned(),
-            AgentRegistryParse { .. } => "failed to parse ACP registry response".to_owned(),
             AgentRegistryMissing { id } => {
                 format!("ACP registry does not contain agent `{id}`")
             }
-            AgentRegistryUnsupportedDistribution { id } => {
-                format!("ACP registry entry `{id}` has no supported install distribution")
+            AgentUnsupported { name } => {
+                format!("{name} is not currently supported. Please try a different agent.")
+            }
+            RegistryLoad { reason } => format!("agent registry could not be loaded: {reason}"),
+            GithubReleaseFetch { repo, .. } => {
+                format!("failed to query GitHub Releases for {repo}")
+            }
+            GithubReleaseAssetNotFound { repo, pattern } => {
+                format!("no release asset for {repo} matched pattern `{pattern}`")
+            }
+            GithubReleaseAssetAmbiguous {
+                repo,
+                pattern,
+                matches,
+            } => format!(
+                "{matches} release assets for {repo} matched pattern `{pattern}`; expected exactly one"
+            ),
+            GithubReleaseArchiveExtract { repo, reason } => {
+                format!("failed to extract release archive from {repo}: {reason}")
+            }
+            GithubReleaseChecksumMismatch {
+                repo,
+                asset,
+                expected,
+                actual,
+            } => format!(
+                "release asset `{asset}` from {repo} failed sha256 verification: expected {expected}, got {actual}"
+            ),
+            UnsupportedHostArch { arch } => {
+                format!("unsupported host architecture `{arch}` for GitHub Release install")
             }
             AgentSha256Mismatch { expected, actual } => {
                 format!("agent binary sha256 mismatch: expected {expected}, got {actual}")
@@ -934,6 +990,7 @@ impl StackError {
             | ServeIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             // Agent-related: classify client-facing vs internal vs upstream.
             AgentNotConfigured => StatusCode::BAD_REQUEST,
+            AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
             AgentAlreadyRunning | AgentNotRunning => StatusCode::CONFLICT,
             AgentNotInitialized => StatusCode::NOT_FOUND,
             AgentUnsupportedCapability { .. } => StatusCode::NOT_IMPLEMENTED,
@@ -943,10 +1000,14 @@ impl StackError {
             AgentInstallerFailed { .. }
             | AgentInstallerCreatesMissing { .. }
             | AgentInstallerTimeout
-            | AgentRegistryFetch { .. }
-            | AgentRegistryParse { .. }
             | AgentRegistryMissing { .. }
-            | AgentRegistryUnsupportedDistribution { .. }
+            | RegistryLoad { .. }
+            | GithubReleaseFetch { .. }
+            | GithubReleaseAssetNotFound { .. }
+            | GithubReleaseAssetAmbiguous { .. }
+            | GithubReleaseArchiveExtract { .. }
+            | GithubReleaseChecksumMismatch { .. }
+            | UnsupportedHostArch { .. }
             | AgentSha256Mismatch { .. }
             | AgentSpawnFailed { .. }
             | AgentApiRequest { .. }

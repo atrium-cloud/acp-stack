@@ -21,6 +21,7 @@
 //! secret-store internals never leak to remote callers.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -123,12 +124,23 @@ impl AppState {
     /// can override config for one run; security checks must inspect the
     /// effective listener, while config export still returns the stored config.
     pub fn with_effective_bind(
-        config: Config,
+        mut config: Config,
         mut state: StateStore,
         session_key: String,
         admin_key: String,
         effective_bind: String,
     ) -> Self {
+        // Adapter metadata is runtime-populated from the active registry.
+        // We resolve once at AppState construction so every handler that
+        // reads `config.agent.adapter` (status, capabilities, etc.) sees
+        // the same value. Failures here are non-fatal: an agent whose id is
+        // unknown to the registry simply has no adapter metadata, which is
+        // the correct outcome for native agents and operator escape hatches.
+        if config.agent.adapter.is_none() {
+            if let Ok(registry) = load_active_registry() {
+                populate_agent_adapter_from_registry(&mut config, &registry);
+            }
+        }
         let api_cap = config.api.max_request_bytes;
         let security_cap = config.security.http.max_request_bytes;
         let cap = api_cap.min(security_cap);
@@ -174,6 +186,41 @@ impl AppState {
             permissions,
             auth_failure_blocker,
             rate_limiter,
+        }
+    }
+}
+
+fn load_active_registry() -> Result<crate::agent_registry::RegistryCatalog> {
+    match operator_registry_override_path() {
+        Some(path) => crate::agent_registry::RegistryCatalog::load_with_override(&path),
+        None => crate::agent_registry::RegistryCatalog::load_embedded(),
+    }
+}
+
+fn operator_registry_override_path() -> Option<PathBuf> {
+    crate::fs_util::home_dir()
+        .ok()
+        .map(|home| registry_override_path(&home))
+}
+
+fn registry_override_path(home: &Path) -> PathBuf {
+    home.join(".config").join("acp-stack").join("registry.toml")
+}
+
+fn populate_agent_adapter_from_registry(
+    config: &mut Config,
+    registry: &crate::agent_registry::RegistryCatalog,
+) {
+    if let Some(entry) = registry.lookup(&config.agent.id) {
+        if matches!(entry.kind, crate::agent_registry::RegistryKind::Adapter) {
+            if let Some(harness) = &entry.harness {
+                config.agent.adapter = Some(crate::config::AgentAdapterConfig {
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                    upstream_agent: harness.id.clone(),
+                    source_url: harness.source_url.clone(),
+                });
+            }
         }
     }
 }
@@ -374,5 +421,51 @@ pub(crate) async fn shutdown_signal() {
     if let Err(err) = tokio::signal::ctrl_c().await {
         tracing::warn!(error = %err, "ctrl-c handler install failed");
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_metadata_can_be_populated_from_override_registry() {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../tests/fixtures/valid-acp-stack.toml"
+        ))
+        .expect("fixture parses");
+        let registry = crate::agent_registry::RegistryCatalog::from_toml(
+            r#"
+[[agents]]
+id = "opencode"
+name = "Private OpenCode Adapter"
+kind = "adapter"
+headless_compatible = true
+
+[agents.adapter_install]
+type = "npx"
+package = "@private/opencode-acp"
+
+[agents.harness]
+id = "private-opencode"
+source_url = "https://example.com/private-opencode"
+
+[agents.harness.install]
+type = "npx"
+package = "@private/opencode"
+"#,
+        )
+        .expect("override registry parses");
+
+        populate_agent_adapter_from_registry(&mut config, &registry);
+
+        let adapter = config.agent.adapter.expect("adapter metadata populated");
+        assert_eq!(adapter.id, "opencode");
+        assert_eq!(adapter.name, "Private OpenCode Adapter");
+        assert_eq!(adapter.upstream_agent, "private-opencode");
+        assert_eq!(
+            adapter.source_url.as_deref(),
+            Some("https://example.com/private-opencode")
+        );
     }
 }

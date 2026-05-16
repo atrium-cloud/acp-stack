@@ -1,4 +1,5 @@
-use crate::agent_installer::run_installer;
+use crate::agent_installer::{install_resolved, run_installer};
+use crate::agent_registry::RegistryCatalog;
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -8,6 +9,7 @@ use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 use clap::Subcommand;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use super::core::daemon_base_url;
 
@@ -89,12 +91,6 @@ async fn post_agent_daemon(
 fn run_agent_install() -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    let install = config
-        .agent
-        .install
-        .clone()
-        .ok_or(StackError::AgentNotConfigured)?;
-    let expected_sha256 = config.agent.expected_sha256.clone();
 
     let state_path = default_state_path(&home);
     let state_dir = parent_dir(&state_path)?;
@@ -105,19 +101,44 @@ fn run_agent_install() -> Result<()> {
     set_owner_only_file(&state_path)?;
 
     let env = resolve_agent_env_for_cli(&home, &config)?;
-    let workspace_root = std::path::PathBuf::from(config.workspace.root.clone());
-    let outcome = run_installer(
-        &install,
-        expected_sha256.as_deref(),
-        env,
-        &workspace_root,
-        &store,
-    )?;
+    let workspace_root = PathBuf::from(config.workspace.root.clone());
+
+    let outcome = if let Some(install) = config.agent.install.as_ref() {
+        // Operator escape-hatch shell recipe takes precedence over the
+        // embedded registry. Useful for private forks of an agent whose id
+        // happens to clash with a curated entry.
+        let expected_sha256 = config.agent.expected_sha256.clone();
+        run_installer(
+            install,
+            expected_sha256.as_deref(),
+            env,
+            &workspace_root,
+            &store,
+        )?
+    } else {
+        let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+        let entry =
+            registry
+                .lookup(&config.agent.id)
+                .ok_or_else(|| StackError::AgentRegistryMissing {
+                    id: config.agent.id.clone(),
+                })?;
+        let dest = local_bin_dir(&home);
+        install_resolved(&config.agent, entry, env, &workspace_root, &dest, &store)?
+    };
 
     println!("agent install: {}", outcome.label());
     println!("path: {}", outcome.path().display());
     println!("sha256: {}", outcome.sha256());
     Ok(())
+}
+
+fn operator_registry_override(home: &std::path::Path) -> PathBuf {
+    home.join(".config").join("acp-stack").join("registry.toml")
+}
+
+fn local_bin_dir(home: &std::path::Path) -> PathBuf {
+    home.join(".local").join("bin")
 }
 
 fn resolve_agent_env_for_cli(

@@ -11,9 +11,9 @@ The configured subprocess may be either:
 - a native ACP agent, such as agents listed by the ACP registry as directly implementing ACP
 - an ACP adapter executable, such as `codex-acp`, that speaks ACP to `acp-stack` and wraps an upstream agent that does not speak ACP directly
 
-`acp-stack` does not implement agent-specific adapters itself. It installs and launches registry-distributed ACP agent or adapter executables, then treats the resulting process as the ACP protocol peer. The Zed ACP ecosystem page identifies which agents are native and which are available via adapters; the `agentclientprotocol/registry` repository is the install source of truth for registry entries such as `codex-acp`.
+`acp-stack` does not implement agent-specific adapters itself. It installs and launches catalog-listed ACP agent or adapter executables, then treats the resulting process as the ACP protocol peer. The install source of truth is the embedded `data/registry.toml` (see [runtime](../runtime.md#agent-installation)). The current embedded catalog is intentionally OpenCode-only while the headless deployment pipeline is proven. The registry model still separately represents adapters and their upstream harnesses for future entries.
 
-As of 2026-05-15, the Zed ACP ecosystem page marks Claude Agent and Codex CLI with `Via Adapter`, and the Pi agent page describes Pi as an ACP adapter. These are compatibility facts from the external ecosystem, not hard-coded runtime policy; `acps` should rely on the registry entry it resolves at install time.
+Upstream `agentclientprotocol/registry` is a reference used by the dev-only sync tool but is no longer fetched at runtime.
 
 ### Initialization
 
