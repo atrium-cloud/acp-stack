@@ -92,6 +92,42 @@
 - [x] Implement `acps agent status`.
 - [x] Verify expected binary hash when `expected_sha256` is configured.
 
+## Agent Registry & Two-Layer Install (omitted from initial Phase 1)
+
+The original installer landed without a curated embedded registry or a model
+that can represent adapter-backed agents later. The work below is a Phase 1
+gap-fill, not a rework: the items above are still correct for native ACP agents;
+the items below replace runtime upstream-registry fetches with a narrow embedded
+catalog, starting with OpenCode as the only verified headless target.
+
+- [x] Hand-curate `data/registry.toml` with `kind = "native" | "adapter"` per entry, starting with OpenCode only.
+- [x] Add `src/runtime/agent_registry.rs` with `include_str!`-loaded embedded catalog and optional override at `~/.config/acp-stack/registry.toml`.
+- [x] Add `src/runtime/github_release.rs` with API client, asset glob matching (`{arch}` substitution), `tar.gz` / `zip` / raw extraction, optional `checksums.txt` verification, and `GITHUB_TOKEN` passthrough.
+- [x] Remove upstream registry fetch from `src/runtime/agent_installer.rs`; resolve installs from the embedded catalog.
+- [x] Refactor `agent_installer` to dispatch on `kind` and orchestrate two install steps (harness then adapter) for adapter-backed entries.
+- [x] Add `step` column to `installer_runs` (migration 009) and thread it through `InstallerRunInput` / persistence.
+- [x] Update `[agent]` config: drop operator-written `[agent.adapter]` (now runtime-populated and rejected via `skip_deserializing`), make `[agent.install]` optional (escape hatch only), add `harness_version` for GitHub Release tag pinning.
+- [x] Wire adapter metadata population from the resolved registry entry into the in-memory `AgentConfig` at app startup so the existing `/v1/agent/capabilities` and `/v1/status/agent` responses keep working.
+- [x] Add error variants in `src/error.rs` for GitHub Release paths and registry-load failures; drop now-dead `AgentRegistry{Fetch,Parse,UnsupportedDistribution}`.
+- [x] Add dev-only `sync-registry-check` binary that verifies embedded registry ids still exist upstream.
+- [x] Update `docs/specs/runtime.md`, `docs/specs/config.md`, and `docs/specs/acp/acp-bridge.md` to describe the new install model.
+- [x] Update `docs/mgmt/architecture.md` and `docs/mgmt/tech-stack.md` for new modules and crates.
+- [ ] Cover the two-step install flow in `tests/agent_install_tests.rs` end-to-end against a mocked GitHub API (currently covered only by module-level unit tests in `agent_registry.rs` and `github_release.rs`).
+
+## Agent Headless Support Contracts
+
+- [ ] Make OpenCode with OpenCode Go the first verified headless support target.
+- [ ] Define the support contract format for documented agent harnesses.
+- [ ] For every `headless_compatible = true` registry entry, add `docs/agents/{id}.md`.
+- [ ] Each agent doc cites the official docs/repos used as sources.
+- [ ] Each agent doc defines install method, ACP launch command, auth flow, required env vars, optional env vars, and provider/model setup where applicable.
+- [ ] Classify each variable as secret, non-secret config, install-only, or runtime env.
+- [ ] Document unsupported auth paths, especially OAuth-only or browser-login flows.
+- [ ] Add a minimal non-interactive smoke verification for each supported agent.
+- [ ] Add registry metadata linking each supported entry to its headless setup doc.
+- [ ] Keep every other registry entry unverified until its own headless setup doc and smoke verification exists.
+- [ ] Treat missing or non-credible headless setup docs as a blocker for `headless_compatible = true`.
+
 ## Workspace And Commands
 
 - [x] Resolve all relative workspace paths under `workspace.root`.

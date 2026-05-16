@@ -491,8 +491,19 @@ impl AcpBridge {
             .env_clear();
         // Inject exactly the resolved names from `[agent].env`. The command
         // path is resolved before `env_clear()`, so the child does not need
-        // inherited PATH/HOME/LANG just to start.
+        // inherited PATH/HOME/LANG just to start. PATH is the one runtime
+        // exception: registry-installed adapters may need to exec harnesses
+        // that acp-stack dropped into ~/.local/bin.
+        if let Some(path) = agent_process_path() {
+            command.env("PATH", path);
+        }
         for (name, value) in &env {
+            if name == "PATH" {
+                tracing::warn!(
+                    "refusing to inject `PATH` from `[agent].env` into agent process: reserved",
+                );
+                continue;
+            }
             command.env(name, value);
         }
         // Fresh process group so a future SIGTERM-during-shutdown also
@@ -978,14 +989,33 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf>
             None
         };
     }
-    let path_env = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_env) {
+    for dir in command_search_paths() {
         let candidate = dir.join(command);
         if candidate.is_file() {
             return Some(candidate);
         }
     }
     None
+}
+
+fn agent_process_path() -> Option<std::ffi::OsString> {
+    let paths = command_search_paths();
+    if paths.is_empty() {
+        None
+    } else {
+        std::env::join_paths(paths).ok()
+    }
+}
+
+fn command_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    paths
 }
 
 #[cfg(test)]
