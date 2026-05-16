@@ -4,4 +4,6 @@ pub mod commands;
 pub mod deps;
 pub mod mcp;
 pub mod permissions;
+pub mod sink_redaction;
+pub mod supabase_sink;
 pub mod supervisor;

@@ -159,40 +159,45 @@ impl StateStore {
             title: record.title,
             metadata_json: record.metadata_json,
         };
-        self.connection().execute(
-            r#"
-            INSERT INTO sessions
-                (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-            params![
-                row.id,
-                row.created_at,
-                row.updated_at,
-                row.status,
-                row.agent_id,
-                row.cwd,
-                row.title,
-                row.metadata_json,
-            ],
-        )?;
+        self.persist_with_outbox("sessions", &row.id, &row.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO sessions
+                    (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "#,
+                params![
+                    row.id,
+                    row.created_at,
+                    row.updated_at,
+                    row.status,
+                    row.agent_id,
+                    row.cwd,
+                    row.title,
+                    row.metadata_json,
+                ],
+            )?;
+            Ok(())
+        })?;
         Ok(row)
     }
 
     pub fn update_session_status(&self, id: &str, status: &str) -> Result<()> {
         let now = current_timestamp();
-        let affected = self.connection().execute(
-            r#"
-            UPDATE sessions
-            SET status = ?1, updated_at = ?2
-            WHERE id = ?3
-            "#,
-            params![status, now, id],
-        )?;
-        if affected == 0 {
-            return Err(StackError::SessionNotFound { id: id.to_owned() });
-        }
-        Ok(())
+        self.persist_with_outbox("sessions", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE sessions
+                SET status = ?1, updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![status, now, id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::SessionNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
     }
 
     /// Append an event scoped to a session. Used by the ACP bridge to persist
@@ -238,22 +243,25 @@ impl StateStore {
             source: source.to_owned(),
         };
 
-        self.connection().execute(
-            r#"
-            INSERT INTO events (id, created_at, level, kind, message, payload_json, source, session_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-            params![
-                event.id,
-                event.created_at,
-                event.level,
-                event.kind,
-                event.message,
-                event.payload_json,
-                event.source,
-                session_id,
-            ],
-        )?;
+        self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO events (id, created_at, level, kind, message, payload_json, source, session_id)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "#,
+                params![
+                    event.id,
+                    event.created_at,
+                    event.level,
+                    event.kind,
+                    event.message,
+                    event.payload_json,
+                    event.source,
+                    session_id,
+                ],
+            )?;
+            Ok(())
+        })?;
 
         if let Some(hub) = self.event_hub() {
             hub.publish_log_event(&event);
@@ -320,21 +328,24 @@ impl StateStore {
             error_message: None,
             prompt_json: record.prompt_json,
         };
-        self.connection().execute(
-            r#"
-            INSERT INTO prompts
-                (id, session_id, created_at, updated_at, status, prompt_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            params![
-                row.id,
-                row.session_id,
-                row.created_at,
-                row.updated_at,
-                row.status,
-                row.prompt_json,
-            ],
-        )?;
+        self.persist_with_outbox("prompts", &row.id, &row.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO prompts
+                    (id, session_id, created_at, updated_at, status, prompt_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                params![
+                    row.id,
+                    row.session_id,
+                    row.created_at,
+                    row.updated_at,
+                    row.status,
+                    row.prompt_json,
+                ],
+            )?;
+            Ok(())
+        })?;
         Ok(row)
     }
 
@@ -363,29 +374,31 @@ impl StateStore {
         error_message: Option<&str>,
     ) -> Result<()> {
         let now = current_timestamp();
-        let affected = self.connection().execute(
-            r#"
-            UPDATE prompts
-            SET status = ?1,
-                updated_at = ?2,
-                stop_reason = ?3,
-                error_code = ?4,
-                error_message = ?5
-            WHERE id = ?6
-            "#,
-            params![
-                status.as_str(),
-                now,
-                stop_reason,
-                error_code,
-                error_message,
-                id
-            ],
-        )?;
-        if affected == 0 {
-            return Err(StackError::PromptNotFound { id: id.to_owned() });
-        }
-        Ok(())
+        self.persist_with_outbox("prompts", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE prompts
+                SET status = ?1,
+                    updated_at = ?2,
+                    stop_reason = ?3,
+                    error_code = ?4,
+                    error_message = ?5
+                WHERE id = ?6
+                "#,
+                params![
+                    status.as_str(),
+                    now,
+                    stop_reason,
+                    error_code,
+                    error_message,
+                    id
+                ],
+            )?;
+            if affected == 0 {
+                return Err(StackError::PromptNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
     }
 
     /// Mark every `pending`/`running` prompt row as `errored` with the given
@@ -394,7 +407,33 @@ impl StateStore {
     /// see them settle. Returns the number of rows transitioned.
     pub fn reconcile_orphaned_prompts(&self, reason: &str) -> Result<usize> {
         let now = current_timestamp();
-        let affected = self.connection().execute(
+        if !self.external_logging_enabled() {
+            let affected = self.connection().execute(
+                r#"
+                UPDATE prompts
+                SET status = 'errored',
+                    updated_at = ?1,
+                    error_code = 'agent.daemon_restart',
+                    error_message = ?2
+                WHERE status IN ('pending', 'running')
+                "#,
+                params![now, reason],
+            )?;
+            return Ok(affected);
+        }
+        // External logging path: collect affected ids first so we can enqueue
+        // them transactionally with the UPDATE.
+        let tx = rusqlite::Transaction::new_unchecked(
+            self.connection(),
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let ids: Vec<String> = {
+            let mut statement =
+                tx.prepare("SELECT id FROM prompts WHERE status IN ('pending', 'running')")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let affected = tx.execute(
             r#"
             UPDATE prompts
             SET status = 'errored',
@@ -405,6 +444,10 @@ impl StateStore {
             "#,
             params![now, reason],
         )?;
+        for id in &ids {
+            super::sink_outbox::enqueue(&tx, "prompts", id, &now)?;
+        }
+        tx.commit()?;
         Ok(affected)
     }
 

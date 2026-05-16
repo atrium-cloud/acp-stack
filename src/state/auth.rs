@@ -69,22 +69,25 @@ impl StateStore {
             payload_json: payload_json.to_owned(),
         };
 
-        self.connection().execute(
-            r#"
-            INSERT INTO auth_failures
-                (id, created_at, key_kind, reason, client_ip, route, payload_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                failure.id,
-                failure.created_at,
-                failure.key_kind,
-                failure.reason,
-                failure.client_ip,
-                failure.route,
-                failure.payload_json,
-            ],
-        )?;
+        self.persist_with_outbox("auth_failures", &failure.id, &failure.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO auth_failures
+                    (id, created_at, key_kind, reason, client_ip, route, payload_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    failure.id,
+                    failure.created_at,
+                    failure.key_kind,
+                    failure.reason,
+                    failure.client_ip,
+                    failure.route,
+                    failure.payload_json,
+                ],
+            )?;
+            Ok(())
+        })?;
 
         Ok(failure)
     }
