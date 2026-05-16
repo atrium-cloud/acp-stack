@@ -5,6 +5,7 @@ use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
     set_owner_only_file,
 };
+use crate::runtime::supabase_sink::SupabaseSink;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 use crate::supervisor::ServerLifecycle;
@@ -33,9 +34,48 @@ pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
     let state_dir = parent_dir(&state_path)?;
     create_dir_owner_only(state_dir)?;
     pre_create_owner_only(&state_path)?;
-    let store = StateStore::open(&state_path)?;
+    let mut store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
+
+    // Open the secret store + resolve any Supabase settings BEFORE running
+    // startup reconciles. The reconciles transition orphaned prompt/command/
+    // permission rows to terminal status; if external logging is enabled but
+    // the flag isn't flipped yet, those terminal writes don't enqueue into
+    // the outbox and Supabase would never see the post-crash settlement.
+    let secret_store = SecretStore::open(&home)?;
+    let session_ref = config.auth.session_key_ref.clone();
+    let admin_ref = config.auth.admin_key_ref.clone();
+    if !secret_store.contains(&session_ref) {
+        return Err(StackError::MissingSessionKey { name: session_ref });
+    }
+    if !secret_store.contains(&admin_ref) {
+        return Err(StackError::MissingAdminKey { name: admin_ref });
+    }
+    let session_key = secret_store.get(&session_ref)?.to_owned();
+    let admin_key = secret_store.get(&admin_ref)?.to_owned();
+
+    // Resolve the Supabase secret API key only when external logging is
+    // explicitly enabled; per spec, a disabled stanza must never reach into
+    // the secret store. The outbox flag has to flip BEFORE the startup
+    // reconciles so their terminal-status writes get mirrored.
+    let supabase_settings = if config.logging.supabase.as_ref().is_some_and(|s| s.enabled) {
+        let supabase = config
+            .logging
+            .supabase
+            .as_ref()
+            .expect("checked is_some_and above");
+        if !secret_store.contains(&supabase.api_key_ref) {
+            return Err(StackError::MissingSupabaseApiKey {
+                name: supabase.api_key_ref.clone(),
+            });
+        }
+        let key = secret_store.get(&supabase.api_key_ref)?.to_owned();
+        store.set_external_logging_enabled(true);
+        Some((supabase.clone(), key))
+    } else {
+        None
+    };
 
     // Reconcile any prompts left in-flight by a previous crash/restart.
     // The in-memory task registry is empty at startup, so a `pending` or
@@ -73,18 +113,6 @@ pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
             "settled orphaned permission requests on startup"
         );
     }
-
-    let secret_store = SecretStore::open(&home)?;
-    let session_ref = config.auth.session_key_ref.clone();
-    let admin_ref = config.auth.admin_key_ref.clone();
-    if !secret_store.contains(&session_ref) {
-        return Err(StackError::MissingSessionKey { name: session_ref });
-    }
-    if !secret_store.contains(&admin_ref) {
-        return Err(StackError::MissingAdminKey { name: admin_ref });
-    }
-    let session_key = secret_store.get(&session_ref)?.to_owned();
-    let admin_key = secret_store.get(&admin_ref)?.to_owned();
 
     let bind = args.bind.unwrap_or_else(|| config.api.bind.clone());
 
@@ -132,6 +160,22 @@ pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
         eprintln!("acps serve: listening on {local}");
         eprintln!("acps serve: acpctl socket at {}", socket_path.display());
         let agent_supervisor = app_state.agent_supervisor.clone();
+
+        // Spawn the Supabase sink once the runtime + shared state are ready.
+        // Failures to build the HTTP client are fatal at boot — there is no
+        // good fallback that preserves the spec's at-least-once delivery
+        // guarantee, and we'd rather not start the server than silently lose
+        // outbound events.
+        let supabase_sink = match supabase_settings {
+            Some((supabase, key)) => Some(SupabaseSink::spawn(
+                state_handle.clone(),
+                supabase,
+                key,
+                event_hub.clone(),
+            )?),
+            None => None,
+        };
+
         // The acpctl UDS server runs alongside the TCP server. Both subscribe
         // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
         // so a single signal stops both. If the TCP serve exits first, the
@@ -154,6 +198,12 @@ pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
         // durable trail shows the agent went down first. A leaked agent
         // process outliving the daemon is a real bug, not a theoretical
         // one: see superflous-restart guarantees in security.md.
+        //
+        // The Supabase sink is intentionally kept alive across both this
+        // shutdown step and `lifecycle.stopped` below: both write durable
+        // rows (`agent.stopped`, `server.stopped`) that must reach the
+        // external mirror. The sink's own shutdown does one final drain
+        // pass before exiting so those rows are uploaded.
         agent_supervisor
             .shutdown_on_serve_exit(&state_handle, &event_hub)
             .await;
@@ -166,6 +216,16 @@ pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
         if let Err(err) = lifecycle.stopped(&state_handle, &event_hub, reason).await {
             tracing::error!(error = %err, "failed to record server.stopped");
         }
+
+        // Drain the Supabase sink AFTER agent.stopped + server.stopped have
+        // landed in the outbox so the final lifecycle rows reach Supabase.
+        // The sink's shutdown runs one last batch loop before exiting; any
+        // individual failure persists in `sink_failures_summary` and gets
+        // surfaced on the next start via `security check`.
+        if let Some(sink) = supabase_sink {
+            sink.shutdown().await;
+        }
+
         eprintln!("acps serve: stopped ({reason})");
         serve_result
     })

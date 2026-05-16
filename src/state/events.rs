@@ -84,21 +84,24 @@ impl StateStore {
             source: source.to_owned(),
         };
 
-        self.connection().execute(
-            r#"
-            INSERT INTO events (id, created_at, level, kind, message, payload_json, source)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                event.id,
-                event.created_at,
-                event.level,
-                event.kind,
-                event.message,
-                event.payload_json,
-                event.source,
-            ],
-        )?;
+        self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO events (id, created_at, level, kind, message, payload_json, source)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    event.id,
+                    event.created_at,
+                    event.level,
+                    event.kind,
+                    event.message,
+                    event.payload_json,
+                    event.source,
+                ],
+            )?;
+            Ok(())
+        })?;
 
         if let Some(hub) = self.event_hub() {
             hub.publish_log_event(&event);

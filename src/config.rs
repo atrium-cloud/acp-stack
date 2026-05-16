@@ -486,9 +486,47 @@ impl Config {
         validate_dependencies(&self.dependencies)?;
         validate_mcp(&self.mcp)?;
         validate_secret_refs(self)?;
+        validate_supabase_logging(self.logging.supabase.as_ref())?;
 
         Ok(())
     }
+}
+
+fn validate_supabase_logging(supabase: Option<&SupabaseLoggingConfig>) -> Result<()> {
+    let Some(supabase) = supabase else {
+        return Ok(());
+    };
+    if !supabase.enabled {
+        return Ok(());
+    }
+    if !supabase.url.starts_with("https://") {
+        return Err(StackError::InvalidSupabaseUrl {
+            url: supabase.url.clone(),
+        });
+    }
+    if !is_safe_pg_identifier(&supabase.schema) {
+        return Err(StackError::InvalidSupabaseSchema {
+            schema: supabase.schema.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Match Postgres' rules for an unquoted identifier: starts with `a-z` or `_`,
+/// followed by `[a-z0-9_]`, up to 63 chars total. We deliberately reject
+/// uppercase to keep the `Content-Profile` header lowercase and avoid quoting.
+fn is_safe_pg_identifier(s: &str) -> bool {
+    if s.is_empty() || s.len() > 63 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn validate_permissions(permissions: &PermissionsConfig) -> Result<()> {

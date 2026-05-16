@@ -98,4 +98,4 @@
 - [ ] A user can run a mediated shell command.
 - [ ] A user can receive and answer permission requests.
 - [ ] A user can query sessions, events, commands, and permission decisions from durable logs.
-- [ ] A user can enable Supabase logging and inspect derived metrics externally.
+- [x] A user can enable Supabase logging and inspect derived metrics externally.
