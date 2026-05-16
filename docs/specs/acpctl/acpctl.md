@@ -51,4 +51,8 @@ Security boundary:
 - agents cannot approve their own high-risk command requests unless policy explicitly allows it.
 - config export through `acpctl` follows normal export rules and includes secret references only.
 
+## Implementation (0.0.3)
+
+The 0.0.3 implementation realizes this surface as a `tokio` Unix-domain-socket listener inside the `acps` daemon (`src/local_listener.rs`). When `acps serve` starts it binds the socket at `~/.local/share/acp-stack/acpctl.sock` (override with `[acpctl] socket_path` in the TOML), sets the file mode to `0600` inside a `0700` parent directory, and unlinks the socket on graceful shutdown. The listener serves an Axum router that mounts an explicit allowlist of the ten operations above; any other route returns 404, including the public-API routes for secret values, API-key rotation, permission approve/deny, config import, and agent install/start/stop. A `tag_local` middleware stamps every UDS request with `KeyKind::Local` so the public router's tier gate rejects the tag if it ever leaks across listeners, and reused handlers attribute durable writes (`api.request`, `workspace.write`, etc.) to `source = "local"`. The `acpctl` binary (`src/bin/acpctl.rs`) speaks HTTP/1.1 over the socket and forwards each subcommand to its mapped route; it sends no `Authorization` header — filesystem permissions on the socket are the access control.
+
 The optional `acpctl mcp serve` command exposes the local introspection interface as an MCP server for agents that prefer tool calls over shell commands. The MCP server must enforce the same capability, permission, and logging rules as the CLI.

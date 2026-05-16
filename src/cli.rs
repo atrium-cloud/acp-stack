@@ -764,6 +764,21 @@ fn run_serve(args: ServeArgs) -> Result<()> {
             .local_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| bind.clone());
+        let (socket_path, parent_policy) = match config.acpctl.socket_path.as_deref() {
+            Some(path) => (
+                std::path::PathBuf::from(path),
+                crate::local_listener::ParentPolicy::ValidateOwnerOnly,
+            ),
+            None => (
+                crate::local_listener::default_socket_path()?,
+                crate::local_listener::ParentPolicy::RepairOwnerOnly,
+            ),
+        };
+        // Bind the acpctl UDS *and* record `server.starting` only after every
+        // listener is ready. A bind failure here is a startup-time error, not
+        // a post-start regression — emitting `server.starting` first would
+        // leave a dangling lifecycle row whenever the UDS bind fails.
+        let bound_local = crate::local_listener::bind_local(&socket_path, parent_policy).await?;
         let lifecycle = ServerLifecycle::starting(&store, &local)?;
         let app_state =
             AppState::with_effective_bind(config, store, session_key, admin_key, local.clone());
@@ -771,8 +786,26 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;
         eprintln!("acps serve: listening on {local}");
+        eprintln!("acps serve: acpctl socket at {}", socket_path.display());
         let agent_supervisor = app_state.agent_supervisor.clone();
+        // The acpctl UDS server runs alongside the TCP server. Both subscribe
+        // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
+        // so a single signal stops both. If the TCP serve exits first, the
+        // local task is aborted; its `SocketGuard::drop` unlinks the socket.
+        let local_handle = tokio::spawn(crate::local_listener::serve_local(
+            app_state.clone(),
+            bound_local,
+        ));
         let serve_result = api::serve(app_state, listener).await;
+        local_handle.abort();
+        match local_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!(error = %err, "acpctl local listener exited with error"),
+            Err(join_err) if join_err.is_cancelled() => {}
+            Err(join_err) => {
+                tracing::warn!(error = %join_err, "acpctl local listener task panicked")
+            }
+        }
         // Tear down the agent BEFORE recording server.stopped so the
         // durable trail shows the agent went down first. A leaked agent
         // process outliving the daemon is a real bug, not a theoretical

@@ -25,6 +25,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::Extension;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
@@ -77,6 +78,19 @@ pub struct AppState {
     pub permissions: PermissionService,
     pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
     pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
+}
+
+impl AppState {
+    /// Resolve the `events.source` label for a request based on the tier tag
+    /// the auth pipeline (or the local UDS listener) attached to the request.
+    /// `KeyKind::Local` is the only writer of `EVENT_SOURCE_LOCAL`; everything
+    /// else is attributed to the public HTTP API.
+    pub fn event_source_for(kind: Option<KeyKind>) -> &'static str {
+        match kind {
+            Some(KeyKind::Local) => crate::state::EVENT_SOURCE_LOCAL,
+            _ => crate::state::EVENT_SOURCE_API,
+        }
+    }
 }
 
 impl AppState {
@@ -309,7 +323,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
 }
 
 #[cfg(unix)]
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let ctrl_c = async {
         // Installing the handler can fail on unusual hosts (e.g. PID 1
@@ -370,6 +384,7 @@ async fn ws_handler(
         let origin_text = origin.unwrap_or("").to_owned();
         persist_security_event(
             &state,
+            crate::state::EVENT_SOURCE_API,
             "warn",
             "security.ws_origin_denied",
             "rejected ws upgrade with disallowed Origin",
@@ -539,6 +554,7 @@ async fn authenticate(
                 .as_secs();
             persist_security_event(
                 &state,
+                crate::state::EVENT_SOURCE_API,
                 "warn",
                 "security.ip_block_active",
                 "blocked IP attempted auth",
@@ -749,6 +765,7 @@ async fn persist_rate_limit_event(
     }
     persist_security_event(
         state,
+        crate::state::EVENT_SOURCE_API,
         "warn",
         "security.rate_limited",
         "rate limit exceeded",
@@ -771,7 +788,7 @@ async fn require_admin(State(state): State<AppState>, req: Request<Body>, next: 
     enforce_tier(KeyKind::Admin, state, req, next).await
 }
 
-async fn track_active_requests(
+pub(crate) async fn track_active_requests(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
@@ -786,7 +803,7 @@ async fn track_active_requests(
 /// high-cardinality `/v1/status*` polls — so request volume stays bounded.
 ///
 /// The event powers the `api_connections` block in `/v1/metrics/summary`.
-async fn log_api_request(
+pub(crate) async fn log_api_request(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
@@ -802,15 +819,26 @@ async fn log_api_request(
         .get::<axum::extract::MatchedPath>()
         .map(|m| m.as_str().to_owned())
         .unwrap_or_else(|| raw_path.clone());
-    let key_kind = req.extensions().get::<KeyKind>().map(|k| match k {
-        KeyKind::Session => "session",
-        KeyKind::Admin => "admin",
-        KeyKind::Unknown => "unknown",
-    });
+    let resolved_kind = req.extensions().get::<KeyKind>().copied();
+    let key_kind_label = resolved_kind.map(|k| k.as_wire_str());
+    // Pick the `events.source` label up-front so the audit row's `source`
+    // column reflects the caller tier (`local` for UDS-driven acpctl calls,
+    // `api` otherwise). The handler runs next; the source decision is fixed
+    // at this point because the tier tag is set by `authenticate` /
+    // `tag_local` BEFORE this middleware sees the request.
+    let event_source = AppState::event_source_for(resolved_kind);
 
     let response = next.run(req).await;
 
-    if should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path) {
+    // The cardinality skip (`/v1/status*`, `/v1/ws`) targets public-API
+    // polling. `acpctl` calls arrive on the local UDS as one-shot operations
+    // and the spec (`docs/specs/acpctl/acpctl.md:47`) requires every action
+    // to be logged with `source = "local"`, so keep the audit row in that
+    // case.
+    let is_local_caller = matches!(resolved_kind, Some(KeyKind::Local));
+    if !is_local_caller
+        && (should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path))
+    {
         return response;
     }
 
@@ -821,19 +849,15 @@ async fn log_api_request(
         "path": path,
         "status": status,
         "duration_ms": duration_ms,
-        "key_kind": key_kind,
+        "key_kind": key_kind_label,
     });
     let payload_text = payload.to_string();
     // Best-effort: a failed audit insert must not break the response. Surface
     // it at warn so the operator can see the divergence in tracing logs.
     let store = state.state.lock().await;
-    if let Err(err) = store.append_event_with_source(
-        "info",
-        "api.request",
-        crate::state::EVENT_SOURCE_API,
-        "",
-        &payload_text,
-    ) {
+    if let Err(err) =
+        store.append_event_with_source("info", "api.request", event_source, "", &payload_text)
+    {
         tracing::warn!(error = %err, path, "failed to persist api.request event");
     }
     response
@@ -924,13 +948,19 @@ async fn enforce_tier(
 /// auth middleware) pass through untouched. Original HTTP semantic headers
 /// (e.g. `Allow` on a 405) are copied onto the rewrapped response so
 /// downstream method-discovery and similar conventions keep working.
-async fn ensure_envelope(
+pub(crate) async fn ensure_envelope(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
     let route = req.uri().path().to_owned();
     let method = req.method().as_str().to_owned();
+    // Capture the caller tier from the request extensions BEFORE consuming
+    // `req` into `next.run`. The tag is set by either `authenticate` (TCP
+    // router) or `tag_local` (UDS router) on inner layers; the body limit's
+    // 413 short-circuit can fire before the tag-setting layer runs, so this
+    // may be `None` — that's fine, the helper defaults to `api`.
+    let caller = req.extensions().get::<KeyKind>().copied();
     let response = next.run(req).await;
     let status = response.status();
     if !status.is_client_error() && !status.is_server_error() {
@@ -946,8 +976,10 @@ async fn ensure_envelope(
         return response;
     }
     if status == StatusCode::PAYLOAD_TOO_LARGE {
+        let source = AppState::event_source_for(caller);
         persist_security_event(
             &state,
+            source,
             "warn",
             "security.request_oversized",
             "rejected oversized request body",
@@ -997,6 +1029,7 @@ async fn enforce_http_origin(
         let origin_text = origin.unwrap_or("").to_owned();
         persist_security_event(
             &state,
+            crate::state::EVENT_SOURCE_API,
             "warn",
             "security.cors_origin_denied",
             "rejected HTTP request with disallowed Origin",
@@ -1087,6 +1120,7 @@ async fn log_failure(
                 let block_secs = state.auth_failure_blocker.block_duration().as_secs();
                 persist_security_event(
                     state,
+                    crate::state::EVENT_SOURCE_API,
                     "warn",
                     "security.ip_block_applied",
                     "IP blocked due to repeated auth failures",
@@ -1106,8 +1140,14 @@ async fn log_failure(
 /// Append a `security.*` event. Best-effort: if the events table write fails,
 /// log a warning rather than failing the surrounding request. The event lands
 /// on the `logs` WS topic and is merged into `GET /v1/logs/security`.
+///
+/// `source` lets the caller attribute the event to either the public API
+/// (`EVENT_SOURCE_API`) or the local UDS (`EVENT_SOURCE_LOCAL`) so a security
+/// event triggered by an acpctl call lands with `source = "local"` to match
+/// its `api.request` row.
 async fn persist_security_event(
     state: &AppState,
+    source: &'static str,
     level: &str,
     kind: &str,
     message: &str,
@@ -1121,13 +1161,7 @@ async fn persist_security_event(
         }
     };
     let store = state.state.lock().await;
-    if let Err(err) = store.append_event_with_source(
-        level,
-        kind,
-        crate::state::EVENT_SOURCE_API,
-        message,
-        &payload,
-    ) {
+    if let Err(err) = store.append_event_with_source(level, kind, source, message, &payload) {
         tracing::warn!(error = %err, kind, "failed to persist security event");
     }
 }
@@ -1139,7 +1173,7 @@ fn reject(status: StatusCode, code: &str, message: &str) -> Response {
 // ----- Handlers -------------------------------------------------------------
 
 #[derive(Serialize)]
-struct StatusResponse {
+pub(crate) struct StatusResponse {
     schema_version: i64,
     latest_event: Option<String>,
     server: ServerInfo,
@@ -1150,7 +1184,7 @@ struct ServerInfo {
     version: &'static str,
 }
 
-async fn status_handler(
+pub(crate) async fn status_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<StatusResponse>, StackError> {
     let store = state.state.lock().await;
@@ -1243,11 +1277,11 @@ async fn status_connections_handler(
 }
 
 #[derive(Serialize)]
-struct ConfigExportResponse {
+pub(crate) struct ConfigExportResponse {
     toml: String,
 }
 
-async fn config_export_handler(
+pub(crate) async fn config_export_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<ConfigExportResponse>, StackError> {
     let toml = state.config.to_canonical_toml()?;
@@ -1399,7 +1433,7 @@ const MAX_LOGS_LIMIT: u32 = 1000;
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct LogsEventsParams {
+pub(crate) struct LogsEventsParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,
     level: Option<String>,
@@ -1429,7 +1463,7 @@ fn split_kind_filter(kind: Option<&str>) -> (Option<&str>, Option<&str>) {
 }
 
 #[derive(Serialize)]
-struct LogsEventsResponse {
+pub(crate) struct LogsEventsResponse {
     events: Vec<LogEventJson>,
     next_cursor: Option<String>,
 }
@@ -1459,7 +1493,7 @@ impl From<crate::state::Event> for LogEventJson {
     }
 }
 
-async fn logs_events_handler(
+pub(crate) async fn logs_events_handler(
     Query(params): Query<LogsEventsParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
@@ -1584,7 +1618,7 @@ async fn logs_sessions_handler(
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct LogsLimitParams {
+pub(crate) struct LogsLimitParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,
 }
@@ -1648,7 +1682,7 @@ async fn logs_commands_handler(
 }
 
 #[derive(Debug, Deserialize)]
-struct CommandSubmitRequest {
+pub(crate) struct CommandSubmitRequest {
     command: String,
     #[serde(default)]
     cwd: Option<String>,
@@ -1659,7 +1693,7 @@ struct CommandSubmitRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct CommandResponse {
+pub(crate) struct CommandResponse {
     id: String,
     created_at: String,
     updated_at: String,
@@ -1696,7 +1730,7 @@ struct CommandsListResponse {
     items: Vec<CommandResponse>,
 }
 
-async fn commands_submit_handler(
+pub(crate) async fn commands_submit_handler(
     State(state): State<AppState>,
     Json(body): Json<CommandSubmitRequest>,
 ) -> std::result::Result<ApiSuccess<CommandResponse>, StackError> {
@@ -1738,7 +1772,7 @@ async fn commands_cancel_handler(
 }
 
 #[derive(Serialize)]
-struct PermissionsListResponse {
+pub(crate) struct PermissionsListResponse {
     permissions: Vec<crate::permissions::PermissionRequestView>,
 }
 
@@ -1755,7 +1789,7 @@ struct PermissionDenyBody {
     reason: Option<String>,
 }
 
-async fn permissions_pending_handler(
+pub(crate) async fn permissions_pending_handler(
     Query(params): Query<LogsLimitParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<PermissionsListResponse>, StackError> {
@@ -1798,7 +1832,7 @@ async fn deps_get_handler(
     )))
 }
 
-async fn deps_check_handler(
+pub(crate) async fn deps_check_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<crate::deps::DepsReport>, StackError> {
     Ok(ApiSuccess::new(crate::deps::check_dependencies(
@@ -2177,20 +2211,13 @@ impl From<crate::state::MetricsSummary> for MetricsSummaryResponse {
 }
 
 #[derive(Serialize)]
-struct SecurityCheckResponse {
+pub(crate) struct SecurityCheckResponse {
     ok: bool,
-    findings: Vec<SecurityFindingJson>,
+    findings: Vec<crate::security::SecurityFinding>,
     auth_failure_count: i64,
 }
 
-#[derive(Serialize)]
-struct SecurityFindingJson {
-    code: String,
-    severity: String,
-    message: String,
-}
-
-async fn security_check_handler(
+pub(crate) async fn security_check_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SecurityCheckResponse>, StackError> {
     let store = state.state.lock().await;
@@ -2199,92 +2226,18 @@ async fn security_check_handler(
         (Utc::now() - Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Nanos, true);
     let recent_auth_failures = store.count_auth_failures_since(&recent_cutoff)?;
     drop(store);
-    let findings = security_findings(&state, recent_auth_failures);
+    let findings = crate::security::check(crate::security::SecurityCheckInputs {
+        effective_bind: state.effective_bind.as_str(),
+        http: &state.config.security.http,
+        session_key_empty: state.session_key.is_empty(),
+        admin_key_empty: state.admin_key.is_empty(),
+        recent_auth_failures,
+    });
     Ok(ApiSuccess::new(SecurityCheckResponse {
         ok: findings.is_empty(),
         findings,
         auth_failure_count: counts.auth_failures,
     }))
-}
-
-fn security_findings(state: &AppState, auth_failure_count: i64) -> Vec<SecurityFindingJson> {
-    let mut findings = Vec::new();
-    let bind_is_public = state
-        .effective_bind
-        .parse::<SocketAddr>()
-        .map(|addr| addr.ip().is_unspecified())
-        .unwrap_or(false);
-
-    if bind_is_public {
-        findings.push(SecurityFindingJson::warning(
-            "api.public_bind",
-            "API bind address listens on all interfaces",
-        ));
-    }
-
-    if bind_is_public
-        && state
-            .config
-            .security
-            .http
-            .allowed_origins
-            .iter()
-            .any(|origin| origin == "*")
-    {
-        findings.push(SecurityFindingJson::critical(
-            "http.wildcard_origin_public_bind",
-            "wildcard CORS origin is configured on a public bind address",
-        ));
-    }
-
-    if state.config.security.http.trust_proxy_headers {
-        findings.push(SecurityFindingJson::critical(
-            "http.trust_proxy_without_trusted_proxies",
-            "proxy headers are trusted but no trusted proxy allowlist is configured",
-        ));
-    }
-
-    if state.session_key.is_empty() {
-        findings.push(SecurityFindingJson::critical(
-            "auth.session_key_empty",
-            "session API key is empty",
-        ));
-    }
-
-    if state.admin_key.is_empty() {
-        findings.push(SecurityFindingJson::critical(
-            "auth.admin_key_empty",
-            "admin API key is empty",
-        ));
-    }
-
-    let threshold = state.config.security.http.auth_failures_per_minute;
-    if threshold > 0 && auth_failure_count >= i64::try_from(threshold).unwrap_or(i64::MAX) {
-        findings.push(SecurityFindingJson::warning(
-            "auth.failure_threshold",
-            "auth failure count meets or exceeds the configured per-minute threshold",
-        ));
-    }
-
-    findings
-}
-
-impl SecurityFindingJson {
-    fn warning(code: &str, message: &str) -> Self {
-        Self {
-            code: code.to_owned(),
-            severity: "warning".to_owned(),
-            message: message.to_owned(),
-        }
-    }
-
-    fn critical(code: &str, message: &str) -> Self {
-        Self {
-            code: code.to_owned(),
-            severity: "critical".to_owned(),
-            message: message.to_owned(),
-        }
-    }
 }
 
 // ----- Agent handlers -------------------------------------------------------
@@ -2885,12 +2838,12 @@ async fn workspace_metadata_handler(
 }
 
 #[derive(Deserialize)]
-struct FilesPathParams {
+pub(crate) struct FilesPathParams {
     path: String,
 }
 
 #[derive(Serialize)]
-struct FilesListResponse {
+pub(crate) struct FilesListResponse {
     path: String,
     entries: Vec<FilesListEntry>,
 }
@@ -2904,7 +2857,7 @@ struct FilesListEntry {
     modified: String,
 }
 
-async fn files_list_handler(
+pub(crate) async fn files_list_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<ApiSuccess<FilesListResponse>, StackError> {
@@ -2936,7 +2889,7 @@ async fn files_list_handler(
 }
 
 #[derive(Serialize)]
-struct FilesContentResponse {
+pub(crate) struct FilesContentResponse {
     path: String,
     encoding: String,
     content: String,
@@ -2944,7 +2897,7 @@ struct FilesContentResponse {
     modified: String,
 }
 
-async fn files_content_get_handler(
+pub(crate) async fn files_content_get_handler(
     State(state): State<AppState>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<ApiSuccess<FilesContentResponse>, StackError> {
@@ -3010,14 +2963,15 @@ async fn files_download_handler(
 }
 
 #[derive(Deserialize)]
-struct FilesContentPutBody {
+pub(crate) struct FilesContentPutBody {
     path: String,
     encoding: String,
     content: String,
 }
 
-async fn files_content_put_handler(
+pub(crate) async fn files_content_put_handler(
     State(state): State<AppState>,
+    Extension(kind): Extension<KeyKind>,
     Json(body): Json<FilesContentPutBody>,
 ) -> std::result::Result<ApiSuccess<FileMutationResponse>, StackError> {
     let bytes = decode_request_content(&body.encoding, &body.content)?;
@@ -3038,7 +2992,14 @@ async fn files_content_put_handler(
     .await
     .map_err(spawn_blocking_to_io)??;
 
-    publish_workspace_mutation(&state, "workspace.write", &body.path, Some(metadata.size)).await?;
+    publish_workspace_mutation(
+        &state,
+        kind,
+        "workspace.write",
+        &body.path,
+        Some(metadata.size),
+    )
+    .await?;
 
     Ok(ApiSuccess::new(FileMutationResponse {
         path: body.path,
@@ -3049,6 +3010,7 @@ async fn files_content_put_handler(
 
 async fn files_upload_handler(
     State(state): State<AppState>,
+    Extension(kind): Extension<KeyKind>,
     mut multipart: Multipart,
 ) -> std::result::Result<ApiSuccess<FileUploadResponse>, StackError> {
     let mut path: Option<String> = None;
@@ -3154,6 +3116,7 @@ async fn files_upload_handler(
 
     publish_workspace_mutation(
         &state,
+        kind,
         "workspace.upload",
         &workspace_relative_path,
         Some(metadata.size),
@@ -3170,6 +3133,7 @@ async fn files_upload_handler(
 
 async fn files_delete_handler(
     State(state): State<AppState>,
+    Extension(kind): Extension<KeyKind>,
     Query(params): Query<FilesPathParams>,
 ) -> std::result::Result<ApiSuccess<FileDeleteResponse>, StackError> {
     let root = state.config.workspace.root.clone();
@@ -3185,7 +3149,7 @@ async fn files_delete_handler(
     .await
     .map_err(spawn_blocking_to_io)??;
 
-    publish_workspace_mutation(&state, "workspace.delete", &params.path, None).await?;
+    publish_workspace_mutation(&state, kind, "workspace.delete", &params.path, None).await?;
 
     Ok(ApiSuccess::new(FileDeleteResponse {
         path: params.path,
@@ -3231,7 +3195,8 @@ fn join_workspace_relative(workspace_root: &str, uploads_root: &str, request_pat
 
 async fn publish_workspace_mutation(
     state: &AppState,
-    kind: &str,
+    caller: KeyKind,
+    event_kind: &str,
     path: &str,
     size: Option<u64>,
 ) -> std::result::Result<(), StackError> {
@@ -3255,8 +3220,8 @@ async fn publish_workspace_mutation(
         // text column (`logs/events` is session-tier-readable).
         store.append_event_with_source(
             "info",
-            kind,
-            crate::state::EVENT_SOURCE_API,
+            event_kind,
+            AppState::event_source_for(Some(caller)),
             "",
             &payload_json,
         )?
@@ -3266,7 +3231,7 @@ async fn publish_workspace_mutation(
 }
 
 #[derive(Serialize)]
-struct FileMutationResponse {
+pub(crate) struct FileMutationResponse {
     path: String,
     size: u64,
     modified: String,

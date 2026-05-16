@@ -22,6 +22,8 @@ pub struct Config {
     pub dependencies: DependenciesConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub acpctl: AcpctlConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,6 +258,17 @@ fn default_dependency_required() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AcpctlConfig {
+    /// Override path for the `acpctl` Unix-domain socket. When unset the
+    /// daemon binds `~/.local/share/acp-stack/acpctl.sock`. Override is
+    /// intended for integration tests; a deployed instance should leave it
+    /// unset so the socket path matches the spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<McpServerConfig>,
@@ -335,6 +348,8 @@ struct RawConfig {
     dependencies: Option<DependenciesConfig>,
     #[serde(default)]
     mcp: Option<McpConfig>,
+    #[serde(default)]
+    acpctl: Option<AcpctlConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -404,6 +419,7 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
         commands: raw.commands.unwrap_or_default(),
         dependencies: raw.dependencies.unwrap_or_default(),
         mcp: raw.mcp.unwrap_or_default(),
+        acpctl: raw.acpctl.unwrap_or_default(),
     };
 
     config.validate()?;

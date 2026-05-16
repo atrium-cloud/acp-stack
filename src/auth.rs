@@ -28,6 +28,11 @@ pub const API_KEY_ENTROPY_BYTES: usize = 32;
 pub enum KeyKind {
     Session,
     Admin,
+    /// Stamped by the Unix-domain-socket listener that serves `acpctl`. It is
+    /// not derivable from any bearer; route handlers reuse the same code path
+    /// as session/admin requests but `enforce_tier` will never accept Local on
+    /// the TCP router, so a Local tag leaking into the public API is a 401.
+    Local,
     Unknown,
 }
 
@@ -36,6 +41,7 @@ impl KeyKind {
         match self {
             KeyKind::Session => "session",
             KeyKind::Admin => "admin",
+            KeyKind::Local => "local",
             KeyKind::Unknown => "unknown",
         }
     }
@@ -150,6 +156,7 @@ mod tests {
     fn key_kind_wire_strings_are_stable() {
         assert_eq!(KeyKind::Session.as_wire_str(), "session");
         assert_eq!(KeyKind::Admin.as_wire_str(), "admin");
+        assert_eq!(KeyKind::Local.as_wire_str(), "local");
         assert_eq!(KeyKind::Unknown.as_wire_str(), "unknown");
     }
 
