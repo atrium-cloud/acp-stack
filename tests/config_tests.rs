@@ -815,3 +815,56 @@ fn rejects_http_mcp_with_bad_url() {
         "got: {error}",
     );
 }
+
+fn enable_supabase(input: &str) -> String {
+    input.replace("enabled = false", "enabled = true")
+}
+
+#[test]
+fn supabase_disabled_skips_url_check() {
+    // VALID_CONFIG ships with enabled = false, so even a non-https url must
+    // parse cleanly until external logging is actually turned on.
+    let updated = VALID_CONFIG.replace(
+        r#"url = "https://example.supabase.co""#,
+        r#"url = "http://insecure.example""#,
+    );
+    let config = load_config_from_str(&updated).expect("disabled-supabase must parse");
+    assert_eq!(
+        config.logging.supabase.as_ref().map(|s| s.url.as_str()),
+        Some("http://insecure.example")
+    );
+}
+
+#[test]
+fn supabase_enabled_requires_https() {
+    let mut updated = enable_supabase(VALID_CONFIG);
+    updated = updated.replace(
+        r#"url = "https://example.supabase.co""#,
+        r#"url = "http://example.supabase.co""#,
+    );
+    let error = load_config_from_str(&updated).expect_err("non-https supabase url must fail");
+    assert!(
+        error.to_string().contains("must start with `https://`"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn supabase_enabled_schema_must_be_safe_identifier() {
+    let updated = enable_supabase(VALID_CONFIG)
+        .replace(r#"schema = "acp_stack""#, r#"schema = "drop tables;""#);
+    let error = load_config_from_str(&updated).expect_err("unsafe schema must fail");
+    assert!(
+        error.to_string().contains("safe Postgres identifier"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn supabase_enabled_with_clean_schema_and_https_passes() {
+    let updated = enable_supabase(VALID_CONFIG);
+    let config = load_config_from_str(&updated).expect("enabled-supabase happy path");
+    let supabase = config.logging.supabase.expect("supabase set");
+    assert!(supabase.enabled);
+    assert_eq!(supabase.schema, "acp_stack");
+}
