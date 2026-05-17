@@ -15,9 +15,7 @@ See [docs/specs/agents/support.md](docs/specs/agents/support.md) for the support
 
 ## Contributing
 
-Pull requests are welcome. No Contributor License Agreement is required.
-
-AI-generated pull requests are strongly discouraged. Contributions are most useful when they reflect human-driven efforts.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 ## License
 
