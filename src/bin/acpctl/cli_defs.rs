@@ -60,6 +60,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: PermissionsCommand,
     },
+    /// Local MCP introspection server.
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -143,4 +148,31 @@ pub(crate) enum PermissionsCommand {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum McpCommand {
+    /// Serve the local introspection interface as an MCP server.
+    Serve(McpServeArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct McpServeArgs {
+    /// Transport for the MCP server.
+    #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
+    pub(crate) transport: McpTransport,
+    /// Bind path for the `http-uds` transport. Defaults to
+    /// `~/.local/share/acp-stack/acpctl-mcp.sock`. Ignored for `stdio`.
+    #[arg(long)]
+    pub(crate) bind: Option<PathBuf>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub(crate) enum McpTransport {
+    /// Speak MCP JSON-RPC over stdin/stdout (default; meant to be spawned by an
+    /// agent as a child process).
+    Stdio,
+    /// Serve MCP streamable HTTP over a Unix-domain socket so agents that
+    /// dial UDS URLs can connect without a child process.
+    HttpUds,
 }

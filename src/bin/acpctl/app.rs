@@ -8,8 +8,8 @@ use clap::Parser;
 use serde_json::Value;
 
 use crate::cli_defs::{
-    Cli, Command, CommandCommand, ConfigCommand, DepsCommand, LogsCommand, PermissionsCommand,
-    SecurityCommand, WorkspaceCommand,
+    Cli, Command, CommandCommand, ConfigCommand, DepsCommand, LogsCommand, McpCommand,
+    PermissionsCommand, SecurityCommand, WorkspaceCommand,
 };
 use crate::client::request;
 use crate::formatters::{
@@ -158,5 +158,8 @@ async fn run(cli: Cli, socket: &std::path::Path) -> Result<(), String> {
             let resp = request(socket, "GET", &path, &[], None).await?;
             print_response(&resp, json_mode, format_permissions)
         }
+        Command::Mcp {
+            action: McpCommand::Serve(args),
+        } => crate::mcp::run_serve(socket, args).await,
     }
 }

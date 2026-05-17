@@ -61,17 +61,17 @@
 
 ## Local MCP Introspection
 
-- [ ] Implement `acpctl mcp serve`.
-- [ ] Expose status, dependency, log, workspace, command, config export, and pending-permission tools.
-- [ ] Enforce the same permission and logging rules as the `acpctl` CLI.
-- [ ] Prevent agents from reading secret values through the local MCP interface.
-- [ ] Prevent agents from rotating API keys through the local MCP interface.
-- [ ] Prevent agents from disabling permissions, rate limits, origin checks, or security logging.
+- [x] Implement `acpctl mcp serve`.
+- [x] Expose status, dependency, log, workspace, command, config export, and pending-permission tools.
+- [x] Enforce the same permission and logging rules as the `acpctl` CLI.
+- [x] Prevent agents from reading secret values through the local MCP interface.
+- [x] Prevent agents from rotating API keys through the local MCP interface.
+- [x] Prevent agents from disabling permissions, rate limits, origin checks, or security logging.
 
 ## Acceptance
 
-- [ ] SQLite remains the local source of truth when external logging is enabled.
+- [x] SQLite remains the local source of truth when external logging is enabled.
 - [ ] Supabase logging can be enabled and inspected.
 - [ ] Derived session, turn, token, context, command, duration, permission, API, WebSocket, and security metrics are queryable.
-- [ ] Agents can use `acpctl` for constrained local inspection.
-- [ ] `acpctl mcp serve` exposes the same constrained local interface through MCP.
+- [x] Agents can use `acpctl` for constrained local inspection.
+- [x] `acpctl mcp serve` exposes the same constrained local interface through MCP.
