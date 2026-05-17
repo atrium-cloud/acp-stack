@@ -1,14 +1,15 @@
 //! Hand-curated catalog of ACP-speaking agents and their adapters.
 //!
-//! The embedded `data/registry.toml` is the runtime source of truth for
+//! The embedded `data/agents.toml` is the runtime source of truth for
 //! `acps agent install`. It supersedes the upstream
 //! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
 //! runtime can make conservative support claims. The embedded catalog starts
-//! with OpenCode only, while the schema still supports future adapter-backed
-//! entries that need both an ACP adapter and the upstream harness it wraps.
+//! with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets.
+//! The schema supports entries that need both an ACP adapter and the upstream
+//! harness it wraps.
 //!
 //! Operators can override entries or add private ones by placing a
-//! `~/.config/acp-stack/registry.toml` file alongside the main config.
+//! `~/.config/acp-stack/agents.toml` file alongside the main config.
 //! Override semantics are full-entry-by-id: an override with the same `id`
 //! replaces the embedded entry; new `id`s are added.
 
@@ -19,7 +20,7 @@ use serde::Deserialize;
 
 use crate::error::{Result, StackError};
 
-const EMBEDDED_REGISTRY: &str = include_str!("../../data/registry.toml");
+const EMBEDDED_REGISTRY: &str = include_str!("../../data/agents.toml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryCatalog {
@@ -90,40 +91,51 @@ impl RegistryCatalog {
         for entry in &self.agents {
             match entry.kind {
                 RegistryKind::Native => {
-                    if entry.harness.is_some() {
+                    if entry.adapter.is_some() {
                         return Err(StackError::RegistryLoad {
                             reason: format!(
-                                "agent `{}` is kind=\"native\" but declares a [harness] block",
+                                "agent `{}` is kind=\"native\" but declares [agents.adapter]",
                                 entry.id
                             ),
                         });
                     }
                 }
-                RegistryKind::Adapter => {
-                    if entry.harness.is_none() {
-                        return Err(StackError::RegistryLoad {
-                            reason: format!(
-                                "agent `{}` is kind=\"adapter\" but has no [harness] block",
-                                entry.id
-                            ),
-                        });
-                    }
-                }
+                RegistryKind::Adapter => {}
             }
-            match (&entry.adapter_install, entry.headless_compatible) {
-                (Some(install), _) => install.validate(&entry.id, "adapter_install")?,
-                (None, true) => {
-                    return Err(StackError::RegistryLoad {
+            if entry.harness.is_none() {
+                return Err(StackError::RegistryLoad {
+                    reason: format!("agent `{}` has no [agents.harness] block", entry.id),
+                });
+            }
+            if entry.headless_compatible
+                && entry
+                    .support_doc
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(StackError::RegistryLoad {
+                    reason: format!(
+                        "agent `{}` is headless-compatible but has no support_doc",
+                        entry.id
+                    ),
+                });
+            }
+            if let Some(github) = &entry.github {
+                github_url_from_value(&entry.id, "github", github)?;
+            }
+            let harness = entry.harness.as_ref().expect("validated harness presence");
+            harness.validate(&entry.id, entry.github.as_deref())?;
+            if entry.kind == RegistryKind::Adapter {
+                let adapter = entry
+                    .adapter
+                    .as_ref()
+                    .ok_or_else(|| StackError::RegistryLoad {
                         reason: format!(
-                            "agent `{}` is supported but has no [adapter_install] block",
+                            "agent `{}` is kind=\"adapter\" but has no [agents.adapter] block",
                             entry.id
                         ),
-                    });
-                }
-                (None, false) => {}
-            }
-            if let Some(harness) = &entry.harness {
-                harness.install.validate(&entry.id, "harness.install")?;
+                    })?;
+                adapter.validate(&entry.id)?;
             }
         }
         let mut seen = std::collections::HashSet::new();
@@ -139,6 +151,7 @@ impl RegistryCatalog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegistryEntry {
     pub id: String,
     pub name: String,
@@ -146,10 +159,19 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub headless_compatible: bool,
     #[serde(default)]
-    pub homepage: Option<String>,
+    pub set_provider: bool,
     #[serde(default)]
-    pub adapter_install: Option<InstallSpec>,
+    pub set_model: bool,
     #[serde(default)]
+    pub set_mode: bool,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub github: Option<String>,
+    #[serde(default)]
+    pub support_doc: Option<String>,
+    #[serde(default)]
+    pub adapter: Option<AdapterSpec>,
     pub harness: Option<HarnessSpec>,
 }
 
@@ -173,66 +195,213 @@ pub enum RegistryKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessSpec {
     pub id: String,
-    #[serde(default)]
-    pub source_url: Option<String>,
-    pub install: InstallSpec,
+    pub install: InstallSet,
+}
+
+impl HarnessSpec {
+    fn validate(&self, agent_id: &str, github: Option<&str>) -> Result<()> {
+        validate_nonempty(agent_id, "harness.id", &self.id)?;
+        self.install.validate(agent_id, "harness.install", github)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum InstallSpec {
-    Npx {
-        package: String,
-    },
-    Uvx {
-        package: String,
-    },
-    Shell {
-        script: String,
-        creates: String,
-    },
-    GithubRelease {
-        repo: String,
-        asset_pattern: String,
-        archive: ArchiveKind,
-        binary_name: String,
-        #[serde(default)]
-        checksums_asset: Option<String>,
-    },
+#[serde(deny_unknown_fields)]
+pub struct AdapterSpec {
+    pub id: String,
+    #[serde(default)]
+    pub github: Option<String>,
+    pub install: InstallSet,
 }
 
-impl InstallSpec {
+impl AdapterSpec {
+    fn validate(&self, agent_id: &str) -> Result<()> {
+        validate_nonempty(agent_id, "adapter.id", &self.id)?;
+        if let Some(github) = &self.github {
+            github_url_from_value(agent_id, "adapter.github", github)?;
+        }
+        self.install
+            .validate(agent_id, "adapter.install", self.github.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallSet {
+    #[serde(default)]
+    pub shell: Option<ShellInstall>,
+    #[serde(default)]
+    pub npm: Option<NpmInstall>,
+    #[serde(default)]
+    pub github: Option<GithubInstall>,
+}
+
+impl InstallSet {
+    pub fn is_empty(&self) -> bool {
+        self.shell.is_none() && self.npm.is_none() && self.github.is_none()
+    }
+
+    fn validate(&self, agent_id: &str, field: &str, github_url: Option<&str>) -> Result<()> {
+        if self.is_empty() {
+            return Err(StackError::RegistryLoad {
+                reason: format!("agent `{agent_id}` has no [{field}.shell|npm|github] path"),
+            });
+        }
+        if let Some(shell) = &self.shell {
+            shell.validate(agent_id, &format!("{field}.shell"))?;
+        }
+        if let Some(npm) = &self.npm {
+            npm.validate(agent_id, &format!("{field}.npm"))?;
+        }
+        if let Some(github) = &self.github {
+            if github_url.is_none_or(|value| value.trim().is_empty()) {
+                return Err(StackError::RegistryLoad {
+                    reason: format!("agent `{agent_id}` {field}.github requires github URL"),
+                });
+            }
+            github.validate(agent_id, &format!("{field}.github"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellInstall {
+    pub script: String,
+    pub creates: String,
+}
+
+impl ShellInstall {
     fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
-        let nonempty = |label: &str, value: &str| -> Result<()> {
-            if value.trim().is_empty() {
-                Err(StackError::RegistryLoad {
-                    reason: format!("agent `{agent_id}` {field}.{label} is empty"),
-                })
-            } else {
-                Ok(())
-            }
-        };
-        match self {
-            InstallSpec::Npx { package } => nonempty("package", package),
-            InstallSpec::Uvx { package } => nonempty("package", package),
-            InstallSpec::Shell { script, creates } => {
-                nonempty("script", script)?;
-                nonempty("creates", creates)
-            }
-            InstallSpec::GithubRelease {
-                repo,
-                asset_pattern,
-                binary_name,
-                ..
-            } => {
-                nonempty("repo", repo)?;
-                nonempty("asset_pattern", asset_pattern)?;
-                nonempty("binary_name", binary_name)
-            }
+        validate_nonempty(agent_id, &format!("{field}.script"), &self.script)?;
+        validate_nonempty(agent_id, &format!("{field}.creates"), &self.creates)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NpmInstall {
+    pub package: String,
+    pub creates: String,
+}
+
+impl NpmInstall {
+    fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
+        validate_nonempty(agent_id, &format!("{field}.package"), &self.package)?;
+        validate_nonempty(agent_id, &format!("{field}.creates"), &self.creates)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubInstall {
+    pub asset_pattern: String,
+    pub archive: ArchiveKind,
+    pub binary_name: String,
+    #[serde(default)]
+    pub checksums_asset: Option<String>,
+    #[serde(default)]
+    pub arch: ArchMap,
+}
+
+impl GithubInstall {
+    fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
+        validate_nonempty(
+            agent_id,
+            &format!("{field}.asset_pattern"),
+            &self.asset_pattern,
+        )?;
+        validate_nonempty(agent_id, &format!("{field}.binary_name"), &self.binary_name)?;
+        if self.asset_pattern.contains("{arch}") {
+            self.arch.validate(agent_id, field)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchMap {
+    #[serde(default)]
+    pub x86_64: Option<String>,
+    #[serde(default)]
+    pub aarch64: Option<String>,
+}
+
+impl ArchMap {
+    pub fn token_for_host(&self) -> Option<&str> {
+        match std::env::consts::ARCH {
+            "x86_64" => self.x86_64.as_deref(),
+            "aarch64" => self.aarch64.as_deref(),
+            _ => None,
         }
     }
+
+    fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
+        let Some(x86_64) = self.x86_64.as_deref() else {
+            return Err(StackError::RegistryLoad {
+                reason: format!("agent `{agent_id}` {field}.arch.x86_64 is required"),
+            });
+        };
+        validate_nonempty(agent_id, &format!("{field}.arch.x86_64"), x86_64)?;
+        let Some(aarch64) = self.aarch64.as_deref() else {
+            return Err(StackError::RegistryLoad {
+                reason: format!("agent `{agent_id}` {field}.arch.aarch64 is required"),
+            });
+        };
+        validate_nonempty(agent_id, &format!("{field}.arch.aarch64"), aarch64)
+    }
+}
+
+fn validate_nonempty(agent_id: &str, field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(StackError::RegistryLoad {
+            reason: format!("agent `{agent_id}` {field} is empty"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub fn github_repo_from_url(agent_id: &str, field: &str, url: &str) -> Result<String> {
+    let rest = github_path_from_value(agent_id, field, url)?;
+    let mut parts = rest.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next().ok_or_else(|| StackError::RegistryLoad {
+        reason: format!("agent `{agent_id}` {field} has no owner"),
+    })?;
+    let repo = parts.next().ok_or_else(|| StackError::RegistryLoad {
+        reason: format!("agent `{agent_id}` {field} has no repo"),
+    })?;
+    Ok(format!("{owner}/{repo}"))
+}
+
+pub fn github_url_from_value(agent_id: &str, field: &str, value: &str) -> Result<String> {
+    let rest = github_path_from_value(agent_id, field, value)?;
+    Ok(format!("https://github.com/{}", rest.trim_matches('/')))
+}
+
+fn github_path_from_value<'a>(agent_id: &str, field: &str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(StackError::RegistryLoad {
+            reason: format!("agent `{agent_id}` {field} is empty"),
+        });
+    }
+    if let Some(rest) = value.strip_prefix("https://github.com/") {
+        return Ok(rest);
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Err(StackError::RegistryLoad {
+            reason: format!(
+                "agent `{agent_id}` {field} must be a GitHub path or https://github.com/ URL"
+            ),
+        });
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -271,6 +440,13 @@ mod tests {
             .expect("opencode must be present in the embedded registry");
         assert_eq!(opencode.kind, RegistryKind::Native);
         assert!(opencode.headless_compatible);
+        assert!(opencode.set_provider);
+        assert!(opencode.set_model);
+        assert!(opencode.set_mode);
+        assert_eq!(
+            opencode.support_doc.as_deref(),
+            Some("docs/agents/opencode.md")
+        );
     }
 
     #[test]
@@ -280,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_registry_only_advertises_opencode_headless_support() {
+    fn embedded_registry_advertises_smoked_headless_support() {
         let catalog = RegistryCatalog::load_embedded().expect("registry");
         let supported: Vec<_> = catalog
             .entries()
@@ -288,18 +464,127 @@ mod tests {
             .filter(|entry| entry.headless_compatible)
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(supported, ["opencode"]);
+        assert_eq!(supported, ["opencode", "cursor", "amp", "pi"]);
     }
 
     #[test]
-    fn embedded_registry_is_intentionally_opencode_only() {
+    fn embedded_registry_contains_only_curated_examples() {
         let catalog = RegistryCatalog::load_embedded().expect("registry");
         let ids: Vec<_> = catalog
             .entries()
             .iter()
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(ids, ["opencode"]);
+        assert_eq!(ids, ["opencode", "cursor", "amp", "pi"]);
+        let cursor = catalog.lookup("cursor").expect("cursor entry exists");
+        assert_eq!(cursor.kind, RegistryKind::Native);
+        assert!(cursor.headless_compatible);
+        assert!(!cursor.set_provider);
+        assert!(cursor.set_model);
+        assert!(cursor.set_mode);
+        assert_eq!(cursor.support_doc.as_deref(), Some("docs/agents/cursor.md"));
+        let amp = catalog.lookup("amp").expect("amp entry exists");
+        assert_eq!(amp.kind, RegistryKind::Adapter);
+        assert!(amp.headless_compatible);
+        assert!(!amp.set_provider);
+        assert!(!amp.set_model);
+        assert!(!amp.set_mode);
+        assert_eq!(
+            amp.adapter.as_ref().map(|adapter| adapter.id.as_str()),
+            Some("amp-acp")
+        );
+        assert_eq!(amp.support_doc.as_deref(), Some("docs/agents/amp.md"));
+        let pi = catalog.lookup("pi").expect("pi entry exists");
+        assert_eq!(pi.kind, RegistryKind::Adapter);
+        assert!(pi.headless_compatible);
+        assert!(pi.set_provider);
+        assert!(pi.set_model);
+        assert!(!pi.set_mode);
+    }
+
+    #[test]
+    fn embedded_registry_uses_per_install_arch_maps() {
+        let catalog = RegistryCatalog::load_embedded().expect("registry");
+        let opencode = catalog.lookup("opencode").expect("opencode entry exists");
+        let opencode_github = opencode
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.install.github.as_ref())
+            .expect("opencode github install");
+        assert_eq!(opencode_github.arch.x86_64.as_deref(), Some("x64"));
+        assert_eq!(opencode_github.arch.aarch64.as_deref(), Some("arm64"));
+
+        let amp = catalog.lookup("amp").expect("amp entry exists");
+        let amp_github = amp
+            .adapter
+            .as_ref()
+            .and_then(|adapter| adapter.install.github.as_ref())
+            .expect("amp-acp github install");
+        assert_eq!(amp_github.arch.x86_64.as_deref(), Some("x86_64"));
+        assert_eq!(amp_github.arch.aarch64.as_deref(), Some("aarch64"));
+    }
+
+    #[test]
+    fn validate_rejects_legacy_registry_fields() {
+        let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+homepage = "https://example.com"
+headless_doc = "docs/agents/bad.md"
+source_url = "https://example.com/install"
+upstream_id = "bad-upstream"
+adapter_install = { type = "npx", package = "bad" }
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+        let err = RegistryCatalog::from_toml(body).expect_err("must reject old fields");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(
+                    reason.contains("unknown field") || reason.contains("unexpected keys"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn github_values_accept_path_shorthand_and_derive_repo() {
+        assert_eq!(
+            github_repo_from_url(
+                "pi",
+                "github",
+                "earendil-works/pi/tree/main/packages/coding-agent"
+            )
+            .expect("repo"),
+            "earendil-works/pi"
+        );
+        assert_eq!(
+            github_url_from_value(
+                "pi",
+                "github",
+                "earendil-works/pi/tree/main/packages/coding-agent"
+            )
+            .expect("url"),
+            "https://github.com/earendil-works/pi/tree/main/packages/coding-agent"
+        );
+        assert_eq!(
+            github_repo_from_url(
+                "amp",
+                "adapter.github",
+                "https://github.com/tao12345666333/amp-acp"
+            )
+            .expect("repo"),
+            "tao12345666333/amp-acp"
+        );
     }
 
     #[test]
@@ -310,43 +595,49 @@ id = "bad"
 name = "Bad"
 kind = "adapter"
 
-[agents.adapter_install]
-type = "npx"
+[agents.adapter]
+id = "bad-adapter"
+
+[agents.adapter.install.npm]
 package = "bad"
+creates = "bad"
 "#;
         let err =
             RegistryCatalog::from_toml(body).expect_err("must reject adapter without harness");
         match err {
             StackError::RegistryLoad { reason } => {
-                assert!(reason.contains("kind=\"adapter\""), "reason: {reason}");
+                assert!(reason.contains("[agents.harness]"), "reason: {reason}");
             }
             other => panic!("expected RegistryLoad, got {other:?}"),
         }
     }
 
     #[test]
-    fn validate_rejects_native_with_harness() {
+    fn validate_rejects_native_with_adapter_install() {
         let body = r#"
 [[agents]]
 id = "bad"
 name = "Bad"
 kind = "native"
 
-[agents.adapter_install]
-type = "npx"
-package = "bad"
-
 [agents.harness]
-id = "should-not-be-here"
+id = "bad"
 
-[agents.harness.install]
-type = "npx"
-package = "ignored"
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+
+[agents.adapter]
+id = "adapter"
+
+[agents.adapter.install.npm]
+package = "adapter"
+creates = "adapter"
 "#;
-        let err = RegistryCatalog::from_toml(body).expect_err("must reject native with harness");
+        let err = RegistryCatalog::from_toml(body).expect_err("must reject native with adapter");
         match err {
             StackError::RegistryLoad { reason } => {
-                assert!(reason.contains("kind=\"native\""), "reason: {reason}");
+                assert!(reason.contains("[agents.adapter]"), "reason: {reason}");
             }
             other => panic!("expected RegistryLoad, got {other:?}"),
         }
@@ -360,23 +651,55 @@ id = "dup"
 name = "First"
 kind = "native"
 
-[agents.adapter_install]
-type = "npx"
+[agents.harness]
+id = "first"
+
+[agents.harness.install.npm]
 package = "first"
+creates = "first"
 
 [[agents]]
 id = "dup"
 name = "Second"
 kind = "native"
 
-[agents.adapter_install]
-type = "npx"
+[agents.harness]
+id = "second"
+
+[agents.harness.install.npm]
 package = "second"
+creates = "second"
 "#;
         let err = RegistryCatalog::from_toml(body).expect_err("must reject duplicate ids");
         match err {
             StackError::RegistryLoad { reason } => {
                 assert!(reason.contains("duplicate"), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_headless_entry_without_doc() {
+        let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("must reject headless-compatible entry without doc");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("support_doc"), "reason: {reason}");
             }
             other => panic!("expected RegistryLoad, got {other:?}"),
         }
@@ -390,10 +713,14 @@ package = "second"
 id = "opencode"
 name = "OpenCode (private fork)"
 kind = "native"
+support_doc = "docs/agents/opencode.md"
 
-[agents.adapter_install]
-type = "npx"
+[agents.harness]
+id = "opencode"
+
+[agents.harness.install.npm]
 package = "@private/opencode"
+creates = "opencode"
 "#;
         let overlay = RegistryCatalog::from_toml(overlay_body).expect("overlay parses");
         let mut catalog = base;

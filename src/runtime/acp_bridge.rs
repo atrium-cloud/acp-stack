@@ -29,7 +29,9 @@ use agent_client_protocol::schema::{
     InitializeResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
     PermissionOptionId, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionId, SessionNotification, StopReason,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionId, SessionNotification, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModelRequest, SetSessionModelResponse, StopReason,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use serde::{Deserialize, Serialize};
@@ -55,6 +57,35 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 /// the agent child. The closure should return immediately once the oneshot
 /// fires; if it does not, the child is misbehaving and we cut losses.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSessionConfigCategory {
+    Mode,
+    Model,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSessionModelSelection {
+    ConfigOption { config_id: String },
+    LegacyModel,
+}
+
+impl AgentSessionConfigCategory {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Mode => "mode",
+            Self::Model => "model",
+        }
+    }
+
+    fn matches(self, category: &SessionConfigOptionCategory) -> bool {
+        matches!(
+            (self, category),
+            (Self::Mode, SessionConfigOptionCategory::Mode)
+                | (Self::Model, SessionConfigOptionCategory::Model)
+        )
+    }
+}
 
 /// Our owned view of the `initialize` response. Mirrors the protocol shape
 /// but is independent of the SDK's `AgentCapabilities` type so our
@@ -463,9 +494,8 @@ impl AcpBridge {
     /// Spawn `[agent].command` and complete the ACP `initialize` handshake.
     ///
     /// `env` is the resolved secret-name -> value map for `[agent].env`. We
-    /// resolve the command path first, then `env_clear()` so only this map
-    /// reaches the child — the security spec requires the runtime to never
-    /// inject the full secret store or unrelated host environment.
+    /// resolve the command path first, then `env_clear()` so only managed
+    /// runtime context and explicitly resolved secrets reach the child.
     pub async fn spawn(
         agent: &AgentConfig,
         env: HashMap<String, String>,
@@ -489,18 +519,18 @@ impl AcpBridge {
             // alongside our daemon logs without an extra plumbing layer.
             .stderr(std::process::Stdio::inherit())
             .env_clear();
-        // Inject exactly the resolved names from `[agent].env`. The command
-        // path is resolved before `env_clear()`, so the child does not need
-        // inherited PATH/HOME/LANG just to start. PATH is the one runtime
-        // exception: registry-installed adapters may need to exec harnesses
-        // that acp-stack dropped into ~/.local/bin.
+        // Runtime context is intentionally narrow: managed PATH so adapters
+        // can find registry-installed harnesses, and HOME so agent wrappers
+        // can find their own config/cache directories.
         if let Some(path) = agent_process_path() {
             command.env("PATH", path);
         }
+        forward_host_env(&mut command, "HOME");
         for (name, value) in &env {
-            if name == "PATH" {
+            if matches!(name.as_str(), "PATH" | "HOME") {
                 tracing::warn!(
-                    "refusing to inject `PATH` from `[agent].env` into agent process: reserved",
+                    name = %name,
+                    "refusing to inject `{name}` from `[agent].env` into agent process: reserved",
                 );
                 continue;
             }
@@ -695,6 +725,42 @@ impl AcpBridge {
             })
     }
 
+    pub async fn set_session_config_option(
+        &self,
+        session_id: SessionId,
+        config_id: &str,
+        value: &str,
+    ) -> Result<SetSessionConfigOptionResponse> {
+        let connection = self.connection().await?;
+        let request =
+            SetSessionConfigOptionRequest::new(session_id, config_id.to_owned(), value.to_owned());
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/set_config_option",
+                message: err.to_string(),
+            })
+    }
+
+    pub async fn set_session_model(
+        &self,
+        session_id: SessionId,
+        model_id: &str,
+    ) -> Result<SetSessionModelResponse> {
+        let connection = self.connection().await?;
+        let request = SetSessionModelRequest::new(session_id, model_id.to_owned());
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/set_model",
+                message: err.to_string(),
+            })
+    }
+
     /// `session/load`. Requires the `loadSession` capability.
     pub async fn load_session(
         &self,
@@ -860,6 +926,156 @@ impl AcpBridge {
     }
 }
 
+pub fn session_config_id_for_value(
+    config_options: Option<&[SessionConfigOption]>,
+    category: AgentSessionConfigCategory,
+    value: &str,
+) -> Result<String> {
+    let Some(config_options) = config_options else {
+        return Err(StackError::AgentConfigProvision {
+            path: PathBuf::from("ACP session config options"),
+            reason: format!(
+                "agent did not advertise a `{}` session config option",
+                category.id()
+            ),
+        });
+    };
+    for option in config_options {
+        let category_matches = option
+            .category
+            .as_ref()
+            .is_some_and(|option_category| category.matches(option_category));
+        let id_matches = option.id.0.as_ref() == category.id();
+        if (category_matches || id_matches) && session_config_option_contains_value(option, value) {
+            return Ok(option.id.0.to_string());
+        }
+    }
+    Err(StackError::AgentConfigProvision {
+        path: PathBuf::from("ACP session config options"),
+        reason: format!(
+            "agent did not advertise `{value}` as an available `{}`",
+            category.id()
+        ),
+    })
+}
+
+pub fn session_config_values(
+    config_options: Option<&[SessionConfigOption]>,
+    category: AgentSessionConfigCategory,
+) -> Result<Vec<String>> {
+    let Some(config_options) = config_options else {
+        return Err(StackError::AgentConfigProvision {
+            path: PathBuf::from("ACP session config options"),
+            reason: format!(
+                "agent did not advertise a `{}` session config option",
+                category.id()
+            ),
+        });
+    };
+    for option in config_options {
+        let category_matches = option
+            .category
+            .as_ref()
+            .is_some_and(|option_category| category.matches(option_category));
+        let id_matches = option.id.0.as_ref() == category.id();
+        if category_matches || id_matches {
+            let mut values = session_config_option_values(option);
+            values.sort();
+            values.dedup();
+            return Ok(values);
+        }
+    }
+    Err(StackError::AgentConfigProvision {
+        path: PathBuf::from("ACP session config options"),
+        reason: format!(
+            "agent did not advertise a `{}` session config option",
+            category.id()
+        ),
+    })
+}
+
+pub fn session_model_selection_for_value(
+    response: &NewSessionResponse,
+    value: &str,
+) -> Result<AgentSessionModelSelection> {
+    if let Some(config_options) = response.config_options.as_deref()
+        && let Ok(config_id) = session_config_id_for_value(
+            Some(config_options),
+            AgentSessionConfigCategory::Model,
+            value,
+        )
+    {
+        return Ok(AgentSessionModelSelection::ConfigOption { config_id });
+    }
+    if legacy_session_model_values(response)
+        .iter()
+        .any(|candidate| candidate == value)
+    {
+        return Ok(AgentSessionModelSelection::LegacyModel);
+    }
+    Err(StackError::AgentConfigProvision {
+        path: PathBuf::from("ACP session config options"),
+        reason: format!("agent did not advertise `{value}` as an available `model`"),
+    })
+}
+
+pub fn session_model_values(response: &NewSessionResponse) -> Result<Vec<String>> {
+    if let Some(config_options) = response.config_options.as_deref()
+        && let Ok(values) =
+            session_config_values(Some(config_options), AgentSessionConfigCategory::Model)
+    {
+        return Ok(values);
+    }
+    let mut values = legacy_session_model_values(response);
+    values.sort();
+    values.dedup();
+    if values.is_empty() {
+        return Err(StackError::AgentConfigProvision {
+            path: PathBuf::from("ACP session config options"),
+            reason: "agent did not advertise a `model` session config option".to_owned(),
+        });
+    }
+    Ok(values)
+}
+
+fn legacy_session_model_values(response: &NewSessionResponse) -> Vec<String> {
+    response
+        .models
+        .as_ref()
+        .map(|models| {
+            models
+                .available_models
+                .iter()
+                .map(|model| model.model_id.0.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn session_config_option_contains_value(option: &SessionConfigOption, value: &str) -> bool {
+    session_config_option_values(option)
+        .iter()
+        .any(|candidate| candidate == value)
+}
+
+fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => match &select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => options
+                .iter()
+                .map(|option| option.value.0.to_string())
+                .collect(),
+            SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .map(|option| option.value.0.to_string())
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 /// Forward a `session/request_permission` request through the durable
 /// PermissionService, await the decision, and translate the result back to
 /// the ACP `RequestPermissionOutcome`. Falls back to `Cancelled` on every
@@ -1007,6 +1223,12 @@ fn agent_process_path() -> Option<std::ffi::OsString> {
     }
 }
 
+fn forward_host_env(command: &mut Command, name: &str) {
+    if let Some(value) = std::env::var_os(name) {
+        command.env(name, value);
+    }
+}
+
 fn command_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
@@ -1119,6 +1341,86 @@ mod tests {
 
         let outcome = outcome_task.await.expect("task joins");
         assert!(matches!(outcome, RequestPermissionOutcome::Cancelled));
+    }
+
+    #[test]
+    fn session_config_helpers_validate_select_values_by_category() {
+        let options: Vec<SessionConfigOption> = serde_json::from_str(
+            r#"[
+                {
+                    "id": "agent-model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "openai/gpt-5.5",
+                    "options": [
+                        {"value": "openai/gpt-5.5", "name": "GPT-5.5"},
+                        {"value": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5"}
+                    ]
+                },
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "smart",
+                    "options": [
+                        {"value": "smart", "name": "Smart"},
+                        {"value": "fast", "name": "Fast"}
+                    ]
+                }
+            ]"#,
+        )
+        .expect("session config options deserialize");
+
+        let model_id = session_config_id_for_value(
+            Some(&options),
+            AgentSessionConfigCategory::Model,
+            "openai/gpt-5.5",
+        )
+        .expect("model value should be accepted");
+        assert_eq!(model_id, "agent-model");
+        assert_eq!(
+            session_config_values(Some(&options), AgentSessionConfigCategory::Mode)
+                .expect("mode values"),
+            ["fast", "smart"]
+        );
+        let err = session_config_id_for_value(
+            Some(&options),
+            AgentSessionConfigCategory::Model,
+            "openai/not-advertised",
+        )
+        .expect_err("unknown model should be rejected");
+        assert!(err.to_string().contains("openai/not-advertised"));
+    }
+
+    #[test]
+    fn session_model_helpers_accept_legacy_model_state() {
+        let response: NewSessionResponse = serde_json::from_str(
+            r#"{
+                "sessionId": "sess_legacy",
+                "models": {
+                    "currentModelId": "opencode-go/deepseek-v4-flash",
+                    "availableModels": [
+                        {
+                            "modelId": "opencode-go/deepseek-v4-flash",
+                            "name": "DeepSeek V4 Flash"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("legacy model state deserializes");
+
+        assert_eq!(
+            session_model_values(&response).expect("legacy model values"),
+            ["opencode-go/deepseek-v4-flash"]
+        );
+        assert_eq!(
+            session_model_selection_for_value(&response, "opencode-go/deepseek-v4-flash")
+                .expect("legacy model should validate"),
+            AgentSessionModelSelection::LegacyModel
+        );
     }
 
     #[test]

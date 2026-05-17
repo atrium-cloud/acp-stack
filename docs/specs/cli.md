@@ -9,7 +9,7 @@ The CLI should call the same core service layer as the HTTP API where practical.
 Initial CLI commands:
 
 ```sh
-acps init
+acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>]
 acps serve
 acps status
 acps reset --yes
@@ -56,7 +56,7 @@ acps deps apply
 
 ## Init
 
-`acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Init may run the configured agent installer after explicit user confirmation once installer execution exists.
+`acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Interactive init prompts for one supported agent, updates `[agent]` with the registry-recommended launch command, then asks whether to install that agent. Non-interactive init skips agent selection and install unless `--agent <id>` and/or `--install-agent` are supplied; `--no-install-agent` suppresses the install prompt in interactive runs.
 
 `acps init` can seed the workspace from one source:
 
@@ -65,6 +65,22 @@ acps deps apply
 - `s3` - download or sync an S3 bucket/prefix into the workspace
 
 Git sources may reference a credential secret for private repositories. S3 sources should reference AWS credential secrets instead of embedding credentials in config.
+
+Phase 4 expands init into a resumable orchestration flow:
+
+- create or import config
+- prompt for the agent, provider id, and missing required secret references without echoing values
+- resolve provider selection through `data/mapping.toml` and validate model/mode values through ACP session config options
+- update generated OpenCode or Pi provider config and relaunch the active agent when provider/model settings change
+- set up code sources under `/workspace/usr/code/<repo-name>/`
+- set up data sources under `/workspace/usr/data/<data-dir-name>/`
+- run agent harness and adapter installation as runtime-managed installer steps
+- configure declared MCP servers and presets
+- run a real-prompt agent testflight after explicit confirmation
+
+Dependency installation requires explicit install metadata and remains a separate future `deps apply`/`data/deps.toml` surface. `acps init` does not infer OS package-manager actions from declarative dependency checks.
+
+For supported OpenCode and Pi configs, `acps init` does not infer model config from default API-key refs. Init may select the initial provider, collect the required provider refs, and write `[agent.provider]` without a model. `acps agent set` is the edit path that can later write the model.
 
 ## Serve
 
@@ -76,7 +92,13 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 
 ## Agent Commands
 
-`acps agent install` installs the configured ACP agent process. The operator-facing path resolves the agent or adapter from the ACP registry, then records the installer run in SQLite, verifies `creates`, and checks `expected_sha256` when configured. Adapter-backed agents install the adapter executable, such as `codex-acp`, because that is the process `acp-stack` speaks ACP with. Direct shell recipes are a low-level/manual escape hatch, not the preferred discovery or installation path.
+`acps agent install` installs the configured ACP agent process. The operator-facing path resolves the agent from the embedded registry, refuses unsupported entries, runs the declared harness step, runs the adapter step concurrently for adapter-backed entries, records every installer row in SQLite, verifies `creates`, and checks `expected_sha256` against the final `[agent].command` binary when configured. Registry-resolved installs do not require or receive `[agent].env` runtime secrets. Direct shell recipes are a low-level/manual escape hatch, not the preferred discovery or installation path.
+
+`acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` updates `[agent.provider]`, adds the selected API-key ref and provider companion refs to `[agent].env` when missing, validates the selected model against ACP-advertised model options, regenerates supported agent-owned config files, and then writes canonical config. Provider edits are available only for agents whose registry entry declares `set_provider = true`. When `--api-key-ref` is omitted, the CLI resolves the default ref from the provider mapping in [agents/api_key.md](agents/api_key.md); providers without a default require an explicit ref. When provider-backed `--model` is omitted, interactive terminals prompt from the ACP-advertised model list, while non-interactive runs list advertised model values and exit without mutating config.
+
+`acps agent set --model <model>` updates `[agent].model` for model-only agents whose registry entry declares `set_model = true` and `set_provider = false`. Cursor CLI uses this path; `acps` validates the value against Cursor's ACP-advertised model options and stores the exact advertised value.
+
+`acps agent set --mode <mode>` updates `[agent].mode` for agents whose registry entry declares `set_mode = true` and whose ACP session advertises a `mode` config option. Current real ACP probes advertise OpenCode `build`/`plan` and Cursor `agent`/`ask`/`plan`; Pi and `amp-acp v0.7.0` do not advertise mode values.
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 

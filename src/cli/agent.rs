@@ -1,17 +1,34 @@
 use crate::agent_installer::{install_resolved, run_installer};
 use crate::agent_registry::RegistryCatalog;
-use crate::config::Config;
+use crate::config::{self, AgentProviderConfig, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_file,
+    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
+    set_owner_only_file,
+};
+use crate::runtime::acp_bridge::{
+    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
+    session_config_values, session_model_selection_for_value, session_model_values,
+};
+use crate::runtime::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent_registry::RegistryEntry;
+use crate::runtime::provider_keys::{
+    env_refs_for_agent_id, env_var_for_agent_provider_id, optional_env_refs_for_provider_id,
+    provider_id_is_known, provider_id_supports_agent, required_env_refs_for_provider_id,
 };
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Write};
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::core::daemon_base_url;
+
+const ACP_CONFIG_OPTIONS_FIXTURE_ENV: &str = "ACP_STACK_AGENT_CONFIG_OPTIONS_PATH";
+const ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_RESPONSE_PATH";
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
@@ -23,6 +40,24 @@ pub enum AgentCommand {
     Stop,
     /// Print the latest persisted agent state from SQLite.
     Status,
+    /// Set the provider id, model, and API-key ref used by generated agent config.
+    Set(AgentSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentSetArgs {
+    /// Provider id, such as opencode-go, openai, or anthropic.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Provider-qualified model id or model pattern.
+    #[arg(long)]
+    model: Option<String>,
+    /// Agent session mode for agents that expose mode as an ACP config option.
+    #[arg(long)]
+    mode: Option<String>,
+    /// Secret ref to inject for this provider. Defaults from provider metadata.
+    #[arg(long)]
+    api_key_ref: Option<String>,
 }
 
 pub(super) fn run_agent_command(command: AgentCommand) -> Result<()> {
@@ -31,6 +66,475 @@ pub(super) fn run_agent_command(command: AgentCommand) -> Result<()> {
         AgentCommand::Start => run_agent_daemon_post("/v1/agent/start", "start"),
         AgentCommand::Stop => run_agent_daemon_post("/v1/agent/stop", "stop"),
         AgentCommand::Status => run_agent_status(),
+        AgentCommand::Set(args) => run_agent_set(args),
+    }
+}
+
+fn run_agent_set(args: AgentSetArgs) -> Result<()> {
+    let home = home_dir()?;
+    let config_path = config::default_config_path()?;
+    let mut config = Config::load_from_path(&config_path)?;
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    let entry =
+        registry
+            .lookup(&config.agent.id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: config.agent.id.clone(),
+            })?;
+    if let Some(mode) = args.mode.clone() {
+        return run_agent_mode_set(config, config_path, &home, args, entry, mode);
+    }
+    let Some(provider_id) = args.provider.clone() else {
+        return run_agent_model_set(config, config_path, &home, args, entry);
+    };
+    if !entry.set_provider {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "{} does not support provider configuration through `acps agent set`",
+                entry.name
+            ),
+        });
+    }
+    if args.model.is_some() && !entry.set_model {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: format!(
+                "{} does not support model configuration through `acps agent set`",
+                entry.name
+            ),
+        });
+    }
+    if !provider_id_is_known(&provider_id) {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!("provider `{provider_id}` is not listed in data/mapping.toml"),
+        });
+    }
+    if !provider_id_supports_agent(&provider_id, &config.agent.id) {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "provider `{}` is not supported for agent `{}`",
+                provider_id, config.agent.id
+            ),
+        });
+    }
+
+    let default_api_key_ref =
+        default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id);
+    if default_api_key_ref.is_none() {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: format!(
+                "provider `{}` has no API-key env mapping for agent `{}`",
+                provider_id, config.agent.id
+            ),
+        });
+    }
+
+    let api_key_ref = args.api_key_ref.or(default_api_key_ref).ok_or_else(|| {
+        StackError::AgentConfigProvision {
+            path: config_path.clone(),
+            reason: format!(
+                "provider `{provider_id}` has no default API-key env var; pass --api-key-ref"
+            ),
+        }
+    })?;
+
+    let required_env_refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
+    for env_ref in &required_env_refs {
+        if !config.agent.env.iter().any(|name| name == env_ref) {
+            config.agent.env.push(env_ref.clone());
+        }
+    }
+    config.agent.model = None;
+    config.agent.provider = Some(AgentProviderConfig {
+        id: provider_id.clone(),
+        model: None,
+        api_key_ref: Some(api_key_ref.clone()),
+    });
+    let model = match args.model {
+        Some(model) => resolve_agent_model_value(&home, &config, Some(&provider_id), &model)?,
+        None => {
+            if !entry.set_model {
+                return Err(StackError::AgentConfigProvision {
+                    path: config_path,
+                    reason: format!(
+                        "{} does not support model configuration through `acps agent set`",
+                        entry.name
+                    ),
+                });
+            }
+            let Some(model) = select_agent_session_config_value(
+                &home,
+                &config,
+                AgentSessionConfigCategory::Model,
+            )?
+            else {
+                return Ok(());
+            };
+            model
+        }
+    };
+    if let Some(provider) = config.agent.provider.as_mut() {
+        provider.model = Some(model);
+    }
+
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    validate_agent_session_config_value(
+        &home,
+        &config,
+        AgentSessionConfigCategory::Model,
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref())
+            .expect("provider model set"),
+    )?;
+    let provisioned = provision_agent_headless_config(&config, &home)?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+
+    println!("agent: configured");
+    println!(
+        "provider: {}",
+        config.agent.provider.as_ref().expect("provider set").id
+    );
+    println!(
+        "model: {}",
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref())
+            .unwrap_or("")
+    );
+    println!("api_key_ref: {api_key_ref}");
+    if required_env_refs.len() > 1 {
+        println!("required_env_refs: {}", required_env_refs.join(", "));
+    }
+    let optional = optional_env_refs_for_provider_id(
+        &config.agent.provider.as_ref().expect("provider set").id,
+    );
+    if !optional.is_empty() {
+        println!("optional_env_refs: {}", optional.join(", "));
+    }
+    for item in provisioned {
+        println!("{}: {}", item.label, item.path.display());
+    }
+    Ok(())
+}
+
+fn run_agent_model_set(
+    mut config: Config,
+    config_path: PathBuf,
+    home: &Path,
+    args: AgentSetArgs,
+    entry: &RegistryEntry,
+) -> Result<()> {
+    if args.api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "api-key-ref",
+            reason: "--api-key-ref requires --provider".to_owned(),
+        });
+    }
+    if !entry.set_model {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: format!(
+                "{} does not support model configuration through `acps agent set`",
+                entry.name
+            ),
+        });
+    }
+    if entry.set_provider {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "pass --provider <provider-id> when setting a model for {}",
+                entry.name
+            ),
+        });
+    }
+    let Some(model) = args.model else {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: "pass --model <model-id>, --provider <provider-id>, or --mode <mode>"
+                .to_owned(),
+        });
+    };
+
+    let required_env_refs = env_refs_for_agent_id(&config.agent.id)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for env_ref in &required_env_refs {
+        if !config.agent.env.iter().any(|name| name == env_ref) {
+            config.agent.env.push(env_ref.clone());
+        }
+    }
+    config.agent.provider = None;
+    let model = resolve_agent_model_value(home, &config, None, &model)?;
+    config.agent.model = Some(model);
+
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    validate_agent_session_config_value(
+        home,
+        &config,
+        AgentSessionConfigCategory::Model,
+        config.agent.model.as_deref().expect("agent model set"),
+    )?;
+    let provisioned = provision_agent_headless_config(&config, home)?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+
+    println!("agent: configured");
+    println!("model: {}", config.agent.model.as_deref().unwrap_or(""));
+    if !required_env_refs.is_empty() {
+        println!("required_env_refs: {}", required_env_refs.join(", "));
+    }
+    for item in provisioned {
+        println!("{}: {}", item.label, item.path.display());
+    }
+    Ok(())
+}
+
+fn run_agent_mode_set(
+    mut config: Config,
+    config_path: PathBuf,
+    home: &Path,
+    args: AgentSetArgs,
+    entry: &RegistryEntry,
+    mode: String,
+) -> Result<()> {
+    if args.provider.is_some() || args.model.is_some() || args.api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "mode",
+            reason: "--mode cannot be combined with --provider, --model, or --api-key-ref"
+                .to_owned(),
+        });
+    }
+    if !entry.set_mode {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: format!(
+                "{} does not support mode configuration through `acps agent set`",
+                entry.name
+            ),
+        });
+    }
+    config.agent.mode = Some(mode);
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    let mode = config.agent.mode.as_deref().expect("mode set");
+    validate_agent_session_config_value(home, &config, AgentSessionConfigCategory::Mode, mode)?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+    println!("agent: configured");
+    println!("mode: {mode}");
+    Ok(())
+}
+
+fn default_api_key_ref_for_agent_provider(agent_id: &str, provider_id: &str) -> Option<String> {
+    env_var_for_agent_provider_id(agent_id, provider_id).map(str::to_owned)
+}
+
+fn resolve_agent_model_value(
+    home: &Path,
+    config: &Config,
+    provider_id: Option<&str>,
+    model_id: &str,
+) -> Result<String> {
+    let response = read_agent_new_session_response(home, config)?;
+    if session_model_selection_for_value(&response, model_id).is_ok() {
+        return Ok(model_id.to_owned());
+    }
+    let values = session_model_values(&response)?;
+    if let Some(provider_id) = provider_id {
+        let provider_qualified = format!("{provider_id}/{model_id}");
+        if values.iter().any(|value| value == &provider_qualified)
+            && session_model_selection_for_value(&response, &provider_qualified).is_ok()
+        {
+            return Ok(provider_qualified);
+        }
+    }
+    let mut base_matches = values
+        .iter()
+        .filter(|value| advertised_model_base_matches(value, provider_id, model_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    base_matches.sort();
+    base_matches.dedup();
+    if base_matches.len() == 1
+        && session_model_selection_for_value(&response, &base_matches[0]).is_ok()
+    {
+        return Ok(base_matches.remove(0));
+    }
+    session_model_selection_for_value(&response, model_id).map(|_| model_id.to_owned())
+}
+
+fn advertised_model_base_matches(value: &str, provider_id: Option<&str>, model_id: &str) -> bool {
+    let base = value.split_once('[').map_or(value, |(base, _)| base);
+    if let Some((provider, model)) = base.split_once('/') {
+        return provider_id.is_none_or(|provider_id| provider == provider_id) && model == model_id;
+    }
+    base == model_id
+}
+
+fn select_agent_session_config_value(
+    home: &Path,
+    config: &Config,
+    category: AgentSessionConfigCategory,
+) -> Result<Option<String>> {
+    let values = agent_session_config_values(home, config, category)?;
+
+    if !io::stdin().is_terminal() {
+        println!("available {} values:", category.id());
+        for value in values {
+            println!("{value}");
+        }
+        println!(
+            "rerun with `--{} <{}>` to apply agent config",
+            category.id(),
+            category.id()
+        );
+        return Ok(None);
+    }
+
+    println!("available {} values:", category.id());
+    for (index, value) in values.iter().enumerate() {
+        println!("  {}. {value}", index + 1);
+    }
+    print!("Select {} number: ", category.id());
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ServeIo { source })?;
+    let mut choice = String::new();
+    io::stdin()
+        .read_line(&mut choice)
+        .map_err(|source| StackError::ServeIo { source })?;
+    let index: usize = choice
+        .trim()
+        .parse()
+        .map_err(|_| StackError::AgentConfigProvision {
+            path: PathBuf::from("ACP session config options"),
+            reason: format!("{} selection must be a number", category.id()),
+        })?;
+    values
+        .get(index.saturating_sub(1))
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| StackError::AgentConfigProvision {
+            path: PathBuf::from("ACP session config options"),
+            reason: format!("{} selection `{index}` is out of range", category.id()),
+        })
+}
+
+fn validate_agent_session_config_value(
+    home: &Path,
+    config: &Config,
+    category: AgentSessionConfigCategory,
+    value: &str,
+) -> Result<()> {
+    let response = read_agent_new_session_response(home, config)?;
+    match category {
+        AgentSessionConfigCategory::Model => {
+            session_model_selection_for_value(&response, value).map(|_| ())
+        }
+        AgentSessionConfigCategory::Mode => {
+            session_config_id_for_value(response.config_options.as_deref(), category, value)
+                .map(|_| ())
+        }
+    }
+}
+
+fn agent_session_config_values(
+    home: &Path,
+    config: &Config,
+    category: AgentSessionConfigCategory,
+) -> Result<Vec<String>> {
+    let response = read_agent_new_session_response(home, config)?;
+    match category {
+        AgentSessionConfigCategory::Model => session_model_values(&response),
+        AgentSessionConfigCategory::Mode => {
+            session_config_values(response.config_options.as_deref(), category)
+        }
+    }
+}
+
+fn read_agent_new_session_response(
+    home: &Path,
+    config: &Config,
+) -> Result<agent_client_protocol::schema::NewSessionResponse> {
+    if let Some(path) = std::env::var_os(ACP_CONFIG_OPTIONS_FIXTURE_ENV) {
+        let path = PathBuf::from(path);
+        let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
+            path: path.clone(),
+            source,
+        })?;
+        let options: Vec<agent_client_protocol::schema::SessionConfigOption> =
+            serde_json::from_str(&body).map_err(|source| StackError::AgentConfigProvision {
+                path,
+                reason: format!("ACP session config options fixture is invalid: {source}"),
+            })?;
+        return Ok(
+            agent_client_protocol::schema::NewSessionResponse::new("fixture")
+                .config_options(options),
+        );
+    }
+
+    if let Some(path) = std::env::var_os(ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV) {
+        let path = PathBuf::from(path);
+        let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
+            path: path.clone(),
+            source,
+        })?;
+        return serde_json::from_str(&body).map_err(|source| StackError::AgentConfigProvision {
+            path,
+            reason: format!("ACP session/new fixture is invalid: {source}"),
+        });
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    let env = resolve_agent_env_for_cli(home, config)?;
+    let cwd = config
+        .agent
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
+
+    runtime.block_on(async move {
+        let bridge = AcpBridge::spawn(
+            &config.agent,
+            env,
+            cwd.clone(),
+            Arc::new(NoopSessionEventSink),
+            None,
+        )
+        .await?;
+        let response = bridge.new_session(cwd, Vec::new()).await;
+        let shutdown = bridge.shutdown().await;
+        let response = response?;
+        shutdown?;
+        Ok(response)
+    })
+}
+
+struct NoopSessionEventSink;
+
+impl SessionEventSink for NoopSessionEventSink {
+    fn append<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _kind: &'a str,
+        _payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
     }
 }
 
@@ -100,13 +604,13 @@ fn run_agent_install() -> Result<()> {
     store.migrate()?;
     set_owner_only_file(&state_path)?;
 
-    let env = resolve_agent_env_for_cli(&home, &config)?;
     let workspace_root = PathBuf::from(config.workspace.root.clone());
 
     let outcome = if let Some(install) = config.agent.install.as_ref() {
         // Operator escape-hatch shell recipe takes precedence over the
         // embedded registry. Useful for private forks of an agent whose id
         // happens to clash with a curated entry.
+        let env = resolve_agent_env_for_cli(&home, &config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         run_installer(
             install,
@@ -124,7 +628,14 @@ fn run_agent_install() -> Result<()> {
                     id: config.agent.id.clone(),
                 })?;
         let dest = local_bin_dir(&home);
-        install_resolved(&config.agent, entry, env, &workspace_root, &dest, &store)?
+        install_resolved(
+            &config.agent,
+            entry,
+            Default::default(),
+            &workspace_root,
+            &dest,
+            &store,
+        )?
     };
 
     println!("agent install: {}", outcome.label());
@@ -134,7 +645,7 @@ fn run_agent_install() -> Result<()> {
 }
 
 fn operator_registry_override(home: &std::path::Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("registry.toml")
+    home.join(".config").join("acp-stack").join("agents.toml")
 }
 
 fn local_bin_dir(home: &std::path::Path) -> PathBuf {
@@ -192,4 +703,21 @@ fn run_agent_status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_cloudflare_gateway_defaults_to_token_ref() {
+        assert_eq!(
+            default_api_key_ref_for_agent_provider("opencode", "cloudflare-ai-gateway"),
+            Some("CLOUDFLARE_API_TOKEN".to_owned())
+        );
+        assert_eq!(
+            default_api_key_ref_for_agent_provider("pi", "cloudflare-ai-gateway"),
+            Some("CLOUDFLARE_API_KEY".to_owned())
+        );
+    }
 }

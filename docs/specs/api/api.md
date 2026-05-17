@@ -55,6 +55,11 @@ Errors:
 - `GET /v1/agent/status`
 - `GET /v1/agent/capabilities`
 
+Phase 4 provider/model API:
+
+- `GET /v1/agent/models` (session-tier) - returns the filtered provider/model catalog for the configured agent. The server fetches `https://models.dev/api.json`, filters through the embedded provider mapping, and never returns secret values.
+- `POST /v1/agent/provider-config` (admin-tier) - accepts a selected provider id, model id, and explicit secret refs; validates them against the resolved catalog; atomically writes the generated OpenCode or Pi provider config file; then stops and restarts the active agent process when it is running. Response includes `{ applied: true, restarted: true|false }`.
+
 ### Session API
 
 - `POST /v1/sessions`

@@ -1,0 +1,368 @@
+# API-key compatibility metadata.
+#
+# Curated from:
+# [OpenCode Docs - Providers](https://opencode.ai/docs/providers/)
+# [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
+# [Amp manual](https://ampcode.com/manual)
+# [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
+# [models.dev](https://models.dev/api.json)
+# Last updated on 2026-05-17
+
+# Provider env vars
+
+[[api_keys]]
+env_var = "ANTHROPIC_API_KEY"
+provider_ids = ["anthropic"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "AZURE_OPENAI_API_KEY"
+provider_ids = ["azure-openai-responses"]
+companion_env_vars = ["AZURE_OPENAI_BASE_URL"]
+optional_env_vars = [
+  "AZURE_OPENAI_RESOURCE_NAME",
+  "AZURE_OPENAI_API_VERSION",
+  "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+]
+
+[[api_keys]]
+env_var = "OPENAI_API_KEY"
+provider_ids = ["openai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "DEEPSEEK_API_KEY"
+provider_ids = ["deepseek"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "GEMINI_API_KEY"
+provider_ids = ["google"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "MISTRAL_API_KEY"
+provider_ids = ["mistral"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "GROQ_API_KEY"
+provider_ids = ["groq"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "CEREBRAS_API_KEY"
+provider_ids = ["cerebras"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "CLOUDFLARE_API_KEY"
+provider_ids = ["cloudflare-ai-gateway", "cloudflare-workers-ai"]
+companion_env_vars = ["CLOUDFLARE_ACCOUNT_ID"]
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "XAI_API_KEY"
+provider_ids = ["xai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "OPENROUTER_API_KEY"
+provider_ids = ["openrouter"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "AI_GATEWAY_API_KEY"
+provider_ids = ["vercel-ai-gateway", "vercel"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ZAI_API_KEY"
+provider_ids = ["zai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "OPENCODE_API_KEY"
+provider_ids = ["opencode", "opencode-go"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "HF_TOKEN"
+provider_ids = ["huggingface"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "FIREWORKS_API_KEY"
+provider_ids = ["fireworks", "fireworks-ai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "TOGETHER_API_KEY"
+provider_ids = ["together", "togetherai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "KIMI_API_KEY"
+provider_ids = ["kimi-coding", "kimi-for-coding"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "MINIMAX_API_KEY"
+provider_ids = ["minimax"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "MINIMAX_CN_API_KEY"
+provider_ids = ["minimax-cn"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "XIAOMI_API_KEY"
+provider_ids = ["xiaomi"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "XIAOMI_TOKEN_PLAN_CN_API_KEY"
+provider_ids = ["xiaomi-token-plan-cn"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "XIAOMI_TOKEN_PLAN_AMS_API_KEY"
+provider_ids = ["xiaomi-token-plan-ams"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "XIAOMI_TOKEN_PLAN_SGP_API_KEY"
+provider_ids = ["xiaomi-token-plan-sgp"]
+companion_env_vars = []
+optional_env_vars = []
+
+# Direct agent env vars
+
+[[api_keys]]
+env_var = "AMP_API_KEY"
+agent_ids = ["amp"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "CURSOR_API_KEY"
+agent_ids = ["cursor"]
+companion_env_vars = []
+optional_env_vars = []
+
+# Providers
+
+[[providers]]
+id = "anthropic"
+name = "Anthropic"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "azure-openai-responses"
+name = "Azure OpenAI Responses"
+agents = ["pi"]
+
+[[providers]]
+id = "openai"
+name = "OpenAI"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "deepseek"
+name = "DeepSeek"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "google"
+name = "Google"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "mistral"
+name = "Mistral"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "groq"
+name = "Groq"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "cerebras"
+name = "Cerebras"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "cloudflare-ai-gateway"
+name = "Cloudflare AI Gateway"
+agents = ["pi", "opencode"]
+companion_env_vars = ["CLOUDFLARE_GATEWAY_ID"]
+optional_env_vars = []
+
+[providers.api_key_env_vars]
+opencode = "CLOUDFLARE_API_TOKEN"
+pi = "CLOUDFLARE_API_KEY"
+
+[[providers]]
+id = "cloudflare-workers-ai"
+name = "Cloudflare Workers AI"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "xai"
+name = "xAI"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "openrouter"
+name = "OpenRouter"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "vercel-ai-gateway"
+name = "Vercel AI Gateway"
+agents = ["pi"]
+
+[[providers]]
+id = "vercel"
+name = "Vercel AI Gateway"
+agents = ["opencode"]
+
+[[providers]]
+id = "zai"
+name = "Z.AI"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "opencode"
+name = "OpenCode Zen"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "opencode-go"
+name = "OpenCode Go"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "huggingface"
+name = "Hugging Face"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "fireworks"
+name = "Fireworks"
+agents = ["pi"]
+
+[[providers]]
+id = "fireworks-ai"
+name = "Fireworks AI"
+agents = ["opencode"]
+
+[[providers]]
+id = "together"
+name = "Together AI"
+agents = ["pi"]
+
+[[providers]]
+id = "togetherai"
+name = "Together AI"
+agents = ["opencode"]
+
+[[providers]]
+id = "kimi-coding"
+name = "Kimi For Coding"
+agents = ["pi"]
+
+[[providers]]
+id = "kimi-for-coding"
+name = "Kimi For Coding"
+agents = ["opencode"]
+
+[[providers]]
+id = "minimax"
+name = "MiniMax (minimax.io)"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = "minimax-cn"
+name = "MiniMax (minimaxi.com)"
+agents = ["pi"]
+
+[[providers]]
+id = "xiaomi"
+name = "Xiaomi"
+agents = ["pi"]
+
+[[providers]]
+id = "xiaomi-token-plan-cn"
+name = "Xiaomi Token Plan (China)"
+agents = ["pi"]
+
+[[providers]]
+id = "xiaomi-token-plan-ams"
+name = "Xiaomi Token Plan (Europe)"
+agents = ["pi"]
+
+[[providers]]
+id = "xiaomi-token-plan-sgp"
+name = "Xiaomi Token Plan (Singapore)"
+agents = ["pi"]
+
+[[providers]]
+id = "google-vertex"
+name = "Vertex"
+agents = ["pi", "opencode"]
+companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
+optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+[[providers]]
+id = "google-vertex-anthropic"
+name = "Vertex (Anthropic)"
+agents = ["pi", "opencode"]
+companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
+optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+[[providers]]
+id = "amazon-bedrock"
+name = "Amazon Bedrock"
+agents = ["pi", "opencode"]
+optional_env_vars = [
+  "AWS_PROFILE",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_REGION",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+  "AWS_BEDROCK_SKIP_AUTH",
+  "AWS_BEDROCK_FORCE_HTTP1",
+  "AWS_BEDROCK_FORCE_CACHE",
+]

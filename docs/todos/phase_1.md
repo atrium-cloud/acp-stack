@@ -92,16 +92,12 @@
 - [x] Implement `acps agent status`.
 - [x] Verify expected binary hash when `expected_sha256` is configured.
 
-## Agent Registry & Two-Layer Install (omitted from initial Phase 1)
+## Agent Registry & Two-Layer Install
 
-The original installer landed without a curated embedded registry or a model
-that can represent adapter-backed agents later. The work below is a Phase 1
-gap-fill, not a rework: the items above are still correct for native ACP agents;
-the items below replace runtime upstream-registry fetches with a narrow embedded
-catalog, starting with OpenCode as the only verified headless target.
+The original installer landed without a curated embedded registry or a model that can represent adapter-backed agents later. The work below is a Phase 1 gap-fill, not a rework: the items above are still correct for native ACP agents; the items below replace runtime upstream-registry fetches with a narrow embedded catalog, starting with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets.
 
-- [x] Hand-curate `data/registry.toml` with `kind = "native" | "adapter"` per entry, starting with OpenCode only.
-- [x] Add `src/runtime/agent_registry.rs` with `include_str!`-loaded embedded catalog and optional override at `~/.config/acp-stack/registry.toml`.
+- [x] Hand-curate `data/agents.toml` with `kind = "native" | "adapter"` per entry, starting with OpenCode, Cursor CLI, Amp, and Pi.
+- [x] Add `src/runtime/agent_registry.rs` with `include_str!`-loaded embedded catalog and optional override at `~/.config/acp-stack/agents.toml`.
 - [x] Add `src/runtime/github_release.rs` with API client, asset glob matching (`{arch}` substitution), `tar.gz` / `zip` / raw extraction, optional `checksums.txt` verification, and `GITHUB_TOKEN` passthrough.
 - [x] Remove upstream registry fetch from `src/runtime/agent_installer.rs`; resolve installs from the embedded catalog.
 - [x] Refactor `agent_installer` to dispatch on `kind` and orchestrate two install steps (harness then adapter) for adapter-backed entries.
@@ -112,21 +108,24 @@ catalog, starting with OpenCode as the only verified headless target.
 - [x] Add dev-only `sync-registry-check` binary that verifies embedded registry ids still exist upstream.
 - [x] Update `docs/specs/runtime.md`, `docs/specs/config.md`, and `docs/specs/acp/acp-bridge.md` to describe the new install model.
 - [x] Update `docs/mgmt/architecture.md` and `docs/mgmt/tech-stack.md` for new modules and crates.
-- [ ] Cover the two-step install flow in `tests/agent_install_tests.rs` end-to-end against a mocked GitHub API (currently covered only by module-level unit tests in `agent_registry.rs` and `github_release.rs`).
 
 ## Agent Headless Support Contracts
 
-- [ ] Make OpenCode with OpenCode Go the first verified headless support target.
-- [ ] Define the support contract format for documented agent harnesses.
-- [ ] For every `headless_compatible = true` registry entry, add `docs/agents/{id}.md`.
-- [ ] Each agent doc cites the official docs/repos used as sources.
-- [ ] Each agent doc defines install method, ACP launch command, auth flow, required env vars, optional env vars, and provider/model setup where applicable.
-- [ ] Classify each variable as secret, non-secret config, install-only, or runtime env.
-- [ ] Document unsupported auth paths, especially OAuth-only or browser-login flows.
-- [ ] Add a minimal non-interactive smoke verification for each supported agent.
-- [ ] Add registry metadata linking each supported entry to its headless setup doc.
-- [ ] Keep every other registry entry unverified until its own headless setup doc and smoke verification exists.
-- [ ] Treat missing or non-credible headless setup docs as a blocker for `headless_compatible = true`.
+- [x] Make OpenCode with OpenCode Go the first verified headless support target.
+- [x] Define the support contract format for documented agent harnesses.
+- [x] For every `headless_compatible = true` registry entry, add `docs/agents/{id}.md`.
+- [x] Each agent doc cites the official docs/repos used as sources.
+- [x] Each agent doc defines install method, ACP launch command, auth flow, required env vars, optional env vars, and provider/model setup where applicable.
+- [x] Classify each variable as secret, non-secret config, install-only, or runtime env.
+- [x] Document unsupported auth paths, especially OAuth-only or browser-login flows.
+- [x] Add a minimal non-interactive smoke verification for each supported agent.
+- [x] Add registry metadata linking each supported entry to its headless setup doc.
+- [x] Keep every other registry entry unverified until its own headless setup doc and smoke verification exists.
+- [x] Treat missing or non-credible headless setup docs as a blocker for `headless_compatible = true`.
+- [x] Add a reusable API-key env var to provider-id mapping for init and provider/model resolution.
+- [x] During `acps init`, provision baseline OpenCode and Pi config files so env-injected API keys are actually consumed headlessly.
+
+Phase 1 scope is limited to credible headless agent support. Full installer orchestration, workspace data ingestion, and an operator-facing real-prompt testflight command are Phase 4 work.
 
 ## Workspace And Commands
 
