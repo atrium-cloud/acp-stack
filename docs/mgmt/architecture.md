@@ -41,7 +41,7 @@ This document captures the management-level architecture for `acp-stack`. For co
 - `Permissions` - durable request/decision lifecycle for ACP permission requests and stack-mediated commands.
 - `Events` - normalizes WebSocket messages and durable event records.
 
-The current Rust crate exposes a library behind the `acps` daemon binary and the `acpctl` local-agent binary. Public compatibility modules remain at the crate root, while implementation files are grouped by domain: runtime services live under `runtime/` (`commands`, `deps`, `mcp`, `permissions`, `supervisor`, `acp_bridge`, `agent_headless_config`, `agent_installer`, `agent_registry`, `github_release`, `provider_keys`); the HTTP API surface splits into per-route-group leaves under `api/routes/` plus auth/ws middleware leaves under `api/`; durable SQLite state splits into per-table leaves under `state/`; the CLI splits per subcommand group under `cli/`; and the local `acpctl` listener keeps a public `local_listener` facade with router/socket internals under `local_listener/`. The `acpctl` binary entrypoint is `src/bin/acpctl/main.rs`, with command dispatch, UDS HTTP client, helpers, and formatters in sibling modules.
+The current Rust crate exposes a library behind the `acps` daemon binary and the `acpctl` local-agent binary. Public compatibility modules remain at the crate root, while implementation files are grouped by domain: runtime services live under `runtime/` (`commands`, `deps`, `mcp`, `permissions`, `supervisor`, `acp_bridge`, `agent_headless_config`, `agent_installer`, `agent_registry`, `github_release`, `provider_keys`); the HTTP API surface splits into per-route-group leaves under `api/routes/` plus auth/ws middleware leaves under `api/`; durable SQLite state splits into per-table leaves under `state/`; the CLI splits per subcommand group under `cli/`; and the local `acpctl` listener keeps a public `local_listener` facade with router/socket internals under `local_listener/`. The `acpctl` binary entrypoint is `src/bin/acpctl/main.rs`, with command dispatch, UDS HTTP client, helpers, and formatters in sibling modules. The `acpctl mcp serve` subcommand owns its own submodule tree under `src/bin/acpctl/mcp/` (`dispatcher`, `tools`, `server`, `transport_uds`) — an rmcp-based MCP server that re-uses the UDS HTTP client to proxy every tool call into the daemon's existing allowlisted local routes.
 
 ### Source tree
 
@@ -113,6 +113,12 @@ src/
     client.rs                     UDS HTTP client
     formatters.rs                 stdout/JSON formatters
     helpers.rs                    socket-path + url-encoding helpers
+    mcp.rs                        `acpctl mcp serve` subcommand entry
+    mcp/
+      dispatcher.rs               tool name + args → UDS request mapping
+      tools.rs                    rmcp Tool definitions for the 10-tool surface
+      server.rs                   rmcp ServerHandler + stdio transport entry
+      transport_uds.rs            streamable-HTTP MCP transport bound on UDS
   auth.rs                         KeyKind + constant-time compare + failure recording
   config.rs                       TOML schema, load/validate/canonicalize
   envelope.rs                     ApiSuccess / ApiError + IntoResponse for StackError
