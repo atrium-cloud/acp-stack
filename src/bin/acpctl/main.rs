@@ -8,6 +8,7 @@ mod cli_defs;
 mod client;
 mod formatters;
 mod helpers;
+mod mcp;
 
 use std::process::ExitCode;
 

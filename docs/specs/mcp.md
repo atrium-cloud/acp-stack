@@ -24,6 +24,7 @@ The curated preset docs should cite their upstream sources. The `modelcontextpro
 Initial curated preset work stays narrow:
 
 - Linear HTTP - documented in this file
+- Exa HTTP - documented in this file
 - Slack - planned example once its headless auth shape is documented
 - generic HTTP - template for user-provided HTTP MCP endpoints
 
@@ -84,6 +85,30 @@ acps secrets set LINEAR_API_KEY
 The header value is interpolated verbatim, so the stored secret must include the `Bearer ` prefix — for example `Bearer lin_api_...`. The token itself can be either a Linear personal API key (long-lived, scoped to one user) or an OAuth2 `client_credentials` app-actor token (valid for 30 days, scoped to all public teams in the workspace). The interactive OAuth user flow is intentionally not used here because it requires a browser callback that the runtime cannot satisfy.
 
 The remote endpoint and authentication options above are verified against upstream as of 2026-05-15.
+
+## Exa (HTTP)
+
+Exa hosts a remote MCP server at `https://mcp.exa.ai/mcp` using streamable HTTP transport. The server reads an API key from the `x-api-key` header, which fits a headless deployment without OAuth.
+
+```toml
+[[mcp.servers]]
+type = "http"
+name = "exa"
+url = "https://mcp.exa.ai/mcp"
+headers = [
+  { name = "x-api-key", value_ref = "EXA_API_KEY" },
+]
+```
+
+Populate the secret:
+
+```sh
+acps secrets set EXA_API_KEY
+```
+
+The header value is interpolated verbatim, so the stored secret is the raw API key with no prefix. Keys come from the Exa dashboard. The server enables `web_search_exa` (general web search returning ready-to-use content) and `web_fetch_exa` (retrieves URLs as clean markdown) by default; opt-in tools are selected through the `?tools=` query string on the URL when needed.
+
+The remote endpoint and authentication options above are verified against upstream as of 2026-05-17.
 
 ## How servers attach to sessions
 
