@@ -2,7 +2,7 @@
 
 While `acp-stack` leverages ACP to connect to agents, not all ACP-compatible agents are automatically supported by `acp-stack`.
 
-Last updated: May 17, 2026
+Last updated: May 18, 2026
 
 ## Eligibility
 
@@ -46,7 +46,11 @@ We also have limited resources for adding support. Adding each agent requires ex
     - Tested with Amp Code Smart Mode on May 17, 2026. `amp-acp v0.7.0` did not advertise ACP mode config on May 19, 2026.
 - Cursor CLI: native
     - Tested with active Cursor subscription on May 17, 2026.
+- Goose: native
 
 ## Currently Unsupported
 
 - Cortex Code: Snowflake-specific, not a general-purpose ACP agent
+- Kilo: headless `kilo run` works with API-key provider config, but `kilo acp` starts a hostname/port-based ACP server rather than a stdio ACP peer. `acp-stack` currently launches agents over stdio, so Kilo cannot be supervised directly until Kilo exposes stdio ACP mode, an adapter exists, or `acp-stack` supports connecting to external ACP server transports (valid as of 2026-05-18).
+- Cline: direct CLI prompts can use OpenRouter headlessly, and `cline --acp` initializes over newline-delimited JSON-RPC, but isolated ACP session creation is not headless-compatible. In manual testing, `session/new` failed until the client called ACP `authenticate`; Cline's advertised ACP auth methods opened browser/account login instead of using the injected OpenRouter API-key env var (valid as of 2026-05-18).
+    - Cline also has an open ACP registry compatibility issue around expected session behavior in Zed: https://github.com/zed-industries/zed/issues/55913. Revisit if Cline exposes a non-interactive ACP auth path for provider API keys or supports ACP sessions from provider env/config without browser login.

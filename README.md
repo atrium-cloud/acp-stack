@@ -4,12 +4,13 @@
 
 ## Agent Support
 
-Last updated: May 17, 2026
+Last updated: May 18, 2026
 
 - OpenCode (native)
+- Pi Agent via `pi-acp` (adapter)
+- Amp Code via `amp-acp` (adapter)
 - Cursor CLI (native)
-- Amp Code via Amp ACP (adapter)
-- Pi Agent via Pi ACP (adapter)
+- Goose (native)
 
 See [docs/specs/agents/support.md](docs/specs/agents/support.md) for the support policy, verification process, and currently unsupported agents.
 

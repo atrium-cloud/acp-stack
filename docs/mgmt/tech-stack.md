@@ -25,7 +25,7 @@ This document records the implementation technologies chosen for the standalone 
 - `tokio-util` (`compat`, `rt`) - bridges tokio's `AsyncRead`/`AsyncWrite` traits to the `futures` traits the ACP SDK expects when constructing `ByteStreams` over child stdio. The `rt` feature exposes `CancellationToken` for cancelling in-flight prompts when the supervisor receives `session/cancel` or shuts the agent down.
 - `futures` - shared async primitives used in concert with the ACP SDK.
 - `libc` - process-group signaling (`kill(-pid, SIGKILL)`) for terminating runaway installers along with their grandchildren on Unix.
-- `serde`, `serde_json`, `toml` - API payloads, config files, durable event payloads, and migration manifest parsing.
+- `serde`, `serde_json`, `serde_yaml`, `toml` - API payloads, generated agent config files, durable event payloads, and migration manifest parsing.
 - `tokio-tungstenite` - WebSocket client. Powers `acps logs tail` for live `/v1/ws` subscription and is reused by integration tests to verify upgrade/auth/subscription behavior.
 - `chrono` - RFC3339 timestamps for durable state records.
 - `rusqlite` - SQLite state and migrations.
