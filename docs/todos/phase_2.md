@@ -35,9 +35,7 @@
 - [x] Document custom stdio MCP server declarations with command, args, and explicit env secret refs.
 - [x] Document custom HTTP MCP server declarations with URL and explicit header secret refs.
 - [x] Document dependency declarations that reference custom MCP server names.
-- [ ] Add Slack MCP example.
 - [x] Add Linear MCP example.
-- [ ] Add generic HTTP MCP example.
 
 ## Dependency Checks
 
