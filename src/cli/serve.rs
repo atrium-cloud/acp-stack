@@ -261,16 +261,29 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let mut resume_session_cap = true;
     let mut close_session_cap = true;
     let mut prompt_emits_updates = true;
+    let mut env_assertions = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--assert-env-absent" => {
                 if let Some(name) = iter.next() {
-                    title = if std::env::var_os(name).is_some() {
-                        format!("env leaked: {name}")
-                    } else {
-                        "env absent".to_owned()
-                    };
+                    if std::env::var_os(name).is_some() {
+                        env_assertions.push(format!("env leaked: {name}"));
+                    }
+                }
+            }
+            "--assert-env-present" => {
+                if let Some(name) = iter.next() {
+                    if std::env::var_os(name).is_none() {
+                        env_assertions.push(format!("env missing: {name}"));
+                    }
+                }
+            }
+            "--assert-env-not-equals" => {
+                if let (Some(name), Some(value)) = (iter.next(), iter.next()) {
+                    if std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new(value)) {
+                        env_assertions.push(format!("env override: {name}"));
+                    }
                 }
             }
             "--no-cap-load-session" => {
@@ -287,6 +300,13 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             }
             _ => {}
         }
+    }
+    if title == "acps fake agent" && args.iter().any(|arg| arg.starts_with("--assert-env-")) {
+        title = if env_assertions.is_empty() {
+            "env assertions passed".to_owned()
+        } else {
+            env_assertions.join(", ")
+        };
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();

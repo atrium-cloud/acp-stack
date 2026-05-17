@@ -10,6 +10,7 @@ use super::agent::AgentCommand;
 use super::auth::AuthCommand;
 use super::config::ConfigCommand;
 use super::deps::DepsCommand;
+use super::init::InitArgs;
 use super::logs::LogsCommand;
 use super::metrics::MetricsCommand;
 use super::reset::ResetArgs;
@@ -31,7 +32,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Init,
+    Init(InitArgs),
     Status,
     Reset(ResetArgs),
     /// Run the HTTP daemon in the foreground. Blocks until SIGTERM or SIGINT.
@@ -102,7 +103,7 @@ pub fn run() -> Result<()> {
 
 fn run_cli(cli: Cli) -> Result<()> {
     let result = match cli.command {
-        Command::Init => super::init::run_init(),
+        Command::Init(args) => super::init::run_init(args),
         Command::Status => super::status::run_status(),
         Command::Reset(args) => super::reset::run_reset(args),
         Command::Serve(args) => super::serve::run_serve(args),

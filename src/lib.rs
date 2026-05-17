@@ -18,6 +18,6 @@ pub mod workspace;
 
 pub use error::{Result, StackError};
 pub use runtime::{
-    acp_bridge, agent_installer, agent_registry, commands, deps, github_release, mcp, permissions,
-    supervisor,
+    acp_bridge, agent_headless_config, agent_installer, agent_registry, commands, deps,
+    github_release, mcp, permissions, provider_keys, supervisor,
 };

@@ -1,0 +1,157 @@
+# Supported Agents
+# OpenCode
+
+[[agents]]
+id = "opencode"
+name = "OpenCode"
+kind = "native"
+headless_compatible = true
+set_provider = true
+set_model = true
+set_mode = true # build, plan
+website = "https://opencode.ai"
+github = "anomalyco/opencode"
+support_doc = "docs/agents/opencode.md"
+
+[agents.harness]
+id = "opencode"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_opencode="${managed_bin}/opencode"
+mkdir -p "$managed_bin"
+curl -fsSL https://opencode.ai/install | XDG_BIN_DIR="$managed_bin" bash -s -- --no-modify-path
+test -x "$managed_opencode"
+'''
+creates = "opencode"
+
+[agents.harness.install.npm]
+package = "opencode-ai"
+creates = "opencode"
+
+[agents.harness.install.github]
+asset_pattern = "opencode-linux-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "opencode"
+
+[agents.harness.install.github.arch]
+x86_64 = "x64"
+aarch64 = "arm64"
+
+# Cursor CLI
+
+[[agents]]
+id = "cursor"
+name = "Cursor CLI"
+kind = "native"
+headless_compatible = true
+set_provider = false
+set_model = true
+set_mode = true # agent, plan, ask
+website = "https://cursor.com/cli"
+support_doc = "docs/agents/cursor.md"
+
+[agents.harness]
+id = "cursor-agent"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_cursor="${managed_bin}/cursor-agent"
+mkdir -p "$managed_bin"
+curl -fsS https://cursor.com/install | bash
+test -x "$managed_cursor"
+'''
+creates = "cursor-agent"
+
+# Amp Code
+
+[[agents]]
+id = "amp"
+name = "Amp Code"
+kind = "adapter"
+headless_compatible = true
+set_provider = false
+set_model = false
+set_mode = false
+website = "https://ampcode.com/"
+support_doc = "docs/agents/amp.md"
+
+[agents.adapter]
+id = "amp-acp"
+github = "tao12345666333/amp-acp"
+
+[agents.adapter.install.github]
+asset_pattern = "amp-acp-linux-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "amp-acp"
+
+[agents.adapter.install.github.arch]
+x86_64 = "x86_64"
+aarch64 = "aarch64"
+
+[agents.harness]
+id = "amp"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_amp="${managed_bin}/amp"
+mkdir -p "$managed_bin"
+curl -fsSL https://ampcode.com/install.sh | bash
+test -x "$managed_amp"
+'''
+creates = "amp"
+
+# Pi Agent
+
+[[agents]]
+id = "pi"
+name = "Pi Agent"
+kind = "adapter"
+headless_compatible = true
+set_provider = true
+set_model = true
+set_mode = false # not supported
+website = "https://pi.dev"
+github = "earendil-works/pi"
+support_doc = "docs/agents/pi.md"
+
+[agents.adapter]
+id = "pi-acp"
+github = "svkozak/pi-acp"
+
+[agents.adapter.install.npm]
+package = "pi-acp"
+creates = "pi-acp"
+
+[agents.harness]
+id = "pi"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_pi="${managed_bin}/pi"
+mkdir -p "$managed_bin"
+curl -fsSL https://pi.dev/install.sh | sh
+test -x "$managed_pi"
+'''
+creates = "pi"
+
+[agents.harness.install.npm]
+package = "@earendil-works/pi-coding-agent"
+creates = "pi"
+
+[agents.harness.install.github]
+asset_pattern = "pi-linux-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "pi"
+
+[agents.harness.install.github.arch]
+x86_64 = "x64"
+aarch64 = "arm64"
