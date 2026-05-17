@@ -26,7 +26,7 @@ Runtime process behavior:
 
 ## Agent Installation
 
-`acps agent install` resolves the configured `[agent].id` against an embedded curated catalog at `data/agents.toml` (compiled into the binary). The catalog is intentionally narrow while the headless deployment pipeline is being proven: OpenCode with OpenCode Go, Cursor CLI, Amp through `amp-acp`, and Pi through `pi-acp` are the first verified headless targets. The registry model classifies entries as **native** (the harness itself speaks ACP) or **adapter** (an ACP adapter launches or coordinates an upstream harness), so later agents can be added one at a time once their headless setup docs and smoke verification are credible. Unsupported or unknown agents are refused before running installer code.
+`acps agent install` resolves the configured `[agent].id` against an embedded curated catalog at `data/agents.toml` (compiled into the binary). The catalog is intentionally narrow while the headless deployment pipeline is being proven: OpenCode, Cursor CLI, and Goose are native targets; Amp through `amp-acp` and Pi through `pi-acp` are adapter-backed targets. The registry model classifies entries as **native** (the harness itself speaks ACP) or **adapter** (an ACP adapter launches or coordinates an upstream harness), so later agents can be added one at a time once their headless setup docs and smoke verification are credible. Unsupported or unknown agents are refused before running installer code.
 
 Every registry entry declares `[agents.harness.install.{shell,npm,github}]` for the upstream agent harness. Native entries produce one install step because the harness itself speaks ACP. Adapter-backed entries also declare `[agents.adapter.install.{shell,npm,github}]` for the ACP-facing adapter; harness and adapter install steps run concurrently and each writes an `installer_runs` row tagged with `step = "harness" | "adapter"`. A failure in either step fails the install after both in-flight steps finish. The final `[agent].command` verification runs only after all selected steps succeed.
 
@@ -71,6 +71,7 @@ The embedded registry replaces an earlier runtime fetch of `https://cdn.agentcli
 
 `acps init` selects the supported agent and may select the initial provider, but it does not infer a model from API-key refs or test-only defaults. Provider-backed generated config is written only after `[agent.provider]` is explicit:
 
+- Goose: writes or merges `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, summarizing context, and session naming disabled. Goose consumes provider-native API-key env vars directly, so the selected `api_key_ref` must match the provider mapping.
 - OpenCode: writes or merges `~/.config/opencode/opencode.json` with a provider `apiKey` reference to the configured API-key ref; when a model is configured, it also writes the selected provider-qualified model.
 - Pi: writes or merges `~/.pi/agent/settings.json` and sets `enabledModels` only when a model is configured.
 
@@ -85,7 +86,7 @@ Provider management includes a provider/model resolution layer for init and prov
 - expose ACP-advertised model/mode choices through the unified API so clients can render selection without scraping agent-specific CLIs
 - map available secret refs and required companion refs to allowed provider ids before accepting a provider choice
 - preserve the resolved provider id, model id, and selected secret refs as non-secret config plus secret references
-- update the generated agent config file before writing the main config; later relaunch the active OpenCode or Pi process so the new provider/model takes effect
+- update generated agent config before writing the main config; later relaunch the active Goose, OpenCode, or Pi process so the new provider/model takes effect. For Goose, model changes take effect through the next session's ACP model config update instead of `GOOSE_MODEL`.
 
 ACP session config options are discovery data, not an execution dependency for every prompt. If discovery fails during an already-configured deployment, the runtime should keep the existing provider/model config and report the refresh failure. Init should fail fast only when no valid provider/model choice is available.
 
