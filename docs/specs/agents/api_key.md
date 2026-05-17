@@ -10,6 +10,7 @@ Supported agents use these paths:
 
 | Agent      | Secret refs                         | Uptake path                              | Notes                                                                                           |
 | ---------- | ----------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Goose      | provider-native API key ref         | process env plus generated Goose config  | Goose config selects provider; ACP session config selects model.                                |
 | OpenCode   | provider-selected API key ref       | generated OpenCode config references env | Init and provider edits write `opencode.json` with the selected provider and matching `{env:...}` key ref. |
 | Cursor CLI | `CURSOR_API_KEY`                    | process env auto-discovery               | Cursor's official wrapper reads the key from the environment; `acps agent set --model <model>` validates Cursor model choices through ACP. |
 | Pi Agent   | provider-specific API key env names | process env plus generated model scope   | `acps agent set` writes Pi `enabledModels` with the selected model.                    |
@@ -19,13 +20,13 @@ Supported agents use these paths:
 
 `provider` is a first-class `acps` concept defined in [config.md](config.md). During init, the operator picks an agent, installs it when requested, then may pick the initial provider. Init uses provider metadata to choose required refs, collect missing values into the encrypted secret store, and write `[agent.provider]` with provider id and API-key ref. Init does not select or synthesize a model.
 
-For OpenCode, this distinction matters: OpenCode can use whichever key the configured provider block references, but the provider block must be set up accordingly. For Pi, the provider is part of the model string. Cursor exposes its supported models through ACP and uses `CURSOR_API_KEY` directly, without an `acps` provider id. Amp Code does not accept raw provider/model designations through this support contract.
+For Goose, this distinction matters because provider auth is consumed from provider-native env vars, so `api_key_ref` must match the provider's mapped default ref. For OpenCode, the generated provider block can reference the selected key using `{env:...}`. For Pi, the provider is part of the model string. Cursor exposes its supported models through ACP and uses `CURSOR_API_KEY` directly, without an `acps` provider id. Amp Code does not accept raw provider/model designations through this support contract.
 
 `acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` is the CLI shape for editing provider config after init. `acps agent set --model <model>` is the model-only shape for Cursor. If `--api-key-ref` is omitted on provider-backed edits, `acps` should use the default key ref from the mapping below. Model values come from the agent's ACP `model` config option: explicit `--model` values are validated against it, interactive terminals prompt from it when provider-backed `--model` is omitted, and non-interactive runs print advertised model values without mutating config.
 
 ## API Key Provider Mapping
 
-The mapping below defines default API-key env vars for provider ids. It is not a universal claim that a provider cannot be configured with another key reference; it is the default prompt/storage contract used by provider-management commands. Provider ids come from Pi and OpenCode provider docs, with display names from `https://models.dev/api.json` where the provider id is present there. The mapping also scopes provider ids to the agents that support them.
+The mapping below defines default API-key env vars for provider ids. It is not a universal claim that a provider cannot be configured with another key reference; it is the default prompt/storage contract used by provider-management commands. Provider ids come from Goose, Pi, and OpenCode provider docs, with display names from `https://models.dev/api.json` where the provider id is present there. The mapping also scopes provider ids to the agents that support them.
 
 | API key env var                 | Provider ids                                     |
 | ------------------------------- | ------------------------------------------------ |

@@ -404,6 +404,70 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
 }
 
 #[test]
+fn agent_set_goose_provider_updates_generated_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "goose""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Goose""#)
+        .replace(r#"command = "opencode""#, r#"command = "goose""#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["OPENROUTER_API_KEY"]"#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openrouter",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
+        .stdout(predicates::str::contains("Goose config:"));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains(r#"id = "openrouter""#));
+    assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
+    assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
+
+    let goose_path = tempdir
+        .path()
+        .join(".config")
+        .join("goose")
+        .join("config.yaml");
+    let goose: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(goose_path).expect("goose config should be readable"),
+    )
+    .expect("goose config should parse");
+    assert_eq!(goose["GOOSE_PROVIDER"], "openrouter");
+    assert_eq!(goose["GOOSE_MODEL"], serde_yaml::Value::Null);
+}
+
+#[test]
 fn agent_set_cursor_accepts_openai_model_from_acp_options() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");

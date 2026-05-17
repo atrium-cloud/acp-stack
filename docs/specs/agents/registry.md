@@ -4,7 +4,7 @@
 
 ## Terminology
 
-- Agent: the product the operator chooses in `[agent].id`, such as `opencode`, `cursor`, `amp`, or `pi`.
+- Agent: the product the operator chooses in `[agent].id`, such as `opencode`, `cursor`, `amp`, `pi`, or `goose`.
 - Harness: the upstream agent CLI that performs the model work. Native agents use the harness as the ACP process.
 - Adapter: an ACP-facing wrapper for a harness that does not speak ACP directly. Adapter-backed entries keep the real agent at top level and put the wrapper identity in `[agents.adapter]`.
 
@@ -19,6 +19,7 @@ Top-level metadata:
 - `set_provider`: true when `acps agent set` can safely update generated agent config.
 - `set_model`: true when `acps agent set` can validate and store an ACP-advertised model value.
 - `set_mode`: true when `acps agent set` can validate and store an ACP-advertised mode value.
+- `stdio_framing`: ACP stdio framing verified during onboarding. Supported values currently include `json-lines`, the ACP spec transport used by the Rust SDK.
 - `website`: official product website.
 - `github`: GitHub path shorthand for the official harness/source repository when one exists, in `owner/repo` or `owner/repo/path` form.
 - `support_doc`: local support note under `docs/agents/`.

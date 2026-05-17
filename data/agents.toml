@@ -1,4 +1,5 @@
 # Supported Agents
+
 # OpenCode
 
 [[agents]]
@@ -9,6 +10,7 @@ headless_compatible = true
 set_provider = true
 set_model = true
 set_mode = true # build, plan
+stdio_framing = "json-lines"
 website = "https://opencode.ai"
 github = "anomalyco/opencode"
 support_doc = "docs/agents/opencode.md"
@@ -50,6 +52,7 @@ headless_compatible = true
 set_provider = false
 set_model = true
 set_mode = true # agent, plan, ask
+stdio_framing = "json-lines"
 website = "https://cursor.com/cli"
 support_doc = "docs/agents/cursor.md"
 
@@ -77,6 +80,7 @@ headless_compatible = true
 set_provider = false
 set_model = false
 set_mode = false
+stdio_framing = "json-lines"
 website = "https://ampcode.com/"
 support_doc = "docs/agents/amp.md"
 
@@ -117,6 +121,7 @@ headless_compatible = true
 set_provider = true
 set_model = true
 set_mode = false # not supported
+stdio_framing = "json-lines"
 website = "https://pi.dev"
 github = "earendil-works/pi"
 support_doc = "docs/agents/pi.md"
@@ -155,3 +160,32 @@ binary_name = "pi"
 [agents.harness.install.github.arch]
 x86_64 = "x64"
 aarch64 = "arm64"
+
+# Goose
+
+[[agents]]
+id = "goose"
+name = "Goose"
+kind = "native"
+headless_compatible = true
+set_provider = true
+set_model = true
+set_mode = false
+stdio_framing = "json-lines"
+website = "https://goose-docs.ai/"
+github = "aaif-goose/goose"
+support_doc = "docs/agents/goose.md"
+
+[agents.harness]
+id = "goose"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_goose="${managed_bin}/goose"
+mkdir -p "$managed_bin"
+curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false GOOSE_BIN_DIR="$managed_bin" bash
+test -x "$managed_goose"
+'''
+creates = "goose"

@@ -150,7 +150,7 @@ impl ProviderKeyMapping {
             }
             validate_tokens(format!("providers.{}.agents", mapping.id), &mapping.agents)?;
             for agent in &mapping.agents {
-                if !matches!(agent.as_str(), "opencode" | "pi" | "cursor") {
+                if !matches!(agent.as_str(), "opencode" | "pi" | "cursor" | "goose") {
                     return provider_mapping_error(format!(
                         "provider `{}` references unsupported agent `{agent}`",
                         mapping.id
@@ -163,7 +163,7 @@ impl ProviderKeyMapping {
                     &format!("providers.{}.api_key_env_vars.{agent}", mapping.id),
                     env_var,
                 )?;
-                if !matches!(agent.as_str(), "opencode" | "pi" | "cursor") {
+                if !matches!(agent.as_str(), "opencode" | "pi" | "cursor" | "goose") {
                     return provider_mapping_error(format!(
                         "provider `{}` references unsupported API-key agent `{agent}`",
                         mapping.id
@@ -513,7 +513,19 @@ mod tests {
         assert!(provider_id_supports_agent("openai", "pi"));
         assert!(provider_id_supports_agent("openai", "opencode"));
         assert!(!provider_id_supports_agent("openai", "cursor"));
+        assert!(provider_id_supports_agent("anthropic", "goose"));
+        assert!(provider_id_supports_agent("openai", "goose"));
+        assert!(provider_id_supports_agent("mistral", "goose"));
+        assert!(provider_id_supports_agent("groq", "goose"));
+        assert!(provider_id_supports_agent("openrouter", "goose"));
+        assert!(provider_id_supports_agent("cerebras", "goose"));
+        assert!(provider_id_supports_agent("xai", "goose"));
+        assert!(!provider_id_supports_agent("deepseek", "goose"));
         assert_eq!(env_var_for_agent_provider_id("cursor", "openai"), None);
+        assert_eq!(
+            env_var_for_agent_provider_id("goose", "openrouter"),
+            Some("OPENROUTER_API_KEY")
+        );
     }
 
     #[test]

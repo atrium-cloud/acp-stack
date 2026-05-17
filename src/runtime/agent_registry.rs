@@ -4,7 +4,7 @@
 //! `acps agent install`. It supersedes the upstream
 //! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
 //! runtime can make conservative support claims. The embedded catalog starts
-//! with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets.
+//! with Goose, OpenCode, Cursor CLI, Amp, and Pi as verified headless targets.
 //! The schema supports entries that need both an ACP adapter and the upstream
 //! harness it wraps.
 //!
@@ -165,6 +165,8 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_mode: bool,
     #[serde(default)]
+    pub stdio_framing: RegistryStdioFraming,
+    #[serde(default)]
     pub website: Option<String>,
     #[serde(default)]
     pub github: Option<String>,
@@ -192,6 +194,13 @@ impl RegistryEntry {
 pub enum RegistryKind {
     Native,
     Adapter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegistryStdioFraming {
+    #[default]
+    JsonLines,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -464,7 +473,7 @@ mod tests {
             .filter(|entry| entry.headless_compatible)
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(supported, ["opencode", "cursor", "amp", "pi"]);
+        assert_eq!(supported, ["opencode", "cursor", "amp", "pi", "goose"]);
     }
 
     #[test]
@@ -475,10 +484,11 @@ mod tests {
             .iter()
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(ids, ["opencode", "cursor", "amp", "pi"]);
+        assert_eq!(ids, ["opencode", "cursor", "amp", "pi", "goose"]);
         let cursor = catalog.lookup("cursor").expect("cursor entry exists");
         assert_eq!(cursor.kind, RegistryKind::Native);
         assert!(cursor.headless_compatible);
+        assert_eq!(cursor.stdio_framing, RegistryStdioFraming::JsonLines);
         assert!(!cursor.set_provider);
         assert!(cursor.set_model);
         assert!(cursor.set_mode);
@@ -500,6 +510,15 @@ mod tests {
         assert!(pi.set_provider);
         assert!(pi.set_model);
         assert!(!pi.set_mode);
+        assert_eq!(pi.stdio_framing, RegistryStdioFraming::JsonLines);
+        let goose = catalog.lookup("goose").expect("goose entry exists");
+        assert_eq!(goose.kind, RegistryKind::Native);
+        assert!(goose.headless_compatible);
+        assert!(goose.set_provider);
+        assert!(goose.set_model);
+        assert!(!goose.set_mode);
+        assert_eq!(goose.stdio_framing, RegistryStdioFraming::JsonLines);
+        assert_eq!(goose.support_doc.as_deref(), Some("docs/agents/goose.md"));
     }
 
     #[test]

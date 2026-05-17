@@ -62,7 +62,7 @@ Fields:
 
 - `[agent].model`: exact agent-advertised model id for model-only agents such as Cursor CLI.
 - `[agent.provider].id`: provider id listed for the configured agent in `data/mapping.toml`.
-- `[agent.provider].model`: exact agent-advertised model id for provider-backed agents. OpenCode and Pi commonly use `<provider-id>/<model-id>`.
+- `[agent.provider].model`: exact agent-advertised model id for provider-backed agents. Goose uses provider-native model ids, while OpenCode and Pi commonly use `<provider-id>/<model-id>`.
 - `[agent.provider].api_key_ref`: secret ref that should be present in `[agent].env` and referenced by generated agent-owned config.
 
 ## Accepted Provider IDs And Model Formats
@@ -71,12 +71,21 @@ Provider ids must be listed for the configured agent in `data/mapping.toml`. The
 
 Model values are agent-specific:
 
+- Goose: exact provider-native model ids for the selected provider.
 - OpenCode: exact provider-qualified model ids in `<provider-id>/<model-id>` form.
 - Pi: exact ids or provider-qualified model patterns accepted by Pi model scoping.
 - Amp Code: no raw provider/model value accepted through `acps`.
 - Cursor CLI: exact ACP-advertised model values. Operators can pass a shorthand such as `gpt-5.5`; `acps` stores the exact advertised Cursor model value.
 
 ## Supported Agents
+
+Goose:
+
+- Provider ids must be listed for Goose in `data/mapping.toml`.
+- Model ids should be provider-native for the selected provider.
+- `acps` writes `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, `GOOSE_CONTEXT_STRATEGY = summarize`, and `GOOSE_DISABLE_SESSION_NAMING = true` after provider selection.
+- `acps` stores Goose's selected model in `[agent.provider].model` and applies it through ACP `session/set_config_option` with `configId = "model"` after `session/new` and before the first prompt.
+- Goose consumes provider-native API-key env vars directly. `acps agent set --provider` therefore requires the selected `api_key_ref` to match the default env var from [api_key.md](api_key.md).
 
 OpenCode:
 

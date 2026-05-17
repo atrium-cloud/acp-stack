@@ -177,7 +177,7 @@ optional_env_vars = []
 [[providers]]
 id = "anthropic"
 name = "Anthropic"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "azure-openai-responses"
@@ -187,7 +187,7 @@ agents = ["pi"]
 [[providers]]
 id = "openai"
 name = "OpenAI"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "deepseek"
@@ -202,17 +202,17 @@ agents = ["pi", "opencode"]
 [[providers]]
 id = "mistral"
 name = "Mistral"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "groq"
 name = "Groq"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "cerebras"
 name = "Cerebras"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "cloudflare-ai-gateway"
@@ -233,12 +233,12 @@ agents = ["pi", "opencode"]
 [[providers]]
 id = "xai"
 name = "xAI"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "openrouter"
 name = "OpenRouter"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "goose"]
 
 [[providers]]
 id = "vercel-ai-gateway"

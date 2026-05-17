@@ -261,6 +261,7 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let mut resume_session_cap = true;
     let mut close_session_cap = true;
     let mut prompt_emits_updates = true;
+    let mut expected_model_config: Option<String> = None;
     let mut env_assertions = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -298,6 +299,11 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             "--prompt-silent" => {
                 prompt_emits_updates = false;
             }
+            "--expect-model-config" => {
+                if let Some(value) = iter.next() {
+                    expected_model_config = Some(value.to_owned());
+                }
+            }
             _ => {}
         }
     }
@@ -314,6 +320,7 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let stdout_handle = std::sync::Mutex::new(stdout.lock());
     let session_counter = AtomicU64::new(0);
     let cancel_requested = AtomicBool::new(false);
+    let model_configured = AtomicBool::new(false);
     let mut buf = String::new();
     loop {
         buf.clear();
@@ -383,6 +390,27 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                     "result": { "sessionId": format!("sess_fake_{counter}") }
                 })
             }
+            Some("session/set_config_option") => {
+                let config_id = value
+                    .get("params")
+                    .and_then(|p| p.get("configId"))
+                    .and_then(|v| v.as_str());
+                let config_value = value
+                    .get("params")
+                    .and_then(|p| p.get("value"))
+                    .and_then(|v| v.as_str());
+                if let Some(expected) = expected_model_config.as_deref()
+                    && config_id == Some("model")
+                    && config_value == Some(expected)
+                {
+                    model_configured.store(true, Ordering::SeqCst);
+                }
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "configOptions": [] }
+                })
+            }
             Some("session/load") | Some("session/resume") | Some("session/close") => {
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -391,48 +419,59 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                 })
             }
             Some("session/prompt") => {
-                let session_id = value
-                    .get("params")
-                    .and_then(|p| p.get("sessionId"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("sess_fake_unknown")
-                    .to_owned();
-                if prompt_emits_updates {
-                    // Push two notifications before the response. The bridge's
-                    // SessionEventSink persists them keyed by session_id; tests
-                    // assert on the `events.session_id` column.
-                    for text in ["chunk-1", "chunk-2"] {
-                        let note = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "session/update",
-                            "params": {
-                                "sessionId": session_id,
-                                "update": {
-                                    "sessionUpdate": "agent_message_chunk",
-                                    "content": { "type": "text", "text": text }
-                                }
-                            }
-                        });
-                        let mut guard = stdout_handle
-                            .lock()
-                            .expect("fake-agent stdout mutex poisoned");
-                        writeln!(*guard, "{note}")
-                            .map_err(|source| StackError::ServeIo { source })?;
-                        guard
-                            .flush()
-                            .map_err(|source| StackError::ServeIo { source })?;
-                    }
-                }
-                let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
-                    "cancelled"
+                if expected_model_config.is_some() && !model_configured.load(Ordering::SeqCst) {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": "expected model config before prompt"
+                        }
+                    })
                 } else {
-                    "end_turn"
-                };
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "stopReason": stop }
-                })
+                    let session_id = value
+                        .get("params")
+                        .and_then(|p| p.get("sessionId"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("sess_fake_unknown")
+                        .to_owned();
+                    if prompt_emits_updates {
+                        // Push two notifications before the response. The bridge's
+                        // SessionEventSink persists them keyed by session_id; tests
+                        // assert on the `events.session_id` column.
+                        for text in ["chunk-1", "chunk-2"] {
+                            let note = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": session_id,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": { "type": "text", "text": text }
+                                    }
+                                }
+                            });
+                            let mut guard = stdout_handle
+                                .lock()
+                                .expect("fake-agent stdout mutex poisoned");
+                            writeln!(*guard, "{note}")
+                                .map_err(|source| StackError::ServeIo { source })?;
+                            guard
+                                .flush()
+                                .map_err(|source| StackError::ServeIo { source })?;
+                        }
+                    }
+                    let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
+                        "cancelled"
+                    } else {
+                        "end_turn"
+                    };
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "stopReason": stop }
+                    })
+                }
             }
             _ => serde_json::json!({
                 "jsonrpc": "2.0",

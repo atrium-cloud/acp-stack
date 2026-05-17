@@ -452,6 +452,7 @@ pub struct AcpBridge {
     /// sink's background writer task has queued.
     sink: Arc<dyn SessionEventSink>,
     notification_drain: Arc<NotificationDrain>,
+    session_model: Option<String>,
 }
 
 #[derive(Default)]
@@ -677,6 +678,13 @@ impl AcpBridge {
 
         let capabilities = AgentCapabilitiesDto::from_initialize_response(&init_response)?;
         let pid = child.id();
+        let session_model = agent.provider.as_ref().and_then(|provider| {
+            if agent.id == "goose" {
+                provider.model.clone()
+            } else {
+                None
+            }
+        });
 
         Ok(Self {
             child: TokioMutex::new(Some(child)),
@@ -687,6 +695,7 @@ impl AcpBridge {
             spawn_pid: pid,
             sink: bridge_sink,
             notification_drain,
+            session_model,
         })
     }
 
@@ -715,14 +724,29 @@ impl AcpBridge {
         let connection = self.connection().await?;
         let mut request = NewSessionRequest::new(cwd);
         request.mcp_servers = mcp_servers;
-        connection
+        let response = connection
             .send_request(request)
             .block_task()
             .await
             .map_err(|err| StackError::AgentRequestFailed {
                 method: "session/new",
                 message: err.to_string(),
-            })
+            })?;
+        if let Some(model) = self.session_model.as_deref() {
+            connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    response.session_id.clone(),
+                    "model",
+                    model.to_owned(),
+                ))
+                .block_task()
+                .await
+                .map_err(|err| StackError::AgentRequestFailed {
+                    method: "session/set_config_option",
+                    message: err.to_string(),
+                })?;
+        }
+        Ok(response)
     }
 
     pub async fn set_session_config_option(

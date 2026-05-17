@@ -7,11 +7,13 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value as JsonValue, json};
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, create_dir_owner_only, parent_dir};
+use crate::runtime::provider_keys::env_var_for_agent_provider_id;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedAgentConfig {
@@ -24,6 +26,14 @@ pub fn provision_agent_headless_config(
     home: &Path,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
     match config.agent.id.as_str() {
+        "goose" => provision_goose_config(config, home).map(|path| {
+            path.into_iter()
+                .map(|path| ProvisionedAgentConfig {
+                    label: "Goose config",
+                    path,
+                })
+                .collect()
+        }),
         "opencode" => provision_opencode_config(config, home).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -42,6 +52,48 @@ pub fn provision_agent_headless_config(
         }),
         _ => Ok(Vec::new()),
     }
+}
+
+fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
+    let path = home.join(".config").join("goose").join("config.yaml");
+    let Some(provider) = config.agent.provider.as_ref() else {
+        return Ok(None);
+    };
+    let provider_id = provider.id.as_str();
+    let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
+    let Some(native_ref) = env_var_for_agent_provider_id(&config.agent.id, provider_id) else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: format!(
+                "goose provider `{provider_id}` has no API-key env mapping in data/mapping.toml"
+            ),
+        });
+    };
+    if api_key_ref != native_ref {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: format!(
+                "goose provider `{provider_id}` requires provider-native env ref `{native_ref}`, got `{api_key_ref}`"
+            ),
+        });
+    }
+
+    let mut root = read_yaml_mapping(&path)?;
+    let values = [
+        ("GOOSE_PROVIDER", YamlValue::String(provider_id.to_owned())),
+        ("GOOSE_MODE", YamlValue::String("auto".to_owned())),
+        (
+            "GOOSE_CONTEXT_STRATEGY",
+            YamlValue::String("summarize".to_owned()),
+        ),
+        ("GOOSE_DISABLE_SESSION_NAMING", YamlValue::Bool(true)),
+    ];
+    for (key, value) in values {
+        root.insert(YamlValue::String(key.to_owned()), value);
+    }
+
+    write_yaml_mapping(&path, root)?;
+    Ok(Some(path))
 }
 
 fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
@@ -130,7 +182,7 @@ fn require_agent_env_for_provider<'a>(
     })
 }
 
-fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
+fn read_json_object(path: &Path) -> Result<Map<String, JsonValue>> {
     if !path.exists() {
         return Ok(Map::new());
     }
@@ -139,13 +191,13 @@ fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
         path: path.to_path_buf(),
         source,
     })?;
-    let value: Value =
+    let value: JsonValue =
         serde_json::from_str(&content).map_err(|source| StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!("existing JSON is invalid: {source}"),
         })?;
     match value {
-        Value::Object(object) => Ok(object),
+        JsonValue::Object(object) => Ok(object),
         _ => Err(StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: "existing JSON root must be an object".to_owned(),
@@ -153,10 +205,10 @@ fn read_json_object(path: &Path) -> Result<Map<String, Value>> {
     }
 }
 
-fn write_json_object(path: &Path, object: Map<String, Value>) -> Result<()> {
+fn write_json_object(path: &Path, object: Map<String, JsonValue>) -> Result<()> {
     let parent = parent_dir(path)?;
     create_dir_owner_only(parent)?;
-    let content = serde_json::to_vec_pretty(&Value::Object(object)).map_err(|source| {
+    let content = serde_json::to_vec_pretty(&JsonValue::Object(object)).map_err(|source| {
         StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!("failed to serialize JSON: {source}"),
@@ -168,16 +220,16 @@ fn write_json_object(path: &Path, object: Map<String, Value>) -> Result<()> {
 }
 
 fn ensure_object_field<'a>(
-    object: &'a mut Map<String, Value>,
+    object: &'a mut Map<String, JsonValue>,
     key: &str,
     path: &Path,
-) -> Result<&'a mut Map<String, Value>> {
+) -> Result<&'a mut Map<String, JsonValue>> {
     if !object.contains_key(key) {
         object.insert(key.to_owned(), json!({}));
     }
     object
         .get_mut(key)
-        .and_then(Value::as_object_mut)
+        .and_then(JsonValue::as_object_mut)
         .ok_or_else(|| StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!("`{key}` must be an object when present"),
@@ -185,9 +237,9 @@ fn ensure_object_field<'a>(
 }
 
 fn insert_if_missing(
-    object: &mut Map<String, Value>,
+    object: &mut Map<String, JsonValue>,
     key: &str,
-    value: Value,
+    value: JsonValue,
     path: &Path,
 ) -> Result<()> {
     if let Some(existing) = object.get(key) {
@@ -203,10 +255,53 @@ fn insert_if_missing(
     Ok(())
 }
 
+fn read_yaml_mapping(path: &Path) -> Result<YamlMapping> {
+    if !path.exists() {
+        return Ok(YamlMapping::new());
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if content.trim().is_empty() {
+        return Ok(YamlMapping::new());
+    }
+    let value: YamlValue =
+        serde_yaml::from_str(&content).map_err(|source| StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!("existing YAML is invalid: {source}"),
+        })?;
+    match value {
+        YamlValue::Mapping(mapping) => Ok(mapping),
+        _ => Err(StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: "existing YAML root must be a mapping".to_owned(),
+        }),
+    }
+}
+
+fn write_yaml_mapping(path: &Path, mapping: YamlMapping) -> Result<()> {
+    let parent = parent_dir(path)?;
+    create_dir_owner_only(parent)?;
+    let content = serde_yaml::to_string(&YamlValue::Mapping(mapping)).map_err(|source| {
+        StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!("failed to serialize YAML: {source}"),
+        }
+    })?;
+    let mut bytes = content.into_bytes();
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    atomic_write_owner_only(path, &bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::load_config_from_str;
+    use serde_json::Value;
 
     fn config_with_agent(id: &str, env: &[&str]) -> Config {
         let env_toml = env
@@ -265,6 +360,123 @@ restart = "on-crash"
 "#
         ))
         .expect("config parses")
+    }
+
+    #[test]
+    fn goose_config_is_skipped_without_configured_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
+
+        let provisioned =
+            provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        assert!(provisioned.is_empty());
+    }
+
+    #[test]
+    fn goose_config_references_provider_native_env() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        });
+
+        let provisioned =
+            provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("config.yaml");
+        assert_eq!(provisioned[0].path, path);
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&path).expect("goose config should be readable"),
+        )
+        .expect("goose config yaml parses");
+        assert_eq!(value["GOOSE_PROVIDER"], "openrouter");
+        assert_eq!(value["GOOSE_MODEL"], serde_yaml::Value::Null);
+        assert_eq!(value["GOOSE_MODE"], "auto");
+        assert_eq!(value["GOOSE_CONTEXT_STRATEGY"], "summarize");
+        assert_eq!(value["GOOSE_DISABLE_SESSION_NAMING"], true);
+    }
+
+    #[test]
+    fn goose_configured_provider_updates_provider_without_model() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("config.yaml");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            "GOOSE_PROVIDER: openrouter\nGOOSE_MODEL: old/model\nCUSTOM_SETTING: keep\n",
+        )
+        .expect("write existing config");
+        let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY", "CEREBRAS_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "cerebras".to_owned(),
+            model: Some("llama3.1-8b".to_owned()),
+            api_key_ref: Some("CEREBRAS_API_KEY".to_owned()),
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&path).expect("goose config should be readable"),
+        )
+        .expect("goose config yaml parses");
+        assert_eq!(value["GOOSE_PROVIDER"], "cerebras");
+        assert_eq!(value["GOOSE_MODEL"], "old/model");
+        assert_eq!(value["CUSTOM_SETTING"], "keep");
+    }
+
+    #[test]
+    fn goose_rejects_non_native_api_key_ref() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("goose", &["CUSTOM_OPENROUTER_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("CUSTOM_OPENROUTER_KEY".to_owned()),
+        });
+
+        let err = provision_agent_headless_config(&config, tempdir.path()).expect_err("fails");
+
+        assert!(
+            err.to_string()
+                .contains("requires provider-native env ref `OPENROUTER_API_KEY`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn goose_rejects_invalid_existing_yaml() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("config.yaml");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(&path, "not: [valid").expect("write invalid yaml");
+        let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        });
+
+        let err = provision_agent_headless_config(&config, tempdir.path()).expect_err("fails");
+
+        assert!(
+            err.to_string().contains("existing YAML is invalid"),
+            "{err}"
+        );
     }
 
     #[test]
