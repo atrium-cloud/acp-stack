@@ -1,4 +1,4 @@
-//! Dev tool: compare our embedded `data/registry.toml` against upstream ACP
+//! Dev tool: compare our embedded `data/agents.toml` against upstream ACP
 //! `registry.json`. Not shipped in release artifacts — `cargo install` the
 //! daemon and this binary stays in the workspace.
 //!
@@ -9,8 +9,9 @@
 //! ```
 //!
 //! The embedded registry is intentionally a small curated subset. Every
-//! embedded id must still exist upstream; upstream entries that are not embedded
-//! are reported for awareness but do not fail the check.
+//! embedded sync id (`adapter.id` for adapter-backed entries, otherwise `id`)
+//! must still exist upstream; upstream entries that are not embedded are reported for
+//! awareness but do not fail the check.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
@@ -53,16 +54,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|agent| (agent.id.as_str(), agent))
         .collect();
-    let embedded_by_id: BTreeMap<&str, _> = embedded
-        .entries()
-        .iter()
-        .map(|entry| (entry.id.as_str(), entry))
-        .collect();
+    let embedded_sync_ids = embedded_sync_ids(&embedded);
 
-    let drift = compare_registry_ids(
-        upstream_by_id.keys().copied(),
-        embedded_by_id.keys().copied(),
-    );
+    let drift = compare_registry_ids(upstream_by_id.keys().copied(), embedded_sync_ids);
 
     println!("acp-stack registry curation report");
     println!("==================================");
@@ -100,7 +94,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("embedded registry contains ids missing from upstream registry".into());
     }
     println!();
-    println!("embedded registry ids are present upstream");
+    println!("embedded registry sync ids are present upstream");
     Ok(())
 }
 
@@ -132,6 +126,20 @@ fn compare_registry_ids<'a>(
             .map(|id| (*id).to_owned())
             .collect(),
     }
+}
+
+fn embedded_sync_ids(catalog: &RegistryCatalog) -> Vec<&str> {
+    catalog
+        .entries()
+        .iter()
+        .map(|entry| {
+            entry
+                .adapter
+                .as_ref()
+                .map(|adapter| adapter.id.as_str())
+                .unwrap_or(entry.id.as_str())
+        })
+        .collect()
 }
 
 fn fetch_upstream() -> Result<UpstreamIndex, Box<dyn std::error::Error>> {
@@ -184,5 +192,12 @@ mod tests {
         assert_eq!(drift.upstream_not_embedded, vec!["b"]);
         assert!(drift.embedded_not_upstream.is_empty());
         assert!(!drift.has_embedded_unknown_ids());
+    }
+
+    #[test]
+    fn embedded_sync_ids_use_upstream_aliases() {
+        let catalog = RegistryCatalog::load_embedded().expect("embedded registry");
+        assert!(embedded_sync_ids(&catalog).contains(&"amp-acp"));
+        assert!(!embedded_sync_ids(&catalog).contains(&"amp"));
     }
 }

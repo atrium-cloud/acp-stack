@@ -26,15 +26,13 @@ pub(crate) struct AgentInstallResponse {
 pub(crate) async fn agent_install_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
-    // Resolve agent env from the secret store. The installer should only
-    // see the same names the agent itself will see (security.md:91).
-    let env = open_agent_env(&state.config)?;
     let workspace_root = std::path::PathBuf::from(state.config.workspace.root.clone());
     let home = home_dir()?;
     let local_bin = home.join(".local").join("bin");
 
     let outcome = if let Some(install) = state.config.agent.install.clone() {
         // Escape-hatch shell recipe. One row, persisted after the shell runs.
+        let env = open_agent_env(&state.config)?;
         let expected_sha256 = state.config.agent.expected_sha256.clone();
         let result = tokio::task::spawn_blocking(move || {
             run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
@@ -58,7 +56,7 @@ pub(crate) async fn agent_install_handler(
         result.outcome?
     } else {
         // Registry-resolved install: one row for native, two for adapter-backed.
-        let override_path = home.join(".config").join("acp-stack").join("registry.toml");
+        let override_path = home.join(".config").join("acp-stack").join("agents.toml");
         let registry = RegistryCatalog::load_with_override(&override_path)?;
         let entry = registry
             .lookup(&state.config.agent.id)
@@ -68,7 +66,13 @@ pub(crate) async fn agent_install_handler(
             .clone();
         let agent = state.config.agent.clone();
         let result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
-            install_resolved_capture(&agent, &entry, env, &workspace_root, &local_bin)
+            install_resolved_capture(
+                &agent,
+                &entry,
+                Default::default(),
+                &workspace_root,
+                &local_bin,
+            )
         })
         .await
         .map_err(|err| StackError::AgentInitializeFailed {

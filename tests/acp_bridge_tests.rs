@@ -53,8 +53,11 @@ fn fake_agent_config() -> AgentConfig {
         env: vec![],
         expected_sha256: None,
         restart: "never".into(),
+        mode: None,
+        model: None,
         harness_version: None,
         adapter: None,
+        provider: None,
         install: Some(AgentInstallConfig {
             install_type: "shell".into(),
             creates: "true".into(),
@@ -121,17 +124,30 @@ async fn shutdown_terminates_the_child() {
 }
 
 #[tokio::test]
-async fn spawn_does_not_forward_unlisted_parent_environment() {
+async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
+    let home = std::env::var("HOME").expect("HOME must be set for bridge runtime context test");
     let mut config = fake_agent_config();
-    config
-        .args
-        .extend(["--assert-env-absent".into(), "HOME".into()]);
+    config.args.extend([
+        "--assert-env-present".into(),
+        "HOME".into(),
+        "--assert-env-absent".into(),
+        "LANG".into(),
+        "--assert-env-present".into(),
+        "ACP_STACK_EXPLICIT_ENV".into(),
+        "--assert-env-not-equals".into(),
+        "HOME".into(),
+        "secret-home".into(),
+    ]);
+    let mut env = fake_env();
+    env.insert("HOME".into(), "secret-home".into());
+    env.insert("ACP_STACK_EXPLICIT_ENV".into(), "present".into());
 
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
+    let bridge = AcpBridge::spawn(&config, env, std::env::temp_dir(), null_sink(), None)
         .await
         .expect("bridge spawns");
     let caps = bridge.capabilities();
-    assert_eq!(caps.agent_title.as_deref(), Some("env absent"));
+    assert_eq!(caps.agent_title.as_deref(), Some("env assertions passed"));
+    assert_ne!(home, "secret-home");
     bridge.shutdown().await.expect("shutdown ok");
 }
 

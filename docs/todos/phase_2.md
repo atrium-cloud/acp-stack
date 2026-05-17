@@ -14,6 +14,7 @@
 - [x] Store encrypted secret values at `~/.local/share/acp-stack/secrets.age`.
 - [x] Implement secret references in config.
 - [x] Implement scoped secret injection for agents, MCP servers, installers, and external logging.
+- [x] Document secret-ref classification for agent runtime env, MCP stdio env, MCP HTTP headers, Git credentials, S3 credentials, and install-only tokens.
 - [x] Implement `acps secrets list`.
 - [x] Implement `acps secrets set <name>`.
 - [x] Implement `acps secrets delete <name>`.
@@ -29,6 +30,11 @@
 - [x] Launch stdio MCP servers when the configured agent supports MCP.
 - [x] Pass HTTP MCP server declarations to agents when supported.
 - [x] Persist MCP process lifecycle events.
+- [x] Document a narrow curated MCP preset set for frequently used servers.
+- [x] Document that MCP presets are convenience templates, not an allowlist.
+- [x] Document custom stdio MCP server declarations with command, args, and explicit env secret refs.
+- [x] Document custom HTTP MCP server declarations with URL and explicit header secret refs.
+- [x] Document dependency declarations that reference custom MCP server names.
 - [ ] Add Slack MCP example.
 - [x] Add Linear MCP example.
 - [ ] Add generic HTTP MCP example.

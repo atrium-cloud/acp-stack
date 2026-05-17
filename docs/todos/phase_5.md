@@ -35,6 +35,9 @@
 - [ ] Add consistent `--format text|json` support.
 - [ ] Add clearer command errors with remediation hints.
 - [ ] Add progress output for long-running installer, dependency, import, and export operations.
+- [ ] Add richer init selection UX for code sources, data sources, MCP presets, custom MCP declarations, and required secrets.
+- [ ] Add provider/model selection UX on top of the Phase 4 `models.dev` resolver, including clear filtering by available secret refs.
+- [ ] Add retry/reporting polish for failed init, dependency, ingestion, and testflight steps.
 - [ ] Add shell completion generation.
 - [ ] Add help examples for common workflows.
 
@@ -58,12 +61,14 @@
 ## MCP Compatibility Matrix
 
 - [ ] Define compatibility matrix format.
+- [ ] Include curated MCP preset compatibility notes.
 - [ ] Document tested stdio MCP server behavior.
 - [ ] Document tested HTTP MCP server behavior.
 - [ ] Include Slack MCP compatibility notes.
 - [ ] Include Linear MCP compatibility notes.
 - [ ] Include generic HTTP MCP compatibility notes.
 - [ ] Record known unsupported MCP features and workarounds.
+- [ ] Do not add a centralized agent skills catalog unless a trusted catalog source exists later.
 
 ## Operational Health
 

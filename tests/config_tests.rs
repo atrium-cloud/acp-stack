@@ -365,6 +365,28 @@ fn rejects_invalid_agent_restart_policy() {
 }
 
 #[test]
+fn rejects_blank_agent_mode() {
+    let error = load_config_from_str(&VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        "restart = \"on-crash\"\nmode = \" \"",
+    ))
+    .expect_err("config should be invalid");
+
+    assert!(error.to_string().contains("agent.mode is required"));
+}
+
+#[test]
+fn rejects_blank_agent_model() {
+    let error = load_config_from_str(&VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        "restart = \"on-crash\"\nmodel = \" \"",
+    ))
+    .expect_err("config should be invalid");
+
+    assert!(error.to_string().contains("agent.model is required"));
+}
+
+#[test]
 fn rejects_empty_expected_sha256() {
     let config = VALID_CONFIG.replace(
         r#"restart = "on-crash""#,

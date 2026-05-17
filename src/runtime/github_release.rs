@@ -53,11 +53,11 @@ pub fn install(
     spec: GithubReleaseInstall<'_>,
     version: Option<&str>,
     dest_dir: &Path,
-    agent_env: &HashMap<String, String>,
+    _agent_env: &HashMap<String, String>,
 ) -> Result<GithubReleaseOutcome> {
     let mut log = LogBuf::new();
     let client = build_client()?;
-    let token = resolve_token(agent_env);
+    let token = resolve_token();
 
     let release = fetch_release(&client, spec.repo, version, token.as_deref())?;
     log.line(format!(
@@ -65,8 +65,12 @@ pub fn install(
         spec.repo, release.tag_name
     ));
 
-    let arch = host_arch_token()?;
-    let resolved_pattern = spec.asset_pattern.replace("{arch}", arch);
+    let resolved_pattern = if spec.asset_pattern.contains("{arch}") {
+        let arch = host_arch_token()?;
+        spec.asset_pattern.replace("{arch}", arch)
+    } else {
+        spec.asset_pattern.to_owned()
+    };
     let asset = pick_asset(&release.assets, &resolved_pattern, spec.repo)?;
     log.line(format!(
         "matched asset `{}` ({} bytes)",
@@ -151,14 +155,7 @@ fn build_client() -> Result<reqwest::blocking::Client> {
         })
 }
 
-fn resolve_token(agent_env: &HashMap<String, String>) -> Option<String> {
-    // Agent-env-declared override beats the host's GITHUB_TOKEN so an operator
-    // can pin a specific token per agent without polluting the daemon env.
-    if let Some(value) = agent_env.get("GITHUB_TOKEN") {
-        if !value.trim().is_empty() {
-            return Some(value.clone());
-        }
-    }
+fn resolve_token() -> Option<String> {
     std::env::var("GITHUB_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty())

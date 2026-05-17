@@ -133,6 +133,10 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,
     pub restart: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Pin the harness install to a specific GitHub Release tag (e.g.
     /// `"v0.42.0"`). Only consulted when the resolved registry entry is
     /// adapter-backed and its harness install is `github_release`. Default
@@ -144,8 +148,20 @@ pub struct AgentConfig {
     /// who carried a `[agent.adapter]` block over from a pre-rework config.
     #[serde(default, skip_deserializing, skip_serializing)]
     pub adapter: Option<AgentAdapterConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<AgentProviderConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<AgentInstallConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProviderConfig {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -328,7 +344,7 @@ pub struct HttpHeaderRef {
 
 /// Operator-facing escape hatch for installing an agent whose entry is not
 /// in the embedded registry (private fork, unreleased build, custom adapter).
-/// The runtime resolves registry-listed agents from `data/registry.toml`
+/// The runtime resolves registry-listed agents from `data/agents.toml`
 /// keyed off `[agent].id`; this struct is consulted only when the operator
 /// explicitly writes `[agent.install]` to override that resolution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -487,6 +503,23 @@ impl Config {
         if let Some(install) = &self.agent.install {
             validate_agent_install(install)?;
         }
+        if let Some(provider) = &self.agent.provider {
+            validate_agent_provider(provider)?;
+        }
+        if let Some(mode) = self.agent.mode.as_deref()
+            && (mode.trim().is_empty() || mode.len() != mode.trim().len())
+        {
+            return Err(StackError::MissingField {
+                field: "agent.mode",
+            });
+        }
+        if let Some(model) = self.agent.model.as_deref()
+            && (model.trim().is_empty() || model.len() != model.trim().len())
+        {
+            return Err(StackError::MissingField {
+                field: "agent.model",
+            });
+        }
         validate_permissions(&self.permissions)?;
         validate_commands(&self.commands)?;
         validate_trusted_proxies(&self.security.http)?;
@@ -497,6 +530,25 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn validate_agent_provider(provider: &AgentProviderConfig) -> Result<()> {
+    if provider.id.trim().is_empty() || provider.id.len() != provider.id.trim().len() {
+        return Err(StackError::MissingField {
+            field: "agent.provider.id",
+        });
+    }
+    if let Some(model) = provider.model.as_deref()
+        && (model.trim().is_empty() || model.len() != model.trim().len())
+    {
+        return Err(StackError::MissingField {
+            field: "agent.provider.model",
+        });
+    }
+    if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
+        validate_secret_ref_name_value(api_key_ref)?;
+    }
+    Ok(())
 }
 
 fn validate_supabase_logging(supabase: Option<&SupabaseLoggingConfig>) -> Result<()> {

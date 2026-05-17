@@ -51,7 +51,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::acp_bridge::{
-    AcpBridge, AgentCapabilitiesDto, SessionEventSink, StateStoreSessionSink, resolve_command_path,
+    AcpBridge, AgentCapabilitiesDto, AgentSessionConfigCategory, AgentSessionModelSelection,
+    SessionEventSink, StateStoreSessionSink, resolve_command_path, session_config_id_for_value,
+    session_model_selection_for_value,
 };
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
@@ -521,6 +523,35 @@ impl AgentSupervisor {
         let cwd_path = PathBuf::from(&resolved_cwd);
         let response = bridge.new_session(cwd_path, mcp_servers).await?;
         let session_id = response.session_id.0.to_string();
+        if let Some(mode) = agent.mode.as_deref() {
+            let config_id = session_config_id_for_value(
+                response.config_options.as_deref(),
+                AgentSessionConfigCategory::Mode,
+                mode,
+            )?;
+            bridge
+                .set_session_config_option(response.session_id.clone(), &config_id, mode)
+                .await?;
+        }
+        if let Some(model) = agent.model.as_deref().or_else(|| {
+            agent
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.model.as_deref())
+        }) {
+            match session_model_selection_for_value(&response, model)? {
+                AgentSessionModelSelection::ConfigOption { config_id } => {
+                    bridge
+                        .set_session_config_option(response.session_id.clone(), &config_id, model)
+                        .await?;
+                }
+                AgentSessionModelSelection::LegacyModel => {
+                    bridge
+                        .set_session_model(response.session_id.clone(), model)
+                        .await?;
+                }
+            }
+        }
 
         // Persist after the agent confirms. If we inserted first and the
         // agent rejected, we'd leave a phantom row. The agent's `session_id`

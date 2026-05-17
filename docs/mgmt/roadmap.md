@@ -23,7 +23,7 @@ Establish the local daemon shape:
 - authentication failure logging
 - CLI commands that exercise the same core services as the API
 
-The initial installer foundation fetched the upstream ACP registry at runtime. A follow-up still inside 0.0.x closes that gap with an intentionally narrow embedded catalog at `data/registry.toml`, starting with OpenCode as the first verified headless target while preserving the model needed for future adapter-backed agents; see `docs/todos/phase_1.md` under "Agent Registry & Two-Layer Install".
+The initial installer foundation fetched the upstream ACP registry at runtime. A follow-up still inside 0.0.x closes that gap with an intentionally narrow embedded catalog at `data/agents.toml`, starting with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets; see `docs/todos/phase_1.md` under "Agent Registry & Two-Layer Install".
 
 ### 0.0.2 - Secrets, Permissions, and MCP
 
@@ -32,6 +32,7 @@ Add the trust and integration layer:
 - age-backed secrets
 - scoped secret injection
 - declared MCP servers
+- curated MCP presets plus custom MCP server declarations
 - dependency manifest validation and status reporting
 - permission requests and decisions
 - ACP permission passthrough
@@ -66,10 +67,13 @@ Make the runtime straightforward to deploy:
 
 - Docker image
 - systemd installer
+- full init orchestration with resumable workspace code/data ingestion
+- provider/model resolution from `models.dev` through the unified API, followed by atomic agent config writes and agent relaunch
 - reverse proxy deployment guides
 - unprivileged `acp` runtime user automation
 - config import/export hardening
 - supported dependency installation through `deps apply`
+- real-prompt init testflight with explicit provider-credit warning
 - dependency status improvements
 - installer command status and retry UX
 - security self-check CLI and API
@@ -82,6 +86,7 @@ Round out the standalone runtime surface:
 - TypeScript client SDK
 - Python client SDK
 - richer CLI UX
+- init selection and retry UX for code, data, MCP, secrets, and testflight
 - log query filters and pagination
 - command output streaming improvements
 - MCP compatibility matrix

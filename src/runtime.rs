@@ -1,4 +1,5 @@
 pub mod acp_bridge;
+pub mod agent_headless_config;
 pub mod agent_installer;
 pub mod agent_registry;
 pub mod commands;
@@ -6,6 +7,7 @@ pub mod deps;
 pub mod github_release;
 pub mod mcp;
 pub mod permissions;
+pub mod provider_keys;
 pub mod sink_redaction;
 pub mod supabase_sink;
 pub mod supervisor;

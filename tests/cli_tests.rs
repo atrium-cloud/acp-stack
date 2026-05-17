@@ -5,6 +5,7 @@ use acp_stack::state::StateStore;
 use assert_cmd::Command;
 use base64::Engine;
 use predicates::prelude::PredicateBooleanExt as _;
+use serde_json::Value;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -211,6 +212,816 @@ fn init_creates_config_and_state() {
     let config = fs::read_to_string(config_path).expect("starter config should be readable");
     assert!(config.contains("[workspace.source]"));
     assert!(config.contains(r#"type = "none""#));
+}
+
+#[test]
+fn init_skips_opencode_config_without_configured_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OpenCode config:").not());
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    assert!(!opencode_path.exists());
+}
+
+#[test]
+fn init_provider_sets_opencode_auth_config_without_model() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OpenCode config:"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains(r#"id = "openai""#));
+    assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
+    assert!(!config.contains(r#"model ="#));
+    assert!(config.contains(r#"env = ["OPENAI_API_KEY"]"#));
+    assert!(!config.contains(r#""OPENCODE_API_KEY""#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert!(opencode.get("model").is_none());
+    assert_eq!(
+        opencode["provider"]["openai"]["options"]["apiKey"],
+        "{env:OPENAI_API_KEY}"
+    );
+}
+
+#[test]
+fn init_provider_failure_does_not_persist_selected_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "amp",
+            "--provider",
+            "openai",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Amp Code does not support provider configuration during init",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(config.contains(r#"id = "opencode""#));
+    assert!(!config.contains(r#"id = "amp""#));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn init_skips_pi_model_scope_without_configured_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "pi""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Pi Agent""#)
+        .replace(r#"command = "opencode""#, r#"command = "pi-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Pi settings:").not());
+
+    let pi_settings_path = tempdir
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("settings.json");
+    assert!(!pi_settings_path.exists());
+}
+
+#[test]
+fn agent_set_updates_config_and_generated_opencode_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openai",
+            "--model",
+            "openai/gpt-5.5",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("api_key_ref: OPENAI_API_KEY"));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains(r#"id = "openai""#));
+    assert!(config.contains(r#"model = "openai/gpt-5.5""#));
+    assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
+    assert!(config.contains(r#""OPENCODE_API_KEY""#));
+    assert!(config.contains(r#""OPENAI_API_KEY""#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert_eq!(opencode["model"], "openai/gpt-5.5");
+    assert_eq!(
+        opencode["provider"]["openai"]["options"]["apiKey"],
+        "{env:OPENAI_API_KEY}"
+    );
+}
+
+#[test]
+fn agent_set_cursor_accepts_openai_model_from_acp_options() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
+        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["CURSOR_API_KEY"]"#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), &config).expect("config should be written");
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["gpt-5.5[context=272k,reasoning=medium,fast=false]"],
+        &[],
+    );
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--model", "gpt-5.5"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "required_env_refs: CURSOR_API_KEY",
+        ));
+
+    let after =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(after.contains(r#"env = ["CURSOR_API_KEY"]"#));
+    assert!(!after.contains("[agent.provider]"));
+    assert!(after.contains(r#"model = "gpt-5.5[context=272k,reasoning=medium,fast=false]""#));
+    assert!(!after.contains(r#"api_key_ref = "CURSOR_API_KEY""#));
+}
+
+#[test]
+fn agent_set_cursor_rejects_provider_argument() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
+        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["CURSOR_API_KEY"]"#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), &config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Cursor CLI does not support provider configuration",
+        ));
+
+    let after =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!after.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_opencode_rejects_model_without_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--model", "gpt-5.5"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "pass --provider <provider-id> when setting a model for OpenCode",
+        ));
+}
+
+#[test]
+fn agent_set_rejects_provider_not_supported_by_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "fireworks",
+            "--model",
+            "fireworks/test-model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "provider `fireworks` is not supported for agent `opencode`",
+        ));
+
+    let after =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!after.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_rejects_providers_without_api_key_mapping() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "google-vertex",
+            "--model",
+            "google-vertex/test-model",
+            "--api-key-ref",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "provider `google-vertex` has no API-key env mapping for agent `opencode`",
+        ));
+
+    let after =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!after.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_adds_cloudflare_companion_refs() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "pi""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Pi Agent""#)
+        .replace(r#"command = "opencode""#, r#"command = "pi-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["workers-ai/@cf/moonshotai/kimi-k2.6"],
+        &[],
+    );
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "cloudflare-ai-gateway",
+            "--model",
+            "workers-ai/@cf/moonshotai/kimi-k2.6",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "required_env_refs: CLOUDFLARE_API_KEY, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID",
+        ));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains(r#"id = "cloudflare-ai-gateway""#));
+    assert!(config.contains(r#"model = "workers-ai/@cf/moonshotai/kimi-k2.6""#));
+    assert!(config.contains(r#""CLOUDFLARE_API_KEY""#));
+    assert!(config.contains(r#""CLOUDFLARE_ACCOUNT_ID""#));
+    assert!(config.contains(r#""CLOUDFLARE_GATEWAY_ID""#));
+}
+
+#[test]
+fn agent_set_opencode_cloudflare_gateway_uses_token_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["cloudflare-ai-gateway/workers-ai/@cf/moonshotai/kimi-k2.6"],
+        &[],
+    );
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "cloudflare-ai-gateway",
+            "--model",
+            "cloudflare-ai-gateway/workers-ai/@cf/moonshotai/kimi-k2.6",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "api_key_ref: CLOUDFLARE_API_TOKEN",
+        ))
+        .stdout(predicates::str::contains(
+            "required_env_refs: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID",
+        ));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains(r#"api_key_ref = "CLOUDFLARE_API_TOKEN""#));
+    assert!(config.contains(r#""CLOUDFLARE_API_TOKEN""#));
+    assert!(config.contains(r#""CLOUDFLARE_ACCOUNT_ID""#));
+    assert!(config.contains(r#""CLOUDFLARE_GATEWAY_ID""#));
+    assert!(!config.contains(r#""CLOUDFLARE_API_KEY""#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert_eq!(
+        opencode["model"],
+        "cloudflare-ai-gateway/workers-ai/@cf/moonshotai/kimi-k2.6"
+    );
+    assert_eq!(
+        opencode["provider"]["cloudflare-ai-gateway"]["options"]["apiKey"],
+        "{env:CLOUDFLARE_API_TOKEN}"
+    );
+}
+
+#[test]
+fn agent_set_without_model_lists_choices_without_mutating_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["cloudflare-workers-ai/@cf/moonshotai/kimi-k2.6"],
+        &[],
+    );
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--provider", "cloudflare-workers-ai"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("available model values:"))
+        .stdout(predicates::str::contains(
+            "cloudflare-workers-ai/@cf/moonshotai/kimi-k2.6",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_does_not_partially_write_main_config_when_provisioning_fails() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+    let opencode_dir = tempdir.path().join(".config").join("opencode");
+    fs::create_dir_all(&opencode_dir).expect("opencode config dir should be created");
+    fs::write(opencode_dir.join("opencode.json"), "[]")
+        .expect("invalid opencode config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openai",
+            "--model",
+            "openai/gpt-5.5",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "existing JSON root must be an object",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains(r#""OPENAI_API_KEY""#));
+}
+
+#[test]
+fn agent_set_validates_model_against_acp_config_options() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openai",
+            "--model",
+            "openai/not-advertised",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent did not advertise `openai/not-advertised` as an available `model`",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_amp_rejects_mode_until_acp_advertises_it() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "amp-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["AMP_API_KEY"]"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--mode", "smart"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Amp Code does not support mode configuration",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config.contains(r#"mode = "smart""#));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_opencode_accepts_mode_only() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &[], &["build", "plan"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--mode", "plan"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mode: plan"));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(config.contains(r#"mode = "plan""#));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_cursor_accepts_mode_only() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
+        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["CURSOR_API_KEY"]"#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &[], &["agent", "ask", "plan"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--mode", "plan"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mode: plan"));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(config.contains(r#"mode = "plan""#));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_pi_rejects_mode() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "pi""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Pi Agent""#)
+        .replace(r#"command = "opencode""#, r#"command = "pi-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--mode", "plan"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Pi Agent does not support mode configuration",
+        ));
+}
+
+#[test]
+fn agent_set_amp_rejects_provider_model_settings() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "amp-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["AMP_API_KEY"]"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openai",
+            "--model",
+            "openai/gpt-5.5",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Amp Code does not support provider configuration",
+        ));
+}
+
+#[test]
+fn agent_install_registry_path_does_not_require_runtime_secret_store() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let workspace_root = tempdir.path().join("workspace");
+    fs::create_dir(&workspace_root).expect("workspace dir should be created");
+    let binary_path = tempdir
+        .path()
+        .join(".local")
+        .join("bin")
+        .join("cli-registry-agent");
+    let script = format!(
+        "mkdir -p {bin} && printf registry > {binary} && chmod 755 {binary}",
+        bin = shell_quote_path(binary_path.parent().expect("binary has parent")),
+        binary = shell_quote_path(&binary_path),
+    );
+    let config = VALID_CONFIG
+        .replace(
+            r#"command = "opencode""#,
+            r#"command = "cli-registry-agent""#,
+        )
+        .replace(
+            r#"root = "/workspace""#,
+            &format!(r#"root = "{}""#, workspace_root.display()),
+        )
+        .replace(
+            r#"uploads = "/workspace/uploads""#,
+            &format!(r#"uploads = "{}/uploads""#, workspace_root.display()),
+        )
+        .replace(r#"args = ["acp"]"#, "args = []")
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    fs::write(
+        config_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "opencode"
+name = "OpenCode Test"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/opencode.md"
+
+[agents.harness]
+id = "opencode"
+
+[agents.harness.install.shell]
+script = {script:?}
+creates = "cli-registry-agent"
+"#
+        ),
+    )
+    .expect("registry should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "install"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent install: installed"))
+        .stdout(predicates::str::contains(
+            binary_path.to_string_lossy().as_ref(),
+        ));
 }
 
 #[cfg(unix)]
@@ -901,6 +1712,52 @@ fn mode(path: &std::path::Path) -> u32 {
         & 0o777
 }
 
+fn shell_quote_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn write_acp_config_options(
+    root: &std::path::Path,
+    models: &[&str],
+    modes: &[&str],
+) -> std::path::PathBuf {
+    let options_path = root.join("acp-config-options.json");
+    let mut options = Vec::new();
+    if !models.is_empty() {
+        options.push(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": models[0],
+            "options": models
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }));
+    }
+    if !modes.is_empty() {
+        options.push(serde_json::json!({
+            "id": "mode",
+            "name": "Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": modes[0],
+            "options": modes
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }));
+    }
+    fs::write(
+        &options_path,
+        serde_json::to_string(&options).expect("options serialize"),
+    )
+    .expect("options fixture should be written");
+    options_path
+}
+
 // ----- 0.0.1 auth/secrets/reset/config-import tests -----
 
 fn run_init_with_home(home: &std::path::Path) {
@@ -910,6 +1767,86 @@ fn run_init_with_home(home: &std::path::Path) {
         .arg("init")
         .assert()
         .success();
+}
+
+#[test]
+fn init_agent_flag_updates_config_non_interactively() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["init", "--agent", "cursor", "--no-install-agent"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Cursor CLI (cursor)"));
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config readable");
+    assert!(written.contains(r#"id = "cursor""#));
+    assert!(written.contains(r#"command = "cursor-agent""#));
+    assert!(written.contains(r#"args = ["acp"]"#));
+    assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
+    assert!(!written.contains("[agent.install]"));
+}
+
+#[test]
+fn init_install_agent_runs_selected_registry_install() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir");
+    let workspace_root = tempdir.path().join("workspace");
+    fs::create_dir(&workspace_root).expect("workspace dir");
+    let managed_binary = tempdir.path().join(".local/bin/init-test-agent");
+    let config = VALID_CONFIG
+        .replace(
+            r#"root = "/workspace""#,
+            &format!(r#"root = "{}""#, workspace_root.display()),
+        )
+        .replace(
+            r#"uploads = "/workspace/uploads""#,
+            &format!(r#"uploads = "{}/uploads""#, workspace_root.display()),
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config");
+    let script = format!(
+        "mkdir -p {bin} && printf init > {binary} && chmod 755 {binary}",
+        bin = shell_quote_path(managed_binary.parent().expect("binary has parent")),
+        binary = shell_quote_path(&managed_binary),
+    );
+    fs::write(
+        config_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "init-test"
+name = "Init Test"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/init-test.md"
+
+[agents.harness]
+id = "init-test-agent"
+
+[agents.harness.install.shell]
+script = {script:?}
+creates = "init-test-agent"
+"#
+        ),
+    )
+    .expect("agents override");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["init", "--agent", "init-test", "--install-agent"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent install: installed"));
+
+    assert!(managed_binary.is_file());
+    let written = fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config readable");
+    assert!(written.contains(r#"id = "init-test""#));
+    assert!(written.contains(r#"command = "init-test-agent""#));
 }
 
 #[test]

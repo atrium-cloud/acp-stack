@@ -204,7 +204,7 @@ fn operator_registry_override_path() -> Option<PathBuf> {
 }
 
 fn registry_override_path(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("registry.toml")
+    home.join(".config").join("acp-stack").join("agents.toml")
 }
 
 fn populate_agent_adapter_from_registry(
@@ -213,12 +213,19 @@ fn populate_agent_adapter_from_registry(
 ) {
     if let Some(entry) = registry.lookup(&config.agent.id) {
         if matches!(entry.kind, crate::agent_registry::RegistryKind::Adapter) {
-            if let Some(harness) = &entry.harness {
+            if let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter) {
                 config.agent.adapter = Some(crate::config::AgentAdapterConfig {
-                    id: entry.id.clone(),
+                    id: adapter.id.clone(),
                     name: entry.name.clone(),
                     upstream_agent: harness.id.clone(),
-                    source_url: harness.source_url.clone(),
+                    source_url: adapter.github.as_deref().and_then(|github| {
+                        crate::agent_registry::github_url_from_value(
+                            &entry.id,
+                            "adapter.github",
+                            github,
+                        )
+                        .ok()
+                    }),
                 });
             }
         }
@@ -441,18 +448,22 @@ id = "opencode"
 name = "Private OpenCode Adapter"
 kind = "adapter"
 headless_compatible = true
+support_doc = "docs/agents/private-opencode.md"
 
-[agents.adapter_install]
-type = "npx"
+[agents.adapter]
+id = "opencode-acp"
+github = "example/opencode-acp"
+
+[agents.adapter.install.npm]
 package = "@private/opencode-acp"
+creates = "opencode-acp"
 
 [agents.harness]
 id = "private-opencode"
-source_url = "https://example.com/private-opencode"
 
-[agents.harness.install]
-type = "npx"
+[agents.harness.install.npm]
 package = "@private/opencode"
+creates = "private-opencode"
 "#,
         )
         .expect("override registry parses");
@@ -460,12 +471,12 @@ package = "@private/opencode"
         populate_agent_adapter_from_registry(&mut config, &registry);
 
         let adapter = config.agent.adapter.expect("adapter metadata populated");
-        assert_eq!(adapter.id, "opencode");
+        assert_eq!(adapter.id, "opencode-acp");
         assert_eq!(adapter.name, "Private OpenCode Adapter");
         assert_eq!(adapter.upstream_agent, "private-opencode");
         assert_eq!(
             adapter.source_url.as_deref(),
-            Some("https://example.com/private-opencode")
+            Some("https://github.com/example/opencode-acp")
         );
     }
 }

@@ -3,7 +3,7 @@
 //! Two install paths share this module:
 //!
 //! - **Registry-resolved** (the default): the operator declares `[agent].id`
-//!   matching an entry in the embedded `data/registry.toml`. Native entries
+//!   matching an entry in the embedded `data/agents.toml`. Native entries
 //!   produce one install step; adapter-backed entries produce two (harness
 //!   first, adapter second).
 //! - **Operator escape hatch**: `[agent.install] type = "shell"` runs a free-
@@ -18,9 +18,9 @@
 //! - Per-stream output cap (`MAX_INSTALLER_STREAM_BYTES`) so a chatty
 //!   installer cannot bloat `installer_runs`. The state repo also
 //!   re-truncates at INSERT time as defense-in-depth.
-//! - Scrubbed environment: only `PATH`, `HOME`, `LANG`, and the
-//!   `[agent].env`-listed secrets reach the subprocess. The installer must
-//!   not be a wider door than the agent itself.
+//! - Scrubbed environment: registry-resolved installer steps receive only
+//!   `PATH`, `HOME`, and `LANG`. The operator escape-hatch installer also
+//!   receives the explicitly resolved env passed to it by the caller.
 //! - Fresh process group so the timeout-induced SIGKILL reaches grandchildren
 //!   the shell forked.
 //!
@@ -43,7 +43,9 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{AgentConfig, AgentInstallConfig};
 use crate::error::{Result, StackError};
-use crate::runtime::agent_registry::{ArchiveKind, InstallSpec, RegistryEntry, RegistryKind};
+use crate::runtime::agent_registry::{
+    ArchiveKind, GithubInstall, InstallSet, RegistryEntry, RegistryKind, github_repo_from_url,
+};
 use crate::runtime::github_release::{self, GithubReleaseInstall};
 use crate::state::{INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore};
 
@@ -256,11 +258,12 @@ pub fn install_resolved(
 pub fn install_resolved_capture(
     agent: &AgentConfig,
     entry: &RegistryEntry,
-    agent_env: HashMap<String, String>,
+    _agent_env: HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
 ) -> InstallerSequenceResult {
     let mut rows = Vec::new();
+    let installer_env = HashMap::new();
     if let Err(err) = entry.ensure_supported() {
         return InstallerSequenceResult {
             outcome: Err(err),
@@ -268,64 +271,130 @@ pub fn install_resolved_capture(
         };
     }
 
-    // Step 1: harness install (only for adapter-backed).
-    if entry.kind == RegistryKind::Adapter {
-        let harness = match entry.harness.as_ref() {
-            Some(h) => h,
-            None => {
-                // The registry validator should have caught this; fail-fast
-                // with a typed error if it didn't.
-                return InstallerSequenceResult {
-                    outcome: Err(StackError::RegistryLoad {
-                        reason: format!(
-                            "registry entry `{}` is kind=adapter but has no harness block",
-                            entry.id
-                        ),
-                    }),
-                    rows,
-                };
-            }
-        };
-        let step = run_install_step(
-            STEP_HARNESS,
-            &harness.install,
-            agent.harness_version.as_deref(),
-            &agent_env,
-            workspace_root,
-            dest_dir,
-        );
-        rows.push(step.row);
-        if let Err(err) = step.outcome {
+    // Step 1: install the upstream agent harness. Native entries speak ACP from
+    // this binary; adapter-backed entries wrap it with an adapter in step 2.
+    let harness = match entry.harness.as_ref() {
+        Some(h) => h,
+        None => {
+            // The registry validator should have caught this; fail-fast with a
+            // typed error if it didn't.
+            return InstallerSequenceResult {
+                outcome: Err(StackError::RegistryLoad {
+                    reason: format!("registry entry `{}` has no harness block", entry.id),
+                }),
+                rows,
+            };
+        }
+    };
+    let harness_step_label = if entry.kind == RegistryKind::Adapter {
+        STEP_HARNESS
+    } else {
+        STEP_INSTALL
+    };
+    let harness_spec = match select_install_path(
+        &entry.id,
+        "harness.install",
+        &harness.install,
+        entry.github.as_deref(),
+        agent.harness_version.as_deref(),
+    ) {
+        Ok(spec) => spec,
+        Err(err) => {
             return InstallerSequenceResult {
                 outcome: Err(err),
                 rows,
             };
         }
+    };
+
+    if entry.kind == RegistryKind::Adapter {
+        let adapter = match entry.adapter.as_ref() {
+            Some(adapter) => adapter,
+            None => {
+                return InstallerSequenceResult {
+                    outcome: Err(StackError::RegistryLoad {
+                        reason: format!("registry entry `{}` has no adapter block", entry.id),
+                    }),
+                    rows,
+                };
+            }
+        };
+        let adapter_spec = match select_install_path(
+            &entry.id,
+            "adapter.install",
+            &adapter.install,
+            adapter.github.as_deref(),
+            None,
+        ) {
+            Ok(spec) => spec,
+            Err(err) => {
+                return InstallerSequenceResult {
+                    outcome: Err(err),
+                    rows,
+                };
+            }
+        };
+
+        let harness_workspace = workspace_root.to_path_buf();
+        let harness_dest = dest_dir.to_path_buf();
+        let harness_env = installer_env.clone();
+        let adapter_workspace = workspace_root.to_path_buf();
+        let adapter_dest = dest_dir.to_path_buf();
+        let adapter_env = installer_env.clone();
+        let harness_thread = std::thread::spawn(move || {
+            run_install_step(
+                STEP_HARNESS,
+                harness_spec,
+                &harness_env,
+                &harness_workspace,
+                &harness_dest,
+            )
+        });
+        let adapter_thread = std::thread::spawn(move || {
+            run_install_step(
+                STEP_ADAPTER,
+                adapter_spec,
+                &adapter_env,
+                &adapter_workspace,
+                &adapter_dest,
+            )
+        });
+        let harness_step = harness_thread.join().unwrap_or_else(|_| StepResult {
+            row: InstallerRowDraft::config_error(STEP_HARNESS),
+            outcome: Err(StackError::AgentInitializeFailed {
+                reason: "harness installer thread panicked".to_owned(),
+            }),
+        });
+        let adapter_step = adapter_thread.join().unwrap_or_else(|_| StepResult {
+            row: InstallerRowDraft::config_error(STEP_ADAPTER),
+            outcome: Err(StackError::AgentInitializeFailed {
+                reason: "adapter installer thread panicked".to_owned(),
+            }),
+        });
+        let harness_outcome = harness_step.outcome;
+        let adapter_outcome = adapter_step.outcome;
+        rows.push(harness_step.row);
+        rows.push(adapter_step.row);
+        if let Err(err) = harness_outcome {
+            return InstallerSequenceResult {
+                outcome: Err(err),
+                rows,
+            };
+        }
+        if let Err(err) = adapter_outcome {
+            return InstallerSequenceResult {
+                outcome: Err(err),
+                rows,
+            };
+        }
+
+        return final_verification(agent, workspace_root, dest_dir, rows);
     }
 
-    // Step 2: adapter (or native) install. The harness_version pin only
-    // applies to the harness step; the adapter ignores it.
-    let adapter_step_label = if entry.kind == RegistryKind::Adapter {
-        STEP_ADAPTER
-    } else {
-        STEP_INSTALL
-    };
-    let Some(adapter_install) = entry.adapter_install.as_ref() else {
-        return InstallerSequenceResult {
-            outcome: Err(StackError::RegistryLoad {
-                reason: format!(
-                    "registry entry `{}` is supported but has no adapter install",
-                    entry.id
-                ),
-            }),
-            rows,
-        };
-    };
     let step = run_install_step(
-        adapter_step_label,
-        adapter_install,
-        None,
-        &agent_env,
+        harness_step_label,
+        harness_spec,
+        &installer_env,
         workspace_root,
         dest_dir,
     );
@@ -337,10 +406,18 @@ pub fn install_resolved_capture(
         };
     }
 
-    // Final verification: the operator's declared `[agent].command` must now
-    // resolve on PATH (or in workspace, per `resolve_creates` semantics). Hash
-    // the resulting binary so the existing `expected_sha256` integrity gate
-    // still runs.
+    final_verification(agent, workspace_root, dest_dir, rows)
+}
+
+fn final_verification(
+    agent: &AgentConfig,
+    workspace_root: &Path,
+    dest_dir: &Path,
+    rows: Vec<InstallerRowDraft>,
+) -> InstallerSequenceResult {
+    // The operator's declared `[agent].command` must now resolve on PATH (or in
+    // workspace, per `resolve_creates` semantics). Hash the resulting binary so
+    // the existing `expected_sha256` integrity gate still runs.
     let outcome = (|| {
         let path =
             resolve_creates(&agent.command, workspace_root, &[dest_dir]).ok_or_else(|| {
@@ -361,57 +438,155 @@ struct StepResult {
     outcome: Result<()>,
 }
 
+#[derive(Debug, Clone)]
+enum ResolvedInstallSpec {
+    Shell {
+        script: String,
+        creates: String,
+    },
+    Npm {
+        package: String,
+        creates: String,
+    },
+    GithubRelease {
+        repo: String,
+        asset_pattern: String,
+        archive: ArchiveKind,
+        binary_name: String,
+        checksums_asset: Option<String>,
+        version_pin: Option<String>,
+    },
+}
+
+fn select_install_path(
+    agent_id: &str,
+    field: &str,
+    install: &InstallSet,
+    github_url: Option<&str>,
+    version_pin: Option<&str>,
+) -> Result<ResolvedInstallSpec> {
+    if let Some(version) = version_pin {
+        if let Some(github) = &install.github {
+            return resolve_github_install(agent_id, field, github_url, github, Some(version));
+        }
+        if let Some(npm) = &install.npm {
+            return Ok(ResolvedInstallSpec::Npm {
+                package: format!("{}@{version}", npm.package),
+                creates: npm.creates.clone(),
+            });
+        }
+        return Err(StackError::RegistryLoad {
+            reason: format!(
+                "agent `{agent_id}` {field} cannot honor pinned version `{version}` with shell-only install"
+            ),
+        });
+    }
+
+    if let Some(shell) = &install.shell {
+        return Ok(ResolvedInstallSpec::Shell {
+            script: shell.script.clone(),
+            creates: shell.creates.clone(),
+        });
+    }
+    if let Some(npm) = &install.npm {
+        return Ok(ResolvedInstallSpec::Npm {
+            package: npm.package.clone(),
+            creates: npm.creates.clone(),
+        });
+    }
+    if let Some(github) = &install.github {
+        return resolve_github_install(agent_id, field, github_url, github, None);
+    }
+
+    Err(StackError::RegistryLoad {
+        reason: format!("agent `{agent_id}` {field} has no install paths"),
+    })
+}
+
+fn resolve_github_install(
+    agent_id: &str,
+    field: &str,
+    github_url: Option<&str>,
+    github: &GithubInstall,
+    version_pin: Option<&str>,
+) -> Result<ResolvedInstallSpec> {
+    let github_url = github_url.ok_or_else(|| StackError::RegistryLoad {
+        reason: format!("agent `{agent_id}` {field}.github requires github URL"),
+    })?;
+    let repo = github_repo_from_url(agent_id, "github", github_url)?;
+    let asset_pattern = if github.asset_pattern.contains("{arch}") {
+        let token =
+            github
+                .arch
+                .token_for_host()
+                .ok_or_else(|| StackError::UnsupportedHostArch {
+                    arch: std::env::consts::ARCH,
+                })?;
+        github.asset_pattern.replace("{arch}", token)
+    } else {
+        github.asset_pattern.clone()
+    };
+    Ok(ResolvedInstallSpec::GithubRelease {
+        repo,
+        asset_pattern,
+        archive: github.archive,
+        binary_name: github.binary_name.clone(),
+        checksums_asset: github.checksums_asset.clone(),
+        version_pin: version_pin.map(str::to_owned),
+    })
+}
+
 fn run_install_step(
     step_label: &'static str,
-    spec: &InstallSpec,
-    version_pin: Option<&str>,
+    spec: ResolvedInstallSpec,
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
 ) -> StepResult {
     let started_at = current_timestamp();
     match spec {
-        InstallSpec::Shell { script, creates } => {
-            let result = run_shell_install(script, agent_env, workspace_root, &[dest_dir]);
+        ResolvedInstallSpec::Shell { script, creates } => {
+            let result = run_shell_install(&script, agent_env, workspace_root, &[dest_dir]);
             shell_step_with_creates(
                 step_label,
                 started_at,
                 result,
-                creates,
+                &creates,
                 workspace_root,
                 &[dest_dir],
             )
         }
-        InstallSpec::Npx { package } => {
-            let args = vec!["install".to_owned(), "-g".to_owned(), package.clone()];
-            let result = run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir]);
-            shell_step_without_creates(step_label, started_at, result)
+        ResolvedInstallSpec::Npm { package, creates } => {
+            let result = run_npm_install(&package, agent_env, workspace_root, dest_dir);
+            shell_step_with_creates(
+                step_label,
+                started_at,
+                result,
+                &creates,
+                workspace_root,
+                &[dest_dir],
+            )
         }
-        InstallSpec::Uvx { package } => {
-            let args = vec!["tool".to_owned(), "install".to_owned(), package.clone()];
-            let result = run_program_install("uv", &args, agent_env, workspace_root, &[dest_dir]);
-            shell_step_without_creates(step_label, started_at, result)
-        }
-        InstallSpec::GithubRelease {
+        ResolvedInstallSpec::GithubRelease {
             repo,
             asset_pattern,
             archive,
             binary_name,
             checksums_asset,
+            version_pin,
         } => {
-            let archive = *archive;
             let install = GithubReleaseInstall {
-                repo,
-                asset_pattern,
+                repo: &repo,
+                asset_pattern: &asset_pattern,
                 archive,
-                binary_name,
+                binary_name: &binary_name,
                 checksums_asset: checksums_asset.as_deref(),
             };
             github_release_step(
                 step_label,
                 started_at,
                 install,
-                version_pin,
+                version_pin.as_deref(),
                 agent_env,
                 dest_dir,
             )
@@ -456,66 +631,6 @@ fn shell_step_with_creates(
                     name: creates.to_owned(),
                 });
             StepResult { outcome, row }
-        }
-        Err(StackError::AgentInstallerTimeout) => StepResult {
-            outcome: Err(StackError::AgentInstallerTimeout),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "timeout".into(),
-                stdout: String::new(),
-                stderr: "[installer timed out]".into(),
-                exit_status: None,
-                step: step_label.to_owned(),
-            },
-        },
-        Err(err) => StepResult {
-            outcome: Err(err),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "error".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: None,
-                step: step_label.to_owned(),
-            },
-        },
-    }
-}
-
-fn shell_step_without_creates(
-    step_label: &'static str,
-    started_at: String,
-    run_result: Result<CapturedOutput>,
-) -> StepResult {
-    let finished_at = current_timestamp();
-    match run_result {
-        Ok(captured) => {
-            let exit_ok = captured.exit_status == Some(0);
-            let row_status = if exit_ok { "ran" } else { "failed" };
-            let row = InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: row_status.into(),
-                stdout: captured.stdout.clone(),
-                stderr: captured.stderr.clone(),
-                exit_status: captured.exit_status,
-                step: step_label.to_owned(),
-            };
-            if !exit_ok {
-                return StepResult {
-                    outcome: Err(StackError::AgentInstallerFailed {
-                        exit: captured.exit_status,
-                        stderr_tail: tail_bytes(&captured.stderr, STDERR_TAIL_BYTES),
-                    }),
-                    row,
-                };
-            }
-            StepResult {
-                outcome: Ok(()),
-                row,
-            }
         }
         Err(StackError::AgentInstallerTimeout) => StepResult {
             outcome: Err(StackError::AgentInstallerTimeout),
@@ -658,13 +773,6 @@ fn finalize_shell_step(
     }
 }
 
-// Suppress unused-variant warning on ArchiveKind imports until the explicit
-// destructure above is broken out further. The compiler sees `archive`
-// matched via `*archive`, but rustc still reads through to ArchiveKind which
-// only this module uses externally.
-#[allow(dead_code)]
-fn _archive_kind_marker(_: ArchiveKind) {}
-
 fn verify_expected_sha256(expected: Option<&str>, actual: &str) -> Result<()> {
     match expected {
         Some(expected) if expected != actual => Err(StackError::AgentSha256Mismatch {
@@ -694,6 +802,28 @@ fn run_shell_install(
         workspace_root,
         extra_path_dirs,
     )
+}
+
+fn run_npm_install(
+    package: &str,
+    agent_env: &HashMap<String, String>,
+    workspace_root: &Path,
+    dest_dir: &Path,
+) -> Result<CapturedOutput> {
+    let prefix = dest_dir.parent().ok_or_else(|| StackError::RegistryLoad {
+        reason: format!(
+            "managed bin directory {} has no parent for npm --prefix",
+            dest_dir.display()
+        ),
+    })?;
+    let args = vec![
+        "install".to_owned(),
+        "-g".to_owned(),
+        "--prefix".to_owned(),
+        prefix.to_string_lossy().into_owned(),
+        package.to_owned(),
+    ];
+    run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir])
 }
 
 fn run_program_install(
@@ -968,6 +1098,7 @@ fn tail_bytes(input: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_registry::{AdapterSpec, HarnessSpec, ShellInstall};
     use crate::state::StateStore;
     use tempfile::TempDir;
 
@@ -1001,10 +1132,96 @@ mod tests {
             env: Vec::new(),
             expected_sha256: None,
             restart: "on-crash".to_owned(),
+            mode: None,
+            model: None,
             harness_version: None,
             adapter: None,
+            provider: None,
             install: None,
         }
+    }
+
+    fn shell_install_set(script: &str, creates: &str) -> InstallSet {
+        InstallSet {
+            shell: Some(ShellInstall {
+                script: script.to_owned(),
+                creates: creates.to_owned(),
+            }),
+            ..InstallSet::default()
+        }
+    }
+
+    fn harness_spec(id: &str, install: InstallSet) -> HarnessSpec {
+        HarnessSpec {
+            id: id.to_owned(),
+            install,
+        }
+    }
+
+    fn adapter_spec(id: &str, install: InstallSet) -> AdapterSpec {
+        AdapterSpec {
+            id: id.to_owned(),
+            github: None,
+            install,
+        }
+    }
+
+    fn native_entry(
+        id: &str,
+        name: &str,
+        support_doc: Option<&str>,
+        harness: HarnessSpec,
+    ) -> RegistryEntry {
+        RegistryEntry {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            kind: RegistryKind::Native,
+            headless_compatible: support_doc.is_some(),
+            set_provider: false,
+            set_model: false,
+            set_mode: false,
+            website: None,
+            github: None,
+            support_doc: support_doc.map(str::to_owned),
+            adapter: None,
+            harness: Some(harness),
+        }
+    }
+
+    fn adapter_entry(
+        id: &str,
+        name: &str,
+        support_doc: Option<&str>,
+        harness: HarnessSpec,
+        adapter: AdapterSpec,
+    ) -> RegistryEntry {
+        RegistryEntry {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            kind: RegistryKind::Adapter,
+            headless_compatible: support_doc.is_some(),
+            set_provider: false,
+            set_model: false,
+            set_mode: false,
+            website: None,
+            github: None,
+            support_doc: support_doc.map(str::to_owned),
+            adapter: Some(adapter),
+            harness: Some(harness),
+        }
+    }
+
+    fn shell_string_for_write(path: &Path, content: &str) -> String {
+        format!(
+            "mkdir -p {bin} && printf {content} > {binary} && chmod 755 {binary}",
+            bin = shell_quote_path(path.parent().expect("binary has parent")),
+            content = shell_quote_literal(content),
+            binary = shell_quote_path(path),
+        )
+    }
+
+    fn shell_quote_literal(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
     }
 
     #[test]
@@ -1096,17 +1313,15 @@ mod tests {
 
     #[test]
     fn unsupported_registry_entry_fails_before_running_steps() {
-        let entry = RegistryEntry {
-            id: "unsupported".to_owned(),
-            name: "Unsupported Agent".to_owned(),
-            kind: RegistryKind::Native,
-            headless_compatible: false,
-            homepage: None,
-            adapter_install: Some(InstallSpec::Npx {
-                package: "definitely-should-not-run".to_owned(),
-            }),
-            harness: None,
-        };
+        let entry = native_entry(
+            "unsupported",
+            "Unsupported Agent",
+            None,
+            harness_spec(
+                "unsupported",
+                shell_install_set("false", "definitely-should-not-run"),
+            ),
+        );
         let tempdir = TempDir::new().expect("tempdir");
         let result = install_resolved_capture(
             &agent_config("unsupported-agent"),
@@ -1131,18 +1346,12 @@ mod tests {
         let binary_path = dest_dir.join("managed-agent");
         std::fs::write(&binary_path, b"fake-agent").expect("write fake binary");
 
-        let entry = RegistryEntry {
-            id: "managed-agent".to_owned(),
-            name: "Managed Agent".to_owned(),
-            kind: RegistryKind::Native,
-            headless_compatible: true,
-            homepage: None,
-            adapter_install: Some(InstallSpec::Shell {
-                script: "true".to_owned(),
-                creates: "managed-agent".to_owned(),
-            }),
-            harness: None,
-        };
+        let entry = native_entry(
+            "managed-agent",
+            "Managed Agent",
+            Some("docs/agents/managed-agent.md"),
+            harness_spec("managed-agent", shell_install_set("true", "managed-agent")),
+        );
 
         let result = install_resolved_capture(
             &agent_config("managed-agent"),
@@ -1155,5 +1364,216 @@ mod tests {
         assert_eq!(outcome.path(), binary_path.as_path());
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].status, "ran");
+    }
+
+    #[test]
+    fn adapter_entry_installs_harness_then_adapter_and_verifies_adapter_command() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        let adapter_binary = dest_dir.join("adapter-agent");
+        let harness_binary = dest_dir.join("upstream-agent");
+        let adapter_script = shell_string_for_write(&adapter_binary, "adapter");
+        let harness_script = shell_string_for_write(&harness_binary, "harness");
+        let entry = adapter_entry(
+            "adapter-agent",
+            "Adapter Agent",
+            Some("docs/agents/adapter-agent.md"),
+            harness_spec(
+                "upstream-agent",
+                shell_install_set(&harness_script, "upstream-agent"),
+            ),
+            adapter_spec(
+                "adapter-agent",
+                shell_install_set(&adapter_script, "adapter-agent"),
+            ),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("adapter-agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        let outcome = result.outcome.expect("adapter should install");
+        assert_eq!(outcome.path(), adapter_binary.as_path());
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].step, "harness");
+        assert_eq!(result.rows[0].status, "ran");
+        assert_eq!(result.rows[1].step, "adapter");
+        assert_eq!(result.rows[1].status, "ran");
+    }
+
+    #[test]
+    fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        let harness_binary = dest_dir.join("upstream-agent");
+        let adapter_binary = dest_dir.join("adapter-agent");
+        let harness_script = format!(
+            "sleep 0.6; mkdir -p {bin}; printf harness > {harness}; chmod 755 {harness}",
+            bin = shell_quote_path(&dest_dir),
+            harness = shell_quote_path(&harness_binary),
+        );
+        let adapter_script = format!(
+            "sleep 0.6; mkdir -p {bin}; printf adapter > {adapter}; chmod 755 {adapter}",
+            bin = shell_quote_path(&dest_dir),
+            adapter = shell_quote_path(&adapter_binary),
+        );
+        let entry = adapter_entry(
+            "adapter-agent",
+            "Adapter Agent",
+            Some("docs/agents/adapter-agent.md"),
+            harness_spec(
+                "upstream-agent",
+                shell_install_set(&harness_script, "upstream-agent"),
+            ),
+            adapter_spec(
+                "adapter-agent",
+                shell_install_set(&adapter_script, "adapter-agent"),
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let result = install_resolved_capture(
+            &agent_config("adapter-agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+        let elapsed = started.elapsed();
+
+        result.outcome.expect("adapter should install");
+        assert!(
+            elapsed < std::time::Duration::from_millis(1100),
+            "adapter install took {elapsed:?}, expected concurrent steps"
+        );
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].step, "harness");
+        assert_eq!(result.rows[1].step, "adapter");
+    }
+
+    #[test]
+    fn adapter_entry_runs_adapter_even_when_harness_fails() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        let adapter_binary = dest_dir.join("adapter-agent");
+        let adapter_script = shell_string_for_write(&adapter_binary, "adapter");
+        let entry = adapter_entry(
+            "adapter-agent",
+            "Adapter Agent",
+            Some("docs/agents/adapter-agent.md"),
+            harness_spec(
+                "upstream-agent",
+                shell_install_set("false", "upstream-agent"),
+            ),
+            adapter_spec(
+                "adapter-agent",
+                shell_install_set(&adapter_script, "adapter-agent"),
+            ),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("adapter-agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        assert!(matches!(
+            result
+                .outcome
+                .expect_err("harness failure must fail install"),
+            StackError::AgentInstallerFailed { .. }
+        ));
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].step, "harness");
+        assert_eq!(result.rows[0].status, "failed");
+        assert_eq!(result.rows[1].step, "adapter");
+        assert_eq!(result.rows[1].status, "ran");
+        assert!(adapter_binary.is_file());
+    }
+
+    #[test]
+    fn registry_installs_do_not_receive_agent_runtime_secrets() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let binary_path = tempdir.path().join("secret-check-agent");
+        let script = format!(
+            "test -z \"$OPENCODE_API_KEY\" && printf ok > {binary}",
+            binary = shell_quote_path(&binary_path),
+        );
+        let entry = native_entry(
+            "secret-check-agent",
+            "Secret Check Agent",
+            Some("docs/agents/secret-check-agent.md"),
+            harness_spec(
+                "secret-check-agent",
+                shell_install_set(&script, "secret-check-agent"),
+            ),
+        );
+        let mut agent_env = HashMap::new();
+        agent_env.insert("OPENCODE_API_KEY".to_owned(), "secret-value".to_owned());
+
+        let result = install_resolved_capture(
+            &agent_config("secret-check-agent"),
+            &entry,
+            agent_env,
+            tempdir.path(),
+            tempdir.path(),
+        );
+
+        let outcome = result
+            .outcome
+            .expect("registry installer should not see runtime secret");
+        assert_eq!(outcome.path(), binary_path.as_path());
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].status, "ran");
+    }
+
+    #[test]
+    fn bootstrap_can_install_directly_into_managed_bin() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join(".local").join("bin");
+        let managed_opencode = dest_dir.join("opencode");
+        let script = format!(
+            "set -eu\n\
+             managed_bin={dest_dir}\n\
+             mkdir -p \"$managed_bin\"\n\
+             printf bootstrap > \"$managed_bin/opencode\"\n\
+             chmod 755 \"$managed_bin/opencode\"\n\
+             test -x {managed_opencode}",
+            dest_dir = shell_quote_path(&dest_dir),
+            managed_opencode = shell_quote_path(&managed_opencode),
+        );
+        let entry = native_entry(
+            "opencode",
+            "OpenCode",
+            Some("docs/agents/opencode.md"),
+            harness_spec("opencode", shell_install_set(&script, "opencode")),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("opencode"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        let outcome = result.outcome.expect("managed opencode link should verify");
+        assert_eq!(outcome.path(), managed_opencode.as_path());
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].status, "ran");
+    }
+
+    fn shell_quote_path(path: &Path) -> String {
+        let text = path.to_string_lossy();
+        format!("'{}'", text.replace('\'', "'\\''"))
     }
 }

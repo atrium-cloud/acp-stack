@@ -70,16 +70,11 @@ schema = "acp_stack"
 id = "opencode"
 name = "OpenCode"
 command = "opencode"
-args = ["--acp"]
+args = ["acp"]
 cwd = "/workspace"
-env = ["OPENCODE_API_KEY"]
+env = ["<provider-api-key-ref>"]
 # expected_sha256 is optional; when present it must be exactly 64 lowercase hex chars.
 restart = "on-crash"
-
-[agent.install]
-type = "registry"
-id = "opencode"
-creates = "opencode"
 
 [permissions]
 mode = "auto"                # auto | supervised | locked
@@ -120,24 +115,31 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[security.http].trusted_proxies` is a list of exact IP-address strings (no CIDR) trusted to populate `X-Forwarded-For` / `Forwarded` headers. When `trust_proxy_headers = true` and the socket peer matches an entry, the leftmost forwarded IP is used as the client IP for auth-failure tracking. With `trust_proxy_headers = false` or an empty list, the socket peer is always used.
 
-`[agent]` names the ACP process that `acp-stack` launches. `[agent].id` matches an entry in the embedded `data/registry.toml`; the runtime uses that lookup to decide whether the agent is native or adapter-backed and what install plan to run. Operators do not write `[agent.adapter]` — that block is populated at runtime from the resolved registry entry and is rejected with an unknown-field error if it appears in operator TOML.
+`[agent]` names the ACP process that `acp-stack` launches. `[agent].id` matches an entry in the embedded `data/agents.toml`; the runtime uses that lookup to decide whether the agent is native or adapter-backed and what install plan to run. Operators do not write `[agent.adapter]` — that block is populated at runtime from the resolved registry entry and is rejected with an unknown-field error if it appears in operator TOML.
 
-`[agent].harness_version` (optional) pins the harness install to a specific GitHub Release tag for adapter-backed agents whose harness is distributed via `github_release`. Omit to install the latest release at install time.
+`[agent].harness_version` (optional) pins the harness install to a specific GitHub Release tag when the resolved registry harness uses `github_release`. Omit for latest/floating shell bootstrap entries.
 
-Example native OpenCode config for OpenCode Go API-key deployments. Install metadata flows from the embedded registry; operator TOML stays terse:
+Example native OpenCode config with explicit provider setup. Install metadata flows from the embedded registry; operator TOML stays terse:
 
 ```toml
 [agent]
 id = "opencode"
 name = "OpenCode"
 command = "opencode"
-args = ["--acp"]
+args = ["acp"]
 cwd = "/workspace"
-env = ["OPENCODE_API_KEY"]
+env = ["<provider-api-key-ref>"]
 restart = "on-crash"
+
+[agent.provider]
+id = "<provider-id>"
+model = "<provider-id>/<model-id>"
+api_key_ref = "<provider-api-key-ref>"
 ```
 
-Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets. The initial embedded registry supports only headless direct-key operation, so the OpenCode example uses `OPENCODE_API_KEY`.
+`[agent].model` is optional and used for model-only agents such as Cursor CLI. `[agent.provider]` is optional and used for agents whose provider setup is explicit. `id` is the configured provider id, `model` is the optional agent-specific model id, and `api_key_ref` is the secret ref that should be present in `[agent].env` and referenced from generated agent-owned config. `acps init --provider <provider-id>` can create the initial provider block without a model. `acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` edits this block only for registry entries that declare `set_provider = true`. `acps agent set --model <model>` writes `[agent].model` only for model-only entries that declare `set_model = true` and `set_provider = false`. Both paths validate model values against ACP session config options, regenerate supported agent config before writing the main config, and write `acp-stack.toml` only after generated config provisioning succeeds. If provider-backed `--model` is omitted, interactive terminals prompt from the ACP `model` config option; non-interactive runs list advertised model values and exit without mutating config.
+
+Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets.
 
 For an agent that is not in the embedded registry (private fork, unreleased build), declare `[agent.install] type = "shell"` as an escape hatch with a free-form install script and a `creates` postcheck. The registry-driven install path is implicit when `[agent.install]` is omitted.
 
@@ -160,6 +162,19 @@ The 0.0.1 implementation supports validation, export, and import:
 - `acps config export --base64` emits the same canonical TOML as base64.
 - `acps config import <path>` parses, validates, and atomically writes canonical TOML to `~/.config/acp-stack/acp-stack.toml`. Without `--force`, it refuses to overwrite an existing config. `--base64 <code>` decodes its argument as base64-encoded canonical TOML before validation. Atomic writes use a temp-file + rename under owner-only mode (`0600`).
 - Validation rejects unknown fields, invalid enum values, relative workspace paths, missing `workspace.source`, incomplete `git` or `s3` source declarations, fields that do not belong to the selected source type, and aliased or empty `[auth].session_key_ref` / `[auth].admin_key_ref`.
+
+The Phase 4 init flow will replace the single `[workspace.source]` seed model with separate code and data source declarations. The planned shape is:
+
+- `[[workspace.code_sources]]` for Git repositories cloned into
+  `/workspace/usr/code/<repo-name>/`
+- `[[workspace.data_sources]]` for local paths, public HTTPS archives, and S3
+  bucket/prefix inputs placed under `/workspace/usr/data/<data-dir-name>/`
+
+Repos use their repository name. Data sources use the existing directory name, archive name, single top-level archive directory, or S3 bucket/prefix terminal name. Init refuses to merge into non-empty destinations unless a later explicit overwrite/force contract is added.
+
+Init does not infer model config from API-key refs. It may write provider/auth config after provider selection and required ref collection. `acps agent set` writes supported model config after the model is explicit. `acp-stack` does not store provider API key values in plaintext.
+
+Phase 4 expands this into a unified provider/model API that resolves provider ids through `data/mapping.toml`, validates selected model and mode values against ACP session config options, updates the agent-owned config file, and relaunches the active agent.
 
 ## Request Size Limits
 
