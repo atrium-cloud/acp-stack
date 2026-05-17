@@ -30,6 +30,9 @@ pub enum StackError {
         source: std::io::Error,
     },
 
+    #[error("failed to provision agent config at {path}: {reason}")]
+    AgentConfigProvision { path: PathBuf, reason: String },
+
     #[error("failed to set owner-only permissions on {path}: {source}")]
     PermissionSet {
         path: PathBuf,
@@ -526,6 +529,7 @@ impl StackError {
             HomeNotSet => "config.home_missing",
             ConfigRead { .. } => "config.read_failed",
             ConfigWrite { .. } => "config.write_failed",
+            AgentConfigProvision { .. } => "agent.config_provision_failed",
             ConfigInitialize { .. } => "config.initialize_failed",
             ConfigExists { .. } => "config.exists",
             ConfigToml(_) | ConfigSerialize(_) => "config.invalid",
@@ -665,6 +669,7 @@ impl StackError {
             ImportUtf8 { .. } => "imported config was not valid UTF-8".to_owned(),
             DirectoryCreate { .. } => "failed to create directory".to_owned(),
             FileCreate { .. } => "failed to create file".to_owned(),
+            AgentConfigProvision { .. } => "failed to provision agent config".to_owned(),
             FileRemove { .. } => "failed to remove file".to_owned(),
             PermissionSet { .. } => "failed to set owner-only permissions".to_owned(),
             MissingParentDir { .. } => "path has no parent directory".to_owned(),
@@ -956,6 +961,7 @@ impl StackError {
             | ConfigRead { .. }
             | ConfigWrite { .. }
             | ConfigInitialize { .. }
+            | AgentConfigProvision { .. }
             | DirectoryCreate { .. }
             | FileCreate { .. }
             | FileRemove { .. }

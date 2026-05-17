@@ -30,11 +30,14 @@ struct AgentHarness {
 
 impl AgentHarness {
     async fn spawn() -> Self {
+        Self::spawn_with_config(test_config()).await
+    }
+
+    async fn spawn_with_config(config: Config) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
-        let config = test_config();
         let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -47,6 +50,93 @@ impl AgentHarness {
             join,
         }
     }
+}
+
+struct HomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl HomeEnvGuard {
+    fn set(home: &std::path::Path) -> Self {
+        let previous = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn registry_install_does_not_require_runtime_secret_store() {
+    let mut config = test_config();
+    let command = config.agent.command.clone();
+    config.agent.install = None;
+    config.agent.env = vec!["OPENCODE_API_KEY".to_owned()];
+    let tempdir = TempDir::new().expect("tempdir");
+    let workspace_root = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace_root).expect("workspace dir");
+    config.workspace.root = workspace_root.to_string_lossy().into_owned();
+    let binary_path = tempdir
+        .path()
+        .join(".local")
+        .join("bin")
+        .join("registry-agent");
+    let script = format!(
+        "mkdir -p {bin} && printf registry > {binary} && chmod 755 {binary}",
+        bin = shell_quote_path(binary_path.parent().expect("binary has parent")),
+        binary = shell_quote_path(&binary_path),
+    );
+    config.agent.command = "registry-agent".to_owned();
+    config.agent.args = Vec::new();
+    let override_dir = tempdir.path().join(".config").join("acp-stack");
+    std::fs::create_dir_all(&override_dir).expect("override dir");
+    std::fs::write(
+        override_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "opencode"
+name = "OpenCode Test"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/opencode.md"
+
+[agents.harness]
+id = "opencode"
+
+[agents.harness.install.shell]
+script = {script:?}
+creates = "registry-agent"
+"#
+        ),
+    )
+    .expect("override registry");
+    let _home_guard = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/install", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send install");
+    let status = response.status();
+    let body: Value = response.json().await.expect("install json");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["outcome"], "installed");
+    assert_eq!(body["data"]["path"], binary_path.to_string_lossy().as_ref());
+    assert_eq!(command, env!("CARGO_BIN_EXE_acps"));
 }
 
 impl Drop for AgentHarness {
@@ -91,6 +181,11 @@ fn admin_bearer() -> String {
 
 fn session_bearer() -> String {
     format!("Bearer {SESSION_KEY}")
+}
+
+fn shell_quote_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 #[tokio::test]

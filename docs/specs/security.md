@@ -64,7 +64,7 @@ Secret references appear in config:
 
 ```toml
 [agent]
-env = ["OPENCODE_API_KEY"]
+env = ["<provider-api-key-ref>"]
 
 [logging.supabase]
 service_role_key_ref = "SUPABASE_SERVICE_ROLE_KEY"
@@ -81,19 +81,38 @@ See [mcp.md](mcp.md) for the full Linear MCP example, including `acps secrets se
 Secret values are managed by CLI or API:
 
 ```sh
-acps secrets set OPENCODE_API_KEY
+acps secrets set <provider-api-key-ref>
 acps secrets list
-acps secrets delete OPENCODE_API_KEY
+acps secrets delete <provider-api-key-ref>
 ```
 
 Scoped injection rules:
 
-- the agent receives only names listed in `[agent].env`
+- the agent receives only reserved non-secret runtime context (`PATH`, `HOME`)
+  plus names listed in `[agent].env`
+- registry-resolved installer steps receive no agent runtime env secrets; future
+  install-only tokens must be declared separately from `[agent].env`
 - a stdio MCP server receives only names listed in its `env`
 - HTTP MCP headers may interpolate referenced secrets
 - the Supabase sink receives only the configured `service_role_key_ref` when external logging is enabled
 - the full secret store is never injected into any child process
 - secret values are never returned by API or config export
+
+Secret-reference classifications:
+
+- **agent runtime env** - reserved non-secret runtime context plus secret values
+  injected only into the configured agent process when listed in `[agent].env`
+- **MCP stdio env** - secret values injected only into that server process when
+  listed in the server's `env`
+- **MCP HTTP header** - secret values interpolated only into the configured
+  outbound header for that HTTP MCP server
+- **Git credential** - secret values used only for workspace repository clone
+  during init or workspace source setup
+- **S3 credential** - secret values used only for S3 data ingestion
+- **install-only token** - secret values made available only to a bounded
+  installer step, not to the launched agent unless separately referenced
+
+Each reference name has exactly one declared purpose in config. The same secret value may be stored twice under two names if an operator intentionally wants to reuse material across purposes, but implicit aliasing across subsystems is not part of the contract.
 
 Security limitation:
 
