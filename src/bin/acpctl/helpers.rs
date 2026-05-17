@@ -69,7 +69,7 @@ pub(crate) fn build_logs_path(args: &LogsQueryArgs) -> Result<String, String> {
 /// The server's `/v1/logs/events` route does no duration parsing of its own,
 /// so passing `30m` straight through would be compared character-by-character
 /// against real timestamps and silently mis-filter.
-fn resolve_time_bound(raw: &str, field: &str) -> Result<String, String> {
+pub(crate) fn resolve_time_bound(raw: &str, field: &str) -> Result<String, String> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Ok(dt
             .with_timezone(&chrono::Utc)

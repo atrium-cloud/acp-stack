@@ -58,7 +58,21 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
 flate2 = "1.0.35"
 tar = "0.4.43"
 zip = { version = "5.1.1", default-features = false, features = ["deflate"] }
+rmcp = { version = "1.7.0", features = [
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+schemars = "0.8.22"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
+rmcp = { version = "1.7.0", features = [
+    "transport-io",
+    "transport-streamable-http-server",
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-unix-socket",
+] }

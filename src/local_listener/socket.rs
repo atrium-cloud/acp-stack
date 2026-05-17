@@ -68,6 +68,16 @@ pub struct BoundLocalListener {
     guard: SocketGuard,
 }
 
+impl BoundLocalListener {
+    /// Consume the wrapper and return the bound `UnixListener` together with
+    /// the `SocketGuard` whose `Drop` impl unlinks the socket inode on exit.
+    /// Used by `acpctl mcp serve` (http-uds transport) to plumb a safely-bound
+    /// listener into rmcp's HTTP server without re-implementing the bind path.
+    pub fn into_parts(self) -> (UnixListener, SocketGuard) {
+        (self.listener, self.guard)
+    }
+}
+
 /// Whether the listener may chmod (`0o700`) an already-existing socket parent
 /// directory. The default path under `~/.local/share/acp-stack/` is
 /// daemon-managed, so repair is safe; an operator-configured `socket_path`
