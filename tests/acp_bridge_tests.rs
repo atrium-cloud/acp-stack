@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use acp_stack::acp_bridge::{AcpBridge, SessionEventSink};
-use acp_stack::config::{AgentConfig, AgentInstallConfig};
+use acp_stack::config::{AgentConfig, AgentInstallConfig, AgentProviderConfig};
 
 #[derive(Default)]
 struct CapturedEvent {
@@ -200,6 +200,40 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
     let payload = sink.events.lock().unwrap()[0].payload.clone();
     assert!(payload.contains("chunk-1"));
 
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn goose_new_session_sets_configured_model_before_prompt() {
+    use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
+
+    let mut config = fake_agent_config();
+    config.id = "goose".into();
+    config.args.extend([
+        "--expect-model-config".into(),
+        "deepseek/deepseek-v4-flash".into(),
+    ]);
+    config.provider = Some(AgentProviderConfig {
+        id: "openrouter".into(),
+        model: Some("deepseek/deepseek-v4-flash".into()),
+        api_key_ref: Some("OPENROUTER_API_KEY".into()),
+    });
+    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
+        .await
+        .expect("spawn");
+
+    let new_session = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect("session/new sets model config");
+    let prompt = PromptRequest::new(
+        new_session.session_id,
+        vec![ContentBlock::Text(TextContent::new("hello"))],
+    );
+    bridge
+        .prompt_session(prompt)
+        .await
+        .expect("prompt sees configured model");
     bridge.shutdown().await.expect("shutdown ok");
 }
 

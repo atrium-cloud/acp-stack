@@ -57,7 +57,6 @@ References:
     - Prioritize correctness and clarity. Speed and efficiency are secondary unless specified.
     - Avoid patch-on-patch fixes. If a change requires repeated boilerplate, special casing, or an architectural workaround, stop and discuss the design.
     - Avoid creative additions unless explicitly requested.
-
 - Programmatic code checks
     - Run these after a logical set of changes are complete, or before commit:
         - Rust checks: when a Rust workspace exists, use the repository's own Cargo commands for build, test, formatting, and linting.
@@ -84,6 +83,10 @@ References:
 - Code Review
     - When asked to perform a code review, review the changes on their own merits and from the perspective of the feature or product.
     - If provided with a plan or spec, use it as context, but do not ignore bugs simply because they are outside the plan.
+- Testing agent with ACP
+    - Run the harness to be tested in interactive shell outside sandbox to make use of existing env vars.
+    - Refrain from claiming an agent is supported before the real prompt smoke passes end-to-end.
+    - Always add newly supported agents to the end of [agents.toml](./data/agents.toml) and [README.md](./README.md).
 
 ## Error Handling
 
