@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::agent_installer::{InstallerOutcome, install_resolved, run_installer};
 use crate::agent_registry::{InstallSet, RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::auth::generate_api_key;
-use crate::config::{self, AgentProviderConfig, Config};
+use crate::config::{
+    self, AgentProviderConfig, CloudflareEdgeConfig, Config, DependencyEntry, EdgeConfig,
+};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
@@ -37,6 +39,45 @@ pub struct InitArgs {
     /// Skip the install prompt in interactive runs.
     #[arg(long)]
     no_install_agent: bool,
+    /// Configure a public edge profile during init.
+    #[arg(long, value_enum)]
+    edge: Option<EdgeProviderArg>,
+    /// Public exposure model for the selected edge provider.
+    #[arg(long, value_enum, requires = "edge")]
+    exposure: Option<EdgeExposureArg>,
+    /// Public hostname for the edge profile, for example agent.example.com.
+    #[arg(long, requires = "edge")]
+    hostname: Option<String>,
+    /// How cloudflared is expected to run for generated Cloudflare artifacts.
+    #[arg(long, value_enum, default_value_t = CloudflaredDeploymentArg::Host)]
+    cloudflared_deployment: CloudflaredDeploymentArg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EdgeProviderArg {
+    Cloudflare,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EdgeExposureArg {
+    Tunnel,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CloudflaredDeploymentArg {
+    Host,
+    Docker,
+    External,
+}
+
+impl CloudflaredDeploymentArg {
+    fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Docker => "docker",
+            Self::External => "external",
+        }
+    }
 }
 
 pub(super) fn run_init(args: InitArgs) -> Result<()> {
@@ -72,6 +113,7 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
     if let Some(entry) = selected_agent {
         apply_registry_entry_to_config(&mut config, entry);
     }
+    let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
 
     let session_ref = config.auth.session_key_ref.clone();
     let admin_ref = config.auth.admin_key_ref.clone();
@@ -140,7 +182,7 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
         &config_path,
         &mut secret_store,
     )?;
-    if selected_agent.is_some() || provider_configured {
+    if selected_agent.is_some() || provider_configured || edge_requested {
         let canonical = config.to_canonical_toml()?;
         config = config::load_config_from_str(&canonical)?;
         atomic_write_owner_only(&config_path, canonical.as_bytes())?;
@@ -148,6 +190,18 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
 
     let provisioned_agent_configs =
         crate::runtime::agent_headless_config::provision_agent_headless_config(&config, &home)?;
+    let provisioned_edge_artifacts = if edge_requested {
+        let config_dir = parent_dir(&config_path)?;
+        match config.edge.cloudflare.as_ref() {
+            Some(cloudflare) if cloudflare.enabled => {
+                let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
+                crate::edge::write_cloudflare_artifacts(config_dir, cloudflare, &service_url)?
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     // Record init.completed AFTER secret-store setup so a half-finished init
     // (e.g. failed key generation) does not leave a misleading
@@ -175,8 +229,64 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
     for provisioned in provisioned_agent_configs {
         println!("{}: {}", provisioned.label, provisioned.path.display());
     }
+    for artifact in provisioned_edge_artifacts {
+        println!("{}: {}", artifact.label, artifact.path.display());
+    }
 
     Ok(())
+}
+
+fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config) -> Result<bool> {
+    let Some(edge) = args.edge else {
+        return Ok(false);
+    };
+    match edge {
+        EdgeProviderArg::Cloudflare => {}
+    }
+    if !matches!(args.exposure, Some(EdgeExposureArg::Tunnel)) {
+        return Err(StackError::MissingField {
+            field: "--exposure tunnel",
+        });
+    }
+    let hostname = args
+        .hostname
+        .as_ref()
+        .ok_or(StackError::MissingField {
+            field: "--hostname",
+        })?
+        .trim()
+        .to_owned();
+    let public_url = format!("https://{hostname}");
+    config.api.bind = "127.0.0.1:7700".to_owned();
+    config.api.public_url = Some(public_url.clone());
+    config.security.http.allowed_origins = vec![public_url];
+    config.security.http.trust_proxy_headers = true;
+    config.security.http.trusted_proxies = vec!["127.0.0.1".to_owned(), "::1".to_owned()];
+    config.edge = EdgeConfig {
+        cloudflare: Some(CloudflareEdgeConfig {
+            enabled: true,
+            mode: "generated".to_owned(),
+            exposure: "tunnel".to_owned(),
+            hostname,
+            tunnel_name: Some("acp-stack".to_owned()),
+            tunnel_id: None,
+            cloudflared_deployment: args.cloudflared_deployment.as_config_value().to_owned(),
+        }),
+    };
+    if matches!(args.cloudflared_deployment, CloudflaredDeploymentArg::Host)
+        && !config
+            .dependencies
+            .commands
+            .iter()
+            .any(|entry| entry.name == "cloudflared")
+    {
+        config.dependencies.commands.push(DependencyEntry {
+            name: "cloudflared".to_owned(),
+            required: true,
+            feature: Some("cloudflare-tunnel".to_owned()),
+        });
+    }
+    Ok(true)
 }
 
 fn select_agent_for_init<'a>(

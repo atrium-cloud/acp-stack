@@ -9,13 +9,13 @@ use serde_json::Value;
 
 use crate::cli_defs::{
     Cli, Command, CommandCommand, ConfigCommand, DepsCommand, LogsCommand, McpCommand,
-    PermissionsCommand, SecurityCommand, WorkspaceCommand,
+    PermissionsCommand, SecurityCommand, WorkspaceCommand, WsCommand,
 };
 use crate::client::request;
 use crate::formatters::{
     format_command, format_config_export, format_deps, format_file_mutation, format_files_list,
-    format_logs, format_permissions, format_security, format_status, print_response,
-    write_workspace_read,
+    format_logs, format_permissions, format_security, format_status, format_ws_connections,
+    format_ws_sessions, print_response, write_workspace_read,
 };
 use crate::helpers::{build_logs_path, resolve_socket_path, url_encode};
 
@@ -157,6 +157,18 @@ async fn run(cli: Cli, socket: &std::path::Path) -> Result<(), String> {
             let path = format!("/v1/permissions/pending?limit={limit}");
             let resp = request(socket, "GET", &path, &[], None).await?;
             print_response(&resp, json_mode, format_permissions)
+        }
+        Command::Ws {
+            action: WsCommand::Connections,
+        } => {
+            let resp = request(socket, "GET", "/v1/ws/connections", &[], None).await?;
+            print_response(&resp, json_mode, format_ws_connections)
+        }
+        Command::Ws {
+            action: WsCommand::Sessions,
+        } => {
+            let resp = request(socket, "GET", "/v1/ws/sessions", &[], None).await?;
+            print_response(&resp, json_mode, format_ws_sessions)
         }
         Command::Mcp {
             action: McpCommand::Serve(args),

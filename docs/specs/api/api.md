@@ -388,22 +388,22 @@ Example server event:
 
 Every WebSocket event that represents important runtime history should also be written to SQLite.
 
-### Planned WebSocket Management
+### WebSocket Management
 
-Phase 5 should add live WebSocket management without changing ACP session semantics. The runtime should maintain an in-memory registry of `/v1/ws` clients with connection id, connected time, last activity, subscribed topics, derived `sessions.{id}` subscriptions, disconnect signal, and bounded request-origin metadata. Connection metadata should be persisted only through connect/disconnect lifecycle events; the live registry is process-local and clears on daemon restart.
+The runtime maintains an in-memory registry of `/v1/ws` clients with connection id, connected time, last activity, subscribed topics, derived `sessions.{id}` subscriptions, disconnect signal, and bounded request-origin metadata. Connection metadata is persisted only through connect/disconnect lifecycle events; the live registry is process-local and clears on daemon restart.
 
 Planned routes:
 
-- `GET /v1/ws/connections` — session-tier sanitized view of live WebSocket clients. Admin-tier callers receive the same sanitized shape unless they pass `include_raw_peer_metadata=true`, which may add a `raw_peer` object limited to socket peer address, trusted-proxy-derived client IP, raw `Origin`, raw `User-Agent`, and raw proxy/Cloudflare headers used for validation. Authorization headers, API keys, credentials, and local `acpctl` views must never expose raw metadata.
+- `GET /v1/ws/connections` — session-tier sanitized view of live WebSocket clients.
 - `GET /v1/ws/sessions` — unique subscribed ACP session ids with live connection counts.
 - `POST /v1/ws/connections/disconnect` — admin-tier only; body `{ "connection_ids": ["ws_..."], "reason": "operator-request" }`.
 - `POST /v1/ws/sessions/disconnect` — admin-tier only; body `{ "session_ids": ["sess_..."], "reason": "operator-request" }`.
 
 Disconnecting a WebSocket client closes only that socket. It must not close the underlying ACP session, cancel prompts, or mutate durable session state. The disconnect event should record `reason = "operator_disconnect"` and include topics/session ids so operators can distinguish client management from agent/session lifecycle.
 
-### Planned Request-Origin Metadata
+### Request-Origin Metadata
 
-When Cloudflare edge mode is configured, request-origin enrichment should flow through the same trusted-proxy validation used for client IP selection. The daemon should ignore Cloudflare headers from untrusted peers. Bounded fields may include `origin_kind`, `proxy_provider`, `client_ip`, `country_code`, `region_code`, `region_name`, and `cloudflare_ray_id`; public metrics should aggregate by bounded buckets rather than exposing raw headers.
+When Cloudflare edge mode is configured, request-origin enrichment flows through the same trusted-proxy validation used for client IP selection. The daemon ignores Cloudflare headers from untrusted peers. Bounded fields include `origin_kind`, `proxy_provider`, `client_ip`, `country_code`, `region_code`, `region_name`, and `cloudflare_ray_id`; public metrics should aggregate by bounded buckets rather than exposing raw headers.
 
 ## API Security Boundaries
 

@@ -3,6 +3,7 @@ mod core;
 pub(crate) mod auth;
 pub(crate) mod routes;
 pub(crate) mod ws;
+pub(crate) mod ws_registry;
 
 pub(crate) use auth::{ensure_envelope, log_api_request, track_active_requests};
 pub(crate) use core::shutdown_signal;
@@ -17,3 +18,4 @@ pub(crate) use routes::status::status_handler;
 pub(crate) use routes::workspace::{
     files_content_get_handler, files_content_put_handler, files_list_handler,
 };
+pub(crate) use routes::ws::{ws_connections_handler, ws_sessions_handler};
