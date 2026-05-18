@@ -51,4 +51,5 @@ This document records the implementation technologies chosen for the standalone 
 
 - Docker and systemd packaging are planned for straightforward self-hosting.
 - Reverse proxy guides should cover public TLS and edge routing while keeping runtime HTTP hardening inside `acp-stack`.
-- Dependency checks and supported `deps apply` flows should stay narrow and explicit in the 0.0.x line.
+- Cloudflare Tunnel is the planned preferred public-edge profile: `cloudflared` runs outside the Rust binary, maps a public hostname to the loopback `acps` listener, and supplies coarse request-origin headers for observability after trusted-proxy validation. The runtime should not bundle `cloudflared` or a GeoIP database.
+- Dependency checks and supported `deps apply` flows should stay narrow and explicit in the initial release.

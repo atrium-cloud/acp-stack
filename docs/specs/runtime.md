@@ -18,7 +18,7 @@ Runtime process behavior:
 - runtime user owns workspace, config, state, and secret files
 - explicit start and stop
 - compatibility limited to headless agents that accept direct API keys through environment variables or config files
-- agents that require browser OAuth or interactive account login are unsupported in the 0.0.x line
+- agents that require browser OAuth or interactive account login are unsupported in the initial release
 - optional restart on crash based on config
 - stderr capture into logs
 - lifecycle events persisted to SQLite
@@ -120,7 +120,7 @@ Persistence is provided by the deployment environment:
 - network storage
 - hosted workspace volume
 
-`acp-stack` reads and writes the filesystem; it does not own volume provisioning in the 0.0.x line.
+`acp-stack` reads and writes the filesystem; it does not own volume provisioning in the initial release.
 
 ## Workspace Source
 
@@ -167,13 +167,13 @@ The Command Gateway is the runtime path for `POST /v1/commands`. Each submitted 
 - caps total persisted bytes at `[commands].max_output_bytes`, after which it drains the pipes and sets the row's `truncated` flag;
 - enforces the per-request `timeout` (or `[commands].default_timeout`) and the explicit `POST /v1/commands/{id}/cancel` path with a two-stage SIGTERM → SIGKILL transition separated by `[commands].cancel_grace`.
 
-The 0.0.1 gateway does not yet hold submissions in an approval queue; `review` glob matches behave like `deny` outside of `mode = "auto"`.
+The Phase 1 gateway does not yet hold submissions in an approval queue; `review` glob matches behave like `deny` outside of `mode = "auto"`.
 
 ## Dependencies And MCP
 
 The dependency manifest is part of the reusable environment config.
 
-0.0.2 dependency responsibilities:
+Phase 2 dependency responsibilities:
 
 - parse dependency declarations
 - validate supported declaration syntax
@@ -181,9 +181,9 @@ The dependency manifest is part of the reusable environment config.
 - report missing dependencies in `status` and `deps check`
 - launch declared MCP servers when their commands are available
 
-0.0.4 adds `deps apply` for supported installers. The first supported target should be narrow and explicit, such as Debian/Ubuntu system packages through `apt` plus npm/pip packages when Node/Python are already available.
+Phase 4 adds `deps apply` for supported installers. The first supported target should be narrow and explicit, such as Debian/Ubuntu system packages through `apt` plus npm/pip packages when Node/Python are already available.
 
-The 0.0.x line does not promise broad reconciliation across `apt`, `apk`, `dnf`, Homebrew, npm, pip, uv, mise, asdf, or direct runtime downloads.
+The initial release does not promise broad reconciliation across `apt`, `apk`, `dnf`, Homebrew, npm, pip, uv, mise, asdf, or direct runtime downloads.
 
 Future `acps deps apply` can add installation behavior without changing the manifest shape.
 
