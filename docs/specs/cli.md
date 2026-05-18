@@ -88,7 +88,7 @@ For supported OpenCode and Pi configs, `acps init` does not infer model config f
 
 Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` overrides it for this run. The HTTP server enforces the request body cap as `min([api].max_request_bytes, [security.http].max_request_bytes)` and 413s oversized requests before any handler runs.
 
-`acps serve` requires both API keys to already exist in the encrypted secret store under the names declared in `[auth]`; missing keys fail startup before the listener binds.
+`acps serve` requires both API keys to already exist in the encrypted secret store under the names declared in `[auth]`; missing keys fail startup before the listener binds. The daemon refuses to run as root unless `--allow-root` is passed or `ACP_STACK_ALLOW_ROOT=1` is set; the environment opt-in is exact, so an empty value or `0` is ignored.
 
 ## Agent Commands
 
@@ -136,7 +136,8 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps logs query [--limit <n>] [--level <level>] [--since <duration|rfc3339>] [--until <duration|rfc3339>] [--kind <kind|prefix.>] [--source <writer>] [--session <id>] [--command <id>] [--permission <id>] [--after <cursor>]`
 - `acps logs tail [--topic <name>]...`
 - `acps metrics summary [--since <duration|rfc3339>] [--until <duration|rfc3339>]`
-- `acps serve [--bind <addr>]`
+- `acps security check`
+- `acps serve [--bind <addr>] [--allow-root]`
 
 When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-stack.toml`. Export currently reads the same default path and writes canonical TOML to stdout unless `--output` is provided.
 
