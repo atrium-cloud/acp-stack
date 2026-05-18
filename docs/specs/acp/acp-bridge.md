@@ -53,7 +53,7 @@ ACP `session/update` notifications are:
 
 MCP servers declared in config are launched or referenced during session creation where the agent supports MCP.
 
-0.0.2 supports:
+Phase 2 supports:
 
 - stdio MCP server declarations
 - HTTP MCP server declarations

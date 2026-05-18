@@ -2,9 +2,9 @@
 
 ## Release Goals
 
-The project should progress through five early versions. Each version should leave stable contracts behind rather than throwaway prototype behavior.
+The `0.0.1` release is organized into five phases. Each phase should leave stable contracts behind rather than throwaway prototype behavior.
 
-### 0.0.1 - Local Runtime Foundation
+### Phase 1 - Local Runtime Foundation
 
 Establish the local daemon shape:
 
@@ -23,9 +23,9 @@ Establish the local daemon shape:
 - authentication failure logging
 - CLI commands that exercise the same core services as the API
 
-The initial installer foundation fetched the upstream ACP registry at runtime. A follow-up still inside 0.0.x closes that gap with an intentionally narrow embedded catalog at `data/agents.toml`, starting with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets; see `docs/todos/phase_1.md` under "Agent Registry & Two-Layer Install".
+The initial installer foundation fetched the upstream ACP registry at runtime. A follow-up still inside the `0.0.1` release closes that gap with an intentionally narrow embedded catalog at `data/agents.toml`, starting with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets; see `docs/todos/phase_1.md` under "Agent Registry & Two-Layer Install".
 
-### 0.0.2 - Secrets, Permissions, and MCP
+### Phase 2 - Secrets, Permissions, and MCP
 
 Add the trust and integration layer:
 
@@ -43,7 +43,7 @@ Add the trust and integration layer:
 - CORS allowlist
 - Slack, Linear, and HTTP MCP examples
 
-### 0.0.3 - Portable Logging and Analytics
+### Phase 3 - Portable Logging and Analytics
 
 Add optional external telemetry sinks while keeping SQLite as the local source of truth and preserving a portable relational schema:
 
@@ -61,7 +61,7 @@ Add optional external telemetry sinks while keeping SQLite as the local source o
 - API and WebSocket connection summaries
 - security event summaries
 
-### 0.0.4 - Packaging and Deployment
+### Phase 4 - Packaging and Deployment
 
 Make the runtime straightforward to deploy:
 
@@ -79,7 +79,7 @@ Make the runtime straightforward to deploy:
 - security self-check CLI and API
 - `acpctl` permission boundaries and audit coverage
 
-### 0.0.5 - Client and Operations Polish
+### Phase 5 - Client and Operations Polish
 
 Round out the standalone runtime surface:
 
@@ -95,7 +95,7 @@ Round out the standalone runtime surface:
 
 ## Later Scope
 
-The following are outside the 0.0.1 to 0.0.5 scope:
+The following are outside the Phase 1-5 scope for `0.0.1`:
 
 - multiple active agents per runtime
 - broad cross-distro package/runtime reconciliation
@@ -105,11 +105,11 @@ The following are outside the 0.0.1 to 0.0.5 scope:
 - hosted fleet management
 - billing and tenant management
 
-## Version-Line Success Criteria
+## Initial Release Success Criteria
 
-The early version line is successful when the version 0.0.5 acceptance criteria in the project spec are met. The full checklist is maintained in [Project Spec](../specs/project-spec.md#acceptance-criteria).
+The `0.0.1` release is successful when the acceptance criteria in the project spec are met. The full checklist is maintained in [Project Spec](../specs/project-spec.md#acceptance-criteria).
 
-Version 0.0.5 is successful when a user can:
+The initial release is successful when a user can:
 
 1. Install `acp-stack` on a Linux instance.
 2. Run `acps init`.

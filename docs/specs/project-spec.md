@@ -19,7 +19,7 @@ ACP defines how clients and agents communicate. `acp-stack` supplies the surroun
 - [messaging-clients](messaging-clients.md) defines future chat-platform integrations that use the HTTP and WebSocket API.
 - [architecture](../mgmt/architecture.md) describes the runtime modules and system boundaries.
 - [tech-stack](../mgmt/tech-stack.md) records implementation technology choices.
-- [roadmap](../mgmt/roadmap.md) tracks the early release line and acceptance criteria.
+- [roadmap](../mgmt/roadmap.md) tracks the `0.0.1` release phases and acceptance criteria.
 
 ## Core Shape
 
@@ -40,7 +40,7 @@ ACP defines how clients and agents communicate. `acp-stack` supplies the surroun
 
 The daemon, agent, MCP servers, and mediated commands run as an unprivileged runtime user by default, normally `acp`. The workspace is ordinary filesystem storage owned by the deployment environment: container volume, VM disk, bare-metal disk, network storage, or hosted workspace volume.
 
-The 0.0.x line is scoped to headless agents or adapters published through the ACP registry and compatible with direct API keys through environment variables or config files. Agents that require browser OAuth or interactive account login are unsupported in the initial line.
+The `0.0.1` release is scoped to headless agents or adapters published through the ACP registry and compatible with direct API keys through environment variables or config files. Agents that require browser OAuth or interactive account login are unsupported in the initial release.
 
 ## Config And State
 
@@ -59,29 +59,29 @@ Default paths:
 ~/.config/acp-stack/age.key
 ```
 
-## Release Line
+## 0.0.1 Release Phases
 
-### 0.0.1 - Local Runtime Foundation
+### Phase 1 - Local Runtime Foundation
 
 Establish the daemon shape: config import/export, SQLite state, one configured agent, direct API-key compatibility, HTTP/WebSocket API, workspace file operations, mediated shell commands, logs, basic auth hardening, and CLI commands that exercise the same core services as the API.
 
-### 0.0.2 - Secrets, Permissions, And MCP
+### Phase 2 - Secrets, Permissions, And MCP
 
 Add age-backed secrets, scoped secret injection, declared MCP servers, dependency status reporting, permission requests and decisions, ACP permission passthrough, command policy enforcement, rate limiting, temporary auth-failure blocks, WebSocket origin checks, CORS allowlist, and common MCP examples.
 
-### 0.0.3 - Portable Logging And Analytics
+### Phase 3 - Portable Logging And Analytics
 
 Add optional PostgreSQL/Supabase-compatible external logging, shared logical migrations, local `acpctl`, optional `acpctl mcp serve`, and derived operational metrics such as session duration, turn counts, command counts, permission response times, and reported token/context usage.
 
-### 0.0.4 - Packaging And Deployment
+### Phase 4 - Packaging And Deployment
 
 Add Docker packaging, systemd installation, reverse proxy deployment guides, unprivileged runtime-user automation, config import/export hardening, supported dependency installation flows, security self-checks, and stronger `acpctl` permission/audit coverage.
 
-### 0.0.5 - Client And Operations Polish
+### Phase 5 - Client And Operations Polish
 
 Add TypeScript and Python client SDKs, richer CLI UX, log query filters and pagination, command output streaming improvements, an MCP compatibility matrix, operational health checks, and security self-check history with remediation hints.
 
-## Out Of Scope For 0.0.x
+## Out Of Scope For 0.0.1
 
 - multiple active agents per runtime
 - broad cross-distro package/runtime reconciliation
@@ -93,4 +93,4 @@ Add TypeScript and Python client SDKs, richer CLI UX, log query filters and pagi
 
 ## Acceptance Criteria
 
-The early release line is successful when a user can install `acp-stack` on a Linux instance, initialize it, configure one direct-key ACP agent, add secrets without plaintext storage, export/import reusable config, validate dependencies and MCP declarations, start the daemon, create and prompt sessions, stream updates, operate on workspace files, run mediated commands, answer permission requests, and query durable logs and derived metrics.
+The `0.0.1` release is successful when a user can install `acp-stack` on a Linux instance, initialize it, configure one direct-key ACP agent, add secrets without plaintext storage, export/import reusable config, validate dependencies and MCP declarations, start the daemon, create and prompt sessions, stream updates, operate on workspace files, run mediated commands, answer permission requests, and query durable logs and derived metrics.

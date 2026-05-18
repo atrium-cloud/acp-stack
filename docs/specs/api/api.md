@@ -117,7 +117,7 @@ Session-tier. All request paths are workspace-relative (rooted at `workspace.roo
 
 - `DELETE /v1/files?path=...` — remove a regular file.
 
-  Response: `{ path, deleted: true }`. Refuses directories with 400 `workspace.path_invalid` (no recursive removal in 0.0.1). Refuses symlinks with 400 `workspace.symlink_escape`.
+  Response: `{ path, deleted: true }`. Refuses directories with 400 `workspace.path_invalid` (no recursive removal in the current API). Refuses symlinks with 400 `workspace.symlink_escape`.
 
 Every workspace mutation (`workspace.write`, `workspace.upload`, `workspace.delete`) is written to the `events` table and fanned out on the `workspace` WebSocket topic.
 
@@ -159,7 +159,7 @@ Response data (also returned by `GET` and `POST /cancel`):
 }
 ```
 
-Execution model (0.0.1):
+Execution model (Phase 1):
 
 - Shell-string spawn: `[workspace].default_shell -c <command>` with a fresh
   process group on Unix.
@@ -231,7 +231,7 @@ Session-tier.
 - `GET /v1/deps` - returns declared dependencies and satisfaction status.
 - `POST /v1/deps/check` - re-runs validation.
 
-0.0.2 reports missing dependencies but does not attempt broad installation by default. Commands are checked via PATH lookup. Packages, runtimes, and MCP cross-references are declarative-only and report `available = false` with a `<kind>-check-not-implemented` reason in this milestone (MCP entries cross-reference `[[mcp.servers]]` for declaration presence).
+Phase 2 reports missing dependencies but does not attempt broad installation by default. Commands are checked via PATH lookup. Packages, runtimes, and MCP cross-references are declarative-only and report `available = false` with a `<kind>-check-not-implemented` reason in this phase (MCP entries cross-reference `[[mcp.servers]]` for declaration presence).
 
 ### Status, Logs, and Metrics API
 
@@ -246,7 +246,7 @@ Session-tier.
 - `GET /v1/logs/sessions`
 - `GET /v1/metrics/summary`
 
-The 0.0.1 daemon implements the status/log/metrics subset against local config, SQLite state, and the in-process agent supervisor:
+The current daemon implements the status/log/metrics subset against local config, SQLite state, and the in-process agent supervisor:
 
 - `GET /v1/status` returns schema version, latest durable event timestamp, and server version.
 - `GET /v1/status/agent` and `GET /v1/agent/status` return the configured agent identity/command, optional adapter metadata, process state, pid when running, and recent `agent_lifecycle` records.
@@ -263,7 +263,7 @@ Query parameters (all optional):
 - `limit` (default `100`, max `1000`).
 - `level` — exact match (`info`, `warn`, `error`, ...).
 - `kind` — exact event kind, or a dotted prefix when the value ends with `.` (e.g. `kind=command.` matches every `command.*` kind).
-- `source` — writer label: `system`, `api`, `acp`, `command`, `permission`, `cli`, `local`. Added in 0.0.3 (migration 007).
+- `source` — writer label: `system`, `api`, `acp`, `command`, `permission`, `cli`, `local`. Added in Phase 3 (migration 007).
 - `session_id` — events scoped to the given session id (uses the `events.session_id` column populated by the ACP bridge).
 - `command_id` — events whose `payload_json.command_id` matches.
 - `permission_id` — events whose `payload_json.permission_id` matches. Legacy permission events with only `payload_json.id` also match when the row is permission-scoped.
@@ -388,6 +388,23 @@ Example server event:
 
 Every WebSocket event that represents important runtime history should also be written to SQLite.
 
+### Planned WebSocket Management
+
+Phase 5 should add live WebSocket management without changing ACP session semantics. The runtime should maintain an in-memory registry of `/v1/ws` clients with connection id, connected time, last activity, subscribed topics, derived `sessions.{id}` subscriptions, disconnect signal, and bounded request-origin metadata. Connection metadata should be persisted only through connect/disconnect lifecycle events; the live registry is process-local and clears on daemon restart.
+
+Planned routes:
+
+- `GET /v1/ws/connections` — session-tier sanitized view of live WebSocket clients. Admin-tier callers receive the same sanitized shape unless they pass `include_raw_peer_metadata=true`, which may add a `raw_peer` object limited to socket peer address, trusted-proxy-derived client IP, raw `Origin`, raw `User-Agent`, and raw proxy/Cloudflare headers used for validation. Authorization headers, API keys, credentials, and local `acpctl` views must never expose raw metadata.
+- `GET /v1/ws/sessions` — unique subscribed ACP session ids with live connection counts.
+- `POST /v1/ws/connections/disconnect` — admin-tier only; body `{ "connection_ids": ["ws_..."], "reason": "operator-request" }`.
+- `POST /v1/ws/sessions/disconnect` — admin-tier only; body `{ "session_ids": ["sess_..."], "reason": "operator-request" }`.
+
+Disconnecting a WebSocket client closes only that socket. It must not close the underlying ACP session, cancel prompts, or mutate durable session state. The disconnect event should record `reason = "operator_disconnect"` and include topics/session ids so operators can distinguish client management from agent/session lifecycle.
+
+### Planned Request-Origin Metadata
+
+When Cloudflare edge mode is configured, request-origin enrichment should flow through the same trusted-proxy validation used for client IP selection. The daemon should ignore Cloudflare headers from untrusted peers. Bounded fields may include `origin_kind`, `proxy_provider`, `client_ip`, `country_code`, `region_code`, `region_name`, and `cloudflare_ray_id`; public metrics should aggregate by bounded buckets rather than exposing raw headers.
+
 ## API Security Boundaries
 
 The API uses the same two-key model and security controls described in [security](../security.md). Session-key and admin-key authorization boundaries are part of the public API contract, and browser-facing clients must satisfy the configured CORS and WebSocket origin policy.
@@ -396,7 +413,7 @@ The API uses the same two-key model and security controls described in [security
 
 HTTP hardening is part of the runtime, not only the reverse proxy layer. The reverse proxy should still provide TLS, compression policy, and public-edge routing, but `acp-stack` should defend itself against common direct API attacks.
 
-Required 0.0.2 controls:
+Required Phase 2 controls:
 
 - bearer token parsing that rejects duplicate or malformed `Authorization` headers
 - constant-time key comparison for session and admin keys

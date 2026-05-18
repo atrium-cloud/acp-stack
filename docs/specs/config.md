@@ -115,6 +115,41 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[security.http].trusted_proxies` is a list of exact IP-address strings (no CIDR) trusted to populate `X-Forwarded-For` / `Forwarded` headers. When `trust_proxy_headers = true` and the socket peer matches an entry, the leftmost forwarded IP is used as the client IP for auth-failure tracking. With `trust_proxy_headers = false` or an empty list, the socket peer is always used.
 
+## Planned Edge Config
+
+Phase 5 should add an optional `[edge.cloudflare]` block for deployments that expose `acps` through Cloudflare. The preferred mode is Cloudflare Tunnel: keep `[api].bind` on loopback, run `cloudflared` locally, and publish the configured hostname from Cloudflare's edge. The runtime should not bundle Cloudflare credentials or `cloudflared`; operators provide them through normal deployment tooling and secret refs.
+
+Planned shape:
+
+```toml
+[edge.cloudflare]
+enabled = true
+mode = "generated"          # generated | managed
+exposure = "tunnel"         # tunnel preferred; proxied_dns is advanced/fallback
+hostname = "agent.example.com"
+tunnel_name = "acp-stack"
+tunnel_id = ""              # set by managed provisioning or operator docs
+api_token_ref = "CLOUDFLARE_API_TOKEN"
+tunnel_token_ref = "CLOUDFLARE_TUNNEL_TOKEN"
+```
+
+Generated mode should create local `cloudflared` artifacts only: an ingress config mapping `https://agent.example.com` to `http://127.0.0.1:7700`, plus optional systemd or Docker snippets and a checklist for creating the tunnel/public hostname in Cloudflare. Managed mode may use the Cloudflare API token secret ref to provision or update a tunnel, public hostname/DNS route, visitor-location headers, and baseline WAF/rate-limit rules for `/v1/*`.
+
+The recommended hardened local config for tunnel deployments is:
+
+```toml
+[api]
+bind = "127.0.0.1:7700"
+public_url = "https://agent.example.com"
+
+[security.http]
+allowed_origins = ["https://agent.example.com"]
+trust_proxy_headers = true
+trusted_proxies = ["127.0.0.1", "::1"]
+```
+
+When trusted proxy validation succeeds, Phase 5 observability should accept bounded Cloudflare metadata such as `CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers. Direct requests that bypass Cloudflare should remain visible as direct-origin traffic in security logs and self-check findings.
+
 `[agent]` names the ACP process that `acp-stack` launches. `[agent].id` matches an entry in the embedded `data/agents.toml`; the runtime uses that lookup to decide whether the agent is native or adapter-backed and what install plan to run. Operators do not write `[agent.adapter]` — that block is populated at runtime from the resolved registry entry and is rejected with an unknown-field error if it appears in operator TOML.
 
 `[agent].harness_version` (optional) pins the harness install to a specific GitHub Release tag when the resolved registry harness uses `github_release`. Omit for latest/floating shell bootstrap entries.
@@ -155,7 +190,7 @@ Related commands are defined in [cli](cli.md):
 - `acps config import <path>`
 - `acps config import --base64 <code>`
 
-The 0.0.1 implementation supports validation, export, and import:
+The current implementation supports validation, export, and import:
 
 - `acps config validate [path]` loads an explicit path or `~/.config/acp-stack/acp-stack.toml`.
 - `acps config export [--output path]` loads the default config and emits canonical TOML.
@@ -184,7 +219,7 @@ Both `[api].max_request_bytes` and `[security.http].max_request_bytes` cap inbou
 
 ## Hardening
 
-Config import/export hardening belongs to the 0.0.4 line:
+Config import/export hardening belongs to Phase 4:
 
 - validate imported config paths are absolute where required
 - reject imported config with secret values in fields that must be references

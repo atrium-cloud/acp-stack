@@ -103,9 +103,9 @@ ACP session updates can include text, tool calls, plans, and progress updates. M
 
 Long outputs should be uploaded as files or linked through `acp-stack` download routes instead of flooding a channel.
 
-## Fit With Release Line
+## Fit With Initial Release
 
-Messaging clients are not required for the 0.0.1 local runtime foundation. They become practical once these surfaces are stable:
+Messaging clients are not required for the initial `0.0.1` release. They become practical once these surfaces are stable:
 
 - Session API
 - Workspace API
