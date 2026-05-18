@@ -7,7 +7,7 @@
 - Runtime user: `acp` (`uid 1000`, `gid 1000`).
 - Working directory: `/workspace`.
 - Exposed port: `7700`.
-- Default command: `acps serve --bind 0.0.0.0:7700`.
+- Default command: `acps serve --bind 0.0.0.0:${PORT:-7700}`.
 - Included binaries: `acps`, `acpctl`.
 
 Persistent paths should be mounted explicitly:
@@ -61,6 +61,8 @@ docker run -d \
   acp-stack:local
 ```
 
+Set `ACP_STACK_AUTO_INIT=1` only when you want the container entrypoint to run `acps init --no-install-agent` automatically if `acp-stack.toml` is missing. The generated API keys are printed to container logs on first initialization.
+
 ## Smoke Test
 
 Run the container startup smoke test from the repository root:
@@ -97,6 +99,16 @@ Reset the persistent environment with:
 ```sh
 scripts/docker-smoke.sh --persistent --reset
 ```
+
+## Railway
+
+For Railway, use the root `Dockerfile`, attach a persistent volume at `/home/acp`, and set:
+
+```text
+ACP_STACK_AUTO_INIT=1
+```
+
+Railway provides `PORT`; the Docker image binds `acps` to `0.0.0.0:${PORT}` automatically. On the first successful deploy, capture both generated API keys from the deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
 
 ## Security Notes
 
