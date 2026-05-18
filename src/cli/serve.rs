@@ -16,9 +16,48 @@ pub struct ServeArgs {
     /// Override the `api.bind` address from config.
     #[arg(long)]
     bind: Option<String>,
+    /// Opt-in to running the daemon as root. Equivalent to setting
+    /// `ACP_STACK_ALLOW_ROOT=1`. Intended only for disposable/dev profiles
+    /// (e.g. ephemeral containers) — production deployments run as the
+    /// configured `workspace.runtime_user`. Even with this flag set, the
+    /// admin API key must be non-empty.
+    #[arg(long)]
+    allow_root: bool,
+}
+
+const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
+
+fn allow_root_env_enabled() -> bool {
+    std::env::var(ALLOW_ROOT_ENV).is_ok_and(|value| value == "1")
+}
+
+/// Refuse to serve as root unless explicitly opted in, and never allow the
+/// daemon to run as root with an unset admin API key — the admin key gates
+/// every mutating route, and an empty admin key combined with root execution
+/// is an open back door.
+fn check_root_constraints(euid: u32, allow_root: bool, admin_key_empty: bool) -> Result<()> {
+    if euid != 0 {
+        return Ok(());
+    }
+    if !allow_root {
+        return Err(StackError::ServeRefusedAsRoot);
+    }
+    if admin_key_empty {
+        return Err(StackError::ServeRootRequiresAdminKey);
+    }
+    Ok(())
 }
 
 pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
+    run_serve_with_euid(args, crate::ownership::process_euid())
+}
+
+fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
+    let allow_root = args.allow_root || allow_root_env_enabled();
+    if process_euid == 0 && !allow_root {
+        return Err(StackError::ServeRefusedAsRoot);
+    }
+
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
     let config_dir = parent_dir(&config_path)?;
@@ -54,6 +93,18 @@ pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
     }
     let session_key = secret_store.get(&session_ref)?.to_owned();
     let admin_key = secret_store.get(&admin_ref)?.to_owned();
+
+    // Gate root execution behind an explicit opt-in. The daemon never drops
+    // privileges itself, so a `User=` directive in the systemd unit or a
+    // non-root `USER` in the Dockerfile is the production path. The CLI flag
+    // / env var exists only for disposable/dev profiles, and even then an
+    // empty admin key is refused — see Phase 4 line 47 of the todo list.
+    check_root_constraints(process_euid, allow_root, admin_key.is_empty())?;
+    if process_euid == 0 {
+        tracing::warn!(
+            "acps serve running as root with explicit opt-in; intended for disposable/dev profiles only"
+        );
+    }
 
     // Resolve the Supabase secret API key only when external logging is
     // explicitly enabled; per spec, a disabled stanza must never reach into
@@ -489,5 +540,101 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
         guard
             .flush()
             .map_err(|source| StackError::ServeIo { source })?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ALLOW_ROOT_ENV, ServeArgs, StackError, allow_root_env_enabled, check_root_constraints,
+        run_serve_with_euid,
+    };
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn non_root_euid_passes_unconditionally() {
+        check_root_constraints(1000, false, false).expect("non-root euid bypasses the gate");
+        check_root_constraints(1000, false, true).expect("non-root euid bypasses the gate");
+    }
+
+    #[test]
+    fn root_without_opt_in_is_refused() {
+        let err = check_root_constraints(0, false, false).expect_err("root must be refused");
+        assert!(matches!(err, StackError::ServeRefusedAsRoot));
+    }
+
+    #[test]
+    fn root_with_opt_in_but_empty_admin_key_is_refused() {
+        let err = check_root_constraints(0, true, true)
+            .expect_err("root + empty admin key must be refused");
+        assert!(matches!(err, StackError::ServeRootRequiresAdminKey));
+    }
+
+    #[test]
+    fn root_with_opt_in_and_admin_key_is_allowed() {
+        check_root_constraints(0, true, false).expect("root + admin key + opt-in is allowed");
+    }
+
+    #[test]
+    fn allow_root_env_requires_exact_one() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var(ALLOW_ROOT_ENV);
+        }
+        assert!(!allow_root_env_enabled());
+
+        unsafe {
+            std::env::set_var(ALLOW_ROOT_ENV, "");
+        }
+        assert!(!allow_root_env_enabled());
+
+        unsafe {
+            std::env::set_var(ALLOW_ROOT_ENV, "0");
+        }
+        assert!(!allow_root_env_enabled());
+
+        unsafe {
+            std::env::set_var(ALLOW_ROOT_ENV, "1");
+        }
+        assert!(allow_root_env_enabled());
+
+        unsafe {
+            std::env::remove_var(ALLOW_ROOT_ENV);
+        }
+    }
+
+    #[test]
+    fn root_without_opt_in_refuses_before_state_creation() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::remove_var(ALLOW_ROOT_ENV);
+            std::env::set_var("HOME", tempdir.path());
+        }
+
+        let err = run_serve_with_euid(
+            ServeArgs {
+                bind: None,
+                allow_root: false,
+            },
+            0,
+        )
+        .expect_err("root without opt-in must fail before reading config or state");
+        assert!(matches!(err, StackError::ServeRefusedAsRoot));
+        assert!(
+            !tempdir.path().join(".local").exists(),
+            "root refusal must not create state directories"
+        );
+
+        unsafe {
+            if let Some(home) = previous_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
     }
 }

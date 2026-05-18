@@ -8,6 +8,7 @@ mod logs;
 mod metrics;
 mod reset;
 mod secrets;
+mod security;
 mod serve;
 mod sessions;
 mod status;

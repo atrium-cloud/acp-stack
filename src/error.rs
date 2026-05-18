@@ -275,6 +275,16 @@ pub enum StackError {
     },
 
     #[error(
+        "refusing to run as root; pass --allow-root or set ACP_STACK_ALLOW_ROOT=1 only for disposable/dev profiles"
+    )]
+    ServeRefusedAsRoot,
+
+    #[error(
+        "running as root requires a non-empty admin API key; re-run `acps init` to provision one before retrying"
+    )]
+    ServeRootRequiresAdminKey,
+
+    #[error(
         "agent is not configured; declare `[agent].id` matching a registry entry, or provide a `[agent.install] type = \"shell\"` recipe"
     )]
     AgentNotConfigured,
@@ -589,6 +599,8 @@ impl StackError {
             ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
             ServeBind { .. } => "serve.bind_failed",
             ServeIo { .. } => "serve.io_error",
+            ServeRefusedAsRoot => "serve.refused_as_root",
+            ServeRootRequiresAdminKey => "serve.root_requires_admin_key",
             AgentNotConfigured => "agent.not_configured",
             AgentInstallerFailed { .. } => "agent.installer_failed",
             AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
@@ -761,6 +773,10 @@ impl StackError {
             }
             ServeBind { .. } => "failed to bind HTTP listener".to_owned(),
             ServeIo { .. } => "HTTP server error".to_owned(),
+            ServeRefusedAsRoot => "refusing to run as root without explicit opt-in".to_owned(),
+            ServeRootRequiresAdminKey => {
+                "running as root requires a non-empty admin API key".to_owned()
+            }
             AgentNotConfigured => {
                 "agent is not configured; declare [agent].id matching a registry entry, or provide an [agent.install] shell recipe"
                     .to_owned()
@@ -993,7 +1009,9 @@ impl StackError {
             | SupabaseSinkUnknownTable { .. }
             | StdinRead { .. }
             | ServeBind { .. }
-            | ServeIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            | ServeIo { .. }
+            | ServeRefusedAsRoot
+            | ServeRootRequiresAdminKey => StatusCode::INTERNAL_SERVER_ERROR,
             // Agent-related: classify client-facing vs internal vs upstream.
             AgentNotConfigured => StatusCode::BAD_REQUEST,
             AgentUnsupported { .. } => StatusCode::BAD_REQUEST,

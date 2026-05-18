@@ -28,9 +28,21 @@ impl ServerHarness {
         Self::spawn_with_config(test_config()).await
     }
 
-    async fn spawn_with_config(config: Config) -> Self {
+    async fn spawn_with_config(mut config: Config) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
+        // Repoint workspace.root at the tempdir so the security-check route's
+        // workspace-writability probe (Phase 4: runtime.workspace_not_writable)
+        // sees a real, writable directory rather than the fixture's
+        // "/workspace" placeholder.
+        let workspace_root = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        config.workspace.root = workspace_root.to_string_lossy().into_owned();
+        config.workspace.uploads = workspace_root
+            .join("uploads")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(workspace_root.join("uploads")).expect("create uploads");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());

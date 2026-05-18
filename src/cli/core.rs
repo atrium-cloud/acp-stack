@@ -15,6 +15,7 @@ use super::logs::LogsCommand;
 use super::metrics::MetricsCommand;
 use super::reset::ResetArgs;
 use super::secrets::SecretsCommand;
+use super::security::SecurityCommand;
 use super::serve::ServeArgs;
 use super::sessions::SessionsCommand;
 
@@ -65,6 +66,11 @@ enum Command {
         #[command(subcommand)]
         command: DepsCommand,
     },
+    /// Run runtime security self-checks.
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
+    },
     /// Inspect derived runtime metrics.
     Metrics {
         #[command(subcommand)]
@@ -114,6 +120,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Agent { command } => super::agent::run_agent_command(command),
         Command::Sessions { command } => super::sessions::run_sessions_command(command),
         Command::Deps { command } => super::deps::run_deps_command(command),
+        Command::Security { command } => super::security::run_security_command(command),
         Command::Metrics { command } => super::metrics::run_metrics_command(command),
     };
 
@@ -138,6 +145,7 @@ fn run_cli(cli: Cli) -> Result<()> {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CliKey {
     Session,
+    Admin,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,7 +212,9 @@ fn static_path_label(path: &str) -> &'static str {
     // Strip the query string before bucketing so callers passing `?limit=` etc.
     // still resolve to the canonical path label.
     let bare = path.split('?').next().unwrap_or(path);
-    if bare == "/v1/sessions" {
+    if bare == "/v1/security/check" {
+        "/v1/security/check"
+    } else if bare == "/v1/sessions" {
         "/v1/sessions"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/prompt") {
         "/v1/sessions/{id}/prompt"
@@ -251,6 +261,7 @@ pub(super) fn open_cli_key(config: &Config, home: &std::path::Path, key: CliKey)
     let store = SecretStore::open(home)?;
     let name = match key {
         CliKey::Session => &config.auth.session_key_ref,
+        CliKey::Admin => &config.auth.admin_key_ref,
     };
     Ok(store.get(name)?.to_owned())
 }
