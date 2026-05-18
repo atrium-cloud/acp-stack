@@ -42,6 +42,7 @@ pub(crate) async fn security_check_handler(
         .ok()
         .flatten();
     let workspace_writable = ownership::workspace_writable(Path::new(&state.config.workspace.root));
+    let railway_platform = railway_platform_detected();
     let findings = crate::security::check(crate::security::SecurityCheckInputs {
         effective_bind: state.effective_bind.as_str(),
         http: &state.config.security.http,
@@ -59,6 +60,7 @@ pub(crate) async fn security_check_handler(
         runtime_user_name,
         workspace_writable,
         workspace_root: state.config.workspace.root.as_str(),
+        railway_platform,
         cloudflare: state.config.edge.cloudflare.as_ref(),
         cloudflared_available: cloudflared_available(),
         recent_direct_cloudflare_mode_requests: recent_origin_counts.direct,
@@ -69,6 +71,20 @@ pub(crate) async fn security_check_handler(
         findings,
         auth_failure_count: counts.auth_failures,
     }))
+}
+
+fn railway_platform_detected() -> bool {
+    const RAILWAY_MARKERS: [&str; 3] = [
+        "RAILWAY_PROJECT_ID",
+        "RAILWAY_ENVIRONMENT_ID",
+        "RAILWAY_SERVICE_ID",
+    ];
+
+    RAILWAY_MARKERS.iter().all(|name| {
+        std::env::var_os(name)
+            .map(|value| !value.as_os_str().is_empty())
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Default)]

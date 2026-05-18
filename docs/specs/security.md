@@ -290,6 +290,24 @@ ReadWritePaths=/workspace /home/acp/.config/acp-stack /home/acp/.local/share/acp
 
 Docker images should use `USER acp` and mount `/workspace` writable by that UID.
 
+Railway deployments are detected from the platform-provided
+`RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID`
+environment variables. In that profile, `acps security check` suppresses only
+Railway-specific diagnostics:
+
+- `api.public_bind`, because Railway requires the application to listen on the
+  injected service port while Railway's edge handles public routing.
+- `runtime.user_mismatch` when the daemon runs as uid 0, the configured
+  `workspace.runtime_user` remains the default `acp`, and Railway root-volume
+  execution is in effect.
+- `runtime.path_ownership` for the `/workspace` root only when Railway
+  root-volume execution runs the daemon as uid 0 and Railway's checkout is
+  owned by uid 1000.
+
+The Railway profile does not suppress loose permissions, uninspectable paths,
+managed config/state/secret ownership mismatches under `/home/acp`, weak keys,
+or HTTP hardening findings unrelated to Railway's runtime shape.
+
 `acps serve` refuses to start as root (`euid == 0`) unless the operator passes
 the `--allow-root` flag or sets `ACP_STACK_ALLOW_ROOT=1`. The opt-in is
 intended for disposable/dev profiles (ephemeral containers). Production

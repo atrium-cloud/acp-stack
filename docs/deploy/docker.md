@@ -102,16 +102,16 @@ scripts/docker-smoke.sh --persistent --reset
 
 ## Railway
 
-For Railway, use the root `Dockerfile`, attach a persistent volume at `/home/acp`, and set:
+For Railway, use the root `Dockerfile` and attach a persistent volume at `/home/acp`. The repository includes `railway.toml` so Railway builds with the Dockerfile and treats `/home/acp` as the required volume mount path.
 
-```text
-ACP_STACK_AUTO_INIT=1
-```
+Railway provides `PORT`; the Docker image binds `acps` to `0.0.0.0:${PORT}` automatically. When Railway's platform variables are present, the entrypoint defaults `ACP_STACK_AUTO_INIT=1` so a missing `/home/acp/.config/acp-stack/acp-stack.toml` is initialized on first boot. If Railway starts the image as root for a mounted volume, the entrypoint also defaults `ACP_STACK_ALLOW_ROOT=1` for that Railway runtime only. Set either variable explicitly in Railway if you need to override those defaults.
 
-Railway provides `PORT`; the Docker image binds `acps` to `0.0.0.0:${PORT}` automatically. On the first successful deploy, capture both generated API keys from the deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
+On the first successful deploy, capture both generated API keys from the deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
+
+`GET /v1/security/check` also detects Railway's platform variables. In that profile it suppresses the Railway-specific `api.public_bind` warning, the default `acp` runtime-user mismatch caused by root volume execution, and the `/workspace` uid 1000 owner mismatch caused by Railway's checked-out workspace ownership. Managed runtime files under `/home/acp` are still checked normally.
 
 ## Security Notes
 
-Production containers should use the image default `USER acp`. `acps serve` has an `ACP_STACK_ALLOW_ROOT=1` escape hatch for disposable development profiles, but it is not needed for this image and should not be set in normal deployments.
+Production containers should use the image default `USER acp`. `acps serve` has an `ACP_STACK_ALLOW_ROOT=1` escape hatch for disposable development profiles and Railway root-volume execution, but it is not needed for normal Docker deployments and should not be set there.
 
 For public exposure, keep TLS termination and public routing at a reverse proxy or Cloudflare Tunnel. Runtime HTTP hardening remains active behind the proxy, including authentication, request limits, CORS/origin checks, rate limits, and security logging.
