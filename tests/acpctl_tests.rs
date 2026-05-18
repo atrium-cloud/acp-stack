@@ -521,6 +521,16 @@ async fn local_router_blocks_all_high_risk_routes() {
         ("POST", "/v1/agent/stop", Some(b"{}")),
         ("POST", "/v1/permissions/abc/approve", Some(b"{}")),
         ("POST", "/v1/permissions/abc/deny", Some(b"{}")),
+        (
+            "POST",
+            "/v1/ws/connections/disconnect",
+            Some(br#"{"connection_id":"abc"}"#),
+        ),
+        (
+            "POST",
+            "/v1/ws/sessions/disconnect",
+            Some(br#"{"session_id":"abc"}"#),
+        ),
     ];
     for (method, path, body) in cases {
         let resp = request(&harness.socket, method, path, *body).await;

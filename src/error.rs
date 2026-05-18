@@ -185,6 +185,33 @@ pub enum StackError {
     )]
     InvalidSupabaseSchema { schema: String },
 
+    #[error("edge.cloudflare.mode = \"managed\" is not implemented yet; use mode = \"generated\"")]
+    CloudflareManagedNotImplemented,
+
+    #[error("edge.cloudflare.mode must be `generated`; got `{mode}`")]
+    InvalidCloudflareMode { mode: String },
+
+    #[error("edge.cloudflare.exposure must be `tunnel`; got `{exposure}`")]
+    InvalidCloudflareExposure { exposure: String },
+
+    #[error(
+        "edge.cloudflare.cloudflared_deployment must be one of host, docker, external; got `{deployment}`"
+    )]
+    InvalidCloudflaredDeployment { deployment: String },
+
+    #[error(
+        "edge.cloudflare.hostname must be a bare hostname such as agent.example.com; got `{hostname}`"
+    )]
+    InvalidCloudflareHostname { hostname: String },
+
+    #[error(
+        "edge.cloudflare.tunnel_name must contain only ASCII letters, numbers, '.', '_', or '-', up to 64 bytes; got `{tunnel_name}`"
+    )]
+    InvalidCloudflareTunnelName { tunnel_name: String },
+
+    #[error("edge.cloudflare.tunnel_id must be a Cloudflare tunnel UUID; got `{tunnel_id}`")]
+    InvalidCloudflareTunnelId { tunnel_id: String },
+
     #[error("Supabase sink rejected upload: {status} {body}")]
     SupabaseSinkHttp { status: u16, body: String },
 
@@ -574,6 +601,13 @@ impl StackError {
             MissingSupabaseApiKey { .. } => "logging.supabase.missing_api_key",
             InvalidSupabaseUrl { .. } => "logging.supabase.invalid_url",
             InvalidSupabaseSchema { .. } => "logging.supabase.invalid_schema",
+            CloudflareManagedNotImplemented => "edge.cloudflare.managed_not_implemented",
+            InvalidCloudflareMode { .. } => "edge.cloudflare.invalid_mode",
+            InvalidCloudflareExposure { .. } => "edge.cloudflare.invalid_exposure",
+            InvalidCloudflaredDeployment { .. } => "edge.cloudflare.invalid_deployment",
+            InvalidCloudflareHostname { .. } => "edge.cloudflare.invalid_hostname",
+            InvalidCloudflareTunnelName { .. } => "edge.cloudflare.invalid_tunnel_name",
+            InvalidCloudflareTunnelId { .. } => "edge.cloudflare.invalid_tunnel_id",
             SupabaseSinkHttp { .. } => "logging.supabase.http_error",
             SupabaseSinkUnknownTable { .. } => "logging.supabase.unknown_table",
             StdinRead { .. } => "io.stdin_read_failed",
@@ -729,6 +763,20 @@ impl StackError {
             InvalidSupabaseSchema { .. } => {
                 "[logging.supabase].schema is not a safe Postgres identifier".to_owned()
             }
+            CloudflareManagedNotImplemented => {
+                "Cloudflare managed provisioning is not implemented yet; use generated mode"
+                    .to_owned()
+            }
+            InvalidCloudflareMode { .. } => "invalid Cloudflare edge mode".to_owned(),
+            InvalidCloudflareExposure { .. } => "invalid Cloudflare exposure mode".to_owned(),
+            InvalidCloudflaredDeployment { .. } => {
+                "invalid cloudflared deployment mode".to_owned()
+            }
+            InvalidCloudflareHostname { .. } => "invalid Cloudflare hostname".to_owned(),
+            InvalidCloudflareTunnelName { .. } => {
+                "invalid Cloudflare tunnel name".to_owned()
+            }
+            InvalidCloudflareTunnelId { .. } => "invalid Cloudflare tunnel id".to_owned(),
             SupabaseSinkHttp { status, .. } => {
                 format!("Supabase sink rejected upload with HTTP {status}")
             }
@@ -961,6 +1009,13 @@ impl StackError {
             | AuthRefsNotDistinct
             | SecretReservedForAuth { .. }
             | ImportChangesAuthRef { .. }
+            | CloudflareManagedNotImplemented
+            | InvalidCloudflareMode { .. }
+            | InvalidCloudflareExposure { .. }
+            | InvalidCloudflaredDeployment { .. }
+            | InvalidCloudflareHostname { .. }
+            | InvalidCloudflareTunnelName { .. }
+            | InvalidCloudflareTunnelId { .. }
             | InvalidPermissionsMode
             | InvalidDurationField { .. }
             | InvalidEnvName { .. }

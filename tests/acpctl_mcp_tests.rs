@@ -194,7 +194,7 @@ fn structured(result: &CallToolResult) -> &Value {
 }
 
 #[tokio::test]
-async fn mcp_stdio_lists_exactly_the_ten_tools() {
+async fn mcp_stdio_lists_exactly_the_twelve_tools() {
     let harness = Harness::spawn().await;
     let client = spawn_stdio_client(&harness.socket).await;
     let tools: Vec<Tool> = client.peer().list_all_tools().await.expect("list_tools");
@@ -211,6 +211,8 @@ async fn mcp_stdio_lists_exactly_the_ten_tools() {
         "workspace_list",
         "workspace_read",
         "workspace_write",
+        "ws_connections",
+        "ws_sessions",
     ]
     .iter()
     .map(|s| (*s).to_owned())
@@ -308,6 +310,14 @@ async fn mcp_stdio_drives_every_tool_with_source_local() {
     let perms = call_tool_value(&client, "permissions_pending", None).await;
     assert_eq!(structured(&perms)["ok"], true);
     assert!(structured(&perms)["data"]["permissions"].is_array());
+
+    let ws_connections = call_tool_value(&client, "ws_connections", None).await;
+    assert_eq!(structured(&ws_connections)["ok"], true);
+    assert!(structured(&ws_connections)["data"]["connections"].is_array());
+
+    let ws_sessions = call_tool_value(&client, "ws_sessions", None).await;
+    assert_eq!(structured(&ws_sessions)["ok"], true);
+    assert!(structured(&ws_sessions)["data"]["sessions"].is_array());
 
     // command_run — kept last because it is the slowest tool. Use `true`
     // so we don't depend on shell builtins or working directories.

@@ -24,6 +24,115 @@ fn parses_valid_config_and_exports_canonical_toml() {
 }
 
 #[test]
+fn parses_generated_cloudflare_edge_config() {
+    let config_text = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "generated"
+exposure = "tunnel"
+hostname = "agent.example.com"
+tunnel_name = "acp-stack"
+cloudflared_deployment = "host"
+
+[workspace]"#,
+    );
+    let config = load_config_from_str(&config_text).expect("cloudflare config should parse");
+    let cloudflare = config.edge.cloudflare.as_ref().expect("cloudflare block");
+    assert!(cloudflare.enabled);
+    assert_eq!(cloudflare.hostname, "agent.example.com");
+
+    let canonical = config.to_canonical_toml().expect("canonical");
+    assert!(canonical.contains("[edge.cloudflare]"));
+    assert!(canonical.contains("cloudflared_deployment = \"host\""));
+}
+
+#[test]
+fn rejects_cloudflare_managed_mode_for_now() {
+    let config_text = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "managed"
+exposure = "tunnel"
+hostname = "agent.example.com"
+
+[workspace]"#,
+    );
+    let error = load_config_from_str(&config_text).expect_err("managed mode should be rejected");
+    assert!(
+        error.to_string().contains("not implemented yet"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_invalid_cloudflare_hostname_and_deployment() {
+    let bad_hostname = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "generated"
+exposure = "tunnel"
+hostname = "https://agent.example.com"
+
+[workspace]"#,
+    );
+    let error = load_config_from_str(&bad_hostname).expect_err("hostname should be rejected");
+    assert!(error.to_string().contains("bare hostname"), "got: {error}");
+
+    let bad_deployment = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "generated"
+exposure = "tunnel"
+hostname = "agent.example.com"
+cloudflared_deployment = "sidecar"
+
+[workspace]"#,
+    );
+    let error = load_config_from_str(&bad_deployment).expect_err("deployment should be rejected");
+    assert!(
+        error.to_string().contains("cloudflared_deployment"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_unsafe_cloudflare_tunnel_artifact_identifiers() {
+    let bad_tunnel_name = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "generated"
+exposure = "tunnel"
+hostname = "agent.example.com"
+tunnel_name = "bad\nname"
+
+[workspace]"#,
+    );
+    let error =
+        load_config_from_str(&bad_tunnel_name).expect_err("unsafe tunnel name should be rejected");
+    assert!(error.to_string().contains("tunnel_name"), "got: {error}");
+
+    let bad_tunnel_id = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "generated"
+exposure = "tunnel"
+hostname = "agent.example.com"
+tunnel_id = "../credentials"
+
+[workspace]"#,
+    );
+    let error =
+        load_config_from_str(&bad_tunnel_id).expect_err("unsafe tunnel id should be rejected");
+    assert!(error.to_string().contains("tunnel_id"), "got: {error}");
+}
+
+#[test]
 fn rejects_operator_written_agent_adapter() {
     // [agent.adapter] is runtime-populated from the embedded registry, not
     // operator-written. A config carrying it over from the pre-rework shape

@@ -99,12 +99,26 @@ pub fn record_auth_failure(
     client_ip: Option<&str>,
     route: Option<&str>,
 ) -> Result<AuthFailure> {
-    let payload = serde_json::json!({
+    record_auth_failure_with_origin(state, kind, reason, client_ip, route, None)
+}
+
+pub fn record_auth_failure_with_origin(
+    state: &StateStore,
+    kind: KeyKind,
+    reason: AuthFailureReason,
+    client_ip: Option<&str>,
+    route: Option<&str>,
+    origin: Option<&crate::http_hardening::RequestOrigin>,
+) -> Result<AuthFailure> {
+    let mut payload = serde_json::json!({
         "key_kind": kind.as_wire_str(),
         "reason": reason.as_wire_str(),
         "client_ip": client_ip,
         "route": route,
     });
+    if let (Some(origin), Some(map)) = (origin, payload.as_object_mut()) {
+        map.insert("origin".to_owned(), origin.as_json());
+    }
     state.append_auth_failure(
         kind.as_wire_str(),
         reason.as_wire_str(),

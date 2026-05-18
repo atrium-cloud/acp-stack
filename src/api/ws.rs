@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use serde::Deserialize;
@@ -19,9 +21,12 @@ struct WsClientMessage {
 
 pub(super) async fn ws_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let request_origin =
+        crate::http_hardening::request_origin(&headers, Some(peer.ip()), &state.config);
     // Enforce Origin allowlist on upgrade. Browser clients always send an
     // Origin header; CLI/local clients don't. We honor the allowlist only
     // when an Origin is present, so local tools continue to work. The
@@ -37,7 +42,7 @@ pub(super) async fn ws_handler(
             "warn",
             "security.ws_origin_denied",
             "rejected ws upgrade with disallowed Origin",
-            serde_json::json!({"origin": origin_text}),
+            serde_json::json!({"origin": origin_text, "request_origin": request_origin}),
         )
         .await;
         return reject(
@@ -47,24 +52,39 @@ pub(super) async fn ws_handler(
         );
     }
     let app_state = state.clone();
-    ws.on_upgrade(move |socket| ws_connection(socket, app_state))
+    ws.on_upgrade(move |socket| ws_connection(socket, app_state, request_origin))
         .into_response()
 }
 
-async fn ws_connection(mut socket: WebSocket, state: AppState) {
+async fn ws_connection(
+    mut socket: WebSocket,
+    state: AppState,
+    origin: crate::http_hardening::RequestOrigin,
+) {
     let mut receiver = state.event_hub.subscribe();
-    let mut subscribed_topics = HashSet::<String>::new();
+    let mut subscribed_topics = BTreeSet::<String>::new();
     let connection_id = next_ws_connection_id();
+    let registration = state
+        .ws_registry
+        .register(connection_id.clone(), origin.clone());
     let started_at = std::time::Instant::now();
     persist_ws_lifecycle_event(
         &state,
         "ws.client_connected",
-        serde_json::json!({"connection_id": connection_id}),
+        serde_json::json!({"connection_id": connection_id, "origin": origin}),
     )
     .await;
 
+    let mut disconnect_reason = "client_disconnect";
     loop {
         tokio::select! {
+            () = registration.notify.notified() => {
+                if registration.disconnect_requested.load(Ordering::Relaxed) {
+                    disconnect_reason = "operator_disconnect";
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+            }
             inbound = socket.recv() => {
                 let Some(inbound) = inbound else {
                     break;
@@ -72,9 +92,11 @@ async fn ws_connection(mut socket: WebSocket, state: AppState) {
                 let Ok(message) = inbound else {
                     break;
                 };
+                state.ws_registry.touch(&registration.connection_id);
                 match message {
                     Message::Text(text) => {
                         handle_ws_client_message(&mut subscribed_topics, text.as_str()).await;
+                        state.ws_registry.update_topics(&registration.connection_id, &subscribed_topics);
                     }
                     Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
                     Message::Close(_) => break,
@@ -97,6 +119,7 @@ async fn ws_connection(mut socket: WebSocket, state: AppState) {
                 if socket.send(Message::Text(payload.into())).await.is_err() {
                     break;
                 }
+                state.ws_registry.touch(&registration.connection_id);
             }
         }
     }
@@ -104,13 +127,20 @@ async fn ws_connection(mut socket: WebSocket, state: AppState) {
     let duration_ms = started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
     let mut topics: Vec<String> = subscribed_topics.into_iter().collect();
     topics.sort();
+    let session_ids = topics
+        .iter()
+        .filter_map(|topic| topic.strip_prefix("sessions.").map(str::to_owned))
+        .collect::<Vec<_>>();
+    state.ws_registry.unregister(&registration.connection_id);
     persist_ws_lifecycle_event(
         &state,
         "ws.client_disconnected",
         serde_json::json!({
             "connection_id": connection_id,
             "topics": topics,
+            "session_ids": session_ids,
             "duration_ms": duration_ms,
+            "reason": disconnect_reason,
         }),
     )
     .await;
@@ -148,7 +178,7 @@ async fn persist_ws_lifecycle_event(state: &AppState, kind: &str, payload: serde
     }
 }
 
-async fn handle_ws_client_message(subscribed_topics: &mut HashSet<String>, text: &str) {
+async fn handle_ws_client_message(subscribed_topics: &mut BTreeSet<String>, text: &str) {
     let message: WsClientMessage = match serde_json::from_str(text) {
         Ok(message) => message,
         Err(err) => {

@@ -115,25 +115,23 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[security.http].trusted_proxies` is a list of exact IP-address strings (no CIDR) trusted to populate `X-Forwarded-For` / `Forwarded` headers. When `trust_proxy_headers = true` and the socket peer matches an entry, the leftmost forwarded IP is used as the client IP for auth-failure tracking. With `trust_proxy_headers = false` or an empty list, the socket peer is always used.
 
-## Planned Edge Config
+## Edge Config
 
-Phase 5 should add an optional `[edge.cloudflare]` block for deployments that expose `acps` through Cloudflare. The preferred mode is Cloudflare Tunnel: keep `[api].bind` on loopback, run `cloudflared` locally, and publish the configured hostname from Cloudflare's edge. The runtime should not bundle Cloudflare credentials or `cloudflared`; operators provide them through normal deployment tooling and secret refs.
+`[edge.cloudflare]` configures deployments that expose `acps` through Cloudflare. The preferred mode is Cloudflare Tunnel: keep `[api].bind` on loopback, run `cloudflared` locally, and publish the configured hostname from Cloudflare's edge. The runtime does not bundle Cloudflare credentials or `cloudflared`.
 
 Planned shape:
 
 ```toml
 [edge.cloudflare]
 enabled = true
-mode = "generated"          # generated | managed
-exposure = "tunnel"         # tunnel preferred; proxied_dns is advanced/fallback
+mode = "generated"          # managed is reserved and rejected for now
+exposure = "tunnel"
 hostname = "agent.example.com"
 tunnel_name = "acp-stack"
-tunnel_id = ""              # set by managed provisioning or operator docs
-api_token_ref = "CLOUDFLARE_API_TOKEN"
-tunnel_token_ref = "CLOUDFLARE_TUNNEL_TOKEN"
+cloudflared_deployment = "host" # host | docker | external
 ```
 
-Generated mode should create local `cloudflared` artifacts only: an ingress config mapping `https://agent.example.com` to `http://127.0.0.1:7700`, plus optional systemd or Docker snippets and a checklist for creating the tunnel/public hostname in Cloudflare. Managed mode may use the Cloudflare API token secret ref to provision or update a tunnel, public hostname/DNS route, visitor-location headers, and baseline WAF/rate-limit rules for `/v1/*`.
+Generated mode creates local `cloudflared` artifacts only: an ingress config mapping `https://agent.example.com` to `http://127.0.0.1:7700`, a systemd unit snippet, a Docker Compose snippet, and a checklist for creating the tunnel/public hostname in Cloudflare. Managed mode is deferred; configs using `mode = "managed"` fail validation with a not-implemented error.
 
 The recommended hardened local config for tunnel deployments is:
 
@@ -148,7 +146,7 @@ trust_proxy_headers = true
 trusted_proxies = ["127.0.0.1", "::1"]
 ```
 
-When trusted proxy validation succeeds, Phase 5 observability should accept bounded Cloudflare metadata such as `CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers. Direct requests that bypass Cloudflare should remain visible as direct-origin traffic in security logs and self-check findings.
+When trusted proxy validation succeeds, observability accepts bounded Cloudflare metadata such as `CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers. Direct requests that bypass Cloudflare remain visible as direct-origin traffic in security logs and self-check findings.
 
 `[agent]` names the ACP process that `acp-stack` launches. `[agent].id` matches an entry in the embedded `data/agents.toml`; the runtime uses that lookup to decide whether the agent is native or adapter-backed and what install plan to run. Operators do not write `[agent.adapter]` — that block is populated at runtime from the resolved registry entry and is rejected with an unknown-field error if it appears in operator TOML.
 
