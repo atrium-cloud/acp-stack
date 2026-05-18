@@ -252,7 +252,7 @@ The 0.0.1 daemon implements the status/log/metrics subset against local config, 
 - `GET /v1/status/agent` and `GET /v1/agent/status` return the configured agent identity/command, optional adapter metadata, process state, pid when running, and recent `agent_lifecycle` records.
 - `GET /v1/agent/capabilities` returns the latest persisted ACP `initialize` capability snapshot plus optional adapter metadata and current process state. Before the first successful start it returns `agent.not_initialized`.
 - `GET /v1/status/connections` returns the current in-process active HTTP request count.
-- `GET /v1/security/check` is admin-tier and returns the current security self-check envelope. In 0.0.1 it reports findings for the effective listener bind (including `acps serve --bind` overrides), wildcard CORS on public binds, proxy-header trust without a trusted proxy allowlist, empty cached API keys, and auth-failure counts in the last minute at or above the configured threshold.
+- `GET /v1/security/check` is admin-tier and returns `{ ok, findings, auth_failure_count }`, where each finding is `{ code, severity, message }`. It reports findings for the effective listener bind (including `acps serve --bind` overrides), wildcard CORS on public binds, proxy-header trust without a trusted proxy allowlist, empty or weak cached API keys, auth-failure counts in the last minute at or above the configured threshold, Supabase sink delivery failures, owner-only mode and ownership problems on runtime-managed paths, configured runtime-user mismatches, and workspace writability failures.
 
 #### `GET /v1/logs/events`
 

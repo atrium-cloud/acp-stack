@@ -418,6 +418,89 @@ async fn local_router_returns_404_for_agent_install() {
 }
 
 #[tokio::test]
+async fn local_router_returns_404_for_agent_start() {
+    let harness = Harness::spawn().await;
+    let resp = request(&harness.socket, "POST", "/v1/agent/start", Some(b"{}")).await;
+    assert_eq!(resp.status, 404);
+}
+
+#[tokio::test]
+async fn local_router_returns_404_for_agent_stop() {
+    let harness = Harness::spawn().await;
+    let resp = request(&harness.socket, "POST", "/v1/agent/stop", Some(b"{}")).await;
+    assert_eq!(resp.status, 404);
+}
+
+#[tokio::test]
+async fn local_router_returns_404_for_secrets_write() {
+    // Writing a secret is admin-tier on the public API. Acpctl must not be
+    // able to mutate the secret store even over the trusted UDS — the only
+    // local mutation acpctl performs is the workspace write at
+    // /v1/files/content.
+    let harness = Harness::spawn().await;
+    let body = serde_json::json!({ "name": "x", "value": "y" }).to_string();
+    let resp = request(
+        &harness.socket,
+        "POST",
+        "/v1/secrets",
+        Some(body.as_bytes()),
+    )
+    .await;
+    assert_eq!(resp.status, 404);
+}
+
+#[tokio::test]
+async fn local_router_returns_404_for_secrets_delete() {
+    let harness = Harness::spawn().await;
+    let resp = request(&harness.socket, "DELETE", "/v1/secrets/example", None).await;
+    assert_eq!(resp.status, 404);
+}
+
+#[tokio::test]
+async fn local_router_returns_404_for_permissions_deny() {
+    // Mirrors the existing /approve negative test. Together they prove that
+    // acpctl (or anything else inside the runtime that talks to the UDS)
+    // cannot self-approve OR self-deny a permission request — both decisions
+    // remain on the operator-facing public API behind a session key.
+    let harness = Harness::spawn().await;
+    let resp = request(
+        &harness.socket,
+        "POST",
+        "/v1/permissions/some-id/deny",
+        Some(b"{}"),
+    )
+    .await;
+    assert_eq!(resp.status, 404);
+}
+
+#[tokio::test]
+async fn local_router_blocks_all_high_risk_routes() {
+    // Single declarative assertion covering every route the Phase 4 acpctl
+    // hardening section lists as off-limits to acpctl. A regression that
+    // accidentally adds one of these to `build_local_router` will fail this
+    // test even if no per-route test was added.
+    let harness = Harness::spawn().await;
+    let cases: &[(&str, &str, Option<&[u8]>)] = &[
+        ("GET", "/v1/secrets", None),
+        ("POST", "/v1/secrets", Some(b"{}")),
+        ("DELETE", "/v1/secrets/example", None),
+        ("POST", "/v1/config/import", Some(b"{}")),
+        ("POST", "/v1/agent/install", Some(b"{}")),
+        ("POST", "/v1/agent/start", Some(b"{}")),
+        ("POST", "/v1/agent/stop", Some(b"{}")),
+        ("POST", "/v1/permissions/abc/approve", Some(b"{}")),
+        ("POST", "/v1/permissions/abc/deny", Some(b"{}")),
+    ];
+    for (method, path, body) in cases {
+        let resp = request(&harness.socket, method, path, *body).await;
+        assert_eq!(
+            resp.status, 404,
+            "{method} {path} must not be reachable via acpctl UDS"
+        );
+    }
+}
+
+#[tokio::test]
 async fn local_socket_has_owner_only_mode() {
     let harness = Harness::spawn().await;
     let meta = std::fs::metadata(&harness.socket).expect("stat socket");
