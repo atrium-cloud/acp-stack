@@ -265,3 +265,33 @@ ReadWritePaths=/workspace /home/acp/.config/acp-stack /home/acp/.local/share/acp
 ```
 
 Docker images should use `USER acp` and mount `/workspace` writable by that UID.
+
+`acps serve` refuses to start as root (`euid == 0`) unless the operator passes
+the `--allow-root` flag or sets `ACP_STACK_ALLOW_ROOT=1`. The opt-in is
+intended for disposable/dev profiles (ephemeral containers). Production
+deployments run as `workspace.runtime_user`, dropping into the unprivileged
+account via the systemd `User=` directive or the Docker `USER` directive.
+Even with the opt-in, the daemon refuses to start if the admin API key is
+empty — an empty admin key combined with root execution is an open back door
+into every mutating route.
+
+`acps security check` (CLI) and `GET /v1/security/check` (admin-tier API,
+also reachable on the acpctl UDS) report on runtime posture. The same helper
+backs both surfaces; the policy lives in one place at `src/security.rs`.
+The check surfaces the following findings beyond the existing `api.*` /
+`http.*` / `auth.*` / `logging.*` codes:
+
+- `auth.session_key_weak`, `auth.admin_key_weak` (warning): the configured
+  API key is shorter than 32 characters or matches a known weak placeholder
+  (`changeme`, `default`, etc., case-insensitive). The actual key value is
+  never echoed in the finding message.
+- `runtime.path_mode_loose` (critical): config dir / state dir is not 0o700,
+  or age key / secret store is not 0o600.
+- `runtime.path_ownership` (critical): a runtime-managed path is owned by a
+  uid other than the daemon's `geteuid()`.
+- `runtime.user_mismatch` (warning): the daemon's effective uid does not
+  match the uid resolved from `workspace.runtime_user` via `getpwnam_r`. The
+  check skips this finding when the configured name does not resolve (e.g.
+  the installer hasn't run yet).
+- `runtime.workspace_not_writable` (critical): the daemon cannot create
+  files inside `workspace.root`.

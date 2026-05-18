@@ -107,14 +107,14 @@
 
 ## Security Self-Check
 
-- [ ] Implement `acps security check`.
-- [ ] Implement `GET /v1/security/check`.
+- [x] Implement `acps security check`.
+- [x] Implement `GET /v1/security/check`.
 - [ ] Check API keys exist and are not default or empty.
 - [ ] Check config, state, age key, and encrypted secret store owner-only permissions.
 - [ ] Check workspace is writable by the runtime user.
-- [ ] Check WebSocket origin and CORS policies are configured for public deployments.
-- [ ] Check recent auth failure rate is below configured thresholds.
-- [ ] Check external logging sink health when enabled.
+- [x] Check WebSocket origin and CORS policies are configured for public deployments.
+- [x] Check recent auth failure rate is below configured thresholds.
+- [x] Check external logging sink health when enabled.
 
 ## acpctl Hardening
 

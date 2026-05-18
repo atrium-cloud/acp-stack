@@ -84,6 +84,17 @@ fn prints_version() {
 }
 
 #[test]
+fn security_check_is_listed_in_help() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["security", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("check"))
+        .stdout(predicates::str::contains("runtime security self-check"));
+}
+
+#[test]
 fn validates_explicit_config_path() {
     let mut command = Command::cargo_bin("acps").expect("binary should build");
 
@@ -1200,6 +1211,39 @@ async fn agent_start_and_stop_call_running_daemon() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent stop: stopped"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn security_check_calls_running_daemon_with_admin_key() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["security", "check"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ok: "))
+        .stdout(predicates::str::contains("auth_failures_total:"))
+        .stdout(predicates::str::contains("findings:"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn security_check_uses_admin_key_not_session_key() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["security", "check"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("/v1/security/check"))
+        .stderr(predicates::str::contains("401"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
