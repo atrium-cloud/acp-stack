@@ -33,6 +33,8 @@
 
 - [ ] Write Nginx deployment guide.
 - [ ] Write Caddy deployment guide.
+- [ ] Write Cloudflare Tunnel deployment guide as the preferred public-edge pattern.
+- [ ] Document Cloudflare proxied-DNS public-origin deployment as an advanced fallback.
 - [ ] Document TLS termination at the reverse proxy.
 - [ ] Document WebSocket upgrade configuration.
 - [ ] Document public-edge compression policy.
@@ -69,6 +71,9 @@
 - [ ] Define resumable init step state: completed steps are verified and reused, failed or incomplete steps resume from the first failing point.
 - [ ] Define fail-on-nonempty collision behavior for init-created code and data directories.
 - [ ] Add installer command status history.
+- [ ] Record installed ACP adapter/harness versions and expose them in agent status.
+- [ ] Add an upgrade/check command that reports stale managed agent harnesses or adapters without upgrading automatically.
+- [ ] Verify install scripts and embedded registry entries cannot silently install an older protocol-incompatible adapter.
 - [ ] Add retry flow for failed agent installer commands.
 - [ ] Preserve installer logs for audit.
 - [ ] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite.
@@ -83,7 +88,13 @@
 - [ ] Persist the selected provider id, model id, and secret refs without storing secret values in plaintext config.
 - [ ] Update generated OpenCode or Pi provider config when the selected provider/model changes.
 - [ ] Relaunch the active OpenCode or Pi process after provider/model config changes.
+- [ ] Document whether each supported agent can change model/mode after session creation; reject unsupported live changes explicitly.
 - [ ] Use `DEEPSEEK-V4-FLASH` as the default real-prompt smoke-test model when available for the selected OpenCode provider.
+
+## Config And Agent Setup Hardening
+
+- [ ] Document agent-owned config lifecycle for supported agents: when config files are written, when they are read, and whether relaunch or new session is required.
+- [ ] Treat plugin/skill/hook setup as unsupported unless a supported agent has a verified non-interactive setup path.
 
 ## Workspace Init Sources
 
@@ -98,6 +109,9 @@
 ## Init Testflight
 
 - [ ] After config and secrets are present, run a full init testflight that starts the agent and sends a minimal real prompt.
+- [ ] Testflight must verify session creation, prompt completion, streamed updates, and terminal prompt state, not just process startup.
+- [ ] For each supported agent, smoke test at least one filesystem-visible tool action when the agent supports tools.
+- [ ] Fail testflight if an agent appears active but emits no progress or terminal state within the configured timeout.
 - [ ] Warn that real-prompt testflight may consume provider credits and provide an explicit skip/confirmation path.
 - [ ] Hard-fail unsupported init paths early: browser OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, and missing required secrets.
 
@@ -127,7 +141,7 @@
 
 - [ ] The runtime can be deployed through Docker.
 - [ ] The runtime can be deployed through systemd.
-- [ ] Public deployments have documented reverse proxy configurations.
+- [ ] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
 - [ ] `acps deps apply` supports only narrow, explicit installation behavior.
 - [ ] Security self-checks are available through CLI and API.
 - [ ] `acpctl` permission boundaries are tested and audited.
