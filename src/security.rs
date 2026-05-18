@@ -155,6 +155,11 @@ pub struct SecurityCheckInputs<'a> {
     /// Configured workspace root path, surfaced in
     /// `runtime.workspace_not_writable` for operator clarity.
     pub workspace_root: &'a str,
+    /// True when the daemon is running inside Railway's managed runtime.
+    /// Railway terminates public HTTP at its edge and may run the container as
+    /// root when a persistent volume is attached, even though the image's
+    /// normal Docker posture remains `USER acp`.
+    pub railway_platform: bool,
     pub cloudflare: Option<&'a CloudflareEdgeConfig>,
     pub cloudflared_available: bool,
     pub recent_direct_cloudflare_mode_requests: i64,
@@ -169,8 +174,9 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
         .parse::<SocketAddr>()
         .map(|addr| addr.ip().is_unspecified())
         .unwrap_or(false);
+    let railway_root_volume_profile = inputs.railway_platform && inputs.process_euid == 0;
 
-    if bind_is_public {
+    if bind_is_public && !inputs.railway_platform {
         findings.push(
             SecurityFinding::warning(
                 "api.public_bind",
@@ -417,7 +423,12 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
         // uses `symlink_metadata`, so a symlinked runtime path reports its
         // own posture and that's what we want to fix.
         let path_quoted = shell_quote(&posture.path.display().to_string());
-        if posture.uid != inputs.process_euid {
+        let railway_workspace_root_ownership = railway_root_volume_profile
+            && posture.kind == crate::ownership::PathKind::WorkspaceRoot
+            && posture.path == std::path::Path::new("/workspace")
+            && inputs.workspace_root == "/workspace"
+            && posture.uid == 1000;
+        if posture.uid != inputs.process_euid && !railway_workspace_root_ownership {
             findings.push(
                 SecurityFinding::critical(
                     "runtime.path_ownership",
@@ -514,7 +525,9 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
     }
 
     if let Some(uid) = inputs.runtime_user_uid {
-        if uid != inputs.process_euid {
+        let railway_runtime_user_mismatch =
+            railway_root_volume_profile && inputs.runtime_user_name == "acp" && uid != 0;
+        if uid != inputs.process_euid && !railway_runtime_user_mismatch {
             // `[workspace].runtime_user = "root"` (uid 0) is permitted only
             // for the disposable/dev profile via `--allow-root` /
             // `ACP_STACK_ALLOW_ROOT=1`; production deploys must run as an
@@ -617,6 +630,7 @@ mod tests {
             runtime_user_name: "acp",
             workspace_writable: true,
             workspace_root: "/workspace",
+            railway_platform: false,
             cloudflare: None,
             cloudflared_available: true,
             recent_direct_cloudflare_mode_requests: 0,
@@ -696,6 +710,19 @@ mod tests {
                 .remediation
                 .as_deref()
                 .is_some_and(|r| r.contains("loopback") || r.contains("reverse proxy"))
+        );
+    }
+
+    #[test]
+    fn railway_platform_suppresses_public_bind_warning() {
+        let http = baseline_http();
+        let mut inputs = baseline_inputs(&http);
+        inputs.effective_bind = "0.0.0.0:8080";
+        inputs.railway_platform = true;
+        let findings = check(inputs);
+        assert!(
+            !findings.iter().any(|f| f.code == "api.public_bind"),
+            "{findings:?}"
         );
     }
 
@@ -1096,6 +1123,57 @@ mod tests {
     }
 
     #[test]
+    fn railway_root_volume_suppresses_workspace_and_default_user_mismatch() {
+        let http = baseline_http();
+        let posture = PathPosture {
+            path: std::path::PathBuf::from("/workspace"),
+            kind: PathKind::WorkspaceRoot,
+            uid: 1000,
+            mode: 0o755,
+            is_symlink: false,
+        };
+        let postures = [posture];
+        let mut inputs = baseline_inputs(&http);
+        inputs.railway_platform = true;
+        inputs.process_euid = 0;
+        inputs.runtime_user_uid = Some(1000);
+        inputs.path_postures = &postures;
+        let findings = check(inputs);
+        assert!(
+            !findings.iter().any(|f| f.code == "runtime.path_ownership"),
+            "{findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.code == "runtime.user_mismatch"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn railway_root_volume_still_reports_managed_file_ownership() {
+        let http = baseline_http();
+        let posture = PathPosture {
+            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acp-stack.toml"),
+            kind: PathKind::ConfigFile,
+            uid: 1000,
+            mode: 0o600,
+            is_symlink: false,
+        };
+        let postures = [posture];
+        let mut inputs = baseline_inputs(&http);
+        inputs.railway_platform = true;
+        inputs.process_euid = 0;
+        inputs.runtime_user_uid = Some(1000);
+        inputs.path_postures = &postures;
+        let findings = check(inputs);
+        let finding = findings
+            .iter()
+            .find(|f| f.code == "runtime.path_ownership")
+            .expect("managed file ownership finding");
+        assert!(finding.message.contains("config file"));
+    }
+
+    #[test]
     fn workspace_root_skips_mode_check() {
         // WorkspaceRoot.expected_mode() is None — the workspace's actual mode
         // must not produce a `runtime.path_mode_loose` finding even when the
@@ -1322,6 +1400,7 @@ mod tests {
             runtime_user_name: "acp",
             workspace_writable: false,
             workspace_root: "/workspace",
+            railway_platform: false,
             cloudflare: None,
             cloudflared_available: true,
             recent_direct_cloudflare_mode_requests: 0,
@@ -1404,6 +1483,7 @@ mod tests {
                 runtime_user_name: self.runtime_user_name,
                 workspace_writable: self.workspace_writable,
                 workspace_root: self.workspace_root,
+                railway_platform: self.railway_platform,
                 cloudflare: self.cloudflare,
                 cloudflared_available: self.cloudflared_available,
                 recent_direct_cloudflare_mode_requests: self.recent_direct_cloudflare_mode_requests,
