@@ -1,6 +1,7 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
@@ -35,10 +36,10 @@ pub(crate) async fn config_validate_handler(
     Ok(ApiSuccess::new(ConfigValidateResponse { valid: true }))
 }
 
-#[derive(Serialize)]
-pub(crate) struct ConfigImportResponse {
-    imported: bool,
-    restart_required: bool,
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConfigImportQuery {
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// POST /v1/config/import (admin-tier). Parses TOML from the raw body,
@@ -46,24 +47,47 @@ pub(crate) struct ConfigImportResponse {
 /// default config path, and records a `server.config_imported` audit event.
 /// The running daemon retains its old `AppState`; the client must restart
 /// the daemon for the new config to take effect.
+///
+/// Query params:
+/// - `dry_run=true`: validates, canonicalizes, compares auth refs, and
+///   reports metadata without writing or auditing.
 pub(crate) async fn config_import_handler(
     State(state): State<AppState>,
+    query: Query<ConfigImportQuery>,
     body: String,
-) -> std::result::Result<ApiSuccess<ConfigImportResponse>, StackError> {
+) -> std::result::Result<ApiSuccess<Value>, StackError> {
+    let input_size = body.len();
+    if input_size > crate::config::IMPORT_SIZE_LIMIT {
+        return Err(StackError::ImportTooLarge {
+            limit: crate::config::IMPORT_SIZE_LIMIT,
+            actual: input_size,
+        });
+    }
+
     let incoming = crate::config::load_config_from_str(&body)?;
-    crate::config::compare_auth_refs(&state.config.auth, &incoming.auth)?;
+    let auth_refs_unchanged =
+        crate::config::compare_auth_refs(&state.config.auth, &incoming.auth).is_ok();
     let canonical = incoming.to_canonical_toml()?;
-    let target = crate::config::default_config_path()?;
+    let target = state.runtime_paths.config_path.clone();
+
+    if query.dry_run {
+        return Ok(ApiSuccess::new(serde_json::json!({
+            "dry_run": true,
+            "config_version": incoming.config_version,
+            "canonical_toml_size": canonical.len(),
+            "input_size": input_size,
+            "auth_refs_unchanged": auth_refs_unchanged,
+            "target": target.to_string_lossy(),
+            "target_exists": target.exists(),
+        })));
+    }
+
+    crate::config::compare_auth_refs(&state.config.auth, &incoming.auth)?;
     if let Some(parent) = target.parent() {
         crate::fs_util::create_dir_owner_only(parent)?;
     }
     crate::fs_util::atomic_write_owner_only(&target, canonical.as_bytes())?;
 
-    // Audit event: durable record that an import landed. Pin the path so the
-    // operator's `acps logs events` shows which file changed. The import has
-    // already succeeded on disk, so an event-write failure must not fail the
-    // response — but it must also not be silently dropped (CLAUDE.md error
-    // rule). Log at warn so monitoring sees the divergence.
     let payload = serde_json::json!({
         "path": target.to_string_lossy(),
         "size_bytes": canonical.len(),
@@ -86,10 +110,10 @@ pub(crate) async fn config_import_handler(
         }
     }
 
-    Ok(ApiSuccess::new(ConfigImportResponse {
-        imported: true,
-        restart_required: true,
-    }))
+    Ok(ApiSuccess::new(serde_json::json!({
+        "imported": true,
+        "restart_required": true,
+    })))
 }
 
 #[derive(Serialize)]

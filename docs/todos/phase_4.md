@@ -50,12 +50,12 @@
 
 ## Config Import/Export Hardening
 
-- [ ] Validate imported config paths are absolute where required.
-- [ ] Reject imported config with secret values in fields that must be references.
-- [ ] Add import dry-run output.
-- [ ] Add export redaction checks.
-- [ ] Add config compatibility version field.
-- [ ] Add tests for malformed, oversized, and unsafe imports.
+- [x] Validate imported config paths are absolute where required.
+- [x] Reject imported config with secret values in fields that must be references.
+- [x] Add import dry-run output.
+- [x] Add export redaction checks.
+- [x] Add config compatibility version field.
+- [x] Add tests for malformed, oversized, and unsafe imports.
 
 ## Dependency Apply
 

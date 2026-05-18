@@ -23,6 +23,8 @@ The config describes desired runtime state. SQLite records runtime history. The 
 ## Example
 
 ```toml
+config_version = 1
+
 [api]
 bind = "127.0.0.1:7700"
 public_url = "https://agent.example.com"
@@ -185,15 +187,20 @@ Related commands are defined in [cli](cli.md):
 - `acps config validate [path]`
 - `acps config export [--output path]`
 - `acps config export --base64`
-- `acps config import <path>`
-- `acps config import --base64 <code>`
+- `acps config import <path> [--force] [--dry-run]`
+- `acps config import --base64 <code> [--force] [--dry-run]`
 
 The current implementation supports validation, export, and import:
 
 - `acps config validate [path]` loads an explicit path or `~/.config/acp-stack/acp-stack.toml`.
-- `acps config export [--output path]` loads the default config and emits canonical TOML.
+- `acps config export [--output path]` loads the default config and emits canonical TOML. Export always writes `config_version = 1`.
 - `acps config export --base64` emits the same canonical TOML as base64.
 - `acps config import <path>` parses, validates, and atomically writes canonical TOML to `~/.config/acp-stack/acp-stack.toml`. Without `--force`, it refuses to overwrite an existing config. `--base64 <code>` decodes its argument as base64-encoded canonical TOML before validation. Atomic writes use a temp-file + rename under owner-only mode (`0600`).
+- `acps config import --dry-run` (for both path and `--base64` imports) validates the incoming config, canonicalizes it, compares auth refs against the existing config when present, and reports metadata (config version, canonical size, auth-ref status, target path) without writing to disk or recording an audit event.
+- Import input size (raw TOML or decoded base64) is capped at 1 MiB. Oversized imports are rejected before parsing.
+- Config version validation: the top-level `config_version` field must be `1`. The field may be omitted in config files, which is treated as version 1 for backward compatibility. Export always emits `config_version = 1`. Unsupported version values are rejected at load time.
+- Secret ref field hardening: fields that should contain secret reference names (like `OPENCODE_API_KEY`) are checked for likely inline secret values. Known token prefixes, JWT-shaped values, long hex-only strings, and names exceeding 128 characters are rejected as likely pasted values rather than reference names.
+- Optional path fields that are config paths (notably `acpctl.socket_path`) require an absolute path with no `..` segments.
 - Validation rejects unknown fields, invalid enum values, relative workspace paths, missing `workspace.source`, incomplete `git` or `s3` source declarations, fields that do not belong to the selected source type, and aliased or empty `[auth].session_key_ref` / `[auth].admin_key_ref`.
 
 The Phase 4 init flow will replace the single `[workspace.source]` seed model with separate code and data source declarations. The planned shape is:
@@ -217,11 +224,12 @@ Both `[api].max_request_bytes` and `[security.http].max_request_bytes` cap inbou
 
 ## Hardening
 
-Config import/export hardening belongs to Phase 4:
+Config import/export hardening (Phase 4):
 
-- validate imported config paths are absolute where required
-- reject imported config with secret values in fields that must be references
-- support import dry-run output
-- check export redaction
-- include a config compatibility version field
-- test malformed, oversized, and unsafe imports
+- `config_version = 1` at the top level; missing version treated as 1 for backward compatibility; export always emits version 1.
+- Reject unsupported config_version values.
+- `acps config import --dry-run` and `POST /v1/config/import?dry_run=true` validate, canonicalize, compare auth refs, and report metadata without writing or auditing.
+- Shared 1 MiB import-size cap for CLI and API; oversized API input returns 413.
+- Validate optional path fields that are config paths (notably `acpctl.socket_path`): absolute path required and no `..` segments.
+- Reject imported config where secret-reference fields contain likely inline secret values (known token prefixes, JWT-shaped values, long hex-only strings, names > 128 chars) while allowing normal refs like `OPENCODE_API_KEY`.
+- Preserve existing auth-ref import protections and canonical export behavior.

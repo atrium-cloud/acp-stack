@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default = "default_config_version")]
+    pub config_version: u64,
     pub api: ApiConfig,
     pub auth: AuthConfig,
     pub security: SecurityConfig,
@@ -26,6 +28,14 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub acpctl: AcpctlConfig,
+}
+
+pub const SUPPORTED_CONFIG_VERSION: u64 = 1;
+
+pub const IMPORT_SIZE_LIMIT: usize = 1_048_576;
+
+fn default_config_version() -> u64 {
+    SUPPORTED_CONFIG_VERSION
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -394,6 +404,8 @@ pub struct AgentInstallConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    #[serde(default)]
+    config_version: Option<u64>,
     api: Option<ApiConfig>,
     auth: Option<AuthConfig>,
     security: Option<RawSecurityConfig>,
@@ -457,6 +469,7 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
     })?;
 
     let config = Config {
+        config_version: raw.config_version.unwrap_or(SUPPORTED_CONFIG_VERSION),
         api: raw
             .api
             .ok_or(StackError::MissingSection { section: "api" })?,
@@ -491,6 +504,11 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
 
 impl Config {
     fn validate(&self) -> Result<()> {
+        if self.config_version != SUPPORTED_CONFIG_VERSION {
+            return Err(StackError::UnsupportedConfigVersion {
+                version: self.config_version,
+            });
+        }
         validate_socket_address("api.bind", &self.api.bind)?;
         validate_nonzero("api.max_request_bytes", self.api.max_request_bytes)?;
         validate_auth_refs(&self.auth)?;
@@ -521,6 +539,9 @@ impl Config {
         // keeps `workspace_relative_string` from emitting absolute paths.
         if !Path::new(&self.workspace.uploads).starts_with(Path::new(&self.workspace.root)) {
             return Err(StackError::WorkspaceUploadsNotUnderRoot);
+        }
+        if let Some(socket_path) = &self.acpctl.socket_path {
+            validate_optional_config_path("acpctl.socket_path", socket_path)?;
         }
         let source = self
             .workspace
@@ -563,6 +584,7 @@ impl Config {
         validate_edge(&self.edge)?;
         validate_dependencies(&self.dependencies)?;
         validate_mcp(&self.mcp)?;
+        validate_secret_refs_not_looking_like_values(self)?;
         validate_secret_refs(self)?;
         validate_supabase_logging(self.logging.supabase.as_ref())?;
 
@@ -1191,4 +1213,103 @@ fn validate_http_url_prefix(field: &'static str, value: &str) -> Result<()> {
         return Ok(());
     }
     Err(StackError::UrlMustBeHttp { field })
+}
+
+fn validate_optional_config_path(field: &'static str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(StackError::MissingField { field });
+    }
+    if !Path::new(value).is_absolute() {
+        return Err(StackError::PathMustBeAbsolute { field });
+    }
+    for component in Path::new(value).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(StackError::PathContainsParentDir { field });
+        }
+    }
+    Ok(())
+}
+
+fn secret_ref_looks_like_value(name: &str) -> bool {
+    if name.len() > 128 {
+        return true;
+    }
+    if name.len() > 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    if name.starts_with("acps_")
+        || name.starts_with("sk-")
+        || name.starts_with("ghp_")
+        || name.starts_with("github_pat_")
+        || name.starts_with("xoxb-")
+        || name.starts_with("xoxp-")
+        || name.starts_with("xoxa-")
+    {
+        return true;
+    }
+    let jwt_parts = name.split('.').collect::<Vec<_>>();
+    if jwt_parts.len() == 3
+        && jwt_parts
+            .iter()
+            .all(|part| part.len() >= 10 && part.chars().all(is_base64url_char))
+    {
+        return true;
+    }
+    false
+}
+
+fn is_base64url_char(value: char) -> bool {
+    value.is_ascii_alphanumeric() || value == '_' || value == '-'
+}
+
+fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
+    let check = |name: &str, field: &'static str| -> Result<()> {
+        if secret_ref_looks_like_value(name) {
+            return Err(StackError::SecretRefLooksLikeValue { field });
+        }
+        Ok(())
+    };
+
+    for env_ref in &config.agent.env {
+        check(env_ref, "agent.env")?;
+    }
+    if let Some(supabase) = &config.logging.supabase {
+        check(
+            &supabase.api_key_ref,
+            "logging.supabase.api_key_ref",
+        )?;
+    }
+    if let Some(source) = &config.workspace.source {
+        if let Some(value) = source.credential_ref.as_deref() {
+            check(value, "workspace.source.credential_ref")?;
+        }
+        if let Some(value) = source.access_key_ref.as_deref() {
+            check(value, "workspace.source.access_key_ref")?;
+        }
+        if let Some(value) = source.secret_key_ref.as_deref() {
+            check(value, "workspace.source.secret_key_ref")?;
+        }
+    }
+    for server in &config.mcp.servers {
+        match server {
+            McpServerConfig::Stdio(s) => {
+                for env_ref in &s.env {
+                    check(env_ref, "mcp.servers.env")?;
+                }
+            }
+            McpServerConfig::Http(s) => {
+                for header in &s.headers {
+                    check(&header.value_ref, "mcp.servers.headers")?;
+                }
+            }
+        }
+    }
+    check(&config.auth.session_key_ref, "auth.session_key_ref")?;
+    check(&config.auth.admin_key_ref, "auth.admin_key_ref")?;
+    if let Some(provider) = &config.agent.provider {
+        if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
+            check(api_key_ref, "agent.provider.api_key_ref")?;
+        }
+    }
+    Ok(())
 }

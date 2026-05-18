@@ -553,6 +553,17 @@ pub enum StackError {
 
     #[error("Origin `{origin}` is not in the configured allowlist")]
     OriginNotAllowed { origin: String },
+
+    #[error("config import exceeds {limit}-byte size limit ({actual} bytes)")]
+    ImportTooLarge { limit: usize, actual: usize },
+
+    #[error("unsupported config version {version}; this binary only supports version 1")]
+    UnsupportedConfigVersion { version: u64 },
+
+    #[error(
+        "secret ref at `{field}` looks like an inline secret value rather than a reference name"
+    )]
+    SecretRefLooksLikeValue { field: &'static str },
 }
 
 impl StackError {
@@ -694,6 +705,9 @@ impl StackError {
             IpBlocked { .. } => "auth.ip_blocked",
             OriginNotAllowed { .. } => "auth.origin_not_allowed",
             InvalidParam { .. } => "request.invalid_param",
+            ImportTooLarge { .. } => "import.too_large",
+            UnsupportedConfigVersion { .. } => "config.unsupported_version",
+            SecretRefLooksLikeValue { .. } => "config.invalid",
         }
     }
 
@@ -975,6 +989,17 @@ impl StackError {
             IpBlocked { .. } => "client IP is temporarily blocked".to_owned(),
             OriginNotAllowed { .. } => "origin is not allowed".to_owned(),
             InvalidParam { field, reason } => format!("invalid parameter `{field}`: {reason}"),
+            ImportTooLarge { limit, .. } => {
+                format!("config import exceeds the {limit}-byte size limit")
+            }
+            UnsupportedConfigVersion { version } => {
+                format!("unsupported config version {version}; this binary only supports version 1")
+            }
+            SecretRefLooksLikeValue { field, .. } => {
+                format!(
+                    "secret ref at `{field}` looks like an inline secret value rather than a reference name"
+                )
+            }
         }
     }
 
@@ -1125,8 +1150,11 @@ impl StackError {
             PermissionNotFound { .. } => StatusCode::NOT_FOUND,
             StateInvalidJson { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             RateLimited | IpBlocked { .. } => StatusCode::TOO_MANY_REQUESTS,
+            ImportTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             OriginNotAllowed { .. } => StatusCode::FORBIDDEN,
             InvalidParam { .. } => StatusCode::BAD_REQUEST,
+            UnsupportedConfigVersion { .. } => StatusCode::BAD_REQUEST,
+            SecretRefLooksLikeValue { .. } => StatusCode::BAD_REQUEST,
         }
     }
 }

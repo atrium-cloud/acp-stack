@@ -26,6 +26,8 @@ acps config export [--output path]
 acps config export --base64
 acps config import <path>
 acps config import --base64 <code>
+acps config import --dry-run <path>
+acps config import --dry-run --base64 <code>
 
 acps secrets list
 acps secrets set <name>
@@ -128,8 +130,8 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps config validate [path]`
 - `acps config export [--output path]`
 - `acps config export --base64`
-- `acps config import <path> [--force]`
-- `acps config import --base64 <code> [--force]`
+- `acps config import <path> [--force] [--dry-run]`
+- `acps config import --base64 <code> [--force] [--dry-run]`
 - `acps init`
 - `acps init --edge cloudflare --exposure tunnel --hostname <host>`
 - `acps status`
@@ -156,7 +158,7 @@ When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-
 
 `acps init` creates the default config and state directories, writes a valid starter config when one is absent, validates an existing config without overwriting it, creates or migrates `~/.local/share/acp-stack/state.sqlite`, initializes the age key and the encrypted secret store, generates session and admin API keys when the store is fresh, and records `init.completed` and `auth.keys_generated` events. On a re-run with both API keys already present, init preserves them silently; if either reference name is missing in a non-empty store, init fails fast.
 
-`acps config import` validates the incoming TOML and writes it to the default config path as canonical TOML. By default, import refuses to overwrite an existing config; pass `--force` to replace one. `--base64 <code>` decodes its argument as base64-encoded canonical TOML before validation.
+`acps config import` validates the incoming TOML and writes it to the default config path as canonical TOML. By default, import refuses to overwrite an existing config; pass `--force` to replace one. `--base64 <code>` decodes its argument as base64-encoded canonical TOML before validation. `--dry-run` validates, canonicalizes, compares auth refs, and reports metadata without writing to disk or auditing. Import input size (raw TOML or decoded base64) is capped at 1 MiB.
 
 `acps secrets set <name>` reads a single line from stdin and stores it as the named secret. `acps secrets list` prints names only — values are never echoed. `acps secrets delete <name>` removes the named secret and errors when it does not exist.
 

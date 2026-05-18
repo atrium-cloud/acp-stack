@@ -204,7 +204,10 @@ fn exports_default_home_config_to_stdout() {
         .assert()
         .success()
         .stdout(predicates::str::contains("[api]"))
-        .stdout(predicates::str::contains("[agent.install]"));
+        .stdout(predicates::str::contains("[agent.install]"))
+        .stdout(predicates::str::contains(SESSION_KEY).not())
+        .stdout(predicates::str::contains(ADMIN_KEY).not())
+        .stdout(predicates::str::contains("sk-proj-exampleinlinevalue").not());
 }
 
 #[test]
@@ -2600,4 +2603,83 @@ fn config_import_rejects_invalid_base64() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("not valid base64"));
+}
+
+#[test]
+fn config_import_dry_run_with_path() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+    let config_path = tempdir.path().join(".config/acp-stack/acp-stack.toml");
+    let original_config = fs::read_to_string(&config_path).expect("config readable");
+
+    let import_path = tempdir.path().join("import.toml");
+    fs::write(&import_path, VALID_CONFIG).expect("write config");
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "config",
+            "import",
+            import_path.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(stdout.contains("import dry-run complete"));
+    assert!(stdout.contains("config_version:"));
+    assert!(stdout.contains("canonical TOML size:"));
+    assert!(stdout.contains("auth refs unchanged:"));
+    assert!(stdout.contains("would write to:"));
+    let current_config = fs::read_to_string(&config_path).expect("config readable");
+    assert_eq!(current_config, original_config);
+}
+
+#[test]
+fn config_import_dry_run_with_base64() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(VALID_CONFIG);
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", "--base64", &encoded, "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(stdout.contains("import dry-run complete"));
+    assert!(stdout.contains("config_version:"));
+    assert!(stdout.contains("would write to:"));
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acp-stack.toml")
+            .exists(),
+        "dry-run must not create a config file"
+    );
+}
+
+#[test]
+fn config_import_rejects_oversized_path_input() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    let big_config = "x".repeat(2 * 1024 * 1024); // 2 MiB
+    let import_path = tempdir.path().join("big.toml");
+    fs::write(&import_path, &big_config).expect("write big config");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "import", import_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("exceeds 1048576-byte size limit"));
 }
