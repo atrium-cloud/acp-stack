@@ -85,6 +85,7 @@ use crate::supervisor::AgentSupervisor;
 pub struct AppState {
     pub config: Arc<Config>,
     pub effective_bind: Arc<String>,
+    pub runtime_paths: Arc<RuntimePaths>,
     pub state: Arc<TokioMutex<StateStore>>,
     pub session_key: Arc<Zeroizing<String>>,
     pub admin_key: Arc<Zeroizing<String>>,
@@ -96,6 +97,27 @@ pub struct AppState {
     pub permissions: PermissionService,
     pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
     pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimePaths {
+    pub config_path: PathBuf,
+    pub state_path: PathBuf,
+}
+
+impl RuntimePaths {
+    pub fn new(config_path: PathBuf, state_path: PathBuf) -> Self {
+        Self {
+            config_path,
+            state_path,
+        }
+    }
+
+    fn from_state_defaults(state: &StateStore) -> Self {
+        let config_path = crate::config::default_config_path()
+            .unwrap_or_else(|_| PathBuf::from(".config/acp-stack/acp-stack.toml"));
+        Self::new(config_path, state.path().to_path_buf())
+    }
 }
 
 impl AppState {
@@ -124,11 +146,30 @@ impl AppState {
     /// can override config for one run; security checks must inspect the
     /// effective listener, while config export still returns the stored config.
     pub fn with_effective_bind(
+        config: Config,
+        state: StateStore,
+        session_key: String,
+        admin_key: String,
+        effective_bind: String,
+    ) -> Self {
+        let runtime_paths = RuntimePaths::from_state_defaults(&state);
+        Self::with_effective_bind_and_runtime_paths(
+            config,
+            state,
+            session_key,
+            admin_key,
+            effective_bind,
+            runtime_paths,
+        )
+    }
+
+    pub fn with_effective_bind_and_runtime_paths(
         mut config: Config,
         mut state: StateStore,
         session_key: String,
         admin_key: String,
         effective_bind: String,
+        runtime_paths: RuntimePaths,
     ) -> Self {
         // Adapter metadata is runtime-populated from the active registry.
         // We resolve once at AppState construction so every handler that
@@ -175,6 +216,7 @@ impl AppState {
         Self {
             config: config_arc,
             effective_bind: Arc::new(effective_bind),
+            runtime_paths: Arc::new(runtime_paths),
             state: state_arc,
             session_key: Arc::new(Zeroizing::new(session_key)),
             admin_key: Arc::new(Zeroizing::new(admin_key)),

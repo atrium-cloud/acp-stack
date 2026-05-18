@@ -1,4 +1,4 @@
-use crate::api::{self, AppState};
+use crate::api::{self, AppState, RuntimePaths};
 use crate::config::{self, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -203,8 +203,15 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
         // leave a dangling lifecycle row whenever the UDS bind fails.
         let bound_local = crate::local_listener::bind_local(&socket_path, parent_policy).await?;
         let lifecycle = ServerLifecycle::starting(&store, &local)?;
-        let app_state =
-            AppState::with_effective_bind(config, store, session_key, admin_key, local.clone());
+        let runtime_paths = RuntimePaths::new(config_path, state_path);
+        let app_state = AppState::with_effective_bind_and_runtime_paths(
+            config,
+            store,
+            session_key,
+            admin_key,
+            local.clone(),
+            runtime_paths,
+        );
         let state_handle = app_state.state.clone();
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;
