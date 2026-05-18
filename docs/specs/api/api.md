@@ -43,8 +43,10 @@ Errors:
 
 ### Config API
 
-- `GET /v1/config/export` (session-tier) - returns canonical TOML.
+- `GET /v1/config/export` (session-tier) - returns canonical TOML including `config_version = 1`.
 - `POST /v1/config/import` (admin-tier) - parses TOML from the raw body, refuses any change to `[auth].session_key_ref` or `[auth].admin_key_ref`, then atomically writes the canonical form to `~/.config/acp-stack/acp-stack.toml`. Response: `{ imported: true, restart_required: true }`. The running daemon does not hot-reload — clients must restart the daemon for the new config to take effect. A `server.config_imported` event is appended to the events table.
+  - Query param `dry_run=true`: validates, canonicalizes, compares auth refs against the running config, and returns metadata (`{ dry_run: true, config_version, canonical_toml_size, input_size, auth_refs_unchanged, target, target_exists }`) without writing to disk or recording an audit event.
+  - Import body size is capped at 1 MiB (1,048,576 bytes). Oversized requests return 413 `import.too_large`.
 - `POST /v1/config/validate` (session-tier) - parses and validates the raw body without applying.
 
 ### Agent API

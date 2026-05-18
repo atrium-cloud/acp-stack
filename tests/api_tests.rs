@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
-use acp_stack::state::{AuthFailureFilter, StateStore};
+use acp_stack::state::{AuthFailureFilter, EventFilter, StateStore};
 use reqwest::StatusCode;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -20,6 +20,7 @@ const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 struct ServerHarness {
     base_url: String,
     state: Arc<TokioMutex<StateStore>>,
+    config_path: PathBuf,
     state_path: PathBuf,
     join: JoinHandle<acp_stack::error::Result<()>>,
     _tempdir: TempDir,
@@ -48,7 +49,7 @@ impl ServerHarness {
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(tempdir.path(), &path);
-        let runtime_paths = RuntimePaths::new(config_path, path.clone());
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
         let effective_bind = config.api.bind.clone();
         let app_state = AppState::with_effective_bind_and_runtime_paths(
             config,
@@ -65,6 +66,7 @@ impl ServerHarness {
         Self {
             base_url: format!("http://{local}"),
             state,
+            config_path,
             state_path: path,
             join,
             _tempdir: tempdir,
@@ -844,7 +846,7 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
         SESSION_KEY.to_owned(),
         ADMIN_KEY.to_owned(),
         "0.0.0.0:7700".to_owned(),
-        RuntimePaths::new(config_path, path.clone()),
+        RuntimePaths::new(config_path.clone(), path.clone()),
     );
     let state = app_state.state.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -853,6 +855,7 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
     let harness = ServerHarness {
         base_url: format!("http://{local}"),
         state,
+        config_path,
         state_path: path,
         join,
         _tempdir: tempdir,
@@ -1600,4 +1603,159 @@ async fn rate_limit_envelope_uses_standard_shape() {
     assert!(body["error"]["message"].is_string());
     // `details` must always be present (object), even when empty, per envelope spec.
     assert!(body["error"]["details"].is_object());
+}
+
+#[tokio::test]
+async fn config_import_dry_run_returns_metadata() {
+    let harness = ServerHarness::spawn().await;
+    let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    let toml = include_str!("fixtures/valid-acp-stack.toml");
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1/config/import?dry_run=true",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .body(toml.to_owned())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["dry_run"], Value::Bool(true));
+    assert_eq!(body["data"]["config_version"], Value::Number(1.into()));
+    assert!(body["data"]["canonical_toml_size"].is_number());
+    assert!(body["data"]["input_size"].is_number());
+    assert!(body["data"]["auth_refs_unchanged"].is_boolean());
+    assert!(body["data"]["target"].is_string());
+    assert!(body["data"]["target_exists"].is_boolean());
+
+    let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert_eq!(current_config, original_config);
+    let guard = harness.state.lock().await;
+    let events = guard
+        .query_events(EventFilter {
+            limit: 10,
+            kind: Some("server.config_imported"),
+            ..EventFilter::default()
+        })
+        .expect("query events");
+    assert!(events.is_empty(), "dry-run must not audit config import");
+}
+
+#[tokio::test]
+async fn config_import_dry_run_reports_auth_ref_mismatch_without_mutation() {
+    let harness = ServerHarness::spawn().await;
+    let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    let toml = include_str!("fixtures/valid-acp-stack.toml").replace(
+        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
+        r#"admin_key_ref = "ROTATED_ADMIN_KEY""#,
+    );
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1/config/import?dry_run=true",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .body(toml)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["auth_refs_unchanged"], Value::Bool(false));
+
+    let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert_eq!(current_config, original_config);
+    let guard = harness.state.lock().await;
+    let events = guard
+        .query_events(EventFilter {
+            limit: 10,
+            kind: Some("server.config_imported"),
+            ..EventFilter::default()
+        })
+        .expect("query events");
+    assert!(events.is_empty(), "dry-run must not audit config import");
+}
+
+#[tokio::test]
+async fn config_import_rejects_auth_ref_mismatch_before_write() {
+    let harness = ServerHarness::spawn().await;
+    let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    let toml = include_str!("fixtures/valid-acp-stack.toml").replace(
+        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
+        r#"admin_key_ref = "ROTATED_ADMIN_KEY""#,
+    );
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/import", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .body(toml)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(false));
+    assert_eq!(body["error"]["code"], "config.import_changes_auth_ref");
+
+    let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert_eq!(current_config, original_config);
+    let guard = harness.state.lock().await;
+    let events = guard
+        .query_events(EventFilter {
+            limit: 10,
+            kind: Some("server.config_imported"),
+            ..EventFilter::default()
+        })
+        .expect("query events");
+    assert!(
+        events.is_empty(),
+        "rejected import must not audit config import"
+    );
+}
+
+#[tokio::test]
+async fn config_import_oversized_body_returns_413() {
+    let harness = ServerHarness::spawn().await;
+    let body = "x".repeat(2 * 1024 * 1024); // 2 MiB
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/import", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .body(body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(false));
+    assert_eq!(body["error"]["code"], "import.too_large");
+}
+
+#[tokio::test]
+async fn config_validate_secret_ref_value_error_does_not_echo_secret() {
+    let harness = ServerHarness::spawn().await;
+    let secret = "sk-proj-inline-secret-value";
+    let toml = include_str!("fixtures/valid-acp-stack.toml").replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        &format!(r#"env = ["{secret}"]"#),
+    );
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/validate", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .body(toml)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(false));
+    assert_eq!(body["error"]["code"], "config.invalid");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains(secret)
+    );
 }
