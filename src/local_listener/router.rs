@@ -9,7 +9,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use crate::api::{
     self, AppState, commands_submit_handler, config_export_handler, deps_check_handler,
     files_content_get_handler, files_content_put_handler, files_list_handler, logs_events_handler,
-    permissions_pending_handler, security_check_handler, status_handler,
+    permissions_pending_handler, security_check_handler, status_handler, ws_connections_handler,
+    ws_sessions_handler,
 };
 use crate::auth::KeyKind;
 
@@ -32,6 +33,8 @@ pub fn build_local_router(state: AppState) -> Router {
         .route("/v1/commands", post(commands_submit_handler))
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/permissions/pending", get(permissions_pending_handler))
+        .route("/v1/ws/connections", get(ws_connections_handler))
+        .route("/v1/ws/sessions", get(ws_sessions_handler))
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(axum::extract::DefaultBodyLimit::disable());
 

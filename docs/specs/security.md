@@ -178,29 +178,29 @@ Rate-limit rejections return `429 auth.rate_limited` in the standard envelope an
 
 HTTP requests with a disallowed `Origin` return `403 auth.origin_not_allowed` and append `security.cors_origin_denied`. WebSocket upgrades use the same allowlist, return the same error code on rejection, and append `security.ws_origin_denied`. Framework-generated oversized request-body rejections return `413 request.too_large` and append `security.request_oversized` with method, route, and configured byte limit.
 
-## Planned Cloudflare Edge Hardening
+## Cloudflare Edge Hardening
 
-Phase 5 should make Cloudflare Tunnel the preferred public exposure model. In that profile, `acps` stays bound to loopback and `cloudflared` creates an outbound tunnel to Cloudflare, which provides public-edge DDoS filtering, WAF/rate-limit rules, TLS, and request geolocation signals before traffic reaches the host. A proxied-DNS public-origin deployment remains an advanced fallback and should require firewall guidance that admits only Cloudflare edge ranges to the origin.
+Cloudflare Tunnel is the preferred public exposure model. In that profile, `acps` stays bound to loopback and `cloudflared` creates an outbound tunnel to Cloudflare, which provides public-edge DDoS filtering, WAF/rate-limit rules, TLS, and request geolocation signals before traffic reaches the host. A proxied-DNS public-origin deployment remains an advanced fallback and should require firewall guidance that admits only Cloudflare edge ranges to the origin.
 
 `acp-stack` should still keep its internal auth, per-IP/per-key rate limiting, CORS/origin validation, request-size limits, and security logging active behind Cloudflare. Cloudflare reduces exposed attack surface and absorbs edge floods; runtime hardening remains defense in depth and protects private/local deployments too.
 
-When `[edge.cloudflare]` is configured and proxy headers are trusted, the runtime should extract bounded Cloudflare metadata only from trusted proxy peers:
+When `[edge.cloudflare]` is configured and proxy headers are trusted, the runtime extracts bounded Cloudflare metadata only from trusted proxy peers:
 
 - `CF-Connecting-IP` as the edge-reported client IP.
 - `CF-IPCountry` as a coarse country code.
 - `CF-Ray` as a correlation id for Cloudflare logs.
 - optional visitor-location headers, when the operator enables Cloudflare Managed Transforms for them.
 
-That metadata should be attached to `api.request`, `auth_failures`, `security.rate_limited`, `security.ip_block_applied`, `security.ip_block_active`, `security.cors_origin_denied`, `security.ws_origin_denied`, `security.request_oversized`, and WebSocket connect/disconnect events. The normal durable payload should keep this bounded to origin kind, country code, region code/name where available, Cloudflare Ray id, and proxy provider. It should not store high-resolution location or raw Cloudflare credentials.
+That metadata is attached to `api.request`, `auth_failures`, `security.rate_limited`, `security.ip_block_applied`, `security.ip_block_active`, `security.cors_origin_denied`, `security.ws_origin_denied`, `security.request_oversized`, and WebSocket connect/disconnect events. The normal durable payload keeps this bounded to origin kind, country code, region code/name where available, Cloudflare Ray id, and proxy provider. It does not store high-resolution location or raw Cloudflare credentials.
 
 Planned self-check findings:
 
 - `edge.cloudflare.cloudflared_missing`: tunnel profile configured but `cloudflared` is not available.
 - `edge.cloudflare.public_bind_in_tunnel_mode`: tunnel mode configured while `[api].bind` listens publicly.
 - `edge.cloudflare.local_proxy_untrusted`: tunnel mode configured without loopback trusted proxies.
-- `edge.cloudflare.origin_unsafe`: configured `allowed_origins` do not exactly match the Cloudflare hostname or include `*`.
+- `edge.cloudflare.unsafe_origins`: configured `allowed_origins` are missing or include `*`.
 - `edge.cloudflare.headers_missing`: recent traffic expected to come through Cloudflare lacks bounded Cloudflare headers.
-- `edge.cloudflare.direct_public_request`: direct public traffic bypassed the configured Cloudflare edge.
+- `edge.cloudflare.direct_public_requests`: direct public traffic bypassed the configured Cloudflare edge.
 
 ## Security Self-Check
 

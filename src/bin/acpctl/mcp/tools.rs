@@ -1,4 +1,4 @@
-//! Declares the 10 MCP tools exposed by `acpctl mcp serve`. Each tool maps
+//! Declares the MCP tools exposed by `acpctl mcp serve`. Each tool maps
 //! one-to-one onto an allowlisted UDS route mounted by
 //! `src/local_listener/router.rs`. The exact set is the deny-list contract
 //! described in `docs/specs/acpctl/acpctl.md` — any deviation here would
@@ -22,6 +22,8 @@ pub(crate) const TOOL_NAMES: &[&str] = &[
     "command_run",
     "config_export",
     "permissions_pending",
+    "ws_connections",
+    "ws_sessions",
 ];
 
 /// Build every tool definition. Cheap enough to call on each `tools/list`
@@ -84,6 +86,14 @@ pub(crate) fn build(name: &str) -> Option<Tool> {
         "permissions_pending" => (
             "List pending permission requests awaiting operator decision.".to_owned(),
             schema_permissions_pending(),
+        ),
+        "ws_connections" => (
+            "Return sanitized live WebSocket connection state.".to_owned(),
+            schema_no_args(),
+        ),
+        "ws_sessions" => (
+            "Return unique session IDs with live WebSocket subscriber counts.".to_owned(),
+            schema_no_args(),
         ),
         _ => return None,
     };

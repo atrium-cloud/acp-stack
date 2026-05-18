@@ -148,9 +148,9 @@ The summary covers:
 
 Percentiles are computed in pure Rust from the windowed result set — SQLite has no `percentile_cont`. Windows up to ~tens of thousands of rows are comfortable; larger windows should add reservoir sampling rather than column materialization.
 
-### Planned Edge And Connection Metrics
+### Edge And Connection Metrics
 
-Phase 5 should enrich request and security events with bounded origin metadata. The same origin payload should be available on `api.request`, `auth_failures`, rate-limit/IP-block events, denied HTTP/WebSocket origins, oversized requests, and WebSocket lifecycle events. Cloudflare metadata is trusted only when the socket peer passes `[security.http].trusted_proxies`; direct or untrusted requests should be recorded as direct/unknown origins rather than silently dropped.
+Request and security events include bounded origin metadata. The same origin payload is available on `api.request`, `auth_failures`, rate-limit/IP-block events, denied HTTP/WebSocket origins, oversized requests, and WebSocket lifecycle events. Cloudflare metadata is trusted only when the socket peer passes `[security.http].trusted_proxies`; direct or untrusted requests are recorded as direct/unknown origins rather than silently dropped.
 
 Planned summary additions:
 
