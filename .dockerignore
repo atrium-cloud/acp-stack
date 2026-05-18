@@ -1,0 +1,13 @@
+# Build artifacts
+target
+
+# VCS metadata
+.git
+.github
+
+# Local/system artifacts
+*.tmp
+*.log
+.DS_Store
+.idea
+.vscode
