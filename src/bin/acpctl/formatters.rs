@@ -238,6 +238,56 @@ pub(crate) fn format_permissions(data: &Value) {
     }
 }
 
+pub(crate) fn format_ws_connections(data: &Value) {
+    let Some(connections) = data.get("connections").and_then(Value::as_array) else {
+        println!("(none)");
+        return;
+    };
+    if connections.is_empty() {
+        println!("(none)");
+        return;
+    }
+    for connection in connections {
+        let id = connection
+            .get("connection_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let origin = connection
+            .get("origin")
+            .and_then(|origin| origin.get("origin_kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let topic_count = connection
+            .get("topics")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        println!("{id} origin={origin} topics={topic_count}");
+    }
+}
+
+pub(crate) fn format_ws_sessions(data: &Value) {
+    let Some(sessions) = data.get("sessions").and_then(Value::as_array) else {
+        println!("(none)");
+        return;
+    };
+    if sessions.is_empty() {
+        println!("(none)");
+        return;
+    }
+    for session in sessions {
+        let id = session
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let count = session
+            .get("connection_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        println!("{id} connections={count}");
+    }
+}
+
 fn print_kv(data: &Value, keys: &[&str]) {
     for key in keys {
         if let Some(value) = data.get(*key) {

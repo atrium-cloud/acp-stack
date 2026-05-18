@@ -9,3 +9,4 @@ pub(crate) mod security;
 pub(crate) mod sessions;
 pub(crate) mod status;
 pub(crate) mod workspace;
+pub(crate) mod ws;

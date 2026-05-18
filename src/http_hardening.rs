@@ -22,10 +22,90 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use http::HeaderMap;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::SecurityHttpConfig;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RequestOrigin {
+    pub origin_kind: String,
+    pub proxy_provider: Option<String>,
+    pub client_ip: Option<String>,
+    pub country_code: Option<String>,
+    pub region_code: Option<String>,
+    pub region_name: Option<String>,
+    pub cloudflare_ray_id: Option<String>,
+}
+
+impl RequestOrigin {
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({"origin_kind": "unknown"}))
+    }
+}
+
+/// Resolve bounded origin metadata and the effective client IP. Cloudflare
+/// metadata is accepted only when the edge profile is enabled and the socket
+/// peer is a configured trusted proxy.
+pub fn request_origin(
+    headers: &HeaderMap,
+    peer: Option<IpAddr>,
+    config: &crate::config::Config,
+) -> RequestOrigin {
+    let Some(peer) = peer else {
+        return RequestOrigin {
+            origin_kind: "unknown".to_owned(),
+            proxy_provider: None,
+            client_ip: None,
+            country_code: None,
+            region_code: None,
+            region_name: None,
+            cloudflare_ray_id: None,
+        };
+    };
+    let peer_trusted = trusted_proxy_peer(peer, &config.security.http);
+    let cloudflare_enabled = config.edge.cloudflare.as_ref().is_some_and(|cloudflare| {
+        cloudflare.enabled && cloudflare.mode == "generated" && cloudflare.exposure == "tunnel"
+    });
+    if cloudflare_enabled && peer_trusted {
+        let cf_ip = parse_header_ip(headers, "cf-connecting-ip");
+        let fallback_ip = Some(client_ip(headers, peer, &config.security.http));
+        let client_ip = cf_ip.or(fallback_ip);
+        let has_cloudflare_header = headers.contains_key("cf-ray")
+            || headers.contains_key("cf-connecting-ip")
+            || headers.contains_key("cf-ipcountry");
+        return RequestOrigin {
+            origin_kind: if has_cloudflare_header {
+                "cloudflare".to_owned()
+            } else {
+                "trusted_proxy_missing_cloudflare".to_owned()
+            },
+            proxy_provider: Some("cloudflare".to_owned()),
+            client_ip: client_ip.map(|ip| ip.to_string()),
+            country_code: bounded_header(headers, "cf-ipcountry", 2),
+            region_code: bounded_header(headers, "cf-region-code", 16),
+            region_name: bounded_header(headers, "cf-region", 64),
+            cloudflare_ray_id: bounded_header(headers, "cf-ray", 64),
+        };
+    }
+    let client_ip = client_ip(headers, peer, &config.security.http);
+    RequestOrigin {
+        origin_kind: if cloudflare_enabled {
+            "direct".to_owned()
+        } else if peer_trusted {
+            "trusted_proxy".to_owned()
+        } else {
+            "direct".to_owned()
+        },
+        proxy_provider: None,
+        client_ip: Some(client_ip.to_string()),
+        country_code: None,
+        region_code: None,
+        region_name: None,
+        cloudflare_ray_id: None,
+    }
+}
 
 /// Resolve the effective client IP for a request given the socket peer.
 /// Returns the socket peer unless proxy headers are explicitly trusted AND
@@ -35,12 +115,7 @@ pub fn client_ip(headers: &HeaderMap, peer: IpAddr, sec: &SecurityHttpConfig) ->
     if !sec.trust_proxy_headers {
         return peer;
     }
-    let peer_trusted = sec
-        .trusted_proxies
-        .iter()
-        .filter_map(|raw| raw.parse::<IpAddr>().ok())
-        .any(|trusted| trusted == peer);
-    if !peer_trusted {
+    if !trusted_proxy_peer(peer, sec) {
         return peer;
     }
     if let Some(value) = headers.get("x-forwarded-for") {
@@ -69,6 +144,31 @@ pub fn client_ip(headers: &HeaderMap, peer: IpAddr, sec: &SecurityHttpConfig) ->
         }
     }
     peer
+}
+
+pub fn trusted_proxy_peer(peer: IpAddr, sec: &SecurityHttpConfig) -> bool {
+    if !sec.trust_proxy_headers {
+        return false;
+    }
+    sec.trusted_proxies
+        .iter()
+        .filter_map(|raw| raw.parse::<IpAddr>().ok())
+        .any(|trusted| trusted == peer)
+}
+
+fn parse_header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|text| text.trim().parse::<IpAddr>().ok())
+}
+
+fn bounded_header(headers: &HeaderMap, name: &'static str, max_len: usize) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    if value.is_empty() || value.len() > max_len || value.chars().any(|ch| ch.is_control()) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 /// Build a `tower_http::cors::CorsLayer` from the configured origins. Returns
@@ -409,6 +509,25 @@ mod tests {
         }
     }
 
+    fn cloudflare_config() -> crate::config::Config {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../tests/fixtures/valid-acp-stack.toml"
+        ))
+        .expect("fixture config");
+        config.security.http.trust_proxy_headers = true;
+        config.security.http.trusted_proxies = vec!["127.0.0.1".to_owned(), "::1".to_owned()];
+        config.edge.cloudflare = Some(crate::config::CloudflareEdgeConfig {
+            enabled: true,
+            mode: "generated".to_owned(),
+            exposure: "tunnel".to_owned(),
+            hostname: "agent.example.com".to_owned(),
+            tunnel_name: Some("acp-stack".to_owned()),
+            tunnel_id: None,
+            cloudflared_deployment: "host".to_owned(),
+        });
+        config
+    }
+
     #[test]
     fn client_ip_returns_peer_when_proxy_headers_untrusted() {
         let sec = make_sec(false, &[], &[], 10);
@@ -428,6 +547,48 @@ mod tests {
         );
         let peer: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(client_ip(&headers, peer, &sec).to_string(), "203.0.113.7");
+    }
+
+    #[test]
+    fn cloudflare_origin_uses_cf_connecting_ip_from_trusted_peer() {
+        let config = cloudflare_config();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.10"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.7"));
+        headers.insert("cf-ipcountry", HeaderValue::from_static("US"));
+        headers.insert("cf-region-code", HeaderValue::from_static("CA"));
+        headers.insert("cf-region", HeaderValue::from_static("California"));
+        headers.insert("cf-ray", HeaderValue::from_static("abc123-SJC"));
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let origin = request_origin(&headers, Some(peer), &config);
+        assert_eq!(origin.origin_kind, "cloudflare");
+        assert_eq!(origin.client_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(origin.country_code.as_deref(), Some("US"));
+        assert_eq!(origin.region_code.as_deref(), Some("CA"));
+        assert_eq!(origin.region_name.as_deref(), Some("California"));
+        assert_eq!(origin.cloudflare_ray_id.as_deref(), Some("abc123-SJC"));
+    }
+
+    #[test]
+    fn cloudflare_headers_are_ignored_from_untrusted_peer() {
+        let config = cloudflare_config();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.10"));
+        let peer: IpAddr = "10.0.0.9".parse().unwrap();
+        let origin = request_origin(&headers, Some(peer), &config);
+        assert_eq!(origin.origin_kind, "direct");
+        assert_eq!(origin.client_ip.as_deref(), Some("10.0.0.9"));
+        assert!(origin.cloudflare_ray_id.is_none());
+    }
+
+    #[test]
+    fn cloudflare_origin_reports_missing_headers_from_trusted_peer() {
+        let config = cloudflare_config();
+        let headers = HeaderMap::new();
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let origin = request_origin(&headers, Some(peer), &config);
+        assert_eq!(origin.origin_kind, "trusted_proxy_missing_cloudflare");
+        assert_eq!(origin.proxy_provider.as_deref(), Some("cloudflare"));
     }
 
     #[test]

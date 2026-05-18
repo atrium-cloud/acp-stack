@@ -11,6 +11,8 @@ pub struct Config {
     pub api: ApiConfig,
     pub auth: AuthConfig,
     pub security: SecurityConfig,
+    #[serde(default, skip_serializing_if = "EdgeConfig::is_empty")]
+    pub edge: EdgeConfig,
     pub workspace: WorkspaceConfig,
     pub logging: LoggingConfig,
     pub agent: AgentConfig,
@@ -61,6 +63,38 @@ pub struct SecurityHttpConfig {
     pub trust_proxy_headers: bool,
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare: Option<CloudflareEdgeConfig>,
+}
+
+impl EdgeConfig {
+    pub fn is_empty(&self) -> bool {
+        self.cloudflare.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareEdgeConfig {
+    pub enabled: bool,
+    pub mode: String,
+    pub exposure: String,
+    pub hostname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_id: Option<String>,
+    #[serde(default = "default_cloudflared_deployment")]
+    pub cloudflared_deployment: String,
+}
+
+fn default_cloudflared_deployment() -> String {
+    "host".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -363,6 +397,8 @@ struct RawConfig {
     api: Option<ApiConfig>,
     auth: Option<AuthConfig>,
     security: Option<RawSecurityConfig>,
+    #[serde(default)]
+    edge: Option<EdgeConfig>,
     workspace: Option<WorkspaceConfig>,
     logging: Option<LoggingConfig>,
     agent: Option<AgentConfig>,
@@ -432,6 +468,7 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
                 section: "security.http",
             })?,
         },
+        edge: raw.edge.unwrap_or_default(),
         workspace: raw.workspace.ok_or(StackError::MissingSection {
             section: "workspace",
         })?,
@@ -523,6 +560,7 @@ impl Config {
         validate_permissions(&self.permissions)?;
         validate_commands(&self.commands)?;
         validate_trusted_proxies(&self.security.http)?;
+        validate_edge(&self.edge)?;
         validate_dependencies(&self.dependencies)?;
         validate_mcp(&self.mcp)?;
         validate_secret_refs(self)?;
@@ -566,6 +604,114 @@ fn validate_supabase_logging(supabase: Option<&SupabaseLoggingConfig>) -> Result
     if !is_safe_pg_identifier(&supabase.schema) {
         return Err(StackError::InvalidSupabaseSchema {
             schema: supabase.schema.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_edge(edge: &EdgeConfig) -> Result<()> {
+    let Some(cloudflare) = &edge.cloudflare else {
+        return Ok(());
+    };
+    if !cloudflare.enabled {
+        return Ok(());
+    }
+    if cloudflare.mode == "managed" {
+        return Err(StackError::CloudflareManagedNotImplemented);
+    }
+    if cloudflare.mode != "generated" {
+        return Err(StackError::InvalidCloudflareMode {
+            mode: cloudflare.mode.clone(),
+        });
+    }
+    if cloudflare.exposure != "tunnel" {
+        return Err(StackError::InvalidCloudflareExposure {
+            exposure: cloudflare.exposure.clone(),
+        });
+    }
+    if !matches!(
+        cloudflare.cloudflared_deployment.as_str(),
+        "host" | "docker" | "external"
+    ) {
+        return Err(StackError::InvalidCloudflaredDeployment {
+            deployment: cloudflare.cloudflared_deployment.clone(),
+        });
+    }
+    validate_cloudflare_hostname(&cloudflare.hostname)?;
+    validate_cloudflare_tunnel_name(cloudflare.tunnel_name.as_deref())?;
+    validate_cloudflare_tunnel_id(cloudflare.tunnel_id.as_deref())?;
+    Ok(())
+}
+
+fn validate_cloudflare_hostname(hostname: &str) -> Result<()> {
+    let hostname = hostname.trim();
+    if hostname.is_empty()
+        || hostname.len() > 253
+        || hostname.contains('/')
+        || hostname.contains(':')
+        || hostname.chars().any(char::is_whitespace)
+        || !hostname.contains('.')
+    {
+        return Err(StackError::InvalidCloudflareHostname {
+            hostname: hostname.to_owned(),
+        });
+    }
+    for label in hostname.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Err(StackError::InvalidCloudflareHostname {
+                hostname: hostname.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_cloudflare_tunnel_name(value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty() {
+        return Err(StackError::MissingField {
+            field: "edge.cloudflare.tunnel_name",
+        });
+    }
+    if value.len() > 64
+        || value.chars().any(|ch| {
+            !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) || ch.is_ascii_control()
+        })
+    {
+        return Err(StackError::InvalidCloudflareTunnelName {
+            tunnel_name: value.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cloudflare_tunnel_id(value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty() {
+        return Err(StackError::MissingField {
+            field: "edge.cloudflare.tunnel_id",
+        });
+    }
+    let bytes = value.as_bytes();
+    let uuid_shape = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !uuid_shape {
+        return Err(StackError::InvalidCloudflareTunnelId {
+            tunnel_id: value.to_owned(),
         });
     }
     Ok(())

@@ -58,7 +58,7 @@ acps deps apply
 
 `acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Interactive init prompts for one supported agent, updates `[agent]` with the registry-recommended launch command, then asks whether to install that agent. Non-interactive init skips agent selection and install unless `--agent <id>` and/or `--install-agent` are supplied; `--no-install-agent` suppresses the install prompt in interactive runs.
 
-Phase 5 should add `acps init --edge cloudflare --exposure tunnel --hostname <host>` as the recommended public deployment profile. The generated config should keep `acps` bound to `127.0.0.1`, set `[api].public_url` and explicit `allowed_origins` to the Cloudflare hostname, trust only the local `cloudflared` proxy peers, and emit local `cloudflared` config plus systemd/Docker snippets. A managed mode may additionally use Cloudflare API-token secret refs to provision tunnel/public-hostname resources and baseline edge rules.
+`acps init --edge cloudflare --exposure tunnel --hostname <host>` is the recommended public deployment profile. It keeps `acps` bound to `127.0.0.1`, sets `[api].public_url` and explicit `allowed_origins` to the Cloudflare hostname, trusts only local `cloudflared` proxy peers, adds a host `cloudflared` dependency when applicable, and emits local `cloudflared` config plus systemd/Docker snippets. Managed Cloudflare API provisioning is deferred.
 
 `acps init` can seed the workspace from one source:
 
@@ -131,6 +131,7 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps config import <path> [--force]`
 - `acps config import --base64 <code> [--force]`
 - `acps init`
+- `acps init --edge cloudflare --exposure tunnel --hostname <host>`
 - `acps status`
 - `acps reset [--yes]`
 - `acps auth regenerate-session-key`
@@ -145,6 +146,10 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps logs tail [--topic <name>]...`
 - `acps metrics summary [--since <duration|rfc3339>] [--until <duration|rfc3339>]`
 - `acps security check`
+- `acps ws connections`
+- `acps ws sessions`
+- `acps ws disconnect --connection-id <id>`
+- `acps ws disconnect --session-id <id>`
 - `acps serve [--bind <addr>] [--allow-root]`
 
 When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-stack.toml`. Export currently reads the same default path and writes canonical TOML to stdout unless `--output` is provided.
@@ -163,13 +168,13 @@ When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-
 
 `acps logs tail` opens a WebSocket subscription to the running daemon and prints each frame as it arrives until SIGINT. `--topic <name>` may be repeated to subscribe to multiple topics; the default is `logs`. Authentication uses the session key from the encrypted secret store, so the daemon must be reachable at `[api].public_url` (or the loopback rewrite of `[api].bind`).
 
-Planned WebSocket connection management belongs under `acps connections ws`:
+WebSocket connection management belongs under `acps ws`:
 
 ```sh
-acps connections ws list
-acps connections ws sessions
-acps connections ws disconnect <connection-id>...
-acps connections ws disconnect-session <session-id>...
+acps ws connections
+acps ws sessions
+acps ws disconnect --connection-id <connection-id>
+acps ws disconnect --session-id <session-id>
 ```
 
-`list` and `sessions` report live `/v1/ws` clients and unique subscribed `sessions.{id}` topics. `disconnect` and `disconnect-session` require the admin key and close only WebSocket client sockets; they do not close ACP sessions or cancel prompts.
+`connections` and `sessions` report live `/v1/ws` clients and unique subscribed `sessions.{id}` topics. `disconnect` requires the admin key and closes only WebSocket client sockets; it does not close ACP sessions or cancel prompts.

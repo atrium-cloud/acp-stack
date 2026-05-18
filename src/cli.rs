@@ -12,5 +12,6 @@ mod security;
 mod serve;
 mod sessions;
 mod status;
+mod ws;
 
 pub use core::{Cli, run};

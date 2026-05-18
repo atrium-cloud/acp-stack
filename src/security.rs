@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::config::CloudflareEdgeConfig;
 use crate::config::SecurityHttpConfig;
 use crate::ownership::PathPosture;
 
@@ -154,6 +155,10 @@ pub struct SecurityCheckInputs<'a> {
     /// Configured workspace root path, surfaced in
     /// `runtime.workspace_not_writable` for operator clarity.
     pub workspace_root: &'a str,
+    pub cloudflare: Option<&'a CloudflareEdgeConfig>,
+    pub cloudflared_available: bool,
+    pub recent_direct_cloudflare_mode_requests: i64,
+    pub recent_missing_cloudflare_header_requests: i64,
 }
 
 /// Compute the list of security findings for the running daemon.
@@ -210,6 +215,101 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
                  `trust_proxy_headers = false`.",
             ),
         );
+    }
+
+    if let Some(cloudflare) = inputs.cloudflare
+        && cloudflare.enabled
+        && cloudflare.exposure == "tunnel"
+    {
+        if bind_is_public {
+            findings.push(
+                SecurityFinding::critical(
+                    "edge.cloudflare.public_bind_tunnel",
+                    "Cloudflare Tunnel mode is configured but the API bind is public",
+                )
+                .with_remediation(
+                    "Set `[api].bind = \"127.0.0.1:7700\"` so only local \
+                     cloudflared can reach the daemon.",
+                ),
+            );
+        }
+        if inputs.http.allowed_origins.is_empty()
+            || inputs
+                .http
+                .allowed_origins
+                .iter()
+                .any(|origin| origin == "*")
+        {
+            findings.push(
+                SecurityFinding::critical(
+                    "edge.cloudflare.unsafe_origins",
+                    "Cloudflare Tunnel mode requires explicit non-wildcard allowed origins",
+                )
+                .with_remediation(
+                    "Set `[security.http].allowed_origins` to the exact \
+                     `https://<hostname>` origin served by Cloudflare.",
+                ),
+            );
+        }
+        let has_localhost_proxy = inputs
+            .http
+            .trusted_proxies
+            .iter()
+            .any(|proxy| proxy == "127.0.0.1")
+            && inputs
+                .http
+                .trusted_proxies
+                .iter()
+                .any(|proxy| proxy == "::1");
+        if !inputs.http.trust_proxy_headers || !has_localhost_proxy {
+            findings.push(
+                SecurityFinding::critical(
+                    "edge.cloudflare.missing_local_trusted_proxies",
+                    "Cloudflare Tunnel mode requires localhost trusted proxies",
+                )
+                .with_remediation(
+                    "Set `[security.http].trust_proxy_headers = true` and \
+                     `[security.http].trusted_proxies = [\"127.0.0.1\", \"::1\"]`.",
+                ),
+            );
+        }
+        if cloudflare.cloudflared_deployment == "host" && !inputs.cloudflared_available {
+            findings.push(
+                SecurityFinding::warning(
+                    "edge.cloudflare.cloudflared_missing",
+                    "Cloudflare Tunnel host deployment is configured but cloudflared is unavailable",
+                )
+                .with_remediation(
+                    "Install `cloudflared` on PATH, or set \
+                     `cloudflared_deployment = \"docker\"` / \"external\" if it runs outside \
+                     the daemon host.",
+                ),
+            );
+        }
+        if inputs.recent_missing_cloudflare_header_requests > 0 {
+            findings.push(
+                SecurityFinding::warning(
+                    "edge.cloudflare.headers_missing",
+                    "recent trusted-proxy requests were missing Cloudflare headers",
+                )
+                .with_remediation(
+                    "Verify the public hostname routes through Cloudflare Tunnel and that \
+                     Cloudflare visitor IP/location headers have not been stripped.",
+                ),
+            );
+        }
+        if inputs.recent_direct_cloudflare_mode_requests > 0 {
+            findings.push(
+                SecurityFinding::critical(
+                    "edge.cloudflare.direct_public_requests",
+                    "recent requests reached the daemon without the trusted Cloudflare proxy path",
+                )
+                .with_remediation(
+                    "Keep the daemon bound to loopback and ensure firewall or container \
+                     networking prevents direct public access.",
+                ),
+            );
+        }
     }
 
     if inputs.session_key_empty {
@@ -517,12 +617,28 @@ mod tests {
             runtime_user_name: "acp",
             workspace_writable: true,
             workspace_root: "/workspace",
+            cloudflare: None,
+            cloudflared_available: true,
+            recent_direct_cloudflare_mode_requests: 0,
+            recent_missing_cloudflare_header_requests: 0,
         }
     }
 
     fn long_key() -> String {
         // 64-char value, well above MIN_API_KEY_LEN.
         "a".repeat(64)
+    }
+
+    fn cloudflare_edge() -> CloudflareEdgeConfig {
+        CloudflareEdgeConfig {
+            enabled: true,
+            mode: "generated".to_owned(),
+            exposure: "tunnel".to_owned(),
+            hostname: "agent.example.com".to_owned(),
+            tunnel_name: Some("acp-stack".to_owned()),
+            tunnel_id: None,
+            cloudflared_deployment: "host".to_owned(),
+        }
     }
 
     #[test]
@@ -631,6 +747,33 @@ mod tests {
                 .any(|f| f.code == "http.trust_proxy_without_trusted_proxies"),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn cloudflare_tunnel_posture_checks_static_and_recent_traffic() {
+        let mut http = baseline_http();
+        http.allowed_origins = vec!["*".to_owned()];
+        let edge = cloudflare_edge();
+        let mut inputs = baseline_inputs(&http);
+        inputs.effective_bind = "0.0.0.0:7700";
+        inputs.cloudflare = Some(&edge);
+        inputs.cloudflared_available = false;
+        inputs.recent_direct_cloudflare_mode_requests = 1;
+        inputs.recent_missing_cloudflare_header_requests = 1;
+        let findings = check(inputs);
+        for code in [
+            "edge.cloudflare.public_bind_tunnel",
+            "edge.cloudflare.unsafe_origins",
+            "edge.cloudflare.missing_local_trusted_proxies",
+            "edge.cloudflare.cloudflared_missing",
+            "edge.cloudflare.headers_missing",
+            "edge.cloudflare.direct_public_requests",
+        ] {
+            assert!(
+                findings.iter().any(|finding| finding.code == code),
+                "{code}: {findings:?}"
+            );
+        }
     }
 
     #[test]
@@ -1179,6 +1322,10 @@ mod tests {
             runtime_user_name: "acp",
             workspace_writable: false,
             workspace_root: "/workspace",
+            cloudflare: None,
+            cloudflared_available: true,
+            recent_direct_cloudflare_mode_requests: 0,
+            recent_missing_cloudflare_header_requests: 0,
         };
         let empty_findings = check(empty_inputs.clone_for_test());
         assert_remediations_present(&empty_findings);
@@ -1257,6 +1404,11 @@ mod tests {
                 runtime_user_name: self.runtime_user_name,
                 workspace_writable: self.workspace_writable,
                 workspace_root: self.workspace_root,
+                cloudflare: self.cloudflare,
+                cloudflared_available: self.cloudflared_available,
+                recent_direct_cloudflare_mode_requests: self.recent_direct_cloudflare_mode_requests,
+                recent_missing_cloudflare_header_requests: self
+                    .recent_missing_cloudflare_header_requests,
             }
         }
     }

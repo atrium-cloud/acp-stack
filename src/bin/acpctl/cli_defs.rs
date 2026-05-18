@@ -60,6 +60,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: PermissionsCommand,
     },
+    /// Read-only WebSocket connection introspection.
+    Ws {
+        #[command(subcommand)]
+        action: WsCommand,
+    },
     /// Local MCP introspection server.
     Mcp {
         #[command(subcommand)]
@@ -148,6 +153,14 @@ pub(crate) enum PermissionsCommand {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum WsCommand {
+    /// List live WebSocket connections.
+    Connections,
+    /// List unique subscribed session IDs.
+    Sessions,
 }
 
 #[derive(Subcommand, Debug)]

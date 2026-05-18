@@ -10,7 +10,7 @@ use http::StatusCode;
 use http::header::AUTHORIZATION;
 
 use super::core::AppState;
-use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_failure};
+use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_failure_with_origin};
 use crate::envelope::ApiError;
 
 // ----- Middleware -----------------------------------------------------------
@@ -28,9 +28,12 @@ pub(super) async fn authenticate(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip());
-    let resolved_ip = peer
-        .map(|ip| crate::http_hardening::client_ip(req.headers(), ip, &state.config.security.http));
-    let client_ip = resolved_ip.map(|ip| ip.to_string());
+    let origin = crate::http_hardening::request_origin(req.headers(), peer, &state.config);
+    let resolved_ip = origin
+        .client_ip
+        .as_deref()
+        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
+    let client_ip = origin.client_ip.as_deref();
 
     // Short-circuit blocked IPs before bearer comparison. The blocker entry
     // is reset on successful authenticate via record_success below.
@@ -45,11 +48,14 @@ pub(super) async fn authenticate(
                 "warn",
                 "security.ip_block_active",
                 "blocked IP attempted auth",
-                serde_json::json!({
-                    "ip": ip.to_string(),
-                    "remaining_seconds": until_secs,
-                    "route": route,
-                }),
+                payload_with_origin(
+                    serde_json::json!({
+                        "ip": ip.to_string(),
+                        "remaining_seconds": until_secs,
+                        "route": route,
+                    }),
+                    &origin,
+                ),
             )
             .await;
             return reject(
@@ -65,7 +71,7 @@ pub(super) async fn authenticate(
     // CPU since we reject before constant-time compare runs.
     if let Some(ip) = resolved_ip {
         if let Err(scope) = state.rate_limiter.check_per_ip(ip) {
-            persist_rate_limit_event(&state, &route, ip, scope, None).await;
+            persist_rate_limit_event(&state, &route, ip, scope, None, &origin).await;
             return reject(
                 StatusCode::TOO_MANY_REQUESTS,
                 "auth.rate_limited",
@@ -82,14 +88,17 @@ pub(super) async fn authenticate(
     let mut auth_values = req.headers().get_all(AUTHORIZATION).iter();
     let header = match (auth_values.next(), auth_values.next()) {
         (None, _) => {
-            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+            if let Some(response) =
+                check_unauthenticated_rate(&state, resolved_ip, &route, &origin).await
+            {
                 return response;
             }
             return match log_failure(
                 &state,
                 KeyKind::Unknown,
                 AuthFailureReason::Missing,
-                client_ip.as_deref(),
+                client_ip,
+                &origin,
                 &route,
             )
             .await
@@ -103,14 +112,17 @@ pub(super) async fn authenticate(
             };
         }
         (Some(_), Some(_)) => {
-            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+            if let Some(response) =
+                check_unauthenticated_rate(&state, resolved_ip, &route, &origin).await
+            {
                 return response;
             }
             return match log_failure(
                 &state,
                 KeyKind::Unknown,
                 AuthFailureReason::MalformedHeader,
-                client_ip.as_deref(),
+                client_ip,
+                &origin,
                 &route,
             )
             .await
@@ -129,14 +141,17 @@ pub(super) async fn authenticate(
     let bearer = match parse_bearer(header) {
         Some(token) => token,
         None => {
-            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+            if let Some(response) =
+                check_unauthenticated_rate(&state, resolved_ip, &route, &origin).await
+            {
                 return response;
             }
             return match log_failure(
                 &state,
                 KeyKind::Unknown,
                 AuthFailureReason::MalformedHeader,
-                client_ip.as_deref(),
+                client_ip,
+                &origin,
                 &route,
             )
             .await
@@ -168,7 +183,15 @@ pub(super) async fn authenticate(
             let fingerprint = crate::http_hardening::key_fingerprint(&bearer);
             if let Err(scope) = state.rate_limiter.check_per_key(&fingerprint) {
                 if let Some(ip) = resolved_ip {
-                    persist_rate_limit_event(&state, &route, ip, scope, Some(&fingerprint)).await;
+                    persist_rate_limit_event(
+                        &state,
+                        &route,
+                        ip,
+                        scope,
+                        Some(&fingerprint),
+                        &origin,
+                    )
+                    .await;
                 }
                 return reject(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -183,14 +206,17 @@ pub(super) async fn authenticate(
             next.run(req).await
         }
         None => {
-            if let Some(response) = check_unauthenticated_rate(&state, resolved_ip, &route).await {
+            if let Some(response) =
+                check_unauthenticated_rate(&state, resolved_ip, &route, &origin).await
+            {
                 return response;
             }
             match log_failure(
                 &state,
                 KeyKind::Unknown,
                 AuthFailureReason::Invalid,
-                client_ip.as_deref(),
+                client_ip,
+                &origin,
                 &route,
             )
             .await
@@ -214,12 +240,13 @@ async fn check_unauthenticated_rate(
     state: &AppState,
     resolved_ip: Option<std::net::IpAddr>,
     route: &str,
+    origin: &crate::http_hardening::RequestOrigin,
 ) -> Option<Response> {
     let ip = resolved_ip?;
     match state.rate_limiter.check_unauthenticated(ip) {
         Ok(()) => None,
         Err(scope) => {
-            persist_rate_limit_event(state, route, ip, scope, None).await;
+            persist_rate_limit_event(state, route, ip, scope, None, origin).await;
             Some(reject(
                 StatusCode::TOO_MANY_REQUESTS,
                 "auth.rate_limited",
@@ -238,6 +265,7 @@ async fn persist_rate_limit_event(
     ip: std::net::IpAddr,
     scope: crate::http_hardening::RateLimitScope,
     key_fingerprint: Option<&str>,
+    origin: &crate::http_hardening::RequestOrigin,
 ) {
     let mut payload = serde_json::json!({
         "scope": scope.as_str(),
@@ -250,6 +278,7 @@ async fn persist_rate_limit_event(
             serde_json::Value::String(fp.to_owned()),
         );
     }
+    payload = payload_with_origin(payload, origin);
     persist_security_event(
         state,
         crate::state::EVENT_SOURCE_API,
@@ -302,6 +331,13 @@ pub(crate) async fn log_api_request(
     let started_at = std::time::Instant::now();
     let method = req.method().as_str().to_owned();
     let raw_path = req.uri().path().to_owned();
+    let origin = {
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        crate::http_hardening::request_origin(req.headers(), peer, &state.config)
+    };
     // Prefer the matched path template (e.g. `/v1/sessions/{id}`) to keep
     // event cardinality bounded. Falls back to the raw path for routes that
     // don't have a matched template (rare; mostly framework fallbacks).
@@ -335,13 +371,16 @@ pub(crate) async fn log_api_request(
 
     let status = response.status().as_u16();
     let duration_ms = started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
-    let payload = serde_json::json!({
-        "method": method,
-        "path": path,
-        "status": status,
-        "duration_ms": duration_ms,
-        "key_kind": key_kind_label,
-    });
+    let payload = payload_with_origin(
+        serde_json::json!({
+            "method": method,
+            "path": path,
+            "status": status,
+            "duration_ms": duration_ms,
+            "key_kind": key_kind_label,
+        }),
+        &origin,
+    );
     let payload_text = payload.to_string();
     // Best-effort: a failed audit insert must not break the response. Surface
     // it at warn so the operator can see the divergence in tracing logs.
@@ -390,22 +429,18 @@ async fn enforce_tier(
         Some(kind) if kind == required => next.run(req).await,
         Some(kind) => {
             let route = req.uri().path().to_owned();
-            let client_ip = req
+            let peer = req
                 .extensions()
                 .get::<ConnectInfo<SocketAddr>>()
-                .map(|info| {
-                    crate::http_hardening::client_ip(
-                        req.headers(),
-                        info.0.ip(),
-                        &state.config.security.http,
-                    )
-                    .to_string()
-                });
+                .map(|info| info.0.ip());
+            let origin = crate::http_hardening::request_origin(req.headers(), peer, &state.config);
+            let client_ip = origin.client_ip.as_deref();
             match log_failure(
                 &state,
                 kind,
                 AuthFailureReason::WrongKind,
-                client_ip.as_deref(),
+                client_ip,
+                &origin,
                 &route,
             )
             .await
@@ -446,6 +481,13 @@ pub(crate) async fn ensure_envelope(
 ) -> Response {
     let route = req.uri().path().to_owned();
     let method = req.method().as_str().to_owned();
+    let origin = {
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        crate::http_hardening::request_origin(req.headers(), peer, &state.config)
+    };
     // Capture the caller tier from the request extensions BEFORE consuming
     // `req` into `next.run`. The tag is set by either `authenticate` (TCP
     // router) or `tag_local` (UDS router) on inner layers; the body limit's
@@ -474,11 +516,14 @@ pub(crate) async fn ensure_envelope(
             "warn",
             "security.request_oversized",
             "rejected oversized request body",
-            serde_json::json!({
-                "route": route,
-                "method": method,
-                "limit_bytes": state.max_request_bytes,
-            }),
+            payload_with_origin(
+                serde_json::json!({
+                    "route": route,
+                    "method": method,
+                    "limit_bytes": state.max_request_bytes,
+                }),
+                &origin,
+            ),
         )
         .await;
     }
@@ -518,17 +563,27 @@ pub(super) async fn enforce_http_origin(
         let route = req.uri().path().to_owned();
         let method = req.method().as_str().to_owned();
         let origin_text = origin.unwrap_or("").to_owned();
+        let request_origin = {
+            let peer = req
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0.ip());
+            crate::http_hardening::request_origin(req.headers(), peer, &state.config)
+        };
         persist_security_event(
             &state,
             crate::state::EVENT_SOURCE_API,
             "warn",
             "security.cors_origin_denied",
             "rejected HTTP request with disallowed Origin",
-            serde_json::json!({
-                "origin": origin_text,
-                "route": route,
-                "method": method,
-            }),
+            payload_with_origin(
+                serde_json::json!({
+                    "origin": origin_text,
+                    "route": route,
+                    "method": method,
+                }),
+                &request_origin,
+            ),
         )
         .await;
         return reject(
@@ -577,11 +632,27 @@ fn parse_bearer(header: &http::HeaderValue) -> Option<String> {
     Some(rest.to_owned())
 }
 
+fn payload_with_origin(
+    mut payload: serde_json::Value,
+    origin: &crate::http_hardening::RequestOrigin,
+) -> serde_json::Value {
+    if let Some(map) = payload.as_object_mut() {
+        let key = if map.contains_key("origin") {
+            "request_origin"
+        } else {
+            "origin"
+        };
+        map.insert(key.to_owned(), origin.as_json());
+    }
+    payload
+}
+
 async fn log_failure(
     state: &AppState,
     kind: KeyKind,
     reason: AuthFailureReason,
     client_ip: Option<&str>,
+    origin: &crate::http_hardening::RequestOrigin,
     route: &str,
 ) -> std::result::Result<(), Response> {
     // Hold the lock only long enough to insert one row. record_auth_failure
@@ -593,7 +664,9 @@ async fn log_failure(
     // returning 401: the operator's monitoring sees the failure, and an
     // attacker cannot brute-force keys against an unrecorded server.
     let store = state.state.lock().await;
-    if let Err(err) = record_auth_failure(&store, kind, reason, client_ip, Some(route)) {
+    if let Err(err) =
+        record_auth_failure_with_origin(&store, kind, reason, client_ip, Some(route), Some(origin))
+    {
         tracing::error!(error = %err, "failed to record auth failure");
         return Err(reject(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -615,11 +688,14 @@ async fn log_failure(
                     "warn",
                     "security.ip_block_applied",
                     "IP blocked due to repeated auth failures",
-                    serde_json::json!({
-                        "ip": ip_str,
-                        "block_duration_seconds": block_secs,
-                        "route": route,
-                    }),
+                    payload_with_origin(
+                        serde_json::json!({
+                            "ip": ip_str,
+                            "block_duration_seconds": block_secs,
+                            "route": route,
+                        }),
+                        origin,
+                    ),
                 )
                 .await;
             }

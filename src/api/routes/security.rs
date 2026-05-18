@@ -29,6 +29,7 @@ pub(crate) async fn security_check_handler(
     let sink_last_error = store
         .latest_sink_failure_summary()?
         .and_then(|(_window, _count, last_error, _observed)| last_error);
+    let recent_origin_counts = recent_cloudflare_origin_counts(&store)?;
     drop(store);
     let (path_postures, path_issues) = collect_path_inspections(
         &state.runtime_paths.config_path,
@@ -58,12 +59,67 @@ pub(crate) async fn security_check_handler(
         runtime_user_name,
         workspace_writable,
         workspace_root: state.config.workspace.root.as_str(),
+        cloudflare: state.config.edge.cloudflare.as_ref(),
+        cloudflared_available: cloudflared_available(),
+        recent_direct_cloudflare_mode_requests: recent_origin_counts.direct,
+        recent_missing_cloudflare_header_requests: recent_origin_counts.missing_headers,
     });
     Ok(ApiSuccess::new(SecurityCheckResponse {
         ok: findings.is_empty(),
         findings,
         auth_failure_count: counts.auth_failures,
     }))
+}
+
+#[derive(Default)]
+struct RecentOriginCounts {
+    direct: i64,
+    missing_headers: i64,
+}
+
+fn recent_cloudflare_origin_counts(
+    store: &crate::state::StateStore,
+) -> std::result::Result<RecentOriginCounts, StackError> {
+    let since = (Utc::now() - Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let events = store.query_events(crate::state::LogFilter {
+        limit: 500,
+        since: Some(&since),
+        ..Default::default()
+    })?;
+    let mut counts = RecentOriginCounts::default();
+    for event in events {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
+            continue;
+        };
+        let Some(origin_kind) = payload_origin_kind(&payload) else {
+            continue;
+        };
+        match origin_kind {
+            "direct" => counts.direct += 1,
+            "trusted_proxy_missing_cloudflare" => counts.missing_headers += 1,
+            _ => {}
+        }
+    }
+    Ok(counts)
+}
+
+fn payload_origin_kind(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("origin")
+        .and_then(|origin| origin.get("origin_kind"))
+        .or_else(|| {
+            payload
+                .get("request_origin")
+                .and_then(|origin| origin.get("origin_kind"))
+        })
+        .and_then(serde_json::Value::as_str)
+}
+
+fn cloudflared_available() -> bool {
+    let Some(path_env) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_env).any(|dir| dir.join("cloudflared").is_file())
 }
 
 /// Inspect each runtime-managed path and return either a posture or a

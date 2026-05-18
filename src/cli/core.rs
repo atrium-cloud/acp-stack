@@ -18,6 +18,7 @@ use super::secrets::SecretsCommand;
 use super::security::SecurityCommand;
 use super::serve::ServeArgs;
 use super::sessions::SessionsCommand;
+use super::ws::WsCommand;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -76,6 +77,11 @@ enum Command {
         #[command(subcommand)]
         command: MetricsCommand,
     },
+    /// Inspect and manage live WebSocket clients.
+    Ws {
+        #[command(subcommand)]
+        command: WsCommand,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -122,6 +128,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Deps { command } => super::deps::run_deps_command(command),
         Command::Security { command } => super::security::run_security_command(command),
         Command::Metrics { command } => super::metrics::run_metrics_command(command),
+        Command::Ws { command } => super::ws::run_ws_command(command),
     };
 
     if let Err(error) = &result {
@@ -214,6 +221,14 @@ fn static_path_label(path: &str) -> &'static str {
     let bare = path.split('?').next().unwrap_or(path);
     if bare == "/v1/security/check" {
         "/v1/security/check"
+    } else if bare == "/v1/ws/connections" {
+        "/v1/ws/connections"
+    } else if bare == "/v1/ws/sessions" {
+        "/v1/ws/sessions"
+    } else if bare == "/v1/ws/connections/disconnect" {
+        "/v1/ws/connections/disconnect"
+    } else if bare == "/v1/ws/sessions/disconnect" {
+        "/v1/ws/sessions/disconnect"
     } else if bare == "/v1/sessions" {
         "/v1/sessions"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/prompt") {

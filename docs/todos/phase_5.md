@@ -34,8 +34,8 @@
 
 ## CLI UX
 
-- [ ] Add `acps init --edge cloudflare --exposure tunnel` as the recommended public deployment profile.
-- [ ] Add generated Cloudflare Tunnel artifact output for `cloudflared` config and systemd/Docker snippets.
+- [x] Add `acps init --edge cloudflare --exposure tunnel` as the recommended public deployment profile.
+- [x] Add generated Cloudflare Tunnel artifact output for `cloudflared` config and systemd/Docker snippets.
 - [ ] Add optional managed Cloudflare provisioning mode using secret refs for Cloudflare API credentials.
 - [ ] Improve `acps status` with daemon, agent, workspace, dependency, and sink health.
 - [ ] Add human-readable and JSON output modes for common commands.
@@ -94,7 +94,7 @@
 
 - [ ] Add basic liveness endpoint.
 - [ ] Add readiness endpoint.
-- [ ] Add Cloudflare Tunnel posture checks when `[edge.cloudflare]` is configured.
+- [x] Add Cloudflare Tunnel posture checks when `[edge.cloudflare]` is configured.
 - [ ] Add health checks for agent process state.
 - [ ] Add health checks for SQLite access.
 - [ ] Add health checks for workspace access.
@@ -107,12 +107,12 @@
 
 - [ ] Expose metrics that let operators distinguish inference endpoint 5xx failures from local VM, SQLite, daemon, and agent-process health issues.
 - [ ] Include inference endpoint failure counters in the future observability dashboard data model.
-- [ ] Enrich `api.request`, auth-failure, rate-limit, denied-origin, oversized-request, and WebSocket lifecycle events with bounded request-origin metadata.
-- [ ] Trust Cloudflare request metadata only after normal trusted-proxy validation (`CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers).
+- [x] Enrich `api.request`, auth-failure, rate-limit, denied-origin, oversized-request, and WebSocket lifecycle events with bounded request-origin metadata.
+- [x] Trust Cloudflare request metadata only after normal trusted-proxy validation (`CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers).
 - [ ] Add request/response counts by method, route, status bucket, key kind, source, origin kind, country, and region.
-- [ ] Add live WebSocket connection registry with connection IDs, topics, derived `sessions.{id}` subscriptions, origin metadata, and disconnect reason tracking.
-- [ ] Add admin `acps` commands to list WebSocket connections, list unique subscribed session IDs, disconnect selected connections, and disconnect all connections for selected session IDs.
-- [ ] Add read-only `acpctl` and `acpctl mcp serve` surfaces for sanitized WebSocket connection/session reporting.
+- [x] Add live WebSocket connection registry with connection IDs, topics, derived `sessions.{id}` subscriptions, origin metadata, and disconnect reason tracking.
+- [x] Add admin `acps` commands to list WebSocket connections, list unique subscribed session IDs, disconnect selected connections, and disconnect all connections for selected session IDs.
+- [x] Add read-only `acpctl` and `acpctl mcp serve` surfaces for sanitized WebSocket connection/session reporting.
 
 ## Security Self-Check History
 
@@ -121,7 +121,7 @@
 - [ ] Add API route for security check history.
 - [ ] Add `acps security history`.
 - [ ] Add remediation text for key, file permission, origin, CORS, proxy, dependency, and sink findings.
-- [ ] Add Cloudflare posture findings for public binds in tunnel mode, missing local trusted proxies, unsafe origins, missing `cloudflared`, absent Cloudflare headers after edge traffic, and direct non-Cloudflare public requests.
+- [x] Add Cloudflare posture findings for public binds in tunnel mode, missing local trusted proxies, unsafe origins, missing `cloudflared`, absent Cloudflare headers after edge traffic, and direct non-Cloudflare public requests.
 
 ## Initial Release Acceptance
 

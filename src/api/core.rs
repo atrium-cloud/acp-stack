@@ -70,6 +70,10 @@ use super::routes::workspace::{
     files_content_get_handler, files_content_put_handler, files_delete_handler,
     files_download_handler, files_list_handler, files_upload_handler, workspace_metadata_handler,
 };
+use super::routes::ws::{
+    ws_connections_handler, ws_disconnect_connections_handler, ws_disconnect_sessions_handler,
+    ws_sessions_handler,
+};
 use super::ws::ws_handler;
 use crate::auth::KeyKind;
 use crate::commands::CommandGateway;
@@ -97,6 +101,7 @@ pub struct AppState {
     pub permissions: PermissionService,
     pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
     pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
+    pub ws_registry: Arc<super::ws_registry::WsRegistry>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +218,7 @@ impl AppState {
         let rate_limiter = Arc::new(crate::http_hardening::RateLimiter::from_config(
             &config_arc.security.http,
         ));
+        let ws_registry = Arc::new(super::ws_registry::WsRegistry::default());
         Self {
             config: config_arc,
             effective_bind: Arc::new(effective_bind),
@@ -228,6 +234,7 @@ impl AppState {
             permissions,
             auth_failure_blocker,
             rate_limiter,
+            ws_registry,
         }
     }
 }
@@ -307,6 +314,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/logs/sessions", get(logs_sessions_handler))
         .route("/v1/metrics/summary", get(metrics_summary_handler))
         .route("/v1/ws", get(ws_handler))
+        .route("/v1/ws/connections", get(ws_connections_handler))
+        .route("/v1/ws/sessions", get(ws_sessions_handler))
         .route(
             "/v1/sessions",
             get(sessions_list_handler).post(sessions_create_handler),
@@ -362,6 +371,14 @@ pub fn build_router(state: AppState) -> Router {
 
     let admin_routes = Router::new()
         .route("/v1/security/check", get(security_check_handler))
+        .route(
+            "/v1/ws/connections/disconnect",
+            post(ws_disconnect_connections_handler),
+        )
+        .route(
+            "/v1/ws/sessions/disconnect",
+            post(ws_disconnect_sessions_handler),
+        )
         .route("/v1/agent/install", post(agent_install_handler))
         .route("/v1/agent/start", post(agent_start_handler))
         .route("/v1/agent/stop", post(agent_stop_handler))

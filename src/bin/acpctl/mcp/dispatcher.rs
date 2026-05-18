@@ -87,6 +87,8 @@ pub(crate) fn build_call(name: &str, args: &Value) -> Result<UdsCall, String> {
             let limit = optional_u32(args, "limit")?.unwrap_or(200);
             Ok(get(format!("/v1/permissions/pending?limit={limit}")))
         }
+        "ws_connections" => Ok(get("/v1/ws/connections".to_owned())),
+        "ws_sessions" => Ok(get("/v1/ws/sessions".to_owned())),
         other => Err(format!("unknown tool {other:?}")),
     }
 }
