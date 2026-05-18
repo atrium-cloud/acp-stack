@@ -9,13 +9,13 @@
 
 ## Docker
 
-- [ ] Create production Dockerfile for the `acps` daemon.
-- [ ] Run as unprivileged `acp` user by default.
-- [ ] Mount `/workspace` as writable runtime data.
-- [ ] Persist `/home/acp/.config/acp-stack`.
-- [ ] Persist `/home/acp/.local/share/acp-stack`.
-- [ ] Document required environment variables and volume mounts.
-- [ ] Add smoke test for container startup and `GET /v1/status`.
+- [x] Create production Dockerfile for the `acps` daemon.
+- [x] Run as unprivileged `acp` user by default.
+- [x] Mount `/workspace` as writable runtime data.
+- [x] Persist `/home/acp/.config/acp-stack`.
+- [x] Persist `/home/acp/.local/share/acp-stack`.
+- [x] Document required environment variables and volume mounts.
+- [x] Add smoke test for container startup and `GET /v1/status`.
 
 ## systemd
 
@@ -31,15 +31,15 @@
 
 ## Reverse Proxy Guides
 
-- [ ] Write Nginx deployment guide.
-- [ ] Write Caddy deployment guide.
-- [ ] Write Cloudflare Tunnel deployment guide as the preferred public-edge pattern.
-- [ ] Document Cloudflare proxied-DNS public-origin deployment as an advanced fallback.
-- [ ] Document TLS termination at the reverse proxy.
-- [ ] Document WebSocket upgrade configuration.
-- [ ] Document public-edge compression policy.
-- [ ] Document `trust_proxy_headers` and trusted proxy address configuration.
-- [ ] Clarify that runtime HTTP hardening remains enabled behind the proxy.
+- [x] Write Nginx deployment guide.
+- [x] Write Caddy deployment guide.
+- [x] Write Cloudflare Tunnel deployment guide as the preferred public-edge pattern.
+- [x] Document Cloudflare proxied-DNS public-origin deployment as an advanced fallback.
+- [x] Document TLS termination at the reverse proxy.
+- [x] Document WebSocket upgrade configuration.
+- [x] Document public-edge compression policy.
+- [x] Document `trust_proxy_headers` and trusted proxy address configuration.
+- [x] Clarify that runtime HTTP hardening remains enabled behind the proxy.
 
 ## Runtime User Automation
 
@@ -139,9 +139,9 @@
 
 ## Acceptance
 
-- [ ] The runtime can be deployed through Docker.
+- [x] The runtime can be deployed through Docker.
 - [ ] The runtime can be deployed through systemd.
-- [ ] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
+- [x] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
 - [ ] `acps deps apply` supports only narrow, explicit installation behavior.
 - [ ] Security self-checks are available through CLI and API.
 - [ ] `acpctl` permission boundaries are tested and audited.
