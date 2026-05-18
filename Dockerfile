@@ -27,10 +27,13 @@ RUN mkdir -p /workspace \
 
 COPY --from=builder /app/target/release/acps /usr/local/bin/acps
 COPY --from=builder /app/target/release/acpctl /usr/local/bin/acpctl
+COPY scripts/docker-entrypoint.sh /usr/local/bin/acp-stack-docker-entrypoint
+RUN chmod 0755 /usr/local/bin/acp-stack-docker-entrypoint
 
 EXPOSE 7700
 WORKDIR /workspace
 USER acp
 ENV HOME=/home/acp
 
-CMD ["acps", "serve", "--bind", "0.0.0.0:7700"]
+ENTRYPOINT ["acp-stack-docker-entrypoint"]
+CMD ["sh", "-c", "acps serve --bind 0.0.0.0:${PORT:-7700}"]
