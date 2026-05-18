@@ -49,15 +49,26 @@ pub fn reject_auth_ref_mutation(name: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Runtime config directory: `~/.config/acp-stack/`. Parent of `age_key_path`
+/// and `default_config_path`. Owner-only (0700). Exposed here so callers
+/// (e.g. `acps security check`) reach for one helper instead of redoing the
+/// `home.join(".config").join("acp-stack")` dance.
+pub fn config_dir(home: &Path) -> PathBuf {
+    home.join(".config").join("acp-stack")
+}
+
+/// Runtime state directory: `~/.local/share/acp-stack/`. Parent of
+/// `secret_store_path` and `default_state_path`. Owner-only (0700).
+pub fn state_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("share").join("acp-stack")
+}
+
 pub fn age_key_path(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("age.key")
+    config_dir(home).join("age.key")
 }
 
 pub fn secret_store_path(home: &Path) -> PathBuf {
-    home.join(".local")
-        .join("share")
-        .join("acp-stack")
-        .join("secrets.age")
+    state_dir(home).join("secrets.age")
 }
 
 /// Loaded, decrypted view of the secret store. Mutations are written through

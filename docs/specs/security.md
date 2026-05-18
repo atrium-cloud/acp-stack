@@ -192,7 +192,7 @@ The same check is exposed through:
 GET /v1/security/check
 ```
 
-The self-check inspects local configuration, file permissions, runtime status, and recent security events. It returns a severity-ranked report with `ok`, `warning`, and `critical` findings.
+The self-check inspects local configuration, file permissions, runtime status, and recent security events. It returns a severity-ranked report with `ok`, `warning`, and `critical` findings. Every finding carries an operator-actionable `remediation` hint alongside its diagnostic `message`; CLI output renders it on an indented `hint:` line, and the JSON payload exposes the string under each finding's `remediation` field (omitted when no hint applies).
 
 Checks include:
 
@@ -286,12 +286,34 @@ The check surfaces the following findings beyond the existing `api.*` /
   (`changeme`, `default`, etc., case-insensitive). The actual key value is
   never echoed in the finding message.
 - `runtime.path_mode_loose` (critical): config dir / state dir is not 0o700,
-  or age key / secret store is not 0o600.
+  or config file / state database / age key / secret store is not 0o600.
 - `runtime.path_ownership` (critical): a runtime-managed path is owned by a
   uid other than the daemon's `geteuid()`.
+- `runtime.path_uninspectable` (critical): a runtime-managed path cannot be
+  inspected at all (missing, unreadable, or blocked by filesystem errors), so
+  the daemon cannot verify its owner or mode.
 - `runtime.user_mismatch` (warning): the daemon's effective uid does not
   match the uid resolved from `workspace.runtime_user` via `getpwnam_r`. The
   check skips this finding when the configured name does not resolve (e.g.
   the installer hasn't run yet).
 - `runtime.workspace_not_writable` (critical): the daemon cannot create
   files inside `workspace.root`.
+
+Each finding includes an actionable `remediation` string — for example
+`runtime.path_ownership` reports the diagnostic in `message` and a literal
+`chown -h <effective-uid> <path>` command in `remediation`. The hint names
+the daemon's effective uid (the value the check enforces) and omits the gid
+because the check validates owner uid only. `chown -h` keeps the command
+operating on the path itself if it is a symlink (`ownership::inspect` reads
+symlink metadata, so a symlinked managed path reports its own posture). CLI
+output renders the remediation on an indented `hint:` line:
+
+```
+findings:
+- critical runtime.path_mode_loose: config directory at /home/acp/.config/acp-stack has mode 0o755, expected 0o700
+    hint: Run `chmod 0700 -- '/home/acp/.config/acp-stack'` to restore owner-only permissions.
+```
+
+Paths inside command-form remediation strings are POSIX shell-quoted so a
+workspace root or HOME containing spaces, single quotes, or other
+metacharacters can't produce an unsafe-to-paste command.

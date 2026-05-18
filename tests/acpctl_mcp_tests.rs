@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp_stack::api::AppState;
+use acp_stack::api::{AppState, RuntimePaths};
 use acp_stack::config::{Config, load_config_from_str};
 use acp_stack::local_listener;
 use acp_stack::state::{EventFilter, StateStore};
@@ -54,11 +54,20 @@ impl Harness {
         let state_path = state_tempdir.path().join("state.sqlite");
         let store = StateStore::open(&state_path).expect("state open");
         store.migrate().expect("migrate");
+        let config_path = create_runtime_files(state_tempdir.path(), &state_path);
+        let runtime_paths = RuntimePaths::new(config_path, state_path.clone());
 
         let socket_tempdir = tempfile::tempdir().expect("socket tempdir");
         let socket = socket_tempdir.path().join("acp-stack").join("acpctl.sock");
 
-        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let app_state = AppState::with_effective_bind_and_runtime_paths(
+            config,
+            store,
+            SESSION_KEY.to_owned(),
+            ADMIN_KEY.to_owned(),
+            "127.0.0.1:7700".to_owned(),
+            runtime_paths,
+        );
         let state = app_state.state.clone();
         let bound =
             local_listener::bind_local(&socket, local_listener::ParentPolicy::RepairOwnerOnly)
@@ -104,6 +113,32 @@ impl Drop for Harness {
     fn drop(&mut self) {
         self.join.abort();
     }
+}
+
+fn create_runtime_files(root: &std::path::Path, state_path: &std::path::Path) -> PathBuf {
+    let config_dir = root.join(".config/acp-stack");
+    let state_dir = state_path.parent().expect("state parent").to_path_buf();
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let config_path = config_dir.join("acp-stack.toml");
+    let age_key_path = config_dir.join("age.key");
+    let secret_store_path = state_dir.join("secrets.age");
+    std::fs::write(&config_path, "test config").expect("write config");
+    std::fs::write(&age_key_path, "test age key").expect("write age key");
+    std::fs::write(&secret_store_path, "test secret store").expect("write secret store");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod config dir");
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod state dir");
+        for file in [&config_path, &age_key_path, state_path, &secret_store_path] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod runtime file");
+        }
+    }
+    config_path
 }
 
 fn test_config() -> Config {

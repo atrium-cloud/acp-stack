@@ -41,8 +41,8 @@
 
 ## Runtime User Automation
 
-- [ ] Validate ownership of workspace, config, state, age key, and encrypted secret store.
-- [ ] Add remediation hints for incorrect ownership.
+- [x] Validate ownership of workspace, config, state, age key, and encrypted secret store.
+- [x] Add remediation hints for incorrect ownership.
 - [ ] Ensure daemon, agent, MCP servers, and mediated commands run as the runtime user.
 - [ ] Keep root execution limited to explicit disposable/dev profile behavior.
 
@@ -109,9 +109,9 @@
 
 - [x] Implement `acps security check`.
 - [x] Implement `GET /v1/security/check`.
-- [ ] Check API keys exist and are not default or empty.
-- [ ] Check config, state, age key, and encrypted secret store owner-only permissions.
-- [ ] Check workspace is writable by the runtime user.
+- [x] Check API keys exist and are not default or empty.
+- [x] Check config, state, age key, and encrypted secret store owner-only permissions.
+- [x] Check workspace is writable by the runtime user.
 - [x] Check WebSocket origin and CORS policies are configured for public deployments.
 - [x] Check recent auth failure rate is below configured thresholds.
 - [x] Check external logging sink health when enabled.
