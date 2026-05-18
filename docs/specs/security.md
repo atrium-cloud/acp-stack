@@ -44,7 +44,7 @@ Every rejected authentication is recorded as a row in the `auth_failures` table.
 - stores config, state, age key, and encrypted secret store under paths owned by the runtime user with owner-only permissions
 - binds to `127.0.0.1:7700` by default
 - assumes TLS and public-edge hardening are handled by a reverse proxy for internet exposure
-- keeps TLS termination and persistent IP allowlists out of the 0.0.x core
+- keeps TLS termination and persistent IP allowlists out of the `acp-stack` core
 - treats root execution as an explicit disposable/dev deployment profile, not the standard deployment model
 
 Deployment guidance should document reverse proxy patterns for Caddy, Nginx, Fly, Railway, and Hetzner.
@@ -53,7 +53,7 @@ Deployment guidance should document reverse proxy patterns for Caddy, Nginx, Fly
 
 Secrets are stored outside the portable config.
 
-0.0.1 uses age-compatible encryption:
+The initial release uses age-compatible encryption:
 
 - private key: `~/.config/acp-stack/age.key` (bech32 x25519 identity, owner-only `0600`)
 - encrypted store: `~/.local/share/acp-stack/secrets.age` (owner-only `0600`)
@@ -120,7 +120,7 @@ If an attacker has root on a running instance, process environment variables may
 
 ## Permissions
 
-0.0.2 implements the permission pipeline as a durable product primitive.
+Phase 2 implements the permission pipeline as a durable product primitive.
 
 Permission sources:
 
@@ -159,7 +159,7 @@ Modes:
 - `supervised` - review destructive mediated operations
 - `locked` - require approval for every mediated command
 
-Important 0.0.x boundary:
+Important initial-release boundary:
 
 The Command Gateway controls commands launched through `acp-stack` and terminal capabilities that `acp-stack` mediates. It does not claim to intercept arbitrary process activity outside its control path.
 
@@ -178,9 +178,33 @@ Rate-limit rejections return `429 auth.rate_limited` in the standard envelope an
 
 HTTP requests with a disallowed `Origin` return `403 auth.origin_not_allowed` and append `security.cors_origin_denied`. WebSocket upgrades use the same allowlist, return the same error code on rejection, and append `security.ws_origin_denied`. Framework-generated oversized request-body rejections return `413 request.too_large` and append `security.request_oversized` with method, route, and configured byte limit.
 
+## Planned Cloudflare Edge Hardening
+
+Phase 5 should make Cloudflare Tunnel the preferred public exposure model. In that profile, `acps` stays bound to loopback and `cloudflared` creates an outbound tunnel to Cloudflare, which provides public-edge DDoS filtering, WAF/rate-limit rules, TLS, and request geolocation signals before traffic reaches the host. A proxied-DNS public-origin deployment remains an advanced fallback and should require firewall guidance that admits only Cloudflare edge ranges to the origin.
+
+`acp-stack` should still keep its internal auth, per-IP/per-key rate limiting, CORS/origin validation, request-size limits, and security logging active behind Cloudflare. Cloudflare reduces exposed attack surface and absorbs edge floods; runtime hardening remains defense in depth and protects private/local deployments too.
+
+When `[edge.cloudflare]` is configured and proxy headers are trusted, the runtime should extract bounded Cloudflare metadata only from trusted proxy peers:
+
+- `CF-Connecting-IP` as the edge-reported client IP.
+- `CF-IPCountry` as a coarse country code.
+- `CF-Ray` as a correlation id for Cloudflare logs.
+- optional visitor-location headers, when the operator enables Cloudflare Managed Transforms for them.
+
+That metadata should be attached to `api.request`, `auth_failures`, `security.rate_limited`, `security.ip_block_applied`, `security.ip_block_active`, `security.cors_origin_denied`, `security.ws_origin_denied`, `security.request_oversized`, and WebSocket connect/disconnect events. The normal durable payload should keep this bounded to origin kind, country code, region code/name where available, Cloudflare Ray id, and proxy provider. It should not store high-resolution location or raw Cloudflare credentials.
+
+Planned self-check findings:
+
+- `edge.cloudflare.cloudflared_missing`: tunnel profile configured but `cloudflared` is not available.
+- `edge.cloudflare.public_bind_in_tunnel_mode`: tunnel mode configured while `[api].bind` listens publicly.
+- `edge.cloudflare.local_proxy_untrusted`: tunnel mode configured without loopback trusted proxies.
+- `edge.cloudflare.origin_unsafe`: configured `allowed_origins` do not exactly match the Cloudflare hostname or include `*`.
+- `edge.cloudflare.headers_missing`: recent traffic expected to come through Cloudflare lacks bounded Cloudflare headers.
+- `edge.cloudflare.direct_public_request`: direct public traffic bypassed the configured Cloudflare edge.
+
 ## Security Self-Check
 
-0.0.4 adds a self-check command:
+Phase 4 adds a self-check command:
 
 ```sh
 acps security check

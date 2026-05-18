@@ -19,7 +19,7 @@ SQLite stores:
 - WebSocket connection metadata where useful
 - usage metrics derived from local events
 
-The initial 0.0.1 state implementation creates the local SQLite database at:
+The initial state implementation creates the local SQLite database at:
 
 ```text
 ~/.local/share/acp-stack/state.sqlite
@@ -41,7 +41,7 @@ The `auth_failures` table records every rejected API key authentication. The att
 
 `payload_json` is the extension point: future fields (rate-limit context, header parse details, etc.) land there without a column migration.
 
-The migration runner follows the documented `migrations/` layout: `manifest.toml` lists each migration's `id`, `name`, and `sqlite_file`. The 0.0.1 runner embeds the SQLite migration files in the binary via `include_str!` and applies any manifest entry whose version is not already recorded in `schema_migrations`. PostgreSQL dialect files (`{id:03}_{name}.postgres.sql`) arrive with the Supabase sink in 0.0.3.
+The migration runner follows the documented `migrations/` layout: `manifest.toml` lists each migration's `id`, `name`, and `sqlite_file`. The runner embeds the SQLite migration files in the binary via `include_str!` and applies any manifest entry whose version is not already recorded in `schema_migrations`. PostgreSQL dialect files (`{id:03}_{name}.postgres.sql`) arrive with the Supabase sink in Phase 3.
 
 `acps init` creates the local config file when absent; `acps config import` writes one too, refusing to overwrite an existing config unless `--force` is passed. Both write atomically at owner-only permissions (Unix `O_CREAT | O_EXCL` with mode `0o600`). `acps status` requires an existing config and repairs its permissions on each run. All three of `init`, `status`, and `logs query` create or migrate the local SQLite file atomically at owner-only permissions when it is missing.
 
@@ -130,7 +130,7 @@ Local logs include:
 
 Token and context usage are best-effort fields. If the configured agent does not expose them through ACP updates or prompt responses, the fields remain null rather than estimated.
 
-### Implementation (0.0.3)
+### Implementation (Phase 3)
 
 Derivation is done in SQLite at query time and exposed through `GET /v1/metrics/summary` over a `[since, until)` window. The window defaults to the last 24 hours; callers can pass `since` / `until` as RFC3339 timestamps or duration suffixes (`30m`, `1h`, `2d`, `1w`).
 
@@ -148,9 +148,22 @@ The summary covers:
 
 Percentiles are computed in pure Rust from the windowed result set — SQLite has no `percentile_cont`. Windows up to ~tens of thousands of rows are comfortable; larger windows should add reservoir sampling rather than column materialization.
 
+### Planned Edge And Connection Metrics
+
+Phase 5 should enrich request and security events with bounded origin metadata. The same origin payload should be available on `api.request`, `auth_failures`, rate-limit/IP-block events, denied HTTP/WebSocket origins, oversized requests, and WebSocket lifecycle events. Cloudflare metadata is trusted only when the socket peer passes `[security.http].trusted_proxies`; direct or untrusted requests should be recorded as direct/unknown origins rather than silently dropped.
+
+Planned summary additions:
+
+- request counts by method, matched route, source, key kind, status bucket, origin kind, country code, and region code.
+- response duration average / p50 / p95 for `api.request`.
+- security-event counts by origin kind and country/region bucket.
+- WebSocket live/session dimensions derived from connect/disconnect lifecycle rows and the process-local live registry.
+
+The public metrics shape should remain additive: existing keys in `/v1/metrics/summary` must stay stable, while new origin and connection breakdowns are added as new fields.
+
 ## Supabase Sink
 
-0.0.3 adds an optional Supabase sink for remote analytics and hosted dashboards. Supabase is treated as PostgreSQL plus useful hosted tooling, not as a separate data model.
+Phase 3 adds an optional Supabase sink for remote analytics and hosted dashboards. Supabase is treated as PostgreSQL plus useful hosted tooling, not as a separate data model.
 
 Config:
 
