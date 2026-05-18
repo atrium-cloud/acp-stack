@@ -24,6 +24,38 @@ fn parses_valid_config_and_exports_canonical_toml() {
 }
 
 #[test]
+fn canonical_export_keeps_secret_refs_and_omits_secret_values() {
+    let config = load_config_from_str(
+        &VALID_CONFIG
+            .replace(
+                r#"env = ["OPENCODE_API_KEY"]"#,
+                r#"env = ["OPENAI_API_KEY"]"#,
+            )
+            .replace(
+                r#"api_key_ref = "SUPABASE_SECRET_KEY""#,
+                r#"api_key_ref = "SUPABASE_KEY_REF""#,
+            ),
+    )
+    .expect("config with refs should parse");
+
+    let canonical = config
+        .to_canonical_toml()
+        .expect("canonical TOML should serialize");
+    assert!(canonical.contains("OPENAI_API_KEY"));
+    assert!(canonical.contains("SUPABASE_KEY_REF"));
+    for secret_value in [
+        "sk-proj-exampleinlinevalue",
+        "github_pat_exampleinlinevalue",
+        "acps_exampleinlinevalue",
+    ] {
+        assert!(
+            !canonical.contains(secret_value),
+            "canonical export leaked {secret_value}"
+        );
+    }
+}
+
+#[test]
 fn parses_generated_cloudflare_edge_config() {
     let config_text = VALID_CONFIG.replace(
         "[workspace]",
@@ -884,4 +916,136 @@ fn supabase_enabled_with_clean_schema_and_https_passes() {
     let supabase = config.logging.supabase.expect("supabase set");
     assert!(supabase.enabled);
     assert_eq!(supabase.schema, "acp_stack");
+}
+
+#[test]
+fn parses_config_with_explicit_version() {
+    let input = format!("config_version = 1\n{VALID_CONFIG}");
+    let config = load_config_from_str(&input).expect("explicit version 1 should parse");
+    assert_eq!(config.config_version, 1);
+}
+
+#[test]
+fn accepts_missing_config_version_as_version_1() {
+    let config = load_config_from_str(VALID_CONFIG).expect("missing version should parse");
+    assert_eq!(config.config_version, 1);
+}
+
+#[test]
+fn rejects_unsupported_config_version() {
+    let input = format!("config_version = 99\n{VALID_CONFIG}");
+    let error = load_config_from_str(&input).expect_err("unsupported version should be rejected");
+    assert!(
+        error.to_string().contains("unsupported config version"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn export_includes_config_version() {
+    let config = load_config_from_str(VALID_CONFIG).expect("valid config");
+    let canonical = config.to_canonical_toml().expect("canonical");
+    assert!(canonical.starts_with("config_version = 1\n"));
+    assert_eq!(canonical.matches("config_version = 1").count(), 1);
+}
+
+#[test]
+fn rejects_acpctl_socket_path_relative() {
+    let input = format!("{VALID_CONFIG}\n[acpctl]\nsocket_path = \"relative/path.sock\"\n");
+    let error = load_config_from_str(&input).expect_err("relative path should be rejected");
+    assert!(
+        error.to_string().contains("acpctl.socket_path") && error.to_string().contains("absolute"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_acpctl_socket_path_with_dot_dot() {
+    let input = format!("{VALID_CONFIG}\n[acpctl]\nsocket_path = \"/tmp/../etc/passwd.sock\"\n");
+    let error = load_config_from_str(&input).expect_err("dot dot path should be rejected");
+    assert!(
+        error.to_string().contains("acpctl.socket_path") && error.to_string().contains(".."),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn allows_acpctl_socket_path_absolute() {
+    let input = format!("{VALID_CONFIG}\n[acpctl]\nsocket_path = \"/tmp/acpctl.sock\"\n");
+    let config = load_config_from_str(&input).expect("absolute path should be accepted");
+    assert_eq!(
+        config.acpctl.socket_path.as_deref(),
+        Some("/tmp/acpctl.sock")
+    );
+}
+
+#[test]
+fn rejects_secret_ref_looking_like_hex_value() {
+    let hex_ref = "a".repeat(50);
+    assert!(hex_ref.chars().all(|c| c.is_ascii_hexdigit()));
+    let input = VALID_CONFIG.replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        &format!(r#"env = ["{hex_ref}"]"#),
+    );
+    let error = load_config_from_str(&input).expect_err("hex-only secret ref should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("looks like an inline secret value"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_secret_ref_longer_than_128_chars() {
+    let long_ref = format!("A{}", "B".repeat(128));
+    let input = VALID_CONFIG.replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        &format!(r#"env = ["{long_ref}"]"#),
+    );
+    let error = load_config_from_str(&input).expect_err("very long secret ref should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("looks like an inline secret value"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn allows_normal_secret_ref_like_opencode_api_key() {
+    let config = load_config_from_str(VALID_CONFIG).expect("OPENCODE_API_KEY should be allowed");
+    assert_eq!(config.agent.env, vec!["OPENCODE_API_KEY"]);
+}
+
+#[test]
+fn rejects_secret_ref_with_known_token_prefix() {
+    let token_ref = "sk-proj-exampleinlinevalue";
+    let input = VALID_CONFIG.replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        &format!(r#"env = ["{token_ref}"]"#),
+    );
+    let error = load_config_from_str(&input).expect_err("inline token ref should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("looks like an inline secret value"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_secret_ref_looking_like_jwt_value() {
+    let jwt_ref = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc";
+    let input = VALID_CONFIG.replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        &format!(r#"env = ["{jwt_ref}"]"#),
+    );
+    let error = load_config_from_str(&input).expect_err("JWT-shaped ref should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("looks like an inline secret value"),
+        "got: {error}"
+    );
 }

@@ -37,6 +37,9 @@ pub struct ConfigImportArgs {
     /// Replace the existing config; without --force, import refuses to clobber.
     #[arg(long)]
     force: bool,
+    /// Validate and report without writing or auditing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 pub(super) fn run_config_command(command: ConfigCommand) -> Result<()> {
@@ -81,15 +84,28 @@ fn run_config_import(args: ConfigImportArgs) -> Result<()> {
             });
         }
         (Some(path), None) => {
-            std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+            let bytes = std::fs::read(path).map_err(|source| StackError::ConfigRead {
                 path: path.to_path_buf(),
                 source,
-            })?
+            })?;
+            if bytes.len() > config::IMPORT_SIZE_LIMIT {
+                return Err(StackError::ImportTooLarge {
+                    limit: config::IMPORT_SIZE_LIMIT,
+                    actual: bytes.len(),
+                });
+            }
+            String::from_utf8(bytes).map_err(|source| StackError::ImportUtf8 { source })?
         }
         (None, Some(encoded)) => {
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|source| StackError::ImportBase64Decode { source })?;
+            if decoded.len() > config::IMPORT_SIZE_LIMIT {
+                return Err(StackError::ImportTooLarge {
+                    limit: config::IMPORT_SIZE_LIMIT,
+                    actual: decoded.len(),
+                });
+            }
             String::from_utf8(decoded).map_err(|source| StackError::ImportUtf8 { source })?
         }
     };
@@ -97,6 +113,23 @@ fn run_config_import(args: ConfigImportArgs) -> Result<()> {
     let config = config::load_config_from_str(&raw_toml)?;
     let canonical = config.to_canonical_toml()?;
     let target = config::default_config_path()?;
+
+    if args.dry_run {
+        println!("import dry-run complete");
+        println!("  config_version: {}", config.config_version);
+        println!("  canonical TOML size: {} bytes", canonical.len());
+        println!("  input size: {} bytes", raw_toml.len());
+        let auth_refs_ok = if target.exists() {
+            let current = Config::load_from_path(&target)?;
+            config::compare_auth_refs(&current.auth, &config.auth).is_ok()
+        } else {
+            true
+        };
+        println!("  auth refs unchanged: {auth_refs_ok}");
+        println!("  would write to: {}", target.display());
+        println!("  target exists: {}", target.exists());
+        return Ok(());
+    }
 
     let target_dir = parent_dir(&target)?;
     create_dir_owner_only(target_dir)?;
@@ -107,16 +140,8 @@ fn run_config_import(args: ConfigImportArgs) -> Result<()> {
                 path: target.clone(),
             });
         }
-        // Refuse to change the auth-ref names through import. Allowing it
-        // would let an operator point `admin_key_ref` at a secret of their
-        // own choosing, effectively replacing the original admin key without
-        // going through `acps reset --yes` — bypassing the documented
-        // reset-only rotation path for the admin key.
         let current = Config::load_from_path(&target)?;
         config::compare_auth_refs(&current.auth, &config.auth)?;
-        // Atomic replace via temp file + rename, with owner-only mode on both
-        // the temp and the final file. Avoids leaving a truncated config on
-        // crash mid-write, which would otherwise brick the next `acps` run.
         atomic_write_owner_only(&target, canonical.as_bytes())?;
         println!("imported config (replaced): {}", target.display());
     } else {
@@ -131,5 +156,32 @@ fn load_config(path: Option<PathBuf>) -> Result<Config> {
     match path {
         Some(path) => Config::load_from_path(path),
         None => Config::load_from_default_path(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_base64_rejects_oversized_decoded_input() {
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode("x".repeat(config::IMPORT_SIZE_LIMIT + 1));
+
+        let error = run_config_import(ConfigImportArgs {
+            path: None,
+            base64: Some(encoded),
+            force: false,
+            dry_run: true,
+        })
+        .expect_err("decoded payload over the import limit must fail");
+
+        assert!(matches!(
+            error,
+            StackError::ImportTooLarge {
+                limit: config::IMPORT_SIZE_LIMIT,
+                actual
+            } if actual == config::IMPORT_SIZE_LIMIT + 1
+        ));
     }
 }
