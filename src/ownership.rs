@@ -20,7 +20,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind {
     ConfigDir,
+    ConfigFile,
     StateDir,
+    StateDb,
     AgeKey,
     SecretStore,
     WorkspaceRoot,
@@ -33,7 +35,9 @@ impl PathKind {
     pub fn expected_mode(self) -> Option<u32> {
         match self {
             PathKind::ConfigDir | PathKind::StateDir => Some(0o700),
-            PathKind::AgeKey | PathKind::SecretStore => Some(0o600),
+            PathKind::ConfigFile | PathKind::StateDb | PathKind::AgeKey | PathKind::SecretStore => {
+                Some(0o600)
+            }
             PathKind::WorkspaceRoot => None,
         }
     }
@@ -41,7 +45,9 @@ impl PathKind {
     pub fn label(self) -> &'static str {
         match self {
             PathKind::ConfigDir => "config directory",
+            PathKind::ConfigFile => "config file",
             PathKind::StateDir => "state directory",
+            PathKind::StateDb => "state database",
             PathKind::AgeKey => "age key",
             PathKind::SecretStore => "encrypted secret store",
             PathKind::WorkspaceRoot => "workspace root",
@@ -55,6 +61,13 @@ pub struct PathPosture {
     pub kind: PathKind,
     pub uid: u32,
     pub mode: u32,
+    /// `true` when the inspected path is itself a symlink. The runtime never
+    /// creates symlinks at managed paths (`fs_util::create_dir_owner_only`
+    /// refuses to follow them), so a symlink here is operator-introduced or
+    /// the result of external tampering. The security check uses this flag
+    /// to vary the remediation, because `chmod` and `chown` without
+    /// symlink-aware flags follow the link and mutate the wrong target.
+    pub is_symlink: bool,
 }
 
 /// Read uid and permission mode for `path`. Uses `symlink_metadata` so a
@@ -70,17 +83,19 @@ pub fn inspect(path: &Path, kind: PathKind) -> std::io::Result<PathPosture> {
         kind,
         uid: metadata.uid(),
         mode: metadata.permissions().mode() & 0o777,
+        is_symlink: metadata.file_type().is_symlink(),
     })
 }
 
 #[cfg(not(unix))]
 pub fn inspect(path: &Path, kind: PathKind) -> std::io::Result<PathPosture> {
-    let _ = std::fs::symlink_metadata(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
     Ok(PathPosture {
         path: path.to_path_buf(),
         kind,
         uid: 0,
         mode: 0,
+        is_symlink: metadata.file_type().is_symlink(),
     })
 }
 
@@ -167,11 +182,28 @@ mod tests {
         let posture = inspect(&dir, PathKind::ConfigDir).expect("inspect");
         assert_eq!(posture.path, dir);
         assert_eq!(posture.kind, PathKind::ConfigDir);
+        assert!(!posture.is_symlink);
         #[cfg(unix)]
         {
             assert_eq!(posture.mode, 0o700);
             assert_eq!(posture.uid, process_euid());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_symlink_reports_is_symlink_true() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let target = tempdir.path().join("real-dir");
+        create_dir_owner_only(&target).expect("create real");
+        let link = tempdir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let posture = inspect(&link, PathKind::ConfigDir).expect("inspect");
+        assert!(
+            posture.is_symlink,
+            "inspect must report is_symlink=true when the managed path is a symlink"
+        );
     }
 
     #[test]
@@ -242,6 +274,10 @@ mod tests {
     fn expected_mode_for_workspace_root_is_none() {
         assert_eq!(PathKind::WorkspaceRoot.expected_mode(), None);
         assert_eq!(PathKind::ConfigDir.expected_mode(), Some(0o700));
+        assert_eq!(PathKind::ConfigFile.expected_mode(), Some(0o600));
+        assert_eq!(PathKind::StateDb.expected_mode(), Some(0o600));
         assert_eq!(PathKind::SecretStore.expected_mode(), Some(0o600));
+        assert_eq!(PathKind::ConfigFile.label(), "config file");
+        assert_eq!(PathKind::StateDb.label(), "state database");
     }
 }

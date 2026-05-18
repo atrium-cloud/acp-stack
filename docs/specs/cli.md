@@ -106,7 +106,13 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 
 ## Security Self-Check
 
-`acps security check` runs the local self-check described in [security](security.md).
+`acps security check` runs the local self-check described in [security](security.md). Findings render in the rule order produced by `security::check()` as `- <severity> <code>: <message>`; when a finding carries a remediation hint it appears on an indented `hint:` line directly below the diagnostic:
+
+```text
+findings:
+- critical runtime.path_mode_loose: config directory at /home/acp/.config/acp-stack has mode 0o755, expected 0o700
+    hint: Run `chmod 0700 -- '/home/acp/.config/acp-stack'` to restore owner-only permissions.
+```
 
 ## Local Agent Interface
 

@@ -8,6 +8,7 @@ use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::ownership::{self, PathKind, PathPosture};
+use crate::security::PathInspectionIssue;
 
 #[derive(Serialize)]
 pub(crate) struct SecurityCheckResponse {
@@ -29,7 +30,11 @@ pub(crate) async fn security_check_handler(
         .latest_sink_failure_summary()?
         .and_then(|(_window, _count, last_error, _observed)| last_error);
     drop(store);
-    let path_postures = collect_path_postures(&state.config.workspace.root);
+    let (path_postures, path_issues) = collect_path_inspections(
+        &state.runtime_paths.config_path,
+        &state.runtime_paths.state_path,
+        &state.config.workspace.root,
+    );
     let process_euid = ownership::process_euid();
     let runtime_user_name = state.config.workspace.runtime_user.as_str();
     let runtime_user_uid = ownership::resolve_runtime_user_uid(runtime_user_name)
@@ -47,6 +52,7 @@ pub(crate) async fn security_check_handler(
         session_key_value: Some(state.session_key.as_str()),
         admin_key_value: Some(state.admin_key.as_str()),
         path_postures: &path_postures,
+        path_issues: &path_issues,
         process_euid,
         runtime_user_uid,
         runtime_user_name,
@@ -60,29 +66,35 @@ pub(crate) async fn security_check_handler(
     }))
 }
 
-/// Inspect each runtime-managed path and return the postures the security
-/// check should evaluate. Skips paths that fail to stat with a tracing warn —
-/// a missing or unreadable path produces zero findings (rather than failing
-/// the whole self-check), which matches the "best-effort posture report"
-/// shape of `acps security check`.
-fn collect_path_postures(workspace_root: &str) -> Vec<PathPosture> {
+/// Inspect each runtime-managed path and return either a posture or a
+/// structured inspection issue. Missing/unreadable paths are security findings:
+/// a deleted state DB or unreadable age key should not make the report look
+/// cleaner than the daemon's actual posture.
+fn collect_path_inspections(
+    config_path: &Path,
+    state_path: &Path,
+    workspace_root: &str,
+) -> (Vec<PathPosture>, Vec<PathInspectionIssue>) {
     let mut postures = Vec::new();
-    let home = match crate::fs_util::home_dir() {
-        Ok(home) => home,
-        Err(err) => {
-            tracing::warn!(error = %err, "security check skipped path postures: HOME not set");
-            return postures;
-        }
-    };
+    let mut issues = Vec::new();
+    let config_dir = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let state_dir = state_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let age_key_path = config_dir.join("age.key");
+    let secret_store_path = state_dir.join("secrets.age");
 
-    let candidates: [(PathBuf, PathKind); 5] = [
-        (config_dir(&home), PathKind::ConfigDir),
-        (state_dir(&home), PathKind::StateDir),
-        (crate::secrets::age_key_path(&home), PathKind::AgeKey),
-        (
-            crate::secrets::secret_store_path(&home),
-            PathKind::SecretStore,
-        ),
+    let candidates: [(PathBuf, PathKind); 7] = [
+        (config_dir, PathKind::ConfigDir),
+        (config_path.to_path_buf(), PathKind::ConfigFile),
+        (state_dir, PathKind::StateDir),
+        (state_path.to_path_buf(), PathKind::StateDb),
+        (age_key_path, PathKind::AgeKey),
+        (secret_store_path, PathKind::SecretStore),
         (PathBuf::from(workspace_root), PathKind::WorkspaceRoot),
     ];
 
@@ -94,18 +106,15 @@ fn collect_path_postures(workspace_root: &str) -> Vec<PathPosture> {
                     error = %err,
                     path = %path.display(),
                     kind = ?kind,
-                    "security check could not inspect path; finding will be omitted"
+                    "security check could not inspect path"
                 );
+                issues.push(PathInspectionIssue {
+                    path,
+                    kind,
+                    error: err.to_string(),
+                });
             }
         }
     }
-    postures
-}
-
-fn config_dir(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack")
-}
-
-fn state_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("share").join("acp-stack")
+    (postures, issues)
 }

@@ -99,6 +99,11 @@ pub(crate) fn format_security(data: &Value) {
                 let code = finding.get("code").and_then(Value::as_str).unwrap_or("");
                 let message = finding.get("message").and_then(Value::as_str).unwrap_or("");
                 println!("  - [{severity}] {code}: {message}");
+                if let Some(remediation) = finding.get("remediation").and_then(Value::as_str) {
+                    if !remediation.is_empty() {
+                        println!("      hint: {remediation}");
+                    }
+                }
             }
         }
     }

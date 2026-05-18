@@ -13,6 +13,7 @@ use super::sink_outbox;
 
 pub struct StateStore {
     connection: Connection,
+    path: PathBuf,
     /// Optional fan-out for every `append_event` write. Set via
     /// `attach_event_hub` from `acps serve`; CLI tools that open the store
     /// read-only leave it `None`.
@@ -33,13 +34,19 @@ pub fn default_state_path(home: &Path) -> PathBuf {
 
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let connection = Connection::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let connection = Connection::open(&path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(Self {
             connection,
+            path,
             event_hub: None,
             external_logging_enabled: false,
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Attach a live `EventHub` so every `append_event` write also fans out on

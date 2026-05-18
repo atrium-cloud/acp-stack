@@ -1,7 +1,9 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use acp_stack::api::{self, AppState};
+use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
 use acp_stack::state::{AuthFailureFilter, StateStore};
 use reqwest::StatusCode;
@@ -45,7 +47,17 @@ impl ServerHarness {
         std::fs::create_dir_all(workspace_root.join("uploads")).expect("create uploads");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
-        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let config_path = create_runtime_files(tempdir.path(), &path);
+        let runtime_paths = RuntimePaths::new(config_path, path.clone());
+        let effective_bind = config.api.bind.clone();
+        let app_state = AppState::with_effective_bind_and_runtime_paths(
+            config,
+            store,
+            SESSION_KEY.to_owned(),
+            ADMIN_KEY.to_owned(),
+            effective_bind,
+            runtime_paths,
+        );
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let local = listener.local_addr().expect("local addr");
@@ -101,6 +113,34 @@ impl Drop for ServerHarness {
     fn drop(&mut self) {
         self.join.abort();
     }
+}
+
+fn create_runtime_files(root: &Path, state_path: &Path) -> PathBuf {
+    let config_dir = root.join(".config/acp-stack");
+    let state_dir = state_path.parent().expect("state parent").to_path_buf();
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+
+    let config_path = config_dir.join("acp-stack.toml");
+    let age_key_path = config_dir.join("age.key");
+    let secret_store_path = state_dir.join("secrets.age");
+    std::fs::write(&config_path, "test config").expect("write config file");
+    std::fs::write(&age_key_path, "test age key").expect("write age key");
+    std::fs::write(&secret_store_path, "test secret store").expect("write secret store");
+
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod config dir");
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod state dir");
+        for file in [&config_path, &age_key_path, state_path, &secret_store_path] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod runtime file");
+        }
+    }
+
+    config_path
 }
 
 fn test_config() -> Config {
@@ -714,6 +754,77 @@ async fn security_check_reports_public_bind_proxy_and_auth_failure_findings() {
     assert!(codes.contains(&"http.wildcard_origin_public_bind"));
     assert!(codes.contains(&"http.trust_proxy_without_trusted_proxies"));
     assert!(codes.contains(&"auth.failure_threshold"));
+
+    // Every finding in the response must carry an operator-actionable
+    // remediation string. Asserted here so a regression in `SecurityFinding`
+    // construction shows up in the integration tier, not just in the unit
+    // tests for `security::check`.
+    for finding in findings {
+        let code = finding["code"].as_str().expect("code");
+        let remediation = finding["remediation"]
+            .as_str()
+            .unwrap_or_else(|| panic!("finding {code} has no remediation in JSON"));
+        assert!(
+            !remediation.is_empty(),
+            "finding {code} has an empty remediation string"
+        );
+    }
+
+    // Spot-check that hint text actually names something the operator can do,
+    // not just describe the problem again.
+    let trust_proxy = findings
+        .iter()
+        .find(|f| f["code"] == "http.trust_proxy_without_trusted_proxies")
+        .expect("trust_proxy finding present");
+    assert!(
+        trust_proxy["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("trusted_proxies")
+    );
+    let auth_threshold = findings
+        .iter()
+        .find(|f| f["code"] == "auth.failure_threshold")
+        .expect("auth_failure_threshold finding present");
+    assert!(
+        auth_threshold["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("/v1/logs/security")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn security_check_reports_loose_state_db_mode() {
+    let harness = ServerHarness::spawn().await;
+    std::fs::set_permissions(&harness.state_path, std::fs::Permissions::from_mode(0o644))
+        .expect("loosen state db mode");
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/security/check", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("security check response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let findings = body["data"]["findings"].as_array().expect("findings");
+    let finding = findings
+        .iter()
+        .find(|finding| {
+            finding["code"] == "runtime.path_mode_loose"
+                && finding["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("state database"))
+        })
+        .expect("state database mode finding");
+    assert!(
+        finding["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("chmod 0600")
+    );
 }
 
 #[tokio::test]
@@ -726,12 +837,14 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
     let store = StateStore::open(&path).expect("state open");
     store.migrate().expect("migrate");
     seed_auth_failure(&path, "af_old", "2000-01-01T00:00:00.000000000Z", "invalid");
-    let app_state = AppState::with_effective_bind(
+    let config_path = create_runtime_files(tempdir.path(), &path);
+    let app_state = AppState::with_effective_bind_and_runtime_paths(
         config,
         store,
         SESSION_KEY.to_owned(),
         ADMIN_KEY.to_owned(),
         "0.0.0.0:7700".to_owned(),
+        RuntimePaths::new(config_path, path.clone()),
     );
     let state = app_state.state.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

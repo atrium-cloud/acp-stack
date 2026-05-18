@@ -1,4 +1,4 @@
-use acp_stack::api::{self, AppState};
+use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::load_config_from_str;
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::StateStore;
@@ -25,17 +25,48 @@ struct AgentCliHarness {
 
 impl AgentCliHarness {
     async fn spawn() -> Self {
+        Self::spawn_inner(None).await
+    }
+
+    /// Spawn a harness that reports a custom `effective_bind` to the security
+    /// check. Used to drive findings like `api.public_bind` from the CLI side
+    /// without rewriting the actual TCP bind (we always bind to `127.0.0.1:0`
+    /// for the test listener).
+    async fn spawn_with_effective_bind(effective_bind: &str) -> Self {
+        Self::spawn_inner(Some(effective_bind.to_owned())).await
+    }
+
+    async fn spawn_inner(effective_bind: Option<String>) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
+        let config_path = create_runtime_files(tempdir.path(), &path);
+        let runtime_paths = RuntimePaths::new(config_path, path.clone());
         let mut config = load_config_from_str(VALID_CONFIG).expect("config parses");
         config.agent.command = env!("CARGO_BIN_EXE_acps").to_owned();
         config.agent.args = vec!["__acps-test-fake-agent".into()];
         config.agent.env = vec![];
         config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
         config.agent.expected_sha256 = None;
-        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let app_state = match effective_bind {
+            Some(bind) => AppState::with_effective_bind_and_runtime_paths(
+                config,
+                store,
+                SESSION_KEY.to_owned(),
+                ADMIN_KEY.to_owned(),
+                bind,
+                runtime_paths,
+            ),
+            None => AppState::with_effective_bind_and_runtime_paths(
+                config,
+                store,
+                SESSION_KEY.to_owned(),
+                ADMIN_KEY.to_owned(),
+                "127.0.0.1:7700".to_owned(),
+                runtime_paths,
+            ),
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local"));
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
@@ -51,6 +82,34 @@ impl Drop for AgentCliHarness {
     fn drop(&mut self) {
         self.join.abort();
     }
+}
+
+fn create_runtime_files(
+    root: &std::path::Path,
+    state_path: &std::path::Path,
+) -> std::path::PathBuf {
+    let config_dir = root.join(".config/acp-stack");
+    let state_dir = state_path.parent().expect("state parent").to_path_buf();
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::create_dir_all(&state_dir).expect("state dir should be created");
+    let config_path = config_dir.join("acp-stack.toml");
+    let age_key_path = config_dir.join("age.key");
+    let secret_store_path = state_dir.join("secrets.age");
+    fs::write(&config_path, "test config").expect("config should be written");
+    fs::write(&age_key_path, "test age key").expect("age key should be written");
+    fs::write(&secret_store_path, "test secret store").expect("secret store should be written");
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))
+            .expect("config dir permissions should be set");
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))
+            .expect("state dir permissions should be set");
+        for file in [&config_path, &age_key_path, state_path, &secret_store_path] {
+            fs::set_permissions(file, fs::Permissions::from_mode(0o600))
+                .expect("runtime file permissions should be set");
+        }
+    }
+    config_path
 }
 
 fn write_cli_home(home: &std::path::Path, base_url: &str, admin_key: &str) {
@@ -1228,6 +1287,29 @@ async fn security_check_calls_running_daemon_with_admin_key() {
         .stdout(predicates::str::contains("ok: "))
         .stdout(predicates::str::contains("auth_failures_total:"))
         .stdout(predicates::str::contains("findings:"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn security_check_renders_hint_line_for_each_finding() {
+    // Drive a finding by reporting an unspecified-address effective_bind; the
+    // self-check turns that into `api.public_bind` (warning). The CLI must
+    // render the diagnostic line AND an indented `hint:` line with the
+    // remediation prose.
+    let harness = AgentCliHarness::spawn_with_effective_bind("0.0.0.0:7700").await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["security", "check"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("api.public_bind"))
+        .stdout(predicates::str::contains("    hint: "))
+        .stdout(
+            predicates::str::contains("loopback").or(predicates::str::contains("reverse proxy")),
+        );
 }
 
 #[tokio::test(flavor = "multi_thread")]
