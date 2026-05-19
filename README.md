@@ -11,6 +11,7 @@ Last updated: May 18, 2026
 - Amp Code via `amp-acp` (adapter)
 - Cursor CLI (native)
 - Goose (native)
+- Codex CLI via `codex-acp` (adapter)
 
 See [docs/specs/agents/support.md](docs/specs/agents/support.md) for the support policy, verification process, and currently unsupported agents.
 

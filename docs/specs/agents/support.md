@@ -2,7 +2,7 @@
 
 While `acp-stack` leverages ACP to connect to agents, not all ACP-compatible agents are automatically supported by `acp-stack`.
 
-Last updated: May 18, 2026
+Last updated: May 19, 2026
 
 ## Eligibility
 
@@ -19,6 +19,7 @@ Examples:
 - OpenCode: supports [config env interpolation](https://opencode.ai/docs/config/#env-vars) for API-key auth and can set up provider through configs.
 - Cursor CLI: supports `CURSOR_API_KEY` for auth and `cursor-agent acp` for native ACP mode.
 - Pi Agent: supports API-key provider env refs for auth.
+- Codex: supports `codex-acp` for ACP and Codex config for provider/model setup.
 - Cortex Code: requires a Snowflake account and permissions; it does not appear to be a general-purpose ACP target.
 
 Secret uptake and API-key env var defaults are defined in [api_key.md](api_key.md). Provider configuration is defined in [config.md](config.md).
@@ -47,6 +48,9 @@ We also have limited resources for adding support. Adding each agent requires ex
 - Cursor CLI: native
     - Tested with active Cursor subscription on May 17, 2026.
 - Goose: native
+    - Current real ACP probe did not advertise mode values on May 19, 2026.
+- Codex: adapter-required
+    - Tested OpenRouter through `~/.codex/config.toml` provider config before support was added. Current real ACP probe advertised `read-only`, `auto`, and `full-access` mode values on May 19, 2026.
 
 ## Currently Unsupported
 

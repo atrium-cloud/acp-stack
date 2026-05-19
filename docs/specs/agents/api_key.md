@@ -1,6 +1,6 @@
 # Agent API Keys
 
-Last updated: May 17, 2026
+Last updated: May 19, 2026
 
 ## Secret Uptake
 
@@ -15,14 +15,15 @@ Supported agents use these paths:
 | Cursor CLI | `CURSOR_API_KEY`                    | process env auto-discovery               | Cursor's official wrapper reads the key from the environment; `acps agent set --model <model>` validates Cursor model choices through ACP. |
 | Pi Agent   | provider-specific API key env names | process env plus generated model scope   | `acps agent set` writes Pi `enabledModels` with the selected model.                    |
 | Amp Code   | `AMP_API_KEY`                       | process env auto-discovery               | Amp accepts CLI modes upstream, but `amp-acp v0.7.0` does not advertise ACP mode config.         |
+| Codex      | `OPENROUTER_API_KEY` for OpenRouter only | generated Codex config references env | Codex OpenAI auth remains Codex-native; Codex OpenRouter writes the Responses provider table. |
 
 ## Provider Concept
 
 `provider` is a first-class `acps` concept defined in [config.md](config.md). During init, the operator picks an agent, installs it when requested, then may pick the initial provider. Init uses provider metadata to choose required refs, collect missing values into the encrypted secret store, and write `[agent.provider]` with provider id and API-key ref. Init does not select or synthesize a model.
 
-For Goose, this distinction matters because provider auth is consumed from provider-native env vars, so `api_key_ref` must match the provider's mapped default ref. For OpenCode, the generated provider block can reference the selected key using `{env:...}`. For Pi, the provider is part of the model string. Cursor exposes its supported models through ACP and uses `CURSOR_API_KEY` directly, without an `acps` provider id. Amp Code does not accept raw provider/model designations through this support contract.
+For Goose, this distinction matters because provider auth is consumed from provider-native env vars, so `api_key_ref` must match the provider's mapped default ref. For OpenCode, the generated provider block can reference the selected key using `{env:...}`. For Pi, the provider is part of the model string. Cursor exposes its supported models through ACP and uses `CURSOR_API_KEY` directly, without an `acps` provider id. Codex uses `openai` without an `acps` API-key ref and uses `OPENROUTER_API_KEY` only for the supported OpenRouter Responses provider. Amp Code does not accept raw provider/model designations through this support contract.
 
-`acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` is the CLI shape for editing provider config after init. `acps agent set --model <model>` is the model-only shape for Cursor. If `--api-key-ref` is omitted on provider-backed edits, `acps` should use the default key ref from the mapping below. Model values come from the agent's ACP `model` config option: explicit `--model` values are validated against it, interactive terminals prompt from it when provider-backed `--model` is omitted, and non-interactive runs print advertised model values without mutating config.
+`acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` is the CLI shape for editing provider config after init. `acps agent set --model <model>` is the model-only shape for Cursor. If `--api-key-ref` is omitted on provider-backed edits, `acps` should use the default key ref from the mapping below, except Codex `openai`, which rejects `--api-key-ref`. Model values come from the agent's ACP `model` config option: explicit `--model` values are validated against it, interactive terminals prompt from it when provider-backed `--model` is omitted, and non-interactive runs print advertised model values without mutating config.
 
 ## API Key Provider Mapping
 
