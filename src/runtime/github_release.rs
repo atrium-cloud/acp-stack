@@ -34,6 +34,7 @@ pub struct GithubReleaseInstall<'a> {
     pub repo: &'a str,
     pub asset_pattern: &'a str,
     pub archive: ArchiveKind,
+    pub archive_binary_name: Option<&'a str>,
     pub binary_name: &'a str,
     pub checksums_asset: Option<&'a str>,
 }
@@ -112,6 +113,7 @@ pub fn install(
         ),
     })?;
     let binary_path = dest_dir.join(spec.binary_name);
+    let archive_binary_name = spec.archive_binary_name.unwrap_or(spec.binary_name);
 
     match spec.archive {
         ArchiveKind::None => {
@@ -119,14 +121,26 @@ pub fn install(
             log.line(format!("wrote raw binary to {}", binary_path.display()));
         }
         ArchiveKind::TarGz => {
-            extract_tar_gz(&asset_bytes, dest_dir, spec.binary_name, spec.repo)?;
+            extract_tar_gz(
+                &asset_bytes,
+                dest_dir,
+                archive_binary_name,
+                spec.binary_name,
+                spec.repo,
+            )?;
             log.line(format!(
                 "extracted tar.gz; binary at {}",
                 binary_path.display()
             ));
         }
         ArchiveKind::Zip => {
-            extract_zip(&asset_bytes, dest_dir, spec.binary_name, spec.repo)?;
+            extract_zip(
+                &asset_bytes,
+                dest_dir,
+                archive_binary_name,
+                spec.binary_name,
+                spec.repo,
+            )?;
             log.line(format!(
                 "extracted zip; binary at {}",
                 binary_path.display()
@@ -332,7 +346,13 @@ fn write_binary(path: &Path, bytes: &[u8], repo: &str) -> Result<()> {
     })
 }
 
-fn extract_tar_gz(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) -> Result<()> {
+fn extract_tar_gz(
+    bytes: &[u8],
+    dest_dir: &Path,
+    archive_binary_name: &str,
+    binary_name: &str,
+    repo: &str,
+) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
     archive.set_preserve_permissions(true);
@@ -359,13 +379,13 @@ fn extract_tar_gz(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) 
             Some(name) => name.to_owned(),
             None => continue,
         };
-        if leaf == std::ffi::OsStr::new(binary_name) {
+        if leaf == std::ffi::OsStr::new(archive_binary_name) {
             let dest = dest_dir.join(binary_name);
             entry
                 .unpack(&dest)
                 .map_err(|source| StackError::GithubReleaseArchiveExtract {
                     repo: repo.to_owned(),
-                    reason: format!("failed to unpack `{binary_name}` from tar: {source}"),
+                    reason: format!("failed to unpack `{archive_binary_name}` from tar: {source}"),
                 })?;
             found = true;
             break;
@@ -374,13 +394,19 @@ fn extract_tar_gz(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) 
     if !found {
         return Err(StackError::GithubReleaseArchiveExtract {
             repo: repo.to_owned(),
-            reason: format!("`{binary_name}` not found in tar archive"),
+            reason: format!("`{archive_binary_name}` not found in tar archive"),
         });
     }
     Ok(())
 }
 
-fn extract_zip(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) -> Result<()> {
+fn extract_zip(
+    bytes: &[u8],
+    dest_dir: &Path,
+    archive_binary_name: &str,
+    binary_name: &str,
+    repo: &str,
+) -> Result<()> {
     let cursor = Cursor::new(bytes);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|source| StackError::GithubReleaseArchiveExtract {
@@ -403,7 +429,7 @@ fn extract_zip(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) -> 
             Some(n) => n.to_owned(),
             None => continue,
         };
-        if leaf == std::ffi::OsStr::new(binary_name) {
+        if leaf == std::ffi::OsStr::new(archive_binary_name) {
             let dest = dest_dir.join(binary_name);
             let mut out = fs::File::create(&dest).map_err(|source| {
                 StackError::GithubReleaseArchiveExtract {
@@ -414,7 +440,7 @@ fn extract_zip(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) -> 
             std::io::copy(&mut entry, &mut out).map_err(|source| {
                 StackError::GithubReleaseArchiveExtract {
                     repo: repo.to_owned(),
-                    reason: format!("failed to extract `{binary_name}` from zip: {source}"),
+                    reason: format!("failed to extract `{archive_binary_name}` from zip: {source}"),
                 }
             })?;
             return Ok(());
@@ -422,7 +448,7 @@ fn extract_zip(bytes: &[u8], dest_dir: &Path, binary_name: &str, repo: &str) -> 
     }
     Err(StackError::GithubReleaseArchiveExtract {
         repo: repo.to_owned(),
-        reason: format!("`{binary_name}` not found in zip archive"),
+        reason: format!("`{archive_binary_name}` not found in zip archive"),
     })
 }
 
@@ -634,5 +660,40 @@ mod tests {
             err,
             StackError::GithubReleaseChecksumMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn extract_tar_gz_can_rename_platform_binary() {
+        let mut tar_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let payload = b"#!/bin/sh\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "codex-x86_64-unknown-linux-musl", &payload[..])
+                .expect("tar entry should append");
+            let encoder = builder.into_inner().expect("tar should finish");
+            encoder.finish().expect("gzip should finish");
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        extract_tar_gz(
+            &tar_bytes,
+            tempdir.path(),
+            "codex-x86_64-unknown-linux-musl",
+            "codex",
+            "openai/codex",
+        )
+        .expect("platform binary should extract");
+
+        assert_eq!(
+            std::fs::read(tempdir.path().join("codex")).expect("codex binary should exist"),
+            b"#!/bin/sh\n"
+        );
     }
 }

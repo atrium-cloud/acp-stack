@@ -52,6 +52,8 @@ Goose built-in providers read provider-native environment variables directly. Fo
 
 The configured model remains in `[agent.provider].model`. `acp-stack` applies it through ACP `session/set_config_option` with `configId = "model"` immediately after `session/new` succeeds and before the first prompt, instead of persisting `GOOSE_MODEL` in Goose config.
 
+The current real ACP probe did not advertise a `mode` session config option for Goose.
+
 ## Unsupported Auth Paths
 
 Unsupported for the `acp-stack` headless contract:

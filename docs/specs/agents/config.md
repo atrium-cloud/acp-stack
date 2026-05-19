@@ -74,6 +74,7 @@ Model values are agent-specific:
 - Goose: exact provider-native model ids for the selected provider.
 - OpenCode: exact provider-qualified model ids in `<provider-id>/<model-id>` form.
 - Pi: exact ids or provider-qualified model patterns accepted by Pi model scoping.
+- Codex: exact ACP-advertised model ids for `openai` or `openrouter`.
 - Amp Code: no raw provider/model value accepted through `acps`.
 - Cursor CLI: exact ACP-advertised model values. Operators can pass a shorthand such as `gpt-5.5`; `acps` stores the exact advertised Cursor model value.
 
@@ -86,6 +87,7 @@ Goose:
 - `acps` writes `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, `GOOSE_CONTEXT_STRATEGY = summarize`, and `GOOSE_DISABLE_SESSION_NAMING = true` after provider selection.
 - `acps` stores Goose's selected model in `[agent.provider].model` and applies it through ACP `session/set_config_option` with `configId = "model"` after `session/new` and before the first prompt.
 - Goose consumes provider-native API-key env vars directly. `acps agent set --provider` therefore requires the selected `api_key_ref` to match the default env var from [api_key.md](api_key.md).
+- The current real ACP probe did not advertise Goose mode values.
 
 OpenCode:
 
@@ -103,6 +105,15 @@ Pi:
 - Model ids should use the form accepted by Pi for the selected provider.
 - `acps agent set` writes `~/.pi/agent/settings.json` `enabledModels` from the explicit configured model.
 - Pi Cloudflare provider setup follows Pi's provider docs: `cloudflare-workers-ai` requires `CLOUDFLARE_API_KEY` plus `CLOUDFLARE_ACCOUNT_ID`; `cloudflare-ai-gateway` also requires `CLOUDFLARE_GATEWAY_ID`.
+
+Codex:
+
+- Provider ids are limited to `openai` and `openrouter`.
+- `acps agent set --provider openai --model <model-id>` validates the model through Codex ACP session config, writes `[agent.provider]` without `api_key_ref`, and keeps OpenAI auth Codex-native.
+- When switching Codex to `openai`, `acps` writes `~/.codex/config.toml` with `model` and `model_provider = "openai"`. If the previous canonical Codex config selected a generated non-OpenAI provider, `acps` first backs up the file as `config.<provider>.toml` or the next `-1`, `-2` suffix, then removes that provider table from the canonical file.
+- `acps agent set --provider openrouter --model <model-id>` defaults `api_key_ref` to `OPENROUTER_API_KEY`, validates the model through Codex ACP session config, and writes `~/.codex/config.toml` with `model_provider = "openrouter"` and `model_providers.openrouter` using `base_url = "https://openrouter.ai/api/v1/responses"`, `env_key = "OPENROUTER_API_KEY"`, and `wire_api = "responses"`.
+- Mode values are validated against Codex's ACP-advertised `mode` option. The current real ACP probe returned `read-only`, `auto`, and `full-access`.
+- Codex providers other than `openai` and `openrouter` are rejected.
 
 Amp Code:
 

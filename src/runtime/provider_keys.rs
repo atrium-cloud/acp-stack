@@ -150,7 +150,10 @@ impl ProviderKeyMapping {
             }
             validate_tokens(format!("providers.{}.agents", mapping.id), &mapping.agents)?;
             for agent in &mapping.agents {
-                if !matches!(agent.as_str(), "opencode" | "pi" | "cursor" | "goose") {
+                if !matches!(
+                    agent.as_str(),
+                    "opencode" | "pi" | "cursor" | "goose" | "codex"
+                ) {
                     return provider_mapping_error(format!(
                         "provider `{}` references unsupported agent `{agent}`",
                         mapping.id
@@ -163,7 +166,10 @@ impl ProviderKeyMapping {
                     &format!("providers.{}.api_key_env_vars.{agent}", mapping.id),
                     env_var,
                 )?;
-                if !matches!(agent.as_str(), "opencode" | "pi" | "cursor" | "goose") {
+                if !matches!(
+                    agent.as_str(),
+                    "opencode" | "pi" | "cursor" | "goose" | "codex"
+                ) {
                     return provider_mapping_error(format!(
                         "provider `{}` references unsupported API-key agent `{agent}`",
                         mapping.id
@@ -252,6 +258,12 @@ pub fn provider_id_supports_agent(provider_id: &str, agent_id: &str) -> bool {
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
         .is_some_and(|provider| provider.agents.iter().any(|agent| agent == agent_id))
+}
+
+pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .map(|provider| provider.name.as_str())
 }
 
 pub fn required_env_refs_for_provider_id(provider_id: &str, api_key_ref: &str) -> Vec<String> {
@@ -512,6 +524,10 @@ mod tests {
         assert!(!provider_id_supports_agent("fireworks-ai", "pi"));
         assert!(provider_id_supports_agent("openai", "pi"));
         assert!(provider_id_supports_agent("openai", "opencode"));
+        assert!(provider_id_supports_agent("openai", "codex"));
+        assert!(provider_id_supports_agent("openrouter", "codex"));
+        assert!(!provider_id_supports_agent("anthropic", "codex"));
+        assert!(!provider_id_supports_agent("xai", "codex"));
         assert!(!provider_id_supports_agent("openai", "cursor"));
         assert!(provider_id_supports_agent("anthropic", "goose"));
         assert!(provider_id_supports_agent("openai", "goose"));
@@ -524,6 +540,10 @@ mod tests {
         assert_eq!(env_var_for_agent_provider_id("cursor", "openai"), None);
         assert_eq!(
             env_var_for_agent_provider_id("goose", "openrouter"),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            env_var_for_agent_provider_id("codex", "openrouter"),
             Some("OPENROUTER_API_KEY")
         );
     }

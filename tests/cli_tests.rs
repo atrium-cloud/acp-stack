@@ -357,6 +357,30 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 }
 
 #[test]
+fn init_codex_openai_rejects_api_key_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "codex",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref",
+        ));
+}
+
+#[test]
 fn init_provider_failure_does_not_persist_selected_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -538,6 +562,204 @@ creates = "opencode"
     .expect("goose config should parse");
     assert_eq!(goose["GOOSE_PROVIDER"], "openrouter");
     assert_eq!(goose["GOOSE_MODEL"], serde_yaml::Value::Null);
+}
+
+#[test]
+fn agent_set_codex_openrouter_writes_responses_provider_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openrouter",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
+        .stdout(predicates::str::contains("Codex config:"));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains(r#"id = "openrouter""#));
+    assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
+    assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
+    assert!(config.contains(r#"env = ["OPENROUTER_API_KEY"]"#));
+
+    let codex_path = tempdir.path().join(".codex").join("config.toml");
+    let codex: toml::Value =
+        toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
+            .expect("codex config should parse");
+    assert_eq!(codex["model"].as_str(), Some("deepseek/deepseek-v4-flash"));
+    assert_eq!(codex["model_provider"].as_str(), Some("openrouter"));
+    assert_eq!(
+        codex["model_providers"]["openrouter"]["base_url"].as_str(),
+        Some("https://openrouter.ai/api/v1/responses")
+    );
+    assert_eq!(
+        codex["model_providers"]["openrouter"]["name"].as_str(),
+        Some("OpenRouter")
+    );
+    assert_eq!(
+        codex["model_providers"]["openrouter"]["env_key"].as_str(),
+        Some("OPENROUTER_API_KEY")
+    );
+    assert_eq!(
+        codex["model_providers"]["openrouter"]["wire_api"].as_str(),
+        Some("responses")
+    );
+}
+
+#[test]
+fn agent_set_codex_openai_model_removes_custom_provider_with_backup() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+    let codex_dir = tempdir.path().join(".codex");
+    fs::create_dir_all(&codex_dir).expect("codex config dir should be created");
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"model = "deepseek/deepseek-v4-flash"
+model_provider = "openrouter"
+preserve = "yes"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1/responses"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+"#,
+    )
+    .expect("codex config should be written");
+    fs::write(codex_dir.join("config.openrouter.toml"), "occupied\n")
+        .expect("existing backup should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("provider: openai"))
+        .stdout(predicates::str::contains("model: gpt-5.5"))
+        .stdout(predicates::str::contains("api_key_ref:").not());
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains(r#"id = "openai""#));
+    assert!(config.contains(r#"model = "gpt-5.5""#));
+    assert!(!config.contains("api_key_ref"));
+    assert!(config.contains("env = []"));
+
+    let codex: toml::Value = toml::from_str(
+        &fs::read_to_string(codex_dir.join("config.toml"))
+            .expect("codex config should be readable"),
+    )
+    .expect("codex config should parse");
+    assert_eq!(codex["model"].as_str(), Some("gpt-5.5"));
+    assert_eq!(codex["model_provider"].as_str(), Some("openai"));
+    assert_eq!(codex["preserve"].as_str(), Some("yes"));
+    assert!(codex.get("model_providers").is_none());
+    let backup = fs::read_to_string(codex_dir.join("config.openrouter-1.toml"))
+        .expect("backup should be readable");
+    assert!(backup.contains(r#"model_provider = "openrouter""#));
+    assert!(backup.contains("[model_providers.openrouter]"));
+}
+
+#[test]
+fn agent_set_codex_openai_rejects_api_key_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.5",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_codex_openai_requires_model() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--provider", "openai"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "pass --model <model-id> when setting Codex OpenAI provider",
+        ));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_codex_rejects_unsupported_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "anthropic",
+            "--model",
+            "anthropic/claude-sonnet-4-5",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "provider `anthropic` is not supported for agent `codex`",
+        ));
 }
 
 #[test]
@@ -1011,6 +1233,30 @@ creates = "opencode"
     let config =
         fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
     assert!(config.contains(r#"mode = "plan""#));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_set_codex_accepts_mode_only() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+    let options_path =
+        write_acp_config_options(tempdir.path(), &[], &["read-only", "auto", "full-access"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--mode", "full-access"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("mode: full-access"));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(config.contains(r#"mode = "full-access""#));
     assert!(!config.contains("[agent.provider]"));
 }
 
@@ -1908,6 +2154,24 @@ fn mode(path: &std::path::Path) -> u32 {
 fn shell_quote_path(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn codex_config() -> String {
+    VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "codex""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Codex""#)
+        .replace(r#"command = "opencode""#, r#"command = "codex-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        )
 }
 
 fn write_acp_config_options(

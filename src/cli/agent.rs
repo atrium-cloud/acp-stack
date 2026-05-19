@@ -120,6 +120,9 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
             ),
         });
     }
+    if config.agent.id == "codex" && provider_id == "openai" {
+        return run_codex_openai_set(&home, config, config_path, args, provider_id);
+    }
 
     let default_api_key_ref =
         default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id);
@@ -220,6 +223,79 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     );
     if !optional.is_empty() {
         println!("optional_env_refs: {}", optional.join(", "));
+    }
+    for item in provisioned {
+        println!("{}: {}", item.label, item.path.display());
+    }
+    Ok(())
+}
+
+fn run_codex_openai_set(
+    home: &Path,
+    mut config: Config,
+    config_path: PathBuf,
+    args: AgentSetArgs,
+    provider_id: String,
+) -> Result<()> {
+    if args.api_key_ref.is_some() {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
+        });
+    }
+    let Some(requested_model) = args.model else {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: "pass --model <model-id> when setting Codex OpenAI provider".to_owned(),
+        });
+    };
+    config.agent.model = None;
+    config.agent.provider = Some(AgentProviderConfig {
+        id: provider_id,
+        model: Some(requested_model),
+        api_key_ref: None,
+    });
+    let canonical = config.to_canonical_toml()?;
+    let mut config = config::load_config_from_str(&canonical)?;
+    provision_agent_headless_config(&config, home)?;
+    let requested_model = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+        .expect("provider model set");
+    let model = resolve_agent_model_value(home, &config, Some("openai"), requested_model)?;
+    if let Some(provider) = config.agent.provider.as_mut() {
+        provider.model = Some(model);
+    }
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    validate_agent_session_config_value(
+        home,
+        &config,
+        AgentSessionConfigCategory::Model,
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref())
+            .expect("provider model set"),
+    )?;
+    let provisioned = provision_agent_headless_config(&config, home)?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+
+    println!("agent: configured");
+    println!(
+        "provider: {}",
+        config.agent.provider.as_ref().expect("provider set").id
+    );
+    if let Some(model) = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+    {
+        println!("model: {model}");
     }
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
@@ -337,6 +413,9 @@ fn run_agent_mode_set(
 }
 
 fn default_api_key_ref_for_agent_provider(agent_id: &str, provider_id: &str) -> Option<String> {
+    if agent_id == "codex" && provider_id == "openai" {
+        return None;
+    }
     env_var_for_agent_provider_id(agent_id, provider_id).map(str::to_owned)
 }
 

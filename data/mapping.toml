@@ -6,7 +6,7 @@
 # [Amp manual](https://ampcode.com/manual)
 # [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-05-17
+# Last updated on 2026-05-19
 
 # Provider env vars
 
@@ -187,7 +187,7 @@ agents = ["pi"]
 [[providers]]
 id = "openai"
 name = "OpenAI"
-agents = ["pi", "opencode", "goose"]
+agents = ["pi", "opencode", "goose", "codex"]
 
 [[providers]]
 id = "deepseek"
@@ -238,7 +238,7 @@ agents = ["pi", "opencode", "goose"]
 [[providers]]
 id = "openrouter"
 name = "OpenRouter"
-agents = ["pi", "opencode", "goose"]
+agents = ["pi", "opencode", "goose", "codex"]
 
 [[providers]]
 id = "vercel-ai-gateway"

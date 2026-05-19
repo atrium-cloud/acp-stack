@@ -469,6 +469,20 @@ fn apply_provider_to_config(
             ),
         });
     }
+    if config.agent.id == "codex" && provider_id == "openai" {
+        if api_key_ref.is_some() {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
+            });
+        }
+        config.agent.provider = Some(AgentProviderConfig {
+            id: provider_id,
+            model: None,
+            api_key_ref: None,
+        });
+        return Ok(Vec::new());
+    }
     let default_api_key_ref = env_var_for_agent_provider_id(&config.agent.id, &provider_id);
     if default_api_key_ref.is_none() {
         return Err(StackError::AgentConfigProvision {

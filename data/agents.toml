@@ -189,3 +189,52 @@ curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download
 test -x "$managed_goose"
 '''
 creates = "goose"
+
+# Codex
+
+[[agents]]
+id = "codex"
+name = "Codex"
+kind = "adapter"
+headless_compatible = true
+set_provider = true
+set_model = true
+set_mode = true # read-only, auto, full-access
+stdio_framing = "json-lines"
+website = "https://developers.openai.com/codex/"
+github = "openai/codex"
+support_doc = "docs/agents/codex.md"
+
+[agents.adapter]
+id = "codex-acp"
+github = "zed-industries/codex-acp"
+
+[agents.adapter.install.npm]
+package = "@zed-industries/codex-acp"
+creates = "codex-acp"
+
+[agents.adapter.install.github]
+asset_pattern = "codex-acp-*-{arch}-unknown-linux-gnu.tar.gz"
+archive = "tar.gz"
+binary_name = "codex-acp"
+
+[agents.adapter.install.github.arch]
+x86_64 = "x86_64"
+aarch64 = "aarch64"
+
+[agents.harness]
+id = "codex"
+
+[agents.harness.install.npm]
+package = "@openai/codex"
+creates = "codex"
+
+[agents.harness.install.github]
+asset_pattern = "codex-{arch}-unknown-linux-musl.tar.gz"
+archive = "tar.gz"
+archive_binary_name = "codex-{arch}-unknown-linux-musl"
+binary_name = "codex"
+
+[agents.harness.install.github.arch]
+x86_64 = "x86_64"
+aarch64 = "aarch64"

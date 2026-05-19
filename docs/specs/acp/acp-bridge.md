@@ -11,7 +11,7 @@ The configured subprocess may be either:
 - a native ACP agent, such as agents listed by the ACP registry as directly implementing ACP
 - an ACP adapter executable, such as `codex-acp`, that speaks ACP to `acp-stack` and wraps an upstream agent that does not speak ACP directly
 
-`acp-stack` does not implement agent-specific adapters itself. It installs and launches catalog-listed ACP agent or adapter executables, then treats the resulting process as the ACP protocol peer. The install source of truth is the embedded `data/agents.toml` (see [runtime](../runtime.md#agent-installation)). The current embedded catalog is intentionally narrow while the headless deployment pipeline is proven: OpenCode and Cursor CLI are verified native targets, and Amp plus Pi are verified adapter-backed targets through `amp-acp` and `pi-acp`. The registry model separately represents adapters and their upstream harnesses for future entries.
+`acp-stack` does not implement agent-specific adapters itself. It installs and launches catalog-listed ACP agent or adapter executables, then treats the resulting process as the ACP protocol peer. The install source of truth is the embedded `data/agents.toml` (see [runtime](../runtime.md#agent-installation)). The current embedded catalog is intentionally narrow while the headless deployment pipeline is proven: OpenCode, Cursor CLI, and Goose are verified native targets, and Amp, Pi, and Codex are verified adapter-backed targets through `amp-acp`, `pi-acp`, and `codex-acp`. The registry model separately represents adapters and their upstream harnesses for future entries.
 
 Upstream `agentclientprotocol/registry` is a reference used by the dev-only sync tool but is no longer fetched at runtime.
 
