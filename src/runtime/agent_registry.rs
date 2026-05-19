@@ -4,7 +4,8 @@
 //! `acps agent install`. It supersedes the upstream
 //! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
 //! runtime can make conservative support claims. The embedded catalog starts
-//! with Goose, OpenCode, Cursor CLI, Amp, and Pi as verified headless targets.
+//! with Goose, OpenCode, Cursor CLI, Amp, Pi, and Codex as verified headless
+//! targets.
 //! The schema supports entries that need both an ACP adapter and the upstream
 //! harness it wraps.
 //!
@@ -310,6 +311,8 @@ impl NpmInstall {
 pub struct GithubInstall {
     pub asset_pattern: String,
     pub archive: ArchiveKind,
+    #[serde(default)]
+    pub archive_binary_name: Option<String>,
     pub binary_name: String,
     #[serde(default)]
     pub checksums_asset: Option<String>,
@@ -324,8 +327,20 @@ impl GithubInstall {
             &format!("{field}.asset_pattern"),
             &self.asset_pattern,
         )?;
+        if let Some(archive_binary_name) = &self.archive_binary_name {
+            validate_nonempty(
+                agent_id,
+                &format!("{field}.archive_binary_name"),
+                archive_binary_name,
+            )?;
+        }
         validate_nonempty(agent_id, &format!("{field}.binary_name"), &self.binary_name)?;
-        if self.asset_pattern.contains("{arch}") {
+        if self.asset_pattern.contains("{arch}")
+            || self
+                .archive_binary_name
+                .as_deref()
+                .is_some_and(|name| name.contains("{arch}"))
+        {
             self.arch.validate(agent_id, field)?;
         }
         Ok(())
@@ -473,7 +488,10 @@ mod tests {
             .filter(|entry| entry.headless_compatible)
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(supported, ["opencode", "cursor", "amp", "pi", "goose"]);
+        assert_eq!(
+            supported,
+            ["opencode", "cursor", "amp", "pi", "goose", "codex"]
+        );
     }
 
     #[test]
@@ -484,7 +502,7 @@ mod tests {
             .iter()
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(ids, ["opencode", "cursor", "amp", "pi", "goose"]);
+        assert_eq!(ids, ["opencode", "cursor", "amp", "pi", "goose", "codex"]);
         let cursor = catalog.lookup("cursor").expect("cursor entry exists");
         assert_eq!(cursor.kind, RegistryKind::Native);
         assert!(cursor.headless_compatible);
@@ -519,6 +537,34 @@ mod tests {
         assert!(!goose.set_mode);
         assert_eq!(goose.stdio_framing, RegistryStdioFraming::JsonLines);
         assert_eq!(goose.support_doc.as_deref(), Some("docs/agents/goose.md"));
+        let codex = catalog.lookup("codex").expect("codex entry exists");
+        assert_eq!(codex.kind, RegistryKind::Adapter);
+        assert!(codex.headless_compatible);
+        assert!(codex.set_provider);
+        assert!(codex.set_model);
+        assert!(codex.set_mode);
+        assert_eq!(
+            codex.adapter.as_ref().map(|adapter| adapter.id.as_str()),
+            Some("codex-acp")
+        );
+        let codex_adapter_install = &codex.adapter.as_ref().expect("codex adapter").install;
+        assert_eq!(
+            codex_adapter_install
+                .npm
+                .as_ref()
+                .map(|install| install.package.as_str()),
+            Some("@zed-industries/codex-acp")
+        );
+        let codex_harness_github = codex
+            .harness
+            .as_ref()
+            .and_then(|harness| harness.install.github.as_ref())
+            .expect("codex harness github install");
+        assert_eq!(
+            codex_harness_github.archive_binary_name.as_deref(),
+            Some("codex-{arch}-unknown-linux-musl")
+        );
+        assert_eq!(codex.support_doc.as_deref(), Some("docs/agents/codex.md"));
     }
 
     #[test]
@@ -541,6 +587,15 @@ mod tests {
             .expect("amp-acp github install");
         assert_eq!(amp_github.arch.x86_64.as_deref(), Some("x86_64"));
         assert_eq!(amp_github.arch.aarch64.as_deref(), Some("aarch64"));
+
+        let codex = catalog.lookup("codex").expect("codex entry exists");
+        let codex_github = codex
+            .adapter
+            .as_ref()
+            .and_then(|adapter| adapter.install.github.as_ref())
+            .expect("codex-acp github install");
+        assert_eq!(codex_github.arch.x86_64.as_deref(), Some("x86_64"));
+        assert_eq!(codex_github.arch.aarch64.as_deref(), Some("aarch64"));
     }
 
     #[test]

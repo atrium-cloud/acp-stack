@@ -30,7 +30,7 @@ Native entries require `[agents.harness]` and no `[agents.adapter]`. Adapter ent
 
 Harness installs live under `agents.harness.install.{shell,npm,github}`. Adapter installs live under `agents.adapter.install.{shell,npm,github}`.
 
-Latest/default selection prefers `shell`, then `npm`, then `github`. Pinned harness selection prefers `github`, then `npm@version`; shell-only entries fail because shell bootstraps are assumed to install latest.
+Latest/default selection prefers `shell`, then `npm`, then `github`. Npm install entries are also the managed form for packages documented primarily as `npx <package>`, because installation still creates a stable executable in the managed bin directory. Pinned harness selection prefers `github`, then `npm@version`; shell-only entries fail because shell bootstraps are assumed to install latest.
 
 `github` install paths derive the release repository from the first two segments of the containing object’s `github` value. Values should normally be `owner/repo`; a path suffix is allowed only when metadata needs to point at a repository subdirectory. Architecture substitutions are local to the path:
 
