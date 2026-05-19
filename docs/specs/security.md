@@ -285,8 +285,15 @@ WorkingDirectory=/workspace
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/workspace /home/acp/.config/acp-stack /home/acp/.local/share/acp-stack
+ReadWritePaths=/workspace /home/acp
 ```
+
+`ReadWritePaths` covers the runtime user's whole home because supported
+headless agents write managed install shims under `~/.local/bin` and
+agent-owned config under paths such as `~/.config/{goose,opencode}`, `~/.pi`,
+and `~/.codex`. The daemon should still run as the unprivileged runtime user;
+writable home access is for agent bootstrap/configuration, not for root
+execution.
 
 Docker images should use `USER acp` and mount `/workspace` writable by that UID.
 

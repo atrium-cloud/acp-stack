@@ -1,0 +1,31 @@
+[Unit]
+Description=acp-stack daemon
+Documentation=https://github.com/finnlyu/acp-stack/blob/main/docs/deploy/systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@WORKSPACE_ROOT@
+Environment=HOME=@HOME_DIR@
+EnvironmentFile=-/etc/acp-stack/environment
+ExecStart=/usr/local/bin/acps serve --bind @BIND@
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (mirrors docs/specs/security.md:279-289). The daemon also writes
+# agent harnesses to ${HOME}/.local/bin and agent-owned config files under
+# ${HOME}/.config/{goose,opencode}, ${HOME}/.pi, and ${HOME}/.codex, so the
+# writable home subtree must cover the entire runtime homedir.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=@WORKSPACE_ROOT@ @HOME_DIR@
+
+[Install]
+WantedBy=multi-user.target

@@ -198,6 +198,6 @@ curl -fsSL https://acp-stack.dev/install.sh | sh
 acps init
 ```
 
-Phase 4 splits installation into two privilege domains. The installer/root phase installs `acps`, creates the runtime user, prepares owner-only directories, and installs supported OS-wide dependencies. `acps init` then runs as the runtime user and manages instance state, workspace ingestion, secrets, agent/MCP config, agent harness or adapter installation, and testflight.
+Phase 4 splits installation into two privilege domains. The installer/root phase installs `acps`, creates the runtime user, prepares owner-only directories, and installs supported OS-wide dependencies. `acps init` then runs as the runtime user and manages instance state, workspace ingestion, secrets, agent/MCP config, agent harness or adapter installation, and testflight. Deployment installers pass the selected workspace root, uploads path, and runtime user into `acps init` when creating the starter config so the generated `[workspace]` block matches the process manager's user and writable paths.
 
 The full init testflight starts the configured agent and sends a minimal real prompt after secrets and config are present. Because this can consume provider credits, the UX must require explicit confirmation or provide a documented skip path for offline and no-spend setups.

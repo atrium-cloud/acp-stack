@@ -49,7 +49,7 @@ This document records the implementation technologies chosen for the standalone 
 
 ## Deployment-Relevant Tooling
 
-- Docker packaging is available for straightforward self-hosting; systemd packaging remains planned.
+- Docker packaging is available for straightforward self-hosting. systemd packaging ships a root-phase bash installer (`scripts/install-systemd.sh`), a hardened unit template (`packaging/systemd/acp-stack.service`), and an end-to-end smoke test (`scripts/install-systemd-smoke.sh`) that also runs in CI via `.github/workflows/install-systemd-smoke.yml`.
 - Reverse proxy guides cover public TLS and edge routing while keeping runtime HTTP hardening inside `acp-stack`.
 - Cloudflare Tunnel is the preferred public-edge profile: `cloudflared` runs outside the Rust binary, maps a public hostname to the loopback `acps` listener, and supplies coarse request-origin headers for observability after trusted-proxy validation. The runtime does not bundle `cloudflared` or a GeoIP database; generated mode emits local config/systemd/Docker snippets only.
 - Dependency checks and supported `deps apply` flows should stay narrow and explicit in the initial release.

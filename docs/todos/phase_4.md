@@ -19,15 +19,15 @@
 
 ## systemd
 
-- [ ] Add installer flow for Linux hosts.
-- [ ] Add bash installer/root phase that installs `acps`, creates the runtime user, installs supported OS-wide dependencies, then runs `acps init` as the runtime user.
-- [ ] Create unprivileged `acp` user when missing.
-- [ ] Create config, state, and workspace directories with owner-only permissions where required.
-- [ ] Install the `acps` binary.
-- [ ] Install a systemd unit for the daemon.
-- [ ] Configure `ReadWritePaths` for workspace, config, and state paths.
-- [ ] Add restart policy compatible with configured runtime behavior.
-- [ ] Document start, stop, status, and journal inspection commands.
+- [x] Add installer flow for Linux hosts.
+- [x] Add bash installer/root phase that installs `acps`, creates the runtime user, installs supported OS-wide dependencies, then runs `acps init` as the runtime user.
+- [x] Create unprivileged `acp` user when missing.
+- [x] Create config, state, and workspace directories with owner-only permissions where required.
+- [x] Install the `acps` binary.
+- [x] Install a systemd unit for the daemon.
+- [x] Configure `ReadWritePaths` for workspace, config, and state paths.
+- [x] Add restart policy compatible with configured runtime behavior.
+- [x] Document start, stop, status, and journal inspection commands.
 
 ## Reverse Proxy Guides
 
@@ -140,7 +140,7 @@
 ## Acceptance
 
 - [x] The runtime can be deployed through Docker.
-- [ ] The runtime can be deployed through systemd.
+- [x] The runtime can be deployed through systemd.
 - [x] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
 - [ ] `acps deps apply` supports only narrow, explicit installation behavior.
 - [ ] Security self-checks are available through CLI and API.
