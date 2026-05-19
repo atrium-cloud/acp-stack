@@ -9,11 +9,17 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value as JsonValue, json};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use toml::{Value as TomlValue, map::Map as TomlMap};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, create_dir_owner_only, parent_dir};
-use crate::runtime::provider_keys::env_var_for_agent_provider_id;
+use crate::runtime::provider_keys::{env_var_for_agent_provider_id, provider_name_for_provider_id};
+
+const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
+// Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
+// completions endpoint most OpenRouter clients configure by default.
+const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1/responses";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedAgentConfig {
@@ -38,6 +44,14 @@ pub fn provision_agent_headless_config(
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "OpenCode config",
+                    path,
+                })
+                .collect()
+        }),
+        "codex" => provision_codex_config(config, home).map(|path| {
+            path.into_iter()
+                .map(|path| ProvisionedAgentConfig {
+                    label: "Codex config",
                     path,
                 })
                 .collect()
@@ -139,6 +153,143 @@ fn provision_pi_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> 
 
     write_json_object(&path, root)?;
     Ok(Some(path))
+}
+
+fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
+    let path = home.join(".codex").join("config.toml");
+    let Some(provider) = config.agent.provider.as_ref() else {
+        return Ok(None);
+    };
+    if provider.id == "openai" {
+        return provision_codex_openai_config(config, &path);
+    }
+    if provider.id != CODEX_OPENROUTER_PROVIDER_ID {
+        return Err(StackError::AgentConfigProvision {
+            path,
+            reason: format!(
+                "codex provider `{}` is not supported; use `openai` or `openrouter`",
+                provider.id
+            ),
+        });
+    }
+    let Some(model) = configured_provider_model(config) else {
+        return Ok(None);
+    };
+    let api_key_ref = require_agent_env_for_provider(config, CODEX_OPENROUTER_PROVIDER_ID, &path)?;
+    let Some(native_ref) =
+        env_var_for_agent_provider_id(&config.agent.id, CODEX_OPENROUTER_PROVIDER_ID)
+    else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: "codex OpenRouter has no API-key env mapping in data/mapping.toml".to_owned(),
+        });
+    };
+    if api_key_ref != native_ref {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: format!(
+                "codex OpenRouter requires provider-native env ref `{native_ref}`, got `{api_key_ref}`"
+            ),
+        });
+    }
+
+    let mut root = read_toml_table(&path)?;
+    root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
+    root.insert(
+        "model_provider".to_owned(),
+        TomlValue::String(CODEX_OPENROUTER_PROVIDER_ID.to_owned()),
+    );
+    let Some(provider_name) = provider_name_for_provider_id(CODEX_OPENROUTER_PROVIDER_ID) else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: "codex OpenRouter has no provider metadata in data/mapping.toml".to_owned(),
+        });
+    };
+    let providers = ensure_toml_table_field(&mut root, "model_providers", &path)?;
+    let openrouter = ensure_toml_table_field(providers, CODEX_OPENROUTER_PROVIDER_ID, &path)?;
+    openrouter.insert(
+        "name".to_owned(),
+        TomlValue::String(provider_name.to_owned()),
+    );
+    openrouter.insert(
+        "base_url".to_owned(),
+        TomlValue::String(CODEX_OPENROUTER_RESPONSES_BASE_URL.to_owned()),
+    );
+    openrouter.insert(
+        "env_key".to_owned(),
+        TomlValue::String(native_ref.to_owned()),
+    );
+    openrouter.insert(
+        "wire_api".to_owned(),
+        TomlValue::String("responses".to_owned()),
+    );
+
+    write_toml_table(&path, root)?;
+    Ok(Some(path))
+}
+
+fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<PathBuf>> {
+    let Some(model) = configured_provider_model(config) else {
+        return Ok(None);
+    };
+    let mut root = read_toml_table(path)?;
+    if let Some(provider_id) = codex_custom_provider_to_remove(&root) {
+        backup_codex_config(path, &provider_id)?;
+        if let Some(providers) = root
+            .get_mut("model_providers")
+            .and_then(TomlValue::as_table_mut)
+        {
+            providers.remove(&provider_id);
+            if providers.is_empty() {
+                root.remove("model_providers");
+            }
+        }
+    }
+    root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
+    root.insert(
+        "model_provider".to_owned(),
+        TomlValue::String("openai".to_owned()),
+    );
+    write_toml_table(path, root)?;
+    Ok(Some(path.to_path_buf()))
+}
+
+fn codex_custom_provider_to_remove(root: &TomlMap<String, TomlValue>) -> Option<String> {
+    let model_provider = root.get("model_provider").and_then(TomlValue::as_str)?;
+    if model_provider == "openai" {
+        return None;
+    }
+    let providers = root.get("model_providers").and_then(TomlValue::as_table)?;
+    providers
+        .contains_key(model_provider)
+        .then(|| model_provider.to_owned())
+}
+
+fn backup_codex_config(path: &Path, provider_id: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let parent = parent_dir(path)?;
+    let backup_path = unique_codex_backup_path(parent, provider_id);
+    std::fs::copy(path, &backup_path).map_err(|source| StackError::ConfigWrite {
+        path: backup_path,
+        source,
+    })?;
+    Ok(())
+}
+
+fn unique_codex_backup_path(parent: &Path, provider_id: &str) -> PathBuf {
+    let first = parent.join(format!("config.{provider_id}.toml"));
+    if !first.exists() {
+        return first;
+    }
+    for index in 1.. {
+        let path = parent.join(format!("config.{provider_id}-{index}.toml"));
+        if !path.exists() {
+            return path;
+        }
+    }
+    unreachable!("unbounded suffix search returns a backup path")
 }
 
 fn configured_provider_model(config: &Config) -> Option<&str> {
@@ -295,6 +446,65 @@ fn write_yaml_mapping(path: &Path, mapping: YamlMapping) -> Result<()> {
         bytes.push(b'\n');
     }
     atomic_write_owner_only(path, &bytes)
+}
+
+fn read_toml_table(path: &Path) -> Result<TomlMap<String, TomlValue>> {
+    if !path.exists() {
+        return Ok(TomlMap::new());
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if content.trim().is_empty() {
+        return Ok(TomlMap::new());
+    }
+    let value: TomlValue =
+        toml::from_str(&content).map_err(|source| StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!("existing TOML is invalid: {source}"),
+        })?;
+    match value {
+        TomlValue::Table(table) => Ok(table),
+        _ => Err(StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: "existing TOML root must be a table".to_owned(),
+        }),
+    }
+}
+
+fn write_toml_table(path: &Path, table: TomlMap<String, TomlValue>) -> Result<()> {
+    let parent = parent_dir(path)?;
+    create_dir_owner_only(parent)?;
+    let content = toml::to_string_pretty(&TomlValue::Table(table)).map_err(|source| {
+        StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!("failed to serialize TOML: {source}"),
+        }
+    })?;
+    let mut bytes = content.into_bytes();
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    atomic_write_owner_only(path, &bytes)
+}
+
+fn ensure_toml_table_field<'a>(
+    table: &'a mut TomlMap<String, TomlValue>,
+    key: &str,
+    path: &Path,
+) -> Result<&'a mut TomlMap<String, TomlValue>> {
+    if !table.contains_key(key) {
+        table.insert(key.to_owned(), TomlValue::Table(TomlMap::new()));
+    }
+    table
+        .get_mut(key)
+        .and_then(TomlValue::as_table_mut)
+        .ok_or_else(|| StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!("`{key}` must be a table when present"),
+        })
 }
 
 #[cfg(test)]
@@ -477,6 +687,95 @@ restart = "on-crash"
             err.to_string().contains("existing YAML is invalid"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn codex_openrouter_writes_responses_provider_config() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+        });
+
+        let provisioned =
+            provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let path = tempdir.path().join(".codex").join("config.toml");
+        assert_eq!(provisioned[0].path, path);
+        let value: toml::Value = toml::from_str(
+            &std::fs::read_to_string(&path).expect("codex config should be readable"),
+        )
+        .expect("codex config toml parses");
+        assert_eq!(value["model"].as_str(), Some("deepseek/deepseek-v4-flash"));
+        assert_eq!(value["model_provider"].as_str(), Some("openrouter"));
+        assert_eq!(
+            value["model_providers"]["openrouter"]["base_url"].as_str(),
+            Some("https://openrouter.ai/api/v1/responses")
+        );
+        assert_eq!(
+            value["model_providers"]["openrouter"]["name"].as_str(),
+            Some("OpenRouter")
+        );
+        assert_eq!(
+            value["model_providers"]["openrouter"]["env_key"].as_str(),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            value["model_providers"]["openrouter"]["wire_api"].as_str(),
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn codex_openai_model_removes_custom_provider_and_writes_backup() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let codex_dir = tempdir.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).expect("create codex config dir");
+        let path = codex_dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"model = "deepseek/deepseek-v4-flash"
+model_provider = "openrouter"
+preserve = "yes"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1/responses"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+"#,
+        )
+        .expect("write existing codex config");
+        std::fs::write(codex_dir.join("config.openrouter.toml"), "occupied\n")
+            .expect("write existing backup");
+        let mut config = config_with_agent("codex", &[]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("gpt-5.5".to_owned()),
+            api_key_ref: None,
+        });
+
+        let provisioned =
+            provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        assert_eq!(provisioned[0].path, path);
+        let value: toml::Value = toml::from_str(
+            &std::fs::read_to_string(&path).expect("codex config should be readable"),
+        )
+        .expect("codex config toml parses");
+        assert_eq!(value["model"].as_str(), Some("gpt-5.5"));
+        assert_eq!(value["model_provider"].as_str(), Some("openai"));
+        assert_eq!(value["preserve"].as_str(), Some("yes"));
+        assert!(
+            value.get("model_providers").is_none(),
+            "openrouter provider table should be removed"
+        );
+        let backup = std::fs::read_to_string(codex_dir.join("config.openrouter-1.toml"))
+            .expect("backup should be written with suffix");
+        assert!(backup.contains(r#"model_provider = "openrouter""#));
+        assert!(backup.contains("[model_providers.openrouter]"));
     }
 
     #[test]

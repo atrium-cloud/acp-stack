@@ -452,6 +452,7 @@ enum ResolvedInstallSpec {
         repo: String,
         asset_pattern: String,
         archive: ArchiveKind,
+        archive_binary_name: Option<String>,
         binary_name: String,
         checksums_asset: Option<String>,
         version_pin: Option<String>,
@@ -514,7 +515,12 @@ fn resolve_github_install(
         reason: format!("agent `{agent_id}` {field}.github requires github URL"),
     })?;
     let repo = github_repo_from_url(agent_id, "github", github_url)?;
-    let asset_pattern = if github.asset_pattern.contains("{arch}") {
+    let arch_token = if github.asset_pattern.contains("{arch}")
+        || github
+            .archive_binary_name
+            .as_deref()
+            .is_some_and(|name| name.contains("{arch}"))
+    {
         let token =
             github
                 .arch
@@ -522,14 +528,23 @@ fn resolve_github_install(
                 .ok_or_else(|| StackError::UnsupportedHostArch {
                     arch: std::env::consts::ARCH,
                 })?;
-        github.asset_pattern.replace("{arch}", token)
+        Some(token)
     } else {
-        github.asset_pattern.clone()
+        None
     };
+    let asset_pattern = arch_token.map_or_else(
+        || github.asset_pattern.clone(),
+        |token| github.asset_pattern.replace("{arch}", token),
+    );
+    let archive_binary_name = github
+        .archive_binary_name
+        .as_ref()
+        .map(|name| arch_token.map_or_else(|| name.clone(), |token| name.replace("{arch}", token)));
     Ok(ResolvedInstallSpec::GithubRelease {
         repo,
         asset_pattern,
         archive: github.archive,
+        archive_binary_name,
         binary_name: github.binary_name.clone(),
         checksums_asset: github.checksums_asset.clone(),
         version_pin: version_pin.map(str::to_owned),
@@ -571,6 +586,7 @@ fn run_install_step(
             repo,
             asset_pattern,
             archive,
+            archive_binary_name,
             binary_name,
             checksums_asset,
             version_pin,
@@ -579,6 +595,7 @@ fn run_install_step(
                 repo: &repo,
                 asset_pattern: &asset_pattern,
                 archive,
+                archive_binary_name: archive_binary_name.as_deref(),
                 binary_name: &binary_name,
                 checksums_asset: checksums_asset.as_deref(),
             };
