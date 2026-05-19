@@ -1,0 +1,79 @@
+name: install-systemd-smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/install-systemd.sh
+      - scripts/install-systemd-smoke.sh
+      - packaging/systemd/**
+      - Dockerfile
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - src/cli/serve.rs
+      - src/cli/init.rs
+      - src/config.rs
+      - src/main.rs
+      - .github/workflows/install-systemd-smoke.yml
+  pull_request:
+    paths:
+      - scripts/install-systemd.sh
+      - scripts/install-systemd-smoke.sh
+      - packaging/systemd/**
+      - Dockerfile
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - src/cli/serve.rs
+      - src/cli/init.rs
+      - src/config.rs
+      - src/main.rs
+      - .github/workflows/install-systemd-smoke.yml
+
+concurrency:
+  group: install-systemd-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --bin acps --bin acpctl --locked
+
+      - name: Run install-systemd-smoke.sh
+        env:
+          ACP_STACK_SKIP_BUILD: '1'
+        run: bash scripts/install-systemd-smoke.sh
+
+      - name: Capture journal on failure
+        if: failure()
+        run: |
+          container="$(docker ps --filter name=acp-stack-systemd-smoke- --format '{{.Names}}' | head -n1)"
+          if [[ -n "${container}" ]]; then
+            mkdir -p smoke-logs
+            docker exec "${container}" systemctl status acp-stack.service --no-pager >smoke-logs/status.txt 2>&1 || true
+            docker exec "${container}" journalctl -u acp-stack.service --no-pager >smoke-logs/journal.txt 2>&1 || true
+          fi
+
+      - name: Upload diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-systemd-smoke-logs
+          path: smoke-logs
+          if-no-files-found: ignore

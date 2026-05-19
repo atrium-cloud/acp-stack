@@ -17,7 +17,7 @@ See [docs/specs/agents/support.md](docs/specs/agents/support.md) for the support
 
 ## Deployment
 
-See [docs/deploy/docker.md](docs/deploy/docker.md) for Docker deployment and [docs/deploy/cloudflare.md](docs/deploy/cloudflare.md), [docs/deploy/nginx.md](docs/deploy/nginx.md), or [docs/deploy/caddy.md](docs/deploy/caddy.md) for public-edge reverse proxy guidance.
+See [docs/deploy/docker.md](docs/deploy/docker.md) for Docker deployment, [docs/deploy/systemd.md](docs/deploy/systemd.md) for systemd deployment, and [docs/deploy/cloudflare.md](docs/deploy/cloudflare.md), [docs/deploy/nginx.md](docs/deploy/nginx.md), or [docs/deploy/caddy.md](docs/deploy/caddy.md) for public-edge reverse proxy guidance.
 
 ## Contributing
 

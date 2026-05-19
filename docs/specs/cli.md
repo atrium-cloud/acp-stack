@@ -9,7 +9,7 @@ The CLI should call the same core service layer as the HTTP API where practical.
 Initial CLI commands:
 
 ```sh
-acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>]
+acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>]
 acps serve
 acps status
 acps reset --yes
@@ -59,6 +59,8 @@ acps deps apply
 ## Init
 
 `acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Interactive init prompts for one supported agent, updates `[agent]` with the registry-recommended launch command, then asks whether to install that agent. Non-interactive init skips agent selection and install unless `--agent <id>` and/or `--install-agent` are supplied; `--no-install-agent` suppresses the install prompt in interactive runs.
+
+When creating a starter config, deployment tooling may pass `--workspace-root`, `--workspace-uploads`, and `--runtime-user` so the generated `[workspace]` block matches the process manager's user, working directory, and writable paths. These flags affect only a newly-created config; re-running init against an existing config validates and preserves the file, and rejects deployment override values that contradict the persisted `[workspace]` block.
 
 `acps init --edge cloudflare --exposure tunnel --hostname <host>` is the recommended public deployment profile. It keeps `acps` bound to `127.0.0.1`, sets `[api].public_url` and explicit `allowed_origins` to the Cloudflare hostname, trusts only local `cloudflared` proxy peers, adds a host `cloudflared` dependency when applicable, and emits local `cloudflared` config plus systemd/Docker snippets. Managed Cloudflare API provisioning is deferred.
 
@@ -133,6 +135,7 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps config import <path> [--force] [--dry-run]`
 - `acps config import --base64 <code> [--force] [--dry-run]`
 - `acps init`
+- `acps init --workspace-root <path> --workspace-uploads <path> --runtime-user <name>`
 - `acps init --edge cloudflare --exposure tunnel --hostname <host>`
 - `acps status`
 - `acps reset [--yes]`

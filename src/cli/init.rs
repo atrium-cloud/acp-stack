@@ -8,7 +8,9 @@ use crate::agent_installer::{InstallerOutcome, install_resolved, run_installer};
 use crate::agent_registry::{InstallSet, RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::auth::generate_api_key;
 use crate::config::{
-    self, AgentProviderConfig, CloudflareEdgeConfig, Config, DependencyEntry, EdgeConfig,
+    self, AgentConfig, AgentInstallConfig, AgentProviderConfig, ApiConfig, AuthConfig,
+    CloudflareEdgeConfig, Config, DependencyEntry, EdgeConfig, LoggingConfig, SecurityConfig,
+    SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig, WorkspaceSourceConfig,
 };
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -51,6 +53,15 @@ pub struct InitArgs {
     /// How cloudflared is expected to run for generated Cloudflare artifacts.
     #[arg(long, value_enum, default_value_t = CloudflaredDeploymentArg::Host)]
     cloudflared_deployment: CloudflaredDeploymentArg,
+    /// Workspace root to write into a newly-created starter config.
+    #[arg(long)]
+    workspace_root: Option<String>,
+    /// Workspace uploads path to write into a newly-created starter config.
+    #[arg(long)]
+    workspace_uploads: Option<String>,
+    /// Runtime user to write into a newly-created starter config.
+    #[arg(long)]
+    runtime_user: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -80,6 +91,29 @@ impl CloudflaredDeploymentArg {
     }
 }
 
+const STARTER_MAX_REQUEST_BYTES: u64 = 104_857_600;
+const STARTER_RATE_LIMIT_PER_MINUTE: u64 = 120;
+const STARTER_RATE_LIMIT_BURST: u64 = 30;
+const STARTER_AUTH_FAILURES_PER_MINUTE: u64 = 5;
+const STARTER_AUTH_BLOCK_DURATION: &str = "15m";
+const STARTER_SESSION_KEY_REF: &str = "ACP_STACK_SESSION_KEY";
+const STARTER_ADMIN_KEY_REF: &str = "ACP_STACK_ADMIN_KEY";
+const STARTER_DEFAULT_SHELL: &str = "/bin/bash";
+const STARTER_WORKSPACE_MAX_FILE_BYTES: u64 = 8_388_608;
+const STARTER_LOCAL_RETENTION_DAYS: u64 = 30;
+const STARTER_LOG_LEVEL: &str = "info";
+const STARTER_SUPABASE_URL: &str = "https://example.supabase.co";
+const STARTER_SUPABASE_API_KEY_REF: &str = "SUPABASE_SECRET_KEY";
+const STARTER_SUPABASE_SCHEMA: &str = "acp_stack";
+const STARTER_AGENT_ID: &str = "placeholder";
+const STARTER_AGENT_NAME: &str = "Placeholder Agent";
+const STARTER_AGENT_COMMAND: &str = "acp-agent";
+const STARTER_AGENT_RESTART: &str = "never";
+const STARTER_AGENT_INSTALL_CREATES: &str = "acp-agent";
+const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
+const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
+const STARTER_WORKSPACE_SOURCE_TYPE: &str = "none";
+
 pub(super) fn run_init(args: InitArgs) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
@@ -94,10 +128,12 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
         // Repair perms before validation so a failure to parse the file does not
         // leave a permissive config on disk; matches the behavior of `acps status`.
         set_owner_only_file(&config_path)?;
-        Config::load_from_path(&config_path)?;
+        let existing_config = Config::load_from_path(&config_path)?;
+        validate_deployment_overrides_match_existing(&args, &existing_config)?;
         "validated existing config"
     } else {
-        write_new_file_owner_only(&config_path, starter_config().as_bytes())?;
+        let starter_config = starter_config(&args)?;
+        write_new_file_owner_only(&config_path, starter_config.as_bytes())?;
         Config::load_from_path(&config_path)?;
         "created starter config"
     };
@@ -732,57 +768,144 @@ fn local_bin_dir(home: &Path) -> PathBuf {
     home.join(".local").join("bin")
 }
 
-fn starter_config() -> &'static str {
-    r#"[api]
-bind = "127.0.0.1:7700"
-public_url = "http://127.0.0.1:7700"
-max_request_bytes = 104857600
+fn validate_deployment_overrides_match_existing(args: &InitArgs, config: &Config) -> Result<()> {
+    reject_conflicting_deployment_override(
+        "--workspace-root",
+        args.workspace_root.as_deref(),
+        &config.workspace.root,
+    )?;
+    reject_conflicting_deployment_override(
+        "--workspace-uploads",
+        args.workspace_uploads.as_deref(),
+        &config.workspace.uploads,
+    )?;
+    reject_conflicting_deployment_override(
+        "--runtime-user",
+        args.runtime_user.as_deref(),
+        &config.workspace.runtime_user,
+    )
+}
 
-[auth]
-session_key_ref = "ACP_STACK_SESSION_KEY"
-admin_key_ref = "ACP_STACK_ADMIN_KEY"
+fn reject_conflicting_deployment_override(
+    field: &'static str,
+    requested: Option<&str>,
+    existing: &str,
+) -> Result<()> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    if requested == existing {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field,
+        reason: format!(
+            "deployment override applies only when creating a starter config; existing config has `{existing}`. Edit the config first or re-run with the existing value."
+        ),
+    })
+}
 
-[security.http]
-max_request_bytes = 104857600
-rate_limit_per_minute = 120
-burst = 30
-auth_failures_per_minute = 5
-auth_block_duration = "15m"
-allowed_origins = []
-trust_proxy_headers = false
+fn starter_config(args: &InitArgs) -> Result<String> {
+    let workspace_root = args
+        .workspace_root
+        .clone()
+        .unwrap_or_else(|| config::DEFAULT_WORKSPACE_ROOT.to_owned());
+    let workspace_uploads = args.workspace_uploads.clone().unwrap_or_else(|| {
+        if args.workspace_root.is_some() {
+            Path::new(&workspace_root)
+                .join("uploads")
+                .display()
+                .to_string()
+        } else {
+            config::DEFAULT_WORKSPACE_UPLOADS.to_owned()
+        }
+    });
+    let runtime_user = args
+        .runtime_user
+        .clone()
+        .unwrap_or_else(|| config::DEFAULT_RUNTIME_USER.to_owned());
 
-[workspace]
-root = "/workspace"
-uploads = "/workspace/uploads"
-default_shell = "/bin/bash"
-runtime_user = "acp"
-max_file_bytes = 8388608
+    let starter = Config {
+        config_version: config::SUPPORTED_CONFIG_VERSION,
+        api: ApiConfig {
+            bind: config::DEFAULT_API_BIND.to_owned(),
+            public_url: Some(format!("http://{}", config::DEFAULT_API_BIND)),
+            max_request_bytes: STARTER_MAX_REQUEST_BYTES,
+        },
+        auth: AuthConfig {
+            session_key_ref: STARTER_SESSION_KEY_REF.to_owned(),
+            admin_key_ref: STARTER_ADMIN_KEY_REF.to_owned(),
+        },
+        security: SecurityConfig {
+            http: SecurityHttpConfig {
+                max_request_bytes: STARTER_MAX_REQUEST_BYTES,
+                rate_limit_per_minute: STARTER_RATE_LIMIT_PER_MINUTE,
+                burst: STARTER_RATE_LIMIT_BURST,
+                auth_failures_per_minute: STARTER_AUTH_FAILURES_PER_MINUTE,
+                auth_block_duration: STARTER_AUTH_BLOCK_DURATION.to_owned(),
+                allowed_origins: Vec::new(),
+                trust_proxy_headers: false,
+                trusted_proxies: Vec::new(),
+            },
+        },
+        edge: EdgeConfig::default(),
+        workspace: WorkspaceConfig {
+            root: workspace_root.clone(),
+            uploads: workspace_uploads,
+            default_shell: STARTER_DEFAULT_SHELL.to_owned(),
+            runtime_user,
+            max_file_bytes: STARTER_WORKSPACE_MAX_FILE_BYTES,
+            source: Some(WorkspaceSourceConfig {
+                source_type: STARTER_WORKSPACE_SOURCE_TYPE.to_owned(),
+                repo: None,
+                branch: None,
+                bucket: None,
+                prefix: None,
+                dest: None,
+                credential_ref: None,
+                access_key_ref: None,
+                secret_key_ref: None,
+                region: None,
+            }),
+        },
+        logging: LoggingConfig {
+            level: STARTER_LOG_LEVEL.to_owned(),
+            local_retention_days: STARTER_LOCAL_RETENTION_DAYS,
+            supabase: Some(SupabaseLoggingConfig {
+                enabled: false,
+                url: STARTER_SUPABASE_URL.to_owned(),
+                api_key_ref: STARTER_SUPABASE_API_KEY_REF.to_owned(),
+                schema: STARTER_SUPABASE_SCHEMA.to_owned(),
+            }),
+        },
+        agent: AgentConfig {
+            id: STARTER_AGENT_ID.to_owned(),
+            name: STARTER_AGENT_NAME.to_owned(),
+            command: STARTER_AGENT_COMMAND.to_owned(),
+            args: Vec::new(),
+            cwd: Some(workspace_root),
+            env: Vec::new(),
+            expected_sha256: None,
+            restart: STARTER_AGENT_RESTART.to_owned(),
+            mode: None,
+            model: None,
+            harness_version: None,
+            adapter: None,
+            provider: None,
+            install: Some(AgentInstallConfig {
+                install_type: STARTER_AGENT_INSTALL_TYPE.to_owned(),
+                creates: STARTER_AGENT_INSTALL_CREATES.to_owned(),
+                shell: Some(STARTER_AGENT_INSTALL_COMMAND.to_owned()),
+            }),
+        },
+        permissions: Default::default(),
+        commands: Default::default(),
+        dependencies: Default::default(),
+        mcp: Default::default(),
+        acpctl: Default::default(),
+    };
 
-[workspace.source]
-type = "none"
-
-[logging]
-level = "info"
-local_retention_days = 30
-
-[logging.supabase]
-enabled = false
-url = "https://example.supabase.co"
-api_key_ref = "SUPABASE_SECRET_KEY"
-schema = "acp_stack"
-
-[agent]
-id = "placeholder"
-name = "Placeholder Agent"
-command = "acp-agent"
-args = []
-cwd = "/workspace"
-env = []
-restart = "never"
-
-[agent.install]
-type = "shell"
-shell = "true"
-creates = "acp-agent"
-"#
+    let canonical = starter.to_canonical_toml()?;
+    config::load_config_from_str(&canonical)?;
+    Ok(canonical)
 }

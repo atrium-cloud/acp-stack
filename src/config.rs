@@ -34,6 +34,18 @@ pub const SUPPORTED_CONFIG_VERSION: u64 = 1;
 
 pub const IMPORT_SIZE_LIMIT: usize = 1_048_576;
 
+/// Default loopback API bind shared by starter config and deployment packaging.
+pub const DEFAULT_API_BIND: &str = "127.0.0.1:7700";
+
+/// Default workspace root shared by starter config, Docker, and systemd packaging.
+pub const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
+
+/// Default uploads directory under the deployment-managed workspace root.
+pub const DEFAULT_WORKSPACE_UPLOADS: &str = "/workspace/uploads";
+
+/// Default unprivileged Linux runtime user for self-hosted deployments.
+pub const DEFAULT_RUNTIME_USER: &str = "acp";
+
 fn default_config_version() -> u64 {
     SUPPORTED_CONFIG_VERSION
 }
@@ -1274,10 +1286,7 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
         check(env_ref, "agent.env")?;
     }
     if let Some(supabase) = &config.logging.supabase {
-        check(
-            &supabase.api_key_ref,
-            "logging.supabase.api_key_ref",
-        )?;
+        check(&supabase.api_key_ref, "logging.supabase.api_key_ref")?;
     }
     if let Some(source) = &config.workspace.source {
         if let Some(value) = source.credential_ref.as_deref() {
