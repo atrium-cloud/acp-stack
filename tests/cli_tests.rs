@@ -288,6 +288,60 @@ fn init_creates_config_and_state() {
 }
 
 #[test]
+fn init_writes_deployment_controlled_workspace_defaults() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--workspace-root",
+            "/srv/acp",
+            "--workspace-uploads",
+            "/srv/acp/uploads",
+            "--runtime-user",
+            "svc-acp",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("starter config should be readable");
+    let config = load_config_from_str(&written).expect("starter config should validate");
+    assert_eq!(config.workspace.root, "/srv/acp");
+    assert_eq!(config.workspace.uploads, "/srv/acp/uploads");
+    assert_eq!(config.workspace.runtime_user, "svc-acp");
+    assert_eq!(config.agent.cwd.as_deref(), Some("/srv/acp"));
+}
+
+#[test]
+fn init_rejects_conflicting_deployment_overrides_for_existing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["init", "--workspace-root", "/srv/acp"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "query parameter `--workspace-root` is invalid",
+        ))
+        .stderr(predicates::str::contains(
+            "deployment override applies only when creating a starter config",
+        ));
+}
+
+#[test]
 fn init_skips_opencode_config_without_configured_provider() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
