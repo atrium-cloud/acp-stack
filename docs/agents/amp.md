@@ -7,9 +7,9 @@ Amp Code is an adapter-backed target for `acp-stack`. The upstream harness is th
 - Amp manual: https://ampcode.com/manual
 - Amp SDK docs: https://ampcode.com/manual/sdk
 - Amp npm package changes: https://ampcode.com/news/npm-package-changes
-- `amp-acp` repository: https://github.com/tao12345666333/amp-acp
+- `amp-acp` repository: https://github.com/finn-lyu/amp-acp
 
-The Amp docs were checked on 2026-05-17. They document installation with `curl -fsSL https://ampcode.com/install.sh | bash`, API-key auth through `AMP_API_KEY`, and smart mode as an available CLI mode. The current ACP bridge is the third-party `amp-acp` adapter.
+The Amp docs were checked on 2026-05-20. They document installation with `curl -fsSL https://ampcode.com/install.sh | bash`, API-key auth through `AMP_API_KEY`, and smart/rush/deep as available CLI modes. The current ACP bridge is a fork built on the official `@ampcode/sdk`.
 
 ## Install
 
@@ -34,11 +34,9 @@ Runtime secret refs are defined by the shared API-key mapping in `data/mapping.t
 
 ## Model And Mode Selection
 
-Amp Code does not expose raw provider/model designations through the current `acp-stack` support contract. The real ACP probe against `amp-acp v0.7.0` did not advertise a `mode` session config option, so `acps agent set --mode <mode>` is not enabled for Amp until the ACP adapter exposes modes.
+Amp Code does not expose raw provider/model designations through the current `acp-stack` support contract; `acps agent set --provider <provider>` and `acps agent set --model <model>` are not valid for Amp.
 
-From testing with an actual prompt, it appears to default to Smart mode. This could be an `amp-acp` limitation.
-
-Amp's upstream CLI documents modes such as smart mode, but those mode selectors are not currently visible through ACP.
+Instead, same as using Amp Code via its interactive TUI, select a mode instead. `amp-acp` exposes `smart`, `rush`, and `deep` as `mode` session config values, and `acps agent set --mode <mode>` writes `[agent].mode` after validating against that list. When mode is unset, Amp defaults to Smart per upstream behavior.
 
 ## Unsupported Auth Paths
 
