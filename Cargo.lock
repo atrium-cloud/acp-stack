@@ -16,6 +16,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "hmac",
  "http",
  "hyper",
  "hyper-util",
@@ -24,6 +25,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest",
  "rmcp",
+ "roxmltree",
  "rusqlite",
  "schemars 0.8.22",
  "serde",
@@ -35,6 +37,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
@@ -2424,6 +2427,15 @@ dependencies = [
  "quote",
  "serde_json",
  "syn",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
