@@ -81,15 +81,17 @@
 
 ## Provider And Model Selection
 
-- [ ] Fetch `https://models.dev/api.json` over HTTPS during init and explicit provider refresh.
-- [ ] Expose provider/model discovery through the unified API so clients can render one selection flow for OpenCode and Pi.
-- [ ] Add a provider resolution layer that maps configured secret refs to allowed `models.dev` provider ids.
-- [ ] For `OPENCODE_API_KEY`, accept `models.dev` provider ids `opencode` and `opencode-go`.
-- [ ] Persist the selected provider id, model id, and secret refs without storing secret values in plaintext config.
-- [ ] Update generated OpenCode or Pi provider config when the selected provider/model changes.
-- [ ] Relaunch the active OpenCode or Pi process after provider/model config changes.
+- [ ] Start a provisional ACP session during interactive provider/model setup.
+- [ ] Read ACP-advertised `model` and `mode` session config options before accepting model or mode choices.
+- [ ] Validate explicit model and mode values against ACP-advertised session config options before writing config.
+- [ ] When provider-backed `--model` is omitted in non-interactive mode, print ACP-advertised model values and exit without mutating config.
+- [ ] Expose provider/model discovery through the unified API using `data/mapping.toml` provider metadata and ACP-advertised model options.
+- [ ] Validate provider ids against `data/mapping.toml` and enforce the configured agent's provider scope from the mapping.
+- [ ] Resolve default API-key refs, companion refs, and optional provider refs from `data/mapping.toml`.
+- [ ] Persist only non-secret provider id, ACP-advertised model id, supported mode value, and secret refs without storing secret values in plaintext config.
+- [ ] Regenerate supported agent-owned config before writing canonical config when provider/model settings change.
+- [ ] Relaunch the active agent only when provider/model changes require process-level config reload; apply Goose model changes through ACP session config.
 - [ ] Document whether each supported agent can change model/mode after session creation; reject unsupported live changes explicitly.
-- [ ] Use `DEEPSEEK-V4-FLASH` as the default real-prompt smoke-test model when available for the selected OpenCode provider.
 
 ## Config And Agent Setup Hardening
 
