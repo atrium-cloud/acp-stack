@@ -79,14 +79,14 @@ kind = "adapter"
 headless_compatible = true
 set_provider = false
 set_model = false
-set_mode = false
+set_mode = true # smart, rush, deep
 stdio_framing = "json-lines"
 website = "https://ampcode.com/"
 support_doc = "docs/agents/amp.md"
 
 [agents.adapter]
 id = "amp-acp"
-github = "tao12345666333/amp-acp"
+github = "finn-lyu/amp-acp"
 
 [agents.adapter.install.github]
 asset_pattern = "amp-acp-linux-{arch}.tar.gz"

@@ -14,7 +14,7 @@ Supported agents use these paths:
 | OpenCode   | provider-selected API key ref       | generated OpenCode config references env | Init and provider edits write `opencode.json` with the selected provider and matching `{env:...}` key ref. |
 | Cursor CLI | `CURSOR_API_KEY`                    | process env auto-discovery               | Cursor's official wrapper reads the key from the environment; `acps agent set --model <model>` validates Cursor model choices through ACP. |
 | Pi Agent   | provider-specific API key env names | process env plus generated model scope   | `acps agent set` writes Pi `enabledModels` with the selected model.                    |
-| Amp Code   | `AMP_API_KEY`                       | process env auto-discovery               | Amp accepts CLI modes upstream, but `amp-acp v0.7.0` does not advertise ACP mode config.         |
+| Amp Code   | `AMP_API_KEY`                       | process env auto-discovery               | `amp-acp v0.1.1` advertises ACP modes `smart`, `rush`, and `deep`; provider/model selection remains unsupported. |
 | Codex      | `OPENROUTER_API_KEY` for OpenRouter only | generated Codex config references env | Codex OpenAI auth remains Codex-native; Codex OpenRouter writes the Responses provider table. |
 
 ## Provider Concept
