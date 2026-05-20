@@ -9,8 +9,8 @@ use crate::agent_registry::{InstallSet, RegistryCatalog, RegistryEntry, Registry
 use crate::auth::generate_api_key;
 use crate::config::{
     self, AgentConfig, AgentInstallConfig, AgentProviderConfig, ApiConfig, AuthConfig,
-    CloudflareEdgeConfig, Config, DependencyEntry, EdgeConfig, LoggingConfig, SecurityConfig,
-    SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig, WorkspaceSourceConfig,
+    CloudflareEdgeConfig, CodeSourceConfig, Config, DataSourceConfig, DependencyEntry, EdgeConfig,
+    LoggingConfig, SecurityConfig, SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig,
 };
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -62,6 +62,21 @@ pub struct InitArgs {
     /// Runtime user to write into a newly-created starter config.
     #[arg(long)]
     runtime_user: Option<String>,
+    /// Pre-seed `[[workspace.code_sources]]` with one or more git
+    /// repositories. Repeatable. Accepts an `https://...`, `git@host:repo`,
+    /// or other supported repo URL. Only applied when the starter config is
+    /// being created.
+    #[arg(long = "code-from", value_name = "URL")]
+    code_from: Vec<String>,
+    /// Pre-seed `[[workspace.data_sources]]` with a local path or an
+    /// `https://...` archive URL. Repeatable. Only applied when the starter
+    /// config is being created.
+    #[arg(long = "data-from", value_name = "PATH_OR_URL")]
+    data_from: Vec<String>,
+    /// Skip the workspace materializer; useful for tests and dev loops that
+    /// do not need actual content fetched/cloned.
+    #[arg(long)]
+    skip_workspace_init: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -112,7 +127,6 @@ const STARTER_AGENT_RESTART: &str = "never";
 const STARTER_AGENT_INSTALL_CREATES: &str = "acp-agent";
 const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
 const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
-const STARTER_WORKSPACE_SOURCE_TYPE: &str = "none";
 
 pub(super) fn run_init(args: InitArgs) -> Result<()> {
     let home = home_dir()?;
@@ -224,6 +238,15 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
         atomic_write_owner_only(&config_path, canonical.as_bytes())?;
     }
 
+    let materialize_report = if args.skip_workspace_init {
+        None
+    } else {
+        Some(crate::runtime::workspace_init::materialize_workspace(
+            &config.workspace,
+            &secret_store,
+        )?)
+    };
+
     let provisioned_agent_configs =
         crate::runtime::agent_headless_config::provision_agent_headless_config(&config, &home)?;
     let provisioned_edge_artifacts = if edge_requested {
@@ -267,6 +290,22 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
     }
     for artifact in provisioned_edge_artifacts {
         println!("{}: {}", artifact.label, artifact.path.display());
+    }
+    if let Some(materialize) = &materialize_report {
+        for entry in &materialize.code {
+            println!(
+                "code source ({:?}): {}",
+                entry.outcome,
+                entry.destination.display()
+            );
+        }
+        for entry in &materialize.data {
+            println!(
+                "data source ({:?}): {}",
+                entry.outcome,
+                entry.destination.display()
+            );
+        }
     }
 
     Ok(())
@@ -855,18 +894,8 @@ fn starter_config(args: &InitArgs) -> Result<String> {
             default_shell: STARTER_DEFAULT_SHELL.to_owned(),
             runtime_user,
             max_file_bytes: STARTER_WORKSPACE_MAX_FILE_BYTES,
-            source: Some(WorkspaceSourceConfig {
-                source_type: STARTER_WORKSPACE_SOURCE_TYPE.to_owned(),
-                repo: None,
-                branch: None,
-                bucket: None,
-                prefix: None,
-                dest: None,
-                credential_ref: None,
-                access_key_ref: None,
-                secret_key_ref: None,
-                region: None,
-            }),
+            code_sources: code_sources_from_args(args),
+            data_sources: data_sources_from_args(args)?,
         },
         logging: LoggingConfig {
             level: STARTER_LOG_LEVEL.to_owned(),
@@ -908,4 +937,70 @@ fn starter_config(args: &InitArgs) -> Result<String> {
     let canonical = starter.to_canonical_toml()?;
     config::load_config_from_str(&canonical)?;
     Ok(canonical)
+}
+
+fn code_sources_from_args(args: &InitArgs) -> Vec<CodeSourceConfig> {
+    args.code_from
+        .iter()
+        .map(|repo| CodeSourceConfig {
+            source_type: "git".to_owned(),
+            repo: Some(repo.clone()),
+            branch: None,
+            credential_ref: None,
+            name: None,
+        })
+        .collect()
+}
+
+fn data_sources_from_args(args: &InitArgs) -> Result<Vec<DataSourceConfig>> {
+    args.data_from
+        .iter()
+        .map(|value| classify_data_from(value))
+        .collect()
+}
+
+fn classify_data_from(value: &str) -> Result<DataSourceConfig> {
+    if let Some(url) = value.strip_prefix("https://") {
+        let _ = url;
+        return Ok(DataSourceConfig {
+            source_type: "https".to_owned(),
+            name: None,
+            path: None,
+            url: Some(value.to_owned()),
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+            access_key_ref: None,
+            secret_key_ref: None,
+        });
+    }
+    if value.starts_with("http://") {
+        return Err(StackError::InvalidParam {
+            field: "data-from",
+            reason: format!("`{value}` must use https:// (http is not allowed)"),
+        });
+    }
+    if !value.starts_with('/') {
+        return Err(StackError::InvalidParam {
+            field: "data-from",
+            reason: format!("`{value}` must be an absolute path or an https:// URL"),
+        });
+    }
+    Ok(DataSourceConfig {
+        source_type: "local".to_owned(),
+        name: None,
+        path: Some(value.to_owned()),
+        url: None,
+        expected_sha256: None,
+        max_download_bytes: None,
+        max_extracted_bytes: None,
+        bucket: None,
+        prefix: None,
+        region: None,
+        access_key_ref: None,
+        secret_key_ref: None,
+    })
 }

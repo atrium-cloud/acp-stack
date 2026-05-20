@@ -98,13 +98,13 @@
 
 ## Workspace Init Sources
 
-- [ ] Replace the single-source init model with separate code and data lanes.
-- [ ] Clone repositories into `/workspace/usr/code/<repo-name>/`.
-- [ ] Place user data under `/workspace/usr/data/<data-dir-name>/`.
-- [ ] Support local file or directory upload by CLI path before daemon startup.
-- [ ] Support public Google Drive and Dropbox data as generic HTTPS archive download and extraction.
-- [ ] Support S3 bucket/prefix ingestion into a derived data subfolder.
-- [ ] Reject archive extraction with absolute paths, `..`, symlink escapes, unsafe formats, oversized downloads, oversized extracted output, or unsupported redirects.
+- [x] Replace the single-source init model with separate code and data lanes.
+- [x] Clone repositories into `/workspace/usr/code/<repo-name>/`.
+- [x] Place user data under `/workspace/usr/data/<data-dir-name>/`.
+- [x] Support local file or directory upload by CLI path before daemon startup.
+- [x] Support public Google Drive and Dropbox data as generic HTTPS archive download and extraction.
+- [x] Support S3 bucket/prefix ingestion into a derived data subfolder.
+- [x] Reject archive extraction with absolute paths, `..`, symlink escapes, unsafe formats, oversized downloads, oversized extracted output, or unsupported redirects.
 
 ## Init Testflight
 
