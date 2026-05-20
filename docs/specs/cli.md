@@ -9,7 +9,7 @@ The CLI should call the same core service layer as the HTTP API where practical.
 Initial CLI commands:
 
 ```sh
-acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>]
+acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init]
 acps serve
 acps status
 acps reset --yes
@@ -64,13 +64,21 @@ When creating a starter config, deployment tooling may pass `--workspace-root`, 
 
 `acps init --edge cloudflare --exposure tunnel --hostname <host>` is the recommended public deployment profile. It keeps `acps` bound to `127.0.0.1`, sets `[api].public_url` and explicit `allowed_origins` to the Cloudflare hostname, trusts only local `cloudflared` proxy peers, adds a host `cloudflared` dependency when applicable, and emits local `cloudflared` config plus systemd/Docker snippets. Managed Cloudflare API provisioning is deferred.
 
-`acps init` can seed the workspace from one source:
+`acps init` seeds the workspace from any number of declared
+`[[workspace.code_sources]]` and `[[workspace.data_sources]]` entries
+(see [config.md](config.md#workspace-source)). For ad-hoc initial setup,
+`--code-from <repo-url>` (repeatable) appends a `type = "git"`
+code-source and `--data-from <path-or-url>` (repeatable) appends a
+`type = "local"` or `type = "https"` data-source to the *starter*
+config. `--data-from http://...` is rejected at parse time; only
+absolute local paths and `https://` URLs are accepted. Both flags
+affect only a newly-created starter config; on a re-run with an
+existing config they are ignored in favor of the persisted source
+list.
 
-- `none` - start with an empty workspace and upload work data later
-- `git` - clone a repository into the workspace
-- `s3` - download or sync an S3 bucket/prefix into the workspace
-
-Git sources may reference a credential secret for private repositories. S3 sources should reference AWS credential secrets instead of embedding credentials in config.
+`--skip-workspace-init` bypasses the materializer entirely. Useful for
+test loops and for operators who want to apply workspace sources
+manually after init completes.
 
 Phase 4 expands init into a resumable orchestration flow:
 

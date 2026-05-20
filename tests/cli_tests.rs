@@ -283,8 +283,15 @@ fn init_creates_config_and_state() {
     assert!(state_path.is_file());
 
     let config = fs::read_to_string(config_path).expect("starter config should be readable");
-    assert!(config.contains("[workspace.source]"));
-    assert!(config.contains(r#"type = "none""#));
+    assert!(
+        !config.contains("[workspace.source]"),
+        "starter config must not retain the legacy single-source block"
+    );
+    assert!(
+        !config.contains("[[workspace.code_sources]]")
+            && !config.contains("[[workspace.data_sources]]"),
+        "starter config should declare no sources by default"
+    );
 }
 
 #[test]

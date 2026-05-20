@@ -125,38 +125,71 @@ Persistence is provided by the deployment environment:
 
 ## Workspace Source
 
-`acps init` can seed the workspace from one source:
+`acps init` materializes the workspace from two parallel lanes:
 
-- `none` - start with an empty workspace and upload work data later
-- `git` - clone a repository into the workspace
-- `s3` - download or sync an S3 bucket/prefix into the workspace
+- `[[workspace.code_sources]]` clones Git repositories into
+  `<workspace.root>/usr/code/<repo-name>/`.
+- `[[workspace.data_sources]]` ingests local paths, public HTTPS archives,
+  and S3 buckets into `<workspace.root>/usr/data/<data-dir-name>/`.
 
 Example:
 
 ```toml
-[workspace.source]
+[[workspace.code_sources]]
+type = "git"
+repo = "https://github.com/example/project.git"
+branch = "main"
+credential_ref = "GITHUB_TOKEN"  # optional; resolved through the secret store
+
+[[workspace.data_sources]]
+type = "https"
+url = "https://example.com/dataset.tar.gz"
+expected_sha256 = "0123…"
+
+[[workspace.data_sources]]
 type = "s3"
 bucket = "my-research-data"
 prefix = "experiments/2026-05/"
-dest = "/workspace/data"
+region = "us-east-1"
 access_key_ref = "AWS_ACCESS_KEY_ID"
 secret_key_ref = "AWS_SECRET_ACCESS_KEY"
-region = "us-east-1"
 ```
 
-Phase 4 replaces this single-source init model with separate code and data lanes while preserving the ordinary workspace APIs:
+S3 ingestion is implemented with a minimal SigV4 client (no AWS SDK
+dependency); production endpoints follow the path-style
+`https://s3.<region>.amazonaws.com/<bucket>` pattern. Set
+`ACP_STACK_S3_ENDPOINT_OVERRIDE` to redirect to a local mock or a
+VPC-internal endpoint without baking that into TOML. Only static
+`access_key_ref` + `secret_key_ref` credentials are supported today;
+session-token / role-assumption flows are out of scope.
 
-- repositories clone into `/workspace/usr/code/<repo-name>/`
-- user data lands under `/workspace/usr/data/<data-dir-name>/`
-- local user data can be copied from a CLI-provided file or directory path
-  before the daemon starts
-- public Google Drive and Dropbox inputs are treated as generic HTTPS archive
-  downloads, not provider API integrations
-- S3 bucket/prefix inputs land under a derived data subfolder
+`acps init --code-from <repo-url>` and `acps init --data-from <path-or-url>`
+pre-seed entries into the starter config. Each is repeatable. Local paths
+must be absolute, and `--data-from` rejects `http://` URLs at CLI parse
+time.
 
-Init-created destinations fail when the target directory already exists and is non-empty. Interrupted init is resumable: completed steps are verified and reused, and setup continues from the first failed or incomplete step.
+Materializer behaviour:
 
-Archive ingestion is fail-fast. The runtime should accept only bounded HTTPS downloads with limited redirects and safe archive formats, then reject extraction entries containing absolute paths, `..`, symlink escapes, or output that exceeds configured limits.
+- HTTPS downloads run through a streaming reader with a default 500 MiB
+  cap, max 3 redirects, and an https-only scheme allowlist applied to both
+  the requested URL and every redirect target. Archive bodies are
+  extracted into the destination via the safe-extract path; non-archive
+  bodies land at `<dest>/<basename>`.
+- Archive extraction (tar/tar.gz/zip, format detected by magic bytes)
+  rejects entries containing absolute paths, `..` segments, symlinks,
+  hardlinks, FIFOs, character/block devices, or output exceeding the
+  configured per-entry or cumulative size caps.
+- Local sources are copied directory-recursive; symlinks in the source
+  tree are refused rather than dereferenced.
+- Every successful materialization drops a `.acp-stack-source.json`
+  sentinel at the destination root recording the source identity.
+  Re-running `acps init` with a matching sentinel skips the source without
+  re-fetching; a non-empty destination without a matching sentinel
+  hard-fails so init never silently merges into existing content.
+
+Resumable init beyond the per-source sentinel skip (e.g. partial
+interruption of the materializer itself) is tracked under Phase 4
+Installer UX and is not part of the workspace-source feature today.
 
 ## Command Gateway
 

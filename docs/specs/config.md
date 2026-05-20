@@ -51,12 +51,18 @@ default_shell = "/bin/bash"
 runtime_user = "acp"
 max_file_bytes = 8388608
 
-[workspace.source]
-type = "git" # none | git | s3
+[[workspace.code_sources]]
+type = "git"
 repo = "https://github.com/example/project.git"
 branch = "main"
-dest = "/workspace/project"
 credential_ref = "GITHUB_TOKEN"
+# name = "project" # optional override; defaults to the repository leaf name
+
+[[workspace.data_sources]]
+type = "https"
+url = "https://example.com/dataset.tar.gz"
+expected_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# max_download_bytes / max_extracted_bytes are optional safety caps.
 
 [logging]
 level = "info"
@@ -201,16 +207,40 @@ The current implementation supports validation, export, and import:
 - Config version validation: the top-level `config_version` field must be `1`. The field may be omitted in config files, which is treated as version 1 for backward compatibility. Export always emits `config_version = 1`. Unsupported version values are rejected at load time.
 - Secret ref field hardening: fields that should contain secret reference names (like `OPENCODE_API_KEY`) are checked for likely inline secret values. Known token prefixes, JWT-shaped values, long hex-only strings, and names exceeding 128 characters are rejected as likely pasted values rather than reference names.
 - Optional path fields that are config paths (notably `acpctl.socket_path`) require an absolute path with no `..` segments.
-- Validation rejects unknown fields, invalid enum values, relative workspace paths, missing `workspace.source`, incomplete `git` or `s3` source declarations, fields that do not belong to the selected source type, and aliased or empty `[auth].session_key_ref` / `[auth].admin_key_ref`.
+- Validation rejects unknown fields, invalid enum values, relative workspace paths, incomplete or mistyped `[[workspace.code_sources]]` / `[[workspace.data_sources]]` entries, fields that do not belong to the selected source type, and aliased or empty `[auth].session_key_ref` / `[auth].admin_key_ref`.
 
-The Phase 4 init flow will replace the single `[workspace.source]` seed model with separate code and data source declarations. The planned shape is:
+The Phase 4 init flow accepts two parallel workspace ingestion lanes:
 
-- `[[workspace.code_sources]]` for Git repositories cloned into
-  `/workspace/usr/code/<repo-name>/`
-- `[[workspace.data_sources]]` for local paths, public HTTPS archives, and S3
-  bucket/prefix inputs placed under `/workspace/usr/data/<data-dir-name>/`
+- `[[workspace.code_sources]]` clones Git repositories into
+  `<workspace.root>/usr/code/<repo-name>/`. Today only `type = "git"` is
+  supported; `repo` is required; `branch`, `credential_ref`, and `name`
+  (destination override) are optional.
+- `[[workspace.data_sources]]` materializes one of:
+  - `type = "local"`: copies an absolute host path tree into
+    `<workspace.root>/usr/data/<name>/`. Symlinks under the source are
+    refused.
+  - `type = "https"`: streams an `https://` URL (Drive/Dropbox/arbitrary
+    public hosts) through a redirect-capped, size-capped downloader, then
+    extracts safe tar/tar.gz/zip archives or drops the raw payload at
+    `<dest>/<basename>` for non-archive responses. `expected_sha256`,
+    `max_download_bytes`, and `max_extracted_bytes` are optional caps.
+  - `type = "s3"`: paginates `ListObjectsV2` under `bucket`/`prefix`
+    using a minimal SigV4 client built from `access_key_ref` +
+    `secret_key_ref` secrets, downloading each object beneath the
+    per-source byte cap. Path-style endpoints only; overriding the
+    endpoint for local mocks is supported via the
+    `ACP_STACK_S3_ENDPOINT_OVERRIDE` env var.
 
-Repos use their repository name. Data sources use the existing directory name, archive name, single top-level archive directory, or S3 bucket/prefix terminal name. Init refuses to merge into non-empty destinations unless a later explicit overwrite/force contract is added.
+Code-source destinations default to the repository leaf name (`.git`
+suffix stripped). Data-source destinations default to the local
+directory's basename, the archive name (with archive suffix stripped),
+or the S3 prefix terminal. `name = "..."` overrides the derived name.
+
+Init refuses to merge into a non-empty destination directory unless the
+existing `.acp-stack-source.json` sentinel matches the configured
+source. When a sentinel is present and matches, the source is reused
+without re-fetching; when it is missing and the directory is non-empty,
+init hard-fails with `workspace.destination_not_empty`.
 
 Init does not infer model config from API-key refs. It may write provider/auth config after provider selection and required ref collection. `acps agent set` writes supported model config after the model is explicit. `acp-stack` does not store provider API key values in plaintext.
 

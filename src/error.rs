@@ -227,11 +227,49 @@ pub enum StackError {
     #[error("{field} is required")]
     MissingField { field: &'static str },
 
-    #[error("{field} is not valid when workspace.source.type is {source_type}")]
-    InvalidWorkspaceSourceField {
-        field: &'static str,
-        source_type: &'static str,
-    },
+    #[error("workspace.code_sources[{index}]: {reason}")]
+    WorkspaceCodeSourceInvalid { index: usize, reason: String },
+
+    #[error("workspace.data_sources[{index}]: {reason}")]
+    WorkspaceDataSourceInvalid { index: usize, reason: String },
+
+    #[error(
+        "workspace destination `{dest}` is not empty and is not a known acp-stack source directory"
+    )]
+    WorkspaceDestinationNotEmpty { dest: String },
+
+    #[error("workspace destination `{dest}` is outside workspace.root `{root}`")]
+    WorkspaceDestinationOutsideRoot { dest: String, root: String },
+
+    #[error("workspace materialization failed: {reason}")]
+    WorkspaceMaterializeFailed { reason: String },
+
+    #[error("download exceeded the {limit}-byte size limit")]
+    SafeDownloadTooLarge { limit: u64 },
+
+    #[error("download URL `{url}` is not allowed (only https:// is permitted)")]
+    SafeDownloadInsecureRedirect { url: String },
+
+    #[error("download from {url} failed with HTTP status {status}")]
+    SafeDownloadHttpStatus { url: String, status: u16 },
+
+    #[error("download from {url} failed: {reason}")]
+    SafeDownloadFailed { url: String, reason: String },
+
+    #[error("downloaded content sha256 mismatch: expected {expected}, got {actual}")]
+    SafeDownloadChecksumMismatch { expected: String, actual: String },
+
+    #[error("archive contained an unsafe {kind}: `{name}`")]
+    ArchiveUnsafeEntry { kind: &'static str, name: String },
+
+    #[error("archive format is not supported")]
+    ArchiveUnsupportedFormat,
+
+    #[error("archive extracted output exceeded the {limit}-byte size limit")]
+    ArchiveTooLarge { limit: u64 },
+
+    #[error("archive read failed: {reason}")]
+    ArchiveReadFailed { reason: String },
 
     #[error("{field} is not valid when {type_field} is {type_value}")]
     InvalidConfigFieldForType {
@@ -251,9 +289,6 @@ pub enum StackError {
 
     #[error("{field} must not contain `..` segments")]
     PathContainsParentDir { field: &'static str },
-
-    #[error("workspace.source.type must be one of none, git, s3")]
-    InvalidWorkspaceSourceType,
 
     #[error("agent.restart must be one of never, on-crash")]
     InvalidAgentRestart,
@@ -624,13 +659,13 @@ impl StackError {
             StdinRead { .. } => "io.stdin_read_failed",
             MissingSection { .. }
             | MissingField { .. }
-            | InvalidWorkspaceSourceField { .. }
+            | WorkspaceCodeSourceInvalid { .. }
+            | WorkspaceDataSourceInvalid { .. }
             | InvalidConfigFieldForType { .. }
             | InvalidSocketAddress { .. }
             | NonZeroRequired { .. }
             | PathMustBeAbsolute { .. }
             | PathContainsParentDir { .. }
-            | InvalidWorkspaceSourceType
             | InvalidAgentRestart
             | InvalidExpectedSha256
             | InvalidAgentInstallType
@@ -683,6 +718,18 @@ impl StackError {
             WorkspaceIo { .. } => "workspace.io_failed",
             WorkspaceEncodingInvalid { .. } => "workspace.encoding_invalid",
             WorkspaceUploadsNotUnderRoot => "config.invalid",
+            WorkspaceDestinationNotEmpty { .. } => "workspace.destination_not_empty",
+            WorkspaceDestinationOutsideRoot { .. } => "workspace.destination_outside_root",
+            WorkspaceMaterializeFailed { .. } => "workspace.materialize_failed",
+            SafeDownloadTooLarge { .. } => "download.too_large",
+            SafeDownloadInsecureRedirect { .. } => "download.insecure_redirect",
+            SafeDownloadHttpStatus { .. } => "download.http_status",
+            SafeDownloadFailed { .. } => "download.failed",
+            SafeDownloadChecksumMismatch { .. } => "download.checksum_mismatch",
+            ArchiveUnsafeEntry { .. } => "archive.unsafe_entry",
+            ArchiveUnsupportedFormat => "archive.unsupported_format",
+            ArchiveTooLarge { .. } => "archive.too_large",
+            ArchiveReadFailed { .. } => "archive.read_failed",
             CommandNotFound { .. } => "command.not_found",
             CommandDenied { .. } => "command.denied",
             CommandCwdOutsideWorkspace { .. } => "command.cwd_outside_workspace",
@@ -800,8 +847,11 @@ impl StackError {
             StdinRead { .. } => "failed to read stdin".to_owned(),
             MissingSection { section } => format!("missing required section `{section}`"),
             MissingField { field } => format!("{field} is required"),
-            InvalidWorkspaceSourceField { field, source_type } => {
-                format!("{field} is not valid when workspace.source.type is {source_type}")
+            WorkspaceCodeSourceInvalid { index, reason } => {
+                format!("workspace.code_sources[{index}]: {reason}")
+            }
+            WorkspaceDataSourceInvalid { index, reason } => {
+                format!("workspace.data_sources[{index}]: {reason}")
             }
             InvalidConfigFieldForType {
                 field,
@@ -814,9 +864,6 @@ impl StackError {
             NonZeroRequired { field } => format!("{field} must be greater than zero"),
             PathMustBeAbsolute { field } => format!("{field} must be absolute"),
             PathContainsParentDir { field } => format!("{field} must not contain `..` segments"),
-            InvalidWorkspaceSourceType => {
-                "workspace.source.type must be one of none, git, s3".to_owned()
-            }
             InvalidAgentRestart => "agent.restart must be one of never, on-crash".to_owned(),
             InvalidExpectedSha256 => {
                 "agent.expected_sha256 must be exactly 64 lowercase hex characters".to_owned()
@@ -934,6 +981,38 @@ impl StackError {
             WorkspaceUploadsNotUnderRoot => {
                 "workspace.uploads must be inside workspace.root".to_owned()
             }
+            WorkspaceDestinationNotEmpty { dest } => {
+                format!("workspace destination `{dest}` is not empty")
+            }
+            WorkspaceDestinationOutsideRoot { dest, root } => {
+                format!("workspace destination `{dest}` is outside workspace.root `{root}`")
+            }
+            WorkspaceMaterializeFailed { reason } => {
+                format!("workspace materialization failed: {reason}")
+            }
+            SafeDownloadTooLarge { limit } => {
+                format!("download exceeded the {limit}-byte size limit")
+            }
+            SafeDownloadInsecureRedirect { url } => {
+                format!("download URL `{url}` is not allowed (only https:// is permitted)")
+            }
+            SafeDownloadHttpStatus { url, status } => {
+                format!("download from {url} failed with HTTP status {status}")
+            }
+            SafeDownloadFailed { url, reason } => {
+                format!("download from {url} failed: {reason}")
+            }
+            SafeDownloadChecksumMismatch { expected, actual } => {
+                format!("downloaded content sha256 mismatch: expected {expected}, got {actual}")
+            }
+            ArchiveUnsafeEntry { kind, name } => {
+                format!("archive contained an unsafe {kind}: `{name}`")
+            }
+            ArchiveUnsupportedFormat => "archive format is not supported".to_owned(),
+            ArchiveTooLarge { limit } => {
+                format!("archive extracted output exceeded the {limit}-byte size limit")
+            }
+            ArchiveReadFailed { reason } => format!("archive read failed: {reason}"),
             InvalidPermissionsMode => {
                 "permissions.mode must be one of auto, supervised, locked".to_owned()
             }
@@ -1019,13 +1098,13 @@ impl StackError {
             | InvalidAuthFailurePayload
             | MissingSection { .. }
             | MissingField { .. }
-            | InvalidWorkspaceSourceField { .. }
+            | WorkspaceCodeSourceInvalid { .. }
+            | WorkspaceDataSourceInvalid { .. }
             | InvalidConfigFieldForType { .. }
             | InvalidSocketAddress { .. }
             | NonZeroRequired { .. }
             | PathMustBeAbsolute { .. }
             | PathContainsParentDir { .. }
-            | InvalidWorkspaceSourceType
             | InvalidAgentRestart
             | InvalidExpectedSha256
             | InvalidAgentInstallType
@@ -1135,6 +1214,23 @@ impl StackError {
             WorkspaceTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             WorkspaceIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             WorkspaceUploadsNotUnderRoot => StatusCode::BAD_REQUEST,
+            // Workspace materialization runs only during CLI `acps init`, so
+            // these never reach the HTTP envelope today. Keep the mapping
+            // explicit so future API exposure surfaces them as 4xx (operator
+            // mis-config) rather than as opaque 500s.
+            WorkspaceDestinationNotEmpty { .. } | WorkspaceDestinationOutsideRoot { .. } => {
+                StatusCode::CONFLICT
+            }
+            WorkspaceMaterializeFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            SafeDownloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            SafeDownloadInsecureRedirect { .. } => StatusCode::BAD_REQUEST,
+            SafeDownloadHttpStatus { .. }
+            | SafeDownloadFailed { .. }
+            | SafeDownloadChecksumMismatch { .. } => StatusCode::BAD_GATEWAY,
+            ArchiveUnsafeEntry { .. } | ArchiveUnsupportedFormat | ArchiveTooLarge { .. } => {
+                StatusCode::BAD_REQUEST
+            }
+            ArchiveReadFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             CommandNotFound { .. } => StatusCode::NOT_FOUND,
             CommandSpawnFailed { .. } | CommandTimeout => StatusCode::INTERNAL_SERVER_ERROR,
             SecretRefReservedForAuth { .. }

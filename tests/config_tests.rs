@@ -331,151 +331,305 @@ fn rejects_relative_workspace_default_shell() {
 }
 
 #[test]
-fn rejects_relative_workspace_source_dest() {
+fn accepts_empty_workspace_sources() {
+    // The default starter config declares no code or data sources; loading
+    // must succeed because Phase 4 lanes are optional.
+    load_config_from_str(VALID_CONFIG).expect("starter config without sources should load");
+}
+
+#[test]
+fn accepts_git_code_source() {
     let config = VALID_CONFIG.replace(
-        r#"[workspace.source]
-type = "none""#,
-        r#"[workspace.source]
+        "[logging]",
+        r#"[[workspace.code_sources]]
 type = "git"
 repo = "https://github.com/example/project.git"
 branch = "main"
-dest = "project""#,
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
 
-    assert!(
-        error
-            .to_string()
-            .contains("workspace.source.dest must be absolute")
+[logging]"#,
     );
+    load_config_from_str(&config).expect("git code source should validate");
 }
 
 #[test]
-fn rejects_missing_workspace_source() {
+fn rejects_unknown_code_source_type() {
     let config = VALID_CONFIG.replace(
-        r#"
-[workspace.source]
-type = "none""#,
-        "",
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
+        "[logging]",
+        r#"[[workspace.code_sources]]
+type = "svn"
+repo = "https://svn.example.com/trunk"
 
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("unknown code-source type rejected");
     assert!(
         error
             .to_string()
-            .contains("missing required section `workspace.source`")
+            .contains("workspace.code_sources[0]: type must be `git`"),
+        "error was: {error}"
     );
 }
 
 #[test]
-fn rejects_invalid_workspace_source_type() {
-    let error = load_config_from_str(&VALID_CONFIG.replace(r#"type = "none""#, r#"type = "ftp""#))
-        .expect_err("config should be invalid");
-
-    assert!(
-        error
-            .to_string()
-            .contains("workspace.source.type must be one of none, git, s3")
-    );
-}
-
-#[test]
-fn rejects_none_workspace_source_with_git_fields() {
+fn rejects_code_source_without_repo() {
     let config = VALID_CONFIG.replace(
-        r#"[workspace.source]
-type = "none""#,
-        r#"[workspace.source]
-type = "none"
-repo = "https://github.com/example/project.git""#,
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
-
-    assert!(
-        error
-            .to_string()
-            .contains("workspace.source.repo is not valid when workspace.source.type is none")
-    );
-}
-
-#[test]
-fn rejects_git_workspace_source_without_repo() {
-    let config = VALID_CONFIG.replace(
-        r#"[workspace.source]
-type = "none""#,
-        r#"[workspace.source]
+        "[logging]",
+        r#"[[workspace.code_sources]]
 type = "git"
-dest = "/workspace/project""#,
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
 
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("missing repo rejected");
     assert!(
-        error
-            .to_string()
-            .contains("workspace.source.repo is required")
+        error.to_string().contains("workspace.code_sources[0]"),
+        "error was: {error}"
     );
 }
 
 #[test]
-fn rejects_git_workspace_source_with_s3_fields() {
+fn rejects_code_source_with_unsupported_scheme() {
     let config = VALID_CONFIG.replace(
-        r#"[workspace.source]
-type = "none""#,
+        "[logging]",
+        r#"[[workspace.code_sources]]
+type = "git"
+repo = "ftp://example.com/project.git"
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("ftp scheme rejected");
+    assert!(
+        error.to_string().contains("workspace.code_sources[0]"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_code_source_destinations() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.code_sources]]
+type = "git"
+repo = "https://github.com/example/project.git"
+
+[[workspace.code_sources]]
+type = "git"
+repo = "https://github.com/another/project.git"
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("duplicate names rejected");
+    assert!(
+        error.to_string().contains("duplicate destination name"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn accepts_https_data_source() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "https"
+url = "https://example.com/dataset.tar.gz"
+
+[logging]"#,
+    );
+    load_config_from_str(&config).expect("https data source should validate");
+}
+
+#[test]
+fn rejects_http_data_source() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "https"
+url = "http://example.com/dataset.tar.gz"
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("http rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.data_sources[0]: url must start with https://"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_data_source_with_mixed_fields() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "local"
+path = "/srv/example/data"
+bucket = "extra"
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("mixed fields rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.data_sources[0]: bucket is not valid when type is local"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_relative_local_data_source_path() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "local"
+path = "relative/path"
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("relative path rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.data_sources[0]: path `relative/path` must be absolute"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_s3_data_source_without_credentials() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "s3"
+bucket = "example"
+region = "us-east-1"
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("missing creds rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("workspace.data_sources[0]: access_key_ref is required"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_local_data_source_with_download_cap() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "local"
+path = "/srv/example/data"
+max_download_bytes = 1048576
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("cap not valid for local");
+    assert!(
+        error
+            .to_string()
+            .contains("max_download_bytes is not valid when type is local"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_zero_max_download_bytes_on_https() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "https"
+url = "https://example.com/dataset.tar.gz"
+max_download_bytes = 0
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("zero cap rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("max_download_bytes must be greater than zero"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn rejects_s3_data_source_with_extracted_cap() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "s3"
+bucket = "example"
+region = "us-east-1"
+access_key_ref = "AWS_ACCESS_KEY_ID"
+secret_key_ref = "AWS_SECRET_ACCESS_KEY"
+max_extracted_bytes = 1048576
+
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("extracted cap not valid for s3");
+    assert!(
+        error
+            .to_string()
+            .contains("max_extracted_bytes is not valid when type is s3"),
+        "error was: {error}"
+    );
+}
+
+#[test]
+fn accepts_fully_specified_s3_data_source() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "s3"
+bucket = "example"
+prefix = "datasets/"
+region = "us-east-1"
+access_key_ref = "AWS_ACCESS_KEY_ID"
+secret_key_ref = "AWS_SECRET_ACCESS_KEY"
+
+[logging]"#,
+    );
+    load_config_from_str(&config).expect("complete s3 data source should validate");
+}
+
+#[test]
+fn rejects_legacy_workspace_source_with_migration_hint() {
+    let config = VALID_CONFIG.replace(
+        "[logging]",
         r#"[workspace.source]
 type = "git"
 repo = "https://github.com/example/project.git"
 dest = "/workspace/project"
-bucket = "data""#,
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
 
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("legacy source rejected");
+    let message = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("workspace.source.bucket is not valid when workspace.source.type is git")
+        message.contains("workspace.source") && message.contains("code_sources"),
+        "error did not direct operator to the new shape: {message}"
     );
 }
 
 #[test]
-fn rejects_s3_workspace_source_without_bucket() {
+fn rejects_unknown_data_source_type() {
     let config = VALID_CONFIG.replace(
-        r#"[workspace.source]
-type = "none""#,
-        r#"[workspace.source]
-type = "s3"
-dest = "/workspace/data"
-access_key_ref = "AWS_ACCESS_KEY_ID"
-secret_key_ref = "AWS_SECRET_ACCESS_KEY"
-region = "us-east-1""#,
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
+        "[logging]",
+        r#"[[workspace.data_sources]]
+type = "ftp"
+url = "ftp://example.com/data"
 
+[logging]"#,
+    );
+    let error = load_config_from_str(&config).expect_err("unknown type rejected");
     assert!(
         error
             .to_string()
-            .contains("workspace.source.bucket is required")
-    );
-}
-
-#[test]
-fn rejects_s3_workspace_source_with_git_fields() {
-    let config = VALID_CONFIG.replace(
-        r#"[workspace.source]
-type = "none""#,
-        r#"[workspace.source]
-type = "s3"
-bucket = "data"
-dest = "/workspace/data"
-access_key_ref = "AWS_ACCESS_KEY_ID"
-secret_key_ref = "AWS_SECRET_ACCESS_KEY"
-region = "us-east-1"
-repo = "https://github.com/example/project.git""#,
-    );
-    let error = load_config_from_str(&config).expect_err("config should be invalid");
-
-    assert!(
-        error
-            .to_string()
-            .contains("workspace.source.repo is not valid when workspace.source.type is s3")
+            .contains("workspace.data_sources[0]: type must be one of local, https, s3"),
+        "error was: {error}"
     );
 }
 
