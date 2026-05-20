@@ -112,7 +112,9 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 
 `acps agent set --model <model>` updates `[agent].model` for model-only agents whose registry entry declares `set_model = true` and `set_provider = false`. Cursor CLI uses this path; `acps` validates the value against Cursor's ACP-advertised model options and stores the exact advertised value.
 
-`acps agent set --mode <mode>` updates `[agent].mode` for agents whose registry entry declares `set_mode = true` and whose ACP session advertises a `mode` config option. Current real ACP probes advertise OpenCode `build`/`plan`, Cursor `agent`/`ask`/`plan`, and Codex `read-only`/`auto`/`full-access`; Pi, Goose, and `amp-acp v0.7.0` do not advertise mode values.
+`acps agent set --mode <mode>` updates `[agent].mode` for agents whose registry entry declares `set_mode = true` and whose ACP session advertises a `mode` config option. Current real ACP probes advertise OpenCode `build`/`plan`, Cursor `agent`/`ask`/`plan`, Codex `read-only`/`auto`/`full-access`, and `amp-acp v0.1.1` `smart`/`rush`/`deep`; Pi and Goose do not advertise mode values.
+
+Successful `acps agent set` output prints the configured agent id, changed fields, and `settings will take effect on new sessions`.
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 

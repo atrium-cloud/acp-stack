@@ -118,7 +118,7 @@ Codex:
 Amp Code:
 
 - Provider/model config through `acps agent set` is not supported.
-- Mode config through `acps agent set` is not enabled because the current real ACP probe did not advertise a `mode` config option through `amp-acp`.
+- Mode values are validated against Amp's ACP-advertised `mode` option. The current real ACP probe (`amp-acp v0.1.1`, 2026-05-20) returned `smart`, `rush`, and `deep`.
 
 Cursor CLI:
 

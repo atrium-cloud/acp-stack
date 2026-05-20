@@ -78,7 +78,7 @@ The embedded registry replaces an earlier runtime fetch of `https://cdn.agentcli
 
 Provider id validation uses the reusable API-key/provider mapping in the runtime.
 
-Model and mode values are validated against the ACP `session/new` response before config is written. Cursor is model-only and stores the exact advertised value in `[agent].model`; OpenCode, Cursor, and Codex currently advertise ACP modes, while Pi, Goose, and `amp-acp v0.7.0` do not.
+Model and mode values are validated against the ACP `session/new` response before config is written. Cursor is model-only and stores the exact advertised value in `[agent].model`; OpenCode, Cursor, Codex, and `amp-acp v0.1.1` currently advertise ACP modes, while Pi and Goose do not.
 
 Provider management includes a provider/model resolution layer for init and provider refresh:
 

@@ -533,8 +533,11 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: configured"))
-        .stdout(predicates::str::contains("api_key_ref: OPENAI_API_KEY"));
+        .stdout(predicates::str::contains("agent: opencode"))
+        .stdout(predicates::str::contains("api_key_ref: OPENAI_API_KEY"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
         .expect("updated config should be readable");
@@ -601,9 +604,12 @@ creates = "opencode"
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("agent: goose"))
         .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
-        .stdout(predicates::str::contains("Goose config:"));
+        .stdout(predicates::str::contains("Goose config:"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
         .expect("updated config should be readable");
@@ -648,9 +654,12 @@ fn agent_set_codex_openrouter_writes_responses_provider_config() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("agent: codex"))
         .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
-        .stdout(predicates::str::contains("Codex config:"));
+        .stdout(predicates::str::contains("Codex config:"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
         .expect("updated config should be readable");
@@ -717,10 +726,13 @@ wire_api = "responses"
         .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: configured"))
+        .stdout(predicates::str::contains("agent: codex"))
         .stdout(predicates::str::contains("provider: openai"))
         .stdout(predicates::str::contains("model: gpt-5.5"))
-        .stdout(predicates::str::contains("api_key_ref:").not());
+        .stdout(predicates::str::contains("api_key_ref:").not())
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
         .expect("updated config should be readable");
@@ -1198,7 +1210,7 @@ fn agent_set_validates_model_against_acp_config_options() {
 }
 
 #[test]
-fn agent_set_amp_rejects_mode_until_acp_advertises_it() {
+fn agent_set_amp_accepts_mode_only() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -1218,19 +1230,24 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &[], &["smart", "rush", "deep"]);
+
     Command::cargo_bin("acps")
         .expect("binary should build")
         .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "smart"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "Amp Code does not support mode configuration",
+        .success()
+        .stdout(predicates::str::contains("agent: amp"))
+        .stdout(predicates::str::contains("mode: smart"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
         ));
 
     let config =
         fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
-    assert!(!config.contains(r#"mode = "smart""#));
+    assert!(config.contains(r#"mode = "smart""#));
     assert!(!config.contains("[agent.provider]"));
 }
 
@@ -1249,7 +1266,11 @@ fn agent_set_opencode_accepts_mode_only() {
         .args(["agent", "set", "--mode", "plan"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("mode: plan"));
+        .stdout(predicates::str::contains("agent: opencode"))
+        .stdout(predicates::str::contains("mode: plan"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config =
         fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
@@ -1289,7 +1310,11 @@ creates = "opencode"
         .args(["agent", "set", "--mode", "plan"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("mode: plan"));
+        .stdout(predicates::str::contains("agent: cursor"))
+        .stdout(predicates::str::contains("mode: plan"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config =
         fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
@@ -1313,7 +1338,11 @@ fn agent_set_codex_accepts_mode_only() {
         .args(["agent", "set", "--mode", "full-access"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("mode: full-access"));
+        .stdout(predicates::str::contains("agent: codex"))
+        .stdout(predicates::str::contains("mode: full-access"))
+        .stdout(predicates::str::contains(
+            "settings will take effect on new sessions",
+        ));
 
     let config =
         fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");

@@ -516,7 +516,7 @@ mod tests {
         assert!(amp.headless_compatible);
         assert!(!amp.set_provider);
         assert!(!amp.set_model);
-        assert!(!amp.set_mode);
+        assert!(amp.set_mode);
         assert_eq!(
             amp.adapter.as_ref().map(|adapter| adapter.id.as_str()),
             Some("amp-acp")
@@ -654,10 +654,10 @@ creates = "bad"
             github_repo_from_url(
                 "amp",
                 "adapter.github",
-                "https://github.com/tao12345666333/amp-acp"
+                "https://github.com/finn-lyu/amp-acp"
             )
             .expect("repo"),
-            "tao12345666333/amp-acp"
+            "finn-lyu/amp-acp"
         );
     }
 

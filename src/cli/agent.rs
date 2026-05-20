@@ -200,7 +200,7 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     let provisioned = provision_agent_headless_config(&config, &home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
-    println!("agent: configured");
+    print_agent_set_agent(&config);
     println!(
         "provider: {}",
         config.agent.provider.as_ref().expect("provider set").id
@@ -227,6 +227,7 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
+    print_agent_set_effective_notice();
     Ok(())
 }
 
@@ -284,7 +285,7 @@ fn run_codex_openai_set(
     let provisioned = provision_agent_headless_config(&config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
-    println!("agent: configured");
+    print_agent_set_agent(&config);
     println!(
         "provider: {}",
         config.agent.provider.as_ref().expect("provider set").id
@@ -300,6 +301,7 @@ fn run_codex_openai_set(
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
+    print_agent_set_effective_notice();
     Ok(())
 }
 
@@ -366,7 +368,7 @@ fn run_agent_model_set(
     let provisioned = provision_agent_headless_config(&config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
-    println!("agent: configured");
+    print_agent_set_agent(&config);
     println!("model: {}", config.agent.model.as_deref().unwrap_or(""));
     if !required_env_refs.is_empty() {
         println!("required_env_refs: {}", required_env_refs.join(", "));
@@ -374,6 +376,7 @@ fn run_agent_model_set(
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
+    print_agent_set_effective_notice();
     Ok(())
 }
 
@@ -407,9 +410,18 @@ fn run_agent_mode_set(
     let mode = config.agent.mode.as_deref().expect("mode set");
     validate_agent_session_config_value(home, &config, AgentSessionConfigCategory::Mode, mode)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
-    println!("agent: configured");
+    print_agent_set_agent(&config);
     println!("mode: {mode}");
+    print_agent_set_effective_notice();
     Ok(())
+}
+
+fn print_agent_set_agent(config: &Config) {
+    println!("agent: {}", config.agent.id);
+}
+
+fn print_agent_set_effective_notice() {
+    println!("settings will take effect on new sessions");
 }
 
 fn default_api_key_ref_for_agent_provider(agent_id: &str, provider_id: &str) -> Option<String> {

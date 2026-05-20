@@ -44,7 +44,7 @@ We also have limited resources for adding support. Adding each agent requires ex
 - Pi Agent: adapter-required
     - Tested OpenCode Go and Cloudflare AI Gateway on May 17, 2026.
 - Amp Code: adapter-required
-    - Tested with Amp Code Smart Mode on May 17, 2026. `amp-acp v0.7.0` did not advertise ACP mode config on May 19, 2026.
+    - Tested with Amp Code on May 20, 2026. `amp-acp v0.1.1` advertised ACP modes `smart`, `rush`, and `deep` on May 20, 2026.
 - Cursor CLI: native
     - Tested with active Cursor subscription on May 17, 2026.
 - Goose: native
