@@ -66,9 +66,14 @@ rmcp = { version = "1.7.0", features = [
 schemars = "0.8.22"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
+roxmltree = "0.21.1"
+# Pinned to 0.12 so it shares the `digest` 0.10 crate with `sha2` above;
+# newer hmac uses `digest` 0.11 which would force a dual-tree pull.
+hmac = "0.12"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
+base64 = "0.22.1"
 predicates = "3.1.4"
 rmcp = { version = "1.7.0", features = [
     "transport-io",
@@ -77,3 +82,4 @@ rmcp = { version = "1.7.0", features = [
     "transport-child-process",
     "transport-streamable-http-client-unix-socket",
 ] }
+tokio-rustls = { version = "0.26.4", default-features = false }
