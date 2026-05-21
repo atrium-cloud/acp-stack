@@ -762,6 +762,8 @@ fn resolve_agent_env_for_cli(
 fn run_agent_status() -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    let registry_entry = registry.lookup(&config.agent.id);
     let state_path = default_state_path(&home);
     let state_dir = parent_dir(&state_path)?;
     create_dir_owner_only(state_dir)?;
@@ -770,7 +772,8 @@ fn run_agent_status() -> Result<()> {
     store.migrate()?;
     set_owner_only_file(&state_path)?;
 
-    println!("agent: {} ({})", config.agent.name, config.agent.id);
+    println!("agent: {}", config.agent.id);
+    print_agent_status_params(&config, registry_entry);
     println!("command: {}", config.agent.command);
 
     match store.latest_agent_capabilities(&config.agent.id)? {
@@ -794,6 +797,97 @@ fn run_agent_status() -> Result<()> {
         }
     }
     Ok(())
+}
+
+enum AgentStatusParamState {
+    Configured(&'static str, String),
+    Unset(&'static str),
+    Unavailable(&'static str),
+}
+
+fn print_agent_status_params(config: &Config, registry_entry: Option<&RegistryEntry>) {
+    let params = agent_status_params(config, registry_entry);
+    let mut unset = Vec::new();
+    let mut unavailable = Vec::new();
+
+    for param in params {
+        match param {
+            AgentStatusParamState::Configured(name, value) => println!("{name}: {value}"),
+            AgentStatusParamState::Unset(name) => unset.push(name),
+            AgentStatusParamState::Unavailable(name) => unavailable.push(name),
+        }
+    }
+
+    if !unset.is_empty() {
+        println!("{} unset", human_list(&unset));
+    }
+    if !unavailable.is_empty() {
+        println!("{} unavailable", human_list(&unavailable));
+    }
+}
+
+fn agent_status_params(
+    config: &Config,
+    registry_entry: Option<&RegistryEntry>,
+) -> Vec<AgentStatusParamState> {
+    let provider = config
+        .agent
+        .provider
+        .as_ref()
+        .map(|provider| provider.id.clone());
+    let model = config.agent.model.clone().or_else(|| {
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.clone())
+    });
+    let mode = config.agent.mode.clone();
+
+    vec![
+        agent_status_param(
+            "provider",
+            provider,
+            registry_entry.is_some_and(|entry| entry.set_provider),
+        ),
+        agent_status_param(
+            "model",
+            model,
+            registry_entry.is_some_and(|entry| entry.set_model),
+        ),
+        agent_status_param(
+            "mode",
+            mode,
+            registry_entry.is_some_and(|entry| entry.set_mode),
+        ),
+    ]
+}
+
+fn agent_status_param(
+    name: &'static str,
+    configured: Option<String>,
+    supported: bool,
+) -> AgentStatusParamState {
+    if let Some(value) = configured {
+        return AgentStatusParamState::Configured(name, value);
+    }
+    if supported {
+        AgentStatusParamState::Unset(name)
+    } else {
+        AgentStatusParamState::Unavailable(name)
+    }
+}
+
+fn human_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [single] => (*single).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let (last, rest) = items.split_last().expect("non-empty list");
+            format!("{}, and {last}", rest.join(", "))
+        }
+    }
 }
 
 #[cfg(test)]
