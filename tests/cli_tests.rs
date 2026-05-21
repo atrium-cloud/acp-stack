@@ -1587,6 +1587,154 @@ fn status_reports_config_state_schema_and_latest_event() {
         .stdout(predicates::str::contains("latest_event:"));
 }
 
+#[test]
+fn agent_status_reports_provider_with_unset_model_and_mode() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = format!("{}\n[agent.provider]\nid = \"openai\"\n", codex_config());
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: codex"))
+        .stdout(predicates::str::contains("provider: openai"))
+        .stdout(predicates::str::contains("model and mode unset"))
+        .stdout(predicates::str::contains("unavailable").not());
+}
+
+#[test]
+fn agent_status_reports_all_configured_params() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        r#"restart = "on-crash"
+mode = "build"
+
+[agent.provider]
+id = "opencode-go"
+model = "deepseek-v4-pro"
+api_key_ref = "OPENCODE_API_KEY""#,
+    );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: opencode"))
+        .stdout(predicates::str::contains("provider: opencode-go"))
+        .stdout(predicates::str::contains("model: deepseek-v4-pro"))
+        .stdout(predicates::str::contains("mode: build"))
+        .stdout(predicates::str::contains(" unset").not())
+        .stdout(predicates::str::contains(" unavailable").not());
+}
+
+#[test]
+fn agent_status_reports_model_only_agent_params() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
+        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["CURSOR_API_KEY"]"#,
+        )
+        .replace(
+            r#"restart = "on-crash""#,
+            r#"restart = "on-crash"
+model = "gpt-5.5""#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: cursor"))
+        .stdout(predicates::str::contains("model: gpt-5.5"))
+        .stdout(predicates::str::contains("mode unset"))
+        .stdout(predicates::str::contains("provider unavailable"));
+}
+
+#[test]
+fn agent_status_reports_amp_unavailable_provider_and_model() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "amp-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["AMP_API_KEY"]"#)
+        .replace(
+            r#"restart = "on-crash""#,
+            r#"restart = "on-crash"
+mode = "smart""#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: amp"))
+        .stdout(predicates::str::contains("mode: smart"))
+        .stdout(predicates::str::contains("provider and model unavailable"));
+}
+
+#[test]
+fn agent_status_reports_all_supported_params_unset() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: opencode"))
+        .stdout(predicates::str::contains("provider, model, and mode unset"))
+        .stdout(predicates::str::contains("unavailable").not());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_start_and_stop_call_running_daemon() {
     let harness = AgentCliHarness::spawn().await;
