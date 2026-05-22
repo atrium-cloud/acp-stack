@@ -662,6 +662,7 @@ fn install_configured_agent(
     if let Some(install) = config.agent.install.as_ref() {
         let env = resolve_agent_env(home, config)?;
         return run_installer(
+            &config.agent.id,
             install,
             config.agent.expected_sha256.as_deref(),
             env,

@@ -1,6 +1,6 @@
 use acp_stack::state::{
-    AuthFailureFilter, EventFilter, NewPermissionRequest, PermissionStatus, StateStore,
-    default_state_path,
+    AuthFailureFilter, EventFilter, InstallerRunInput, NewPermissionRequest, PermissionStatus,
+    StateStore, default_state_path,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -32,7 +32,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        9
+        10
     );
 }
 
@@ -93,6 +93,151 @@ fn appends_and_queries_events_newest_first() {
 }
 
 #[test]
+fn installer_runs_round_trip_records_and_returns_version() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "test-agent",
+            started_at: "2026-05-21T00:00:00.000000000Z",
+            finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.2.3"),
+        })
+        .expect("harness row should append");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "test-agent",
+            started_at: "2026-05-21T00:00:02.000000000Z",
+            finished_at: Some("2026-05-21T00:00:03.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "adapter",
+            version: None,
+        })
+        .expect("adapter row should append");
+
+    let history = store
+        .query_installer_runs(10)
+        .expect("history should query");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].step, "adapter");
+    assert_eq!(history[0].agent_id.as_deref(), Some("test-agent"));
+    assert!(history[0].version.is_none());
+    assert_eq!(history[1].step, "harness");
+    assert_eq!(history[1].agent_id.as_deref(), Some("test-agent"));
+    assert_eq!(history[1].version.as_deref(), Some("v1.2.3"));
+
+    let latest = store
+        .latest_successful_installer_runs_for_agent("test-agent")
+        .expect("latest-by-step should query");
+    assert_eq!(latest.len(), 2);
+    let harness = latest
+        .iter()
+        .find(|row| row.step == "harness")
+        .expect("harness row");
+    assert_eq!(harness.version.as_deref(), Some("v1.2.3"));
+    let adapter = latest
+        .iter()
+        .find(|row| row.step == "adapter")
+        .expect("adapter row");
+    assert!(adapter.version.is_none());
+}
+
+#[test]
+fn latest_successful_installer_runs_are_scoped_by_agent_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "first-agent",
+            started_at: "2026-05-21T00:00:00.000000000Z",
+            finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.0.0"),
+        })
+        .expect("first agent row should append");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "second-agent",
+            started_at: "2026-05-21T00:00:02.000000000Z",
+            finished_at: Some("2026-05-21T00:00:03.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v9.9.9"),
+        })
+        .expect("second agent row should append");
+
+    let latest = store
+        .latest_successful_installer_runs_for_agent("first-agent")
+        .expect("latest-by-step should query");
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].agent_id.as_deref(), Some("first-agent"));
+    assert_eq!(latest[0].version.as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn latest_successful_installer_runs_skips_failed_rows() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "test-agent",
+            started_at: "2026-05-21T00:00:00.000000000Z",
+            finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "install",
+            version: Some("v1.0.0"),
+        })
+        .expect("first ran row should append");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "test-agent",
+            started_at: "2026-05-21T00:00:02.000000000Z",
+            finished_at: Some("2026-05-21T00:00:03.000000000Z"),
+            status: "failed",
+            stdout: "",
+            stderr: "boom",
+            exit_status: Some(1),
+            step: "install",
+            version: None,
+        })
+        .expect("second failed row should append");
+
+    let latest = store
+        .latest_successful_installer_runs_for_agent("test-agent")
+        .expect("latest-by-step should query");
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].status, "ran");
+    assert_eq!(latest[0].version.as_deref(), Some("v1.0.0"));
+}
+
+#[test]
 fn rejects_invalid_event_payload_json() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
@@ -138,7 +283,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 9")
+            .contains("state schema version 99 is newer than supported version 10")
     );
 }
 

@@ -704,6 +704,7 @@ fn run_agent_install() -> Result<()> {
         let env = resolve_agent_env_for_cli(&home, &config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
         run_installer(
+            &config.agent.id,
             install,
             expected_sha256.as_deref(),
             env,
@@ -774,6 +775,8 @@ fn run_agent_status() -> Result<()> {
 
     println!("agent: {}", config.agent.id);
     print_agent_status_params(&config, registry_entry);
+    let installed_versions = store.latest_successful_installer_runs_for_agent(&config.agent.id)?;
+    print_installed_versions(&installed_versions);
     println!("command: {}", config.agent.command);
 
     match store.latest_agent_capabilities(&config.agent.id)? {
@@ -875,6 +878,25 @@ fn agent_status_param(
         AgentStatusParamState::Unset(name)
     } else {
         AgentStatusParamState::Unavailable(name)
+    }
+}
+
+/// Render one line per `installer_runs.step` recorded for this agent, showing
+/// the step name and the resolved version when known. Steps that ran without
+/// a recorded version (shell installs) print "version unknown"
+/// so the operator can tell the difference between "no install row at all"
+/// and "install ran but produced no version".
+fn print_installed_versions(rows: &[crate::state::InstallerRun]) {
+    if rows.is_empty() {
+        return;
+    }
+    for row in rows {
+        match row.version.as_deref() {
+            Some(value) if !value.is_empty() => {
+                println!("installed {}: {value}", row.step);
+            }
+            _ => println!("installed {}: version unknown", row.step),
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::load_config_from_str;
 use acp_stack::secrets::SecretStore;
-use acp_stack::state::StateStore;
+use acp_stack::state::{InstallerRunInput, StateStore, default_state_path};
 use assert_cmd::Command;
 use base64::Engine;
 use predicates::prelude::PredicateBooleanExt as _;
@@ -1583,8 +1583,64 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 9"))
+        .stdout(predicates::str::contains("schema_version: 10"))
         .stdout(predicates::str::contains("latest_event:"));
+}
+
+#[test]
+fn agent_status_surfaces_installed_versions_from_state() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    // Seed installer_runs rows so `acps agent status` surfaces the versions.
+    // The latest-successful query buckets by `step`, so a 'harness' row with
+    // a recorded version and an 'adapter' row without a version exercise both
+    // the "show version" and "version unknown" branches of the surface.
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "opencode",
+            started_at: "2026-05-21T00:00:00.000000000Z",
+            finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.2.3"),
+        })
+        .expect("harness row should append");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "opencode",
+            started_at: "2026-05-21T00:00:02.000000000Z",
+            finished_at: Some("2026-05-21T00:00:03.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "adapter",
+            version: None,
+        })
+        .expect("adapter row should append");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("installed harness: v1.2.3"))
+        .stdout(predicates::str::contains(
+            "installed adapter: version unknown",
+        ));
 }
 
 #[test]

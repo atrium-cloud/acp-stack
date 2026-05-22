@@ -44,6 +44,7 @@ pub(crate) async fn agent_install_handler(
         {
             let store = state.state.lock().await;
             store.append_installer_run(InstallerRunInput {
+                agent_id: &state.config.agent.id,
                 started_at: &result.row.started_at,
                 finished_at: result.row.finished_at.as_deref(),
                 status: &result.row.status,
@@ -51,6 +52,7 @@ pub(crate) async fn agent_install_handler(
                 stderr: &result.row.stderr,
                 exit_status: result.row.exit_status,
                 step: &result.row.step,
+                version: result.row.version.as_deref(),
             })?;
         }
         result.outcome?
@@ -82,6 +84,7 @@ pub(crate) async fn agent_install_handler(
             let store = state.state.lock().await;
             for row in &result.rows {
                 store.append_installer_run(InstallerRunInput {
+                    agent_id: &state.config.agent.id,
                     started_at: &row.started_at,
                     finished_at: row.finished_at.as_deref(),
                     status: &row.status,
@@ -89,6 +92,7 @@ pub(crate) async fn agent_install_handler(
                     stderr: &row.stderr,
                     exit_status: row.exit_status,
                     step: &row.step,
+                    version: row.version.as_deref(),
                 })?;
             }
         }

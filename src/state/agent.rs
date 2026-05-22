@@ -26,6 +26,7 @@ pub struct AgentCapabilitiesRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallerRun {
     pub id: String,
+    pub agent_id: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub status: String,
@@ -33,10 +34,12 @@ pub struct InstallerRun {
     pub stderr: String,
     pub exit_status: Option<i32>,
     pub step: String,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallerRunInput<'a> {
+    pub agent_id: &'a str,
     pub started_at: &'a str,
     pub finished_at: Option<&'a str>,
     pub status: &'a str,
@@ -44,6 +47,7 @@ pub struct InstallerRunInput<'a> {
     pub stderr: &'a str,
     pub exit_status: Option<i32>,
     pub step: &'a str,
+    pub version: Option<&'a str>,
 }
 
 /// Per-stream byte cap applied before INSERT to keep installer_runs rows bounded.
@@ -198,6 +202,7 @@ impl StateStore {
         let stderr = truncate_for_storage(input.stderr);
         let run = InstallerRun {
             id: next_installer_run_id(),
+            agent_id: Some(input.agent_id.to_owned()),
             started_at: input.started_at.to_owned(),
             finished_at: input.finished_at.map(str::to_owned),
             status: input.status.to_owned(),
@@ -205,16 +210,18 @@ impl StateStore {
             stderr: stderr.clone(),
             exit_status: input.exit_status,
             step: input.step.to_owned(),
+            version: input.version.map(str::to_owned),
         };
 
         self.connection().execute(
             r#"
             INSERT INTO installer_runs
-                (id, started_at, finished_at, status, stdout, stderr, exit_status, step)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             params![
                 run.id,
+                run.agent_id,
                 run.started_at,
                 run.finished_at,
                 run.status,
@@ -222,6 +229,7 @@ impl StateStore {
                 stderr,
                 run.exit_status,
                 run.step,
+                run.version,
             ],
         )?;
 
@@ -232,7 +240,7 @@ impl StateStore {
         let limit = i64::from(limit);
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, started_at, finished_at, status, stdout, stderr, exit_status, step
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version
             FROM installer_runs
             ORDER BY started_at DESC, id DESC
             LIMIT ?1
@@ -241,13 +249,52 @@ impl StateStore {
         let rows = statement.query_map(params![limit], |row| {
             Ok(InstallerRun {
                 id: row.get(0)?,
-                started_at: row.get(1)?,
-                finished_at: row.get(2)?,
-                status: row.get(3)?,
-                stdout: row.get(4)?,
-                stderr: row.get(5)?,
-                exit_status: row.get(6)?,
-                step: row.get(7)?,
+                agent_id: row.get(1)?,
+                started_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                status: row.get(4)?,
+                stdout: row.get(5)?,
+                stderr: row.get(6)?,
+                exit_status: row.get(7)?,
+                step: row.get(8)?,
+                version: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Return the most recent successful installer row for each `step` of the
+    /// given agent. Used by `acps agent status` to render the installed
+    /// harness/adapter versions. Legacy rows without `agent_id` are ignored
+    /// because they cannot be safely attributed to the active config.
+    pub fn latest_successful_installer_runs_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<InstallerRun>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version
+            FROM installer_runs
+            WHERE id IN (
+                SELECT MAX(id) FROM installer_runs
+                WHERE status = 'ran' AND agent_id = ?1
+                GROUP BY step
+            )
+            ORDER BY step
+            "#,
+        )?;
+        let rows = statement.query_map(params![agent_id], |row| {
+            Ok(InstallerRun {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                started_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                status: row.get(4)?,
+                stdout: row.get(5)?,
+                stderr: row.get(6)?,
+                exit_status: row.get(7)?,
+                step: row.get(8)?,
+                version: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
