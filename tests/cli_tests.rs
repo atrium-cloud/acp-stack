@@ -131,6 +131,36 @@ fn write_cli_home(home: &std::path::Path, base_url: &str, admin_key: &str) {
         .expect("auth keys should be stored");
 }
 
+fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
+    let config_dir = home.join(".config/acp-stack");
+    let workspace = home.join("workspace");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::create_dir_all(&workspace).expect("workspace should be created");
+    let mut args = vec!["__acps-test-fake-agent"];
+    args.extend_from_slice(fake_args);
+    let args_toml = args
+        .iter()
+        .map(|arg| toml_string(arg))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let config = VALID_CONFIG
+        .replace(
+            r#"command = "opencode""#,
+            &format!("command = {}", toml_string(env!("CARGO_BIN_EXE_acps"))),
+        )
+        .replace(r#"args = ["acp"]"#, &format!("args = [{args_toml}]"))
+        .replace(
+            r#"cwd = "/workspace""#,
+            &format!("cwd = {}", toml_string(&workspace.to_string_lossy())),
+        )
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []");
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+}
+
+fn toml_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 #[test]
 fn prints_version() {
     let mut command = Command::cargo_bin("acps").expect("binary should build");
@@ -1640,6 +1670,152 @@ fn agent_status_surfaces_installed_versions_from_state() {
         .stdout(predicates::str::contains("installed harness: v1.2.3"))
         .stdout(predicates::str::contains(
             "installed adapter: version unknown",
+        ));
+}
+
+#[test]
+fn agent_test_succeeds_with_prompt() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "test", "--prompt", "hello from cli"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent test: ok"))
+        .stdout(predicates::str::contains("agent: opencode"))
+        .stdout(predicates::str::contains("prompt: provided"))
+        .stdout(predicates::str::contains("session_id: sess_fake_0"))
+        .stdout(predicates::str::contains("stop_reason: end_turn"))
+        .stdout(predicates::str::contains("updates: 2"));
+}
+
+#[test]
+fn agent_test_uses_default_prompt_when_omitted() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "test"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent test: ok"))
+        .stdout(predicates::str::contains("prompt: default"))
+        .stdout(predicates::str::contains("stop_reason: end_turn"));
+}
+
+#[test]
+fn agent_test_applies_configured_model_before_prompt() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(
+        tempdir.path(),
+        &[
+            "--model-config-option",
+            "openai/gpt-5.5",
+            "--expect-model-config",
+            "openai/gpt-5.5",
+        ],
+    );
+    let config_path = tempdir.path().join(".config/acp-stack/acp-stack.toml");
+    let config = fs::read_to_string(&config_path).expect("config should be readable");
+    fs::write(
+        &config_path,
+        config.replace(
+            r#"restart = "on-crash""#,
+            "restart = \"on-crash\"\nmodel = \"openai/gpt-5.5\"",
+        ),
+    )
+    .expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent test: ok"));
+}
+
+#[test]
+fn agent_test_reports_initialize_failure_stage() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--initialize-error"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent test failed at ACP initialize",
+        ))
+        .stderr(predicates::str::contains("fake initialize failure"));
+}
+
+#[test]
+fn agent_test_reports_session_creation_failure_stage() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--session-new-error"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent test failed at session creation",
+        ))
+        .stderr(predicates::str::contains("fake session/new failure"));
+}
+
+#[test]
+fn agent_test_reports_prompt_failure_stage() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--prompt-error"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent test failed at prompt completion",
+        ))
+        .stderr(predicates::str::contains("fake prompt failure"));
+}
+
+#[test]
+fn agent_test_reports_progress_timeout_after_stall() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--prompt-stall-after-update"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "test",
+            "--prompt",
+            "hello",
+            "--progress-timeout",
+            "50ms",
+            "--timeout",
+            "2s",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent test failed at prompt/progress timeout",
+        ))
+        .stderr(predicates::str::contains(
+            "no new session/update or terminal prompt response within 50ms",
         ));
 }
 
