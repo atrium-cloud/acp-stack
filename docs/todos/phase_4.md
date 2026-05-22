@@ -85,9 +85,9 @@
 - [ ] Read ACP-advertised `model` and `mode` session config options before accepting model or mode choices.
 - [ ] Validate explicit model and mode values against ACP-advertised session config options before writing config.
 - [ ] When provider-backed `--model` is omitted in non-interactive mode, print ACP-advertised model values and exit without mutating config.
-- [ ] Expose provider/model discovery through the unified API using `data/mapping.toml` provider metadata and ACP-advertised model options.
-- [ ] Validate provider ids against `data/mapping.toml` and enforce the configured agent's provider scope from the mapping.
-- [ ] Resolve default API-key refs, companion refs, and optional provider refs from `data/mapping.toml`.
+- [ ] Expose provider/model discovery through the unified API using provider metadata and ACP-advertised model options.
+- [ ] Validate provider ids against the provider/env mapping and enforce the configured agent's provider scope from the mapping.
+- [ ] Resolve default API-key refs, companion refs, and optional provider refs from the provider/env mapping.
 - [ ] Persist only non-secret provider id, ACP-advertised model id, supported mode value, and secret refs without storing secret values in plaintext config.
 - [ ] Regenerate supported agent-owned config before writing canonical config when provider/model settings change.
 - [ ] Relaunch the active agent only when provider/model changes require process-level config reload; apply Goose model changes through ACP session config.

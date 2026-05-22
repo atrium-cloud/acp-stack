@@ -1,0 +1,736 @@
+# Provider compatibility metadata.
+#
+# Curated from:
+# [OpenCode Docs - Providers](https://opencode.ai/docs/providers/)
+# [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
+# [Amp manual](https://ampcode.com/manual)
+# [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
+# [models.dev](https://models.dev/api.json)
+# Last updated on 2026-05-22
+
+[[providers]]
+id = ["anthropic"]
+name = "Anthropic"
+agents = ["pi", "opencode", "goose"]
+
+[[providers]]
+id = ["azure-openai-responses"]
+name = "Azure OpenAI Responses"
+agents = ["pi"]
+
+[[providers]]
+id = ["openai"]
+name = "OpenAI"
+agents = ["pi", "opencode", "goose", "codex"]
+
+[[providers]]
+id = ["deepseek"]
+name = "DeepSeek"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["google"]
+name = "Google AI Studio"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["mistral"]
+name = "Mistral"
+agents = ["pi", "opencode", "goose"]
+
+[[providers]]
+id = ["groq"]
+name = "Groq"
+agents = ["pi", "opencode", "goose"]
+
+[[providers]]
+id = ["cerebras"]
+name = "Cerebras"
+agents = ["pi", "opencode", "goose"]
+
+[[providers]]
+id = ["cloudflare-ai-gateway"]
+name = "Cloudflare AI Gateway"
+agents = ["pi", "opencode"]
+companion_env_vars = ["CLOUDFLARE_GATEWAY_ID"]
+optional_env_vars = []
+
+[providers.api_key_env_vars]
+opencode = "CLOUDFLARE_API_TOKEN"
+pi = "CLOUDFLARE_API_KEY"
+
+[[providers]]
+id = ["cloudflare-workers-ai"]
+name = "Cloudflare Workers AI"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["xai"]
+name = "xAI"
+agents = ["pi", "opencode", "goose"]
+
+[[providers]]
+id = ["openrouter"]
+name = "OpenRouter"
+agents = ["pi", "opencode", "goose", "codex"]
+
+[[providers]]
+id = ["vercel-ai-gateway", "vercel"]
+name = "Vercel AI Gateway"
+agents = ["pi", "opencode"]
+
+[providers.provider_ids]
+vercel-ai-gateway = "pi"
+vercel = "opencode"
+
+[[providers]]
+id = ["zai"]
+name = "Z.AI"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["opencode"]
+name = "OpenCode Zen"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["opencode-go"]
+name = "OpenCode Go"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["huggingface"]
+name = "Hugging Face"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["fireworks", "fireworks-ai"]
+name = "Fireworks"
+agents = ["pi", "opencode"]
+
+[providers.provider_ids]
+fireworks = "pi"
+fireworks-ai = "opencode"
+
+[[providers]]
+id = ["together", "togetherai"]
+name = "Together AI"
+agents = ["pi", "opencode"]
+
+[providers.provider_ids]
+together = "pi"
+togetherai = "opencode"
+
+[[providers]]
+id = ["kimi-coding", "kimi-for-coding"]
+name = "Kimi For Coding"
+agents = ["pi", "opencode"]
+
+[providers.provider_ids]
+kimi-coding = "pi"
+kimi-for-coding = "opencode"
+
+[[providers]]
+id = ["minimax"]
+name = "MiniMax"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["minimax-cn"]
+name = "MiniMax (China)"
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["xiaomi"]
+name = "Xiaomi"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["xiaomi-token-plan-cn"]
+name = "Xiaomi Token Plan (China)"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["xiaomi-token-plan-ams"]
+name = "Xiaomi Token Plan (Europe)"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["xiaomi-token-plan-sgp"]
+name = "Xiaomi Token Plan (Singapore)"
+# does not appear to have a status page
+agents = ["pi", "opencode"]
+
+[[providers]]
+id = ["google-vertex"]
+name = "Vertex"
+agents = ["pi", "opencode"]
+companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
+optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+[[providers]]
+id = ["google-vertex-anthropic"]
+name = "Vertex (Anthropic)"
+agents = ["pi", "opencode"]
+companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
+optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+[[providers]]
+id = ["amazon-bedrock"]
+name = "Amazon Bedrock"
+agents = ["pi", "opencode"]
+optional_env_vars = [
+  "AWS_PROFILE",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_REGION",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+  "AWS_BEDROCK_SKIP_AUTH",
+  "AWS_BEDROCK_FORCE_HTTP1",
+  "AWS_BEDROCK_FORCE_CACHE",
+]
+
+[[providers]]
+id = ["amp-code"]
+name = "Amp Code"
+agents = ["amp"]
+
+[[providers]]
+id = ["cursor"]
+name = "Cursor CLI"
+agents = ["cursor"]
+
+# OpenCode-only providers from models.dev
+# Excluded:
+# - abliteration-ai (one obscure model is listed)
+# - claudinio (one obscure model listed)
+# - xpersona (one obscure model listed)
+
+[[providers]]
+id = ["302ai"]
+name = "302.AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["abacus"]
+name = "Abacus"
+agents = ["opencode"]
+
+[[providers]]
+id = ["aihubmix"]
+name = "AIHubMix"
+agents = ["opencode"]
+
+[[providers]]
+id = ["alibaba"]
+name = "Alibaba"
+agents = ["opencode"]
+
+[[providers]]
+id = ["alibaba-cn"]
+name = "Alibaba (China)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["alibaba-coding-plan"]
+name = "Alibaba Coding Plan"
+agents = ["opencode"]
+
+[[providers]]
+id = ["alibaba-coding-plan-cn"]
+name = "Alibaba Coding Plan (China)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["ambient"]
+name = "Ambient"
+agents = ["opencode"]
+
+[[providers]]
+id = ["atomic-chat"]
+name = "Atomic Chat"
+agents = ["opencode"]
+
+[[providers]]
+id = ["auriko"]
+name = "Auriko"
+agents = ["opencode"]
+
+[[providers]]
+id = ["azure"]
+name = "Azure"
+agents = ["opencode"]
+
+[[providers]]
+id = ["azure-cognitive-services"]
+name = "Azure Cognitive Services"
+agents = ["opencode"]
+
+[[providers]]
+id = ["bailing"]
+name = "Bailing"
+agents = ["opencode"]
+
+[[providers]]
+id = ["baseten"]
+name = "Baseten"
+agents = ["opencode"]
+
+[[providers]]
+id = ["berget"]
+name = "Berget.AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["chutes"]
+name = "Chutes"
+agents = ["opencode"]
+
+[[providers]]
+id = ["clarifai"]
+name = "Clarifai"
+agents = ["opencode"]
+
+[[providers]]
+id = ["cloudferro-sherlock"]
+name = "CloudFerro Sherlock"
+agents = ["opencode"]
+
+[[providers]]
+id = ["cohere"]
+name = "Cohere"
+agents = ["opencode"]
+
+[[providers]]
+id = ["cortecs"]
+name = "Cortecs"
+agents = ["opencode"]
+
+[[providers]]
+id = ["crof"]
+name = "CrofAI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["databricks"]
+name = "Databricks"
+agents = ["opencode"]
+
+[[providers]]
+id = ["deepinfra"]
+name = "Deep Infra"
+agents = ["opencode"]
+
+[[providers]]
+id = ["digitalocean"]
+name = "DigitalOcean"
+agents = ["opencode"]
+
+[[providers]]
+id = ["dinference"]
+name = "DInference"
+agents = ["opencode"]
+
+[[providers]]
+id = ["drun"]
+name = "D.Run (China)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["evroc"]
+name = "evroc"
+agents = ["opencode"]
+
+[[providers]]
+id = ["fastrouter"]
+name = "FastRouter"
+agents = ["opencode"]
+
+[[providers]]
+id = ["firepass"]
+name = "Fireworks (Firepass)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["friendli"]
+name = "Friendli"
+agents = ["opencode"]
+
+[[providers]]
+id = ["frogbot"]
+name = "FrogBot"
+agents = ["opencode"]
+
+[[providers]]
+id = ["github-copilot"]
+name = "GitHub Copilot"
+agents = ["opencode"]
+
+[[providers]]
+id = ["github-models"]
+name = "GitHub Models"
+agents = ["opencode"]
+
+[[providers]]
+id = ["gitlab"]
+name = "GitLab Duo"
+agents = ["opencode"]
+
+[[providers]]
+id = ["gmicloud"]
+name = "GMI Cloud"
+agents = ["opencode"]
+
+[[providers]]
+id = ["helicone"]
+name = "Helicone"
+agents = ["opencode"]
+
+[[providers]]
+id = ["hpc-ai"]
+name = "HPC-AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["iflowcn"]
+name = "iFlow"
+agents = ["opencode"]
+
+[[providers]]
+id = ["inception"]
+name = "Inception"
+agents = ["opencode"]
+
+[[providers]]
+id = ["inceptron"]
+name = "Inceptron"
+agents = ["opencode"]
+
+[[providers]]
+id = ["inference"]
+name = "Inference"
+agents = ["opencode"]
+
+[[providers]]
+id = ["io-net"]
+name = "IO.NET"
+agents = ["opencode"]
+
+[[providers]]
+id = ["jiekou"]
+name = "Jiekou.AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["kilo"]
+name = "Kilo Gateway"
+agents = ["opencode"]
+
+[[providers]]
+id = ["kuae-cloud-coding-plan"]
+name = "KUAE Cloud Coding Plan"
+agents = ["opencode"]
+
+[[providers]]
+id = ["lilac"]
+name = "Lilac"
+agents = ["opencode"]
+
+[[providers]]
+id = ["llama"]
+name = "Llama"
+agents = ["opencode"]
+
+[[providers]]
+id = ["llmgateway"]
+name = "LLM Gateway"
+agents = ["opencode"]
+
+[[providers]]
+id = ["lmstudio"]
+name = "LMStudio"
+agents = ["opencode"]
+
+[[providers]]
+id = ["lucidquery"]
+name = "LucidQuery AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["meganova"]
+name = "Meganova"
+agents = ["opencode"]
+
+[[providers]]
+id = ["minimax-cn-coding-plan"]
+name = "MiniMax Token Plan (minimaxi.com)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["minimax-coding-plan"]
+name = "MiniMax Token Plan (minimax.io)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["mixlayer"]
+name = "Mixlayer"
+agents = ["opencode"]
+
+[[providers]]
+id = ["moark"]
+name = "Moark"
+agents = ["opencode"]
+
+[[providers]]
+id = ["modelscope"]
+name = "ModelScope"
+agents = ["opencode"]
+
+[[providers]]
+id = ["moonshotai"]
+name = "Moonshot AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["moonshotai-cn"]
+name = "Moonshot AI (China)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["morph"]
+name = "Morph"
+agents = ["opencode"]
+
+[[providers]]
+id = ["nano-gpt"]
+name = "NanoGPT"
+agents = ["opencode"]
+
+[[providers]]
+id = ["nearai"]
+name = "NEAR AI Cloud"
+agents = ["opencode"]
+
+[[providers]]
+id = ["nebius"]
+name = "Nebius Token Factory"
+agents = ["opencode"]
+
+[[providers]]
+id = ["neuralwatt"]
+name = "Neuralwatt"
+agents = ["opencode"]
+
+[[providers]]
+id = ["nova"]
+name = "Nova"
+agents = ["opencode"]
+
+[[providers]]
+id = ["novita-ai"]
+name = "NovitaAI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["nvidia"]
+name = "Nvidia" # NIM
+agents = ["opencode"]
+
+[[providers]]
+id = ["ollama-cloud"]
+name = "Ollama Cloud"
+agents = ["opencode"]
+
+[[providers]]
+id = ["orcarouter"]
+name = "OrcaRouter"
+agents = ["opencode"]
+
+[[providers]]
+id = ["ovhcloud"]
+name = "OVHcloud AI Endpoints"
+agents = ["opencode"]
+
+[[providers]]
+id = ["perplexity"]
+name = "Perplexity"
+agents = ["opencode"]
+
+[[providers]]
+id = ["perplexity-agent"]
+name = "Perplexity Agent"
+agents = ["opencode"]
+
+[[providers]]
+id = ["poe"]
+name = "Poe"
+agents = ["opencode"]
+
+[[providers]]
+id = ["privatemode-ai"]
+name = "Privatemode AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["qihang-ai"]
+name = "QiHang"
+agents = ["opencode"]
+
+[[providers]]
+id = ["qiniu-ai"]
+name = "Qiniu"
+agents = ["opencode"]
+
+[[providers]]
+id = ["regolo-ai"]
+name = "Regolo AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["requesty"]
+name = "Requesty"
+agents = ["opencode"]
+
+[[providers]]
+id = ["routing-run"]
+name = "routing.run"
+agents = ["opencode"]
+
+[[providers]]
+id = ["sap-ai-core"]
+name = "SAP AI Core"
+agents = ["opencode"]
+
+[[providers]]
+id = ["sarvam"]
+name = "Sarvam AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["scaleway"]
+name = "Scaleway"
+agents = ["opencode"]
+
+[[providers]]
+id = ["siliconflow"]
+name = "SiliconFlow"
+agents = ["opencode"]
+
+[[providers]]
+id = ["siliconflow-cn"]
+name = "SiliconFlow (China)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["stackit"]
+name = "STACKIT"
+agents = ["opencode"]
+
+[[providers]]
+id = ["stepfun"]
+name = "StepFun"
+agents = ["opencode"]
+
+[[providers]]
+id = ["stepfun-ai"]
+name = "StepFun"
+agents = ["opencode"]
+
+[[providers]]
+id = ["submodel"]
+name = "submodel"
+agents = ["opencode"]
+
+[[providers]]
+id = ["synthetic"]
+name = "Synthetic"
+agents = ["opencode"]
+
+[[providers]]
+id = ["tencent-coding-plan"]
+name = "Tencent Coding Plan (China)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["tencent-tokenhub"]
+name = "Tencent TokenHub"
+agents = ["opencode"]
+
+[[providers]]
+id = ["the-grid-ai"]
+name = "The Grid AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["umans-ai-coding-plan"]
+name = "Umans AI Coding Plan"
+agents = ["opencode"]
+
+[[providers]]
+id = ["upstage"]
+name = "Upstage"
+agents = ["opencode"]
+
+[[providers]]
+id = ["v0"]
+name = "v0"
+agents = ["opencode"]
+
+[[providers]]
+id = ["venice"]
+name = "Venice AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["vivgrid"]
+name = "Vivgrid"
+agents = ["opencode"]
+
+[[providers]]
+id = ["vultr"]
+name = "Vultr"
+agents = ["opencode"]
+
+[[providers]]
+id = ["wafer.ai"]
+name = "Wafer"
+agents = ["opencode"]
+
+[[providers]]
+id = ["wandb"]
+name = "Weights & Biases"
+agents = ["opencode"]
+
+[[providers]]
+id = ["zai-coding-plan"]
+name = "Z.AI Coding Plan"
+agents = ["opencode"]
+
+[[providers]]
+id = ["zenmux"]
+name = "ZenMux"
+agents = ["opencode"]
+
+[[providers]]
+id = ["zhipuai"]
+name = "Zhipu AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["zhipuai-coding-plan"]
+name = "Zhipu AI Coding Plan"
+agents = ["opencode"]

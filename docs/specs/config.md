@@ -176,9 +176,17 @@ restart = "on-crash"
 id = "<provider-id>"
 model = "<provider-id>/<model-id>"
 api_key_ref = "<provider-api-key-ref>"
+
+[agent.provider.custom]
+name = "<provider-display-name>"
+base_url = "https://api.example.com/v1"
+api = "chat-completions"
+model_name = "<model-display-name>"
+context = 200000
+output_max_tokens = 65536
 ```
 
-`[agent].model` is optional and used for model-only agents such as Cursor CLI. `[agent.provider]` is optional and used for agents whose provider setup is explicit. `id` is the configured provider id, `model` is the optional agent-specific model id, and `api_key_ref` is the secret ref that should be present in `[agent].env` and referenced from generated agent-owned config. `acps init --provider <provider-id>` can create the initial provider block without a model. `acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` edits this block only for registry entries that declare `set_provider = true`. Codex `openai` stores a provider/model selection without `api_key_ref`; Codex `openrouter` stores `OPENROUTER_API_KEY` and writes the OpenRouter Responses provider table. `acps agent set --model <model>` writes `[agent].model` only for model-only entries that declare `set_model = true` and `set_provider = false`. Both paths validate model values against ACP session config options, regenerate supported agent config before writing the main config, and write `acp-stack.toml` only after generated config provisioning succeeds. If provider-backed `--model` is omitted, interactive terminals prompt from the ACP `model` config option; non-interactive runs list advertised model values and exit without mutating config.
+`[agent].model` is optional and used for model-only agents such as Cursor CLI. `[agent.provider]` is optional and used for agents whose provider setup is explicit. `id` is the configured provider id, `model` is the optional agent-specific model id, and `api_key_ref` is the secret ref that should be present in `[agent].env` and referenced from generated agent-owned config. `[agent.provider.custom]` is optional custom provider metadata; when present, `model` and `api_key_ref` are required. `acps init --provider <provider-id>` can create the initial mapped provider block without a model, while custom provider init requires provider name, base URL, API-key ref, and model id. `acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` edits mapped providers only for registry entries that declare `set_provider = true`. `acps agent set --custom-provider ...` writes custom provider metadata for agents that declare custom-provider and custom-model support. Codex `openai` stores a provider/model selection without `api_key_ref`; Codex `openrouter` stores `OPENROUTER_API_KEY` and writes the OpenRouter Responses provider table; Codex custom providers are Responses-only. `acps agent set --model <model>` writes `[agent].model` only for model-only entries that declare `set_model = true` and `set_provider = false`. Mapped provider/model paths validate model values against ACP session config options, regenerate supported agent config before writing the main config, and write `acp-stack.toml` only after generated config provisioning succeeds. Custom provider setup writes the requested config without guaranteeing that the underlying agent supports that endpoint. If provider-backed `--model` is omitted, interactive terminals prompt from the ACP `model` config option; non-interactive runs list advertised model values and exit without mutating config.
 
 Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets.
 
@@ -244,7 +252,7 @@ init hard-fails with `workspace.destination_not_empty`.
 
 Init does not infer model config from API-key refs. It may write provider/auth config after provider selection and required ref collection. `acps agent set` writes supported model config after the model is explicit. `acp-stack` does not store provider API key values in plaintext.
 
-Phase 4 expands this into a unified provider/model API that resolves provider ids through `data/mapping.toml`, validates selected model and mode values against ACP session config options, updates the agent-owned config file, and relaunches the active agent.
+Phase 4 expands this into a unified provider/model API that resolves provider ids through the provider/env mapping, validates selected model and mode values against ACP session config options, updates the agent-owned config file, and relaunches the active agent.
 
 ## Request Size Limits
 
