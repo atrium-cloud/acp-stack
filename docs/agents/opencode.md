@@ -55,9 +55,9 @@ OpenCode advertises ACP mode values through `session/new`. `acps agent set --mod
 }
 ```
 
-`acps agent set` is the edit path after init. When a model is supplied, the generated config also sets OpenCode's provider-qualified model value. The provider id matters because a default secret ref is not valid for every provider. Init and provider edits validate the provider id against `data/mapping.toml`; model values are validated against OpenCode's ACP `model` config option.
+`acps agent set` is the edit path after init. When a model is supplied, the generated config also sets OpenCode's provider-qualified model value. The provider id matters because a default secret ref is not valid for every provider. Init and provider edits validate the provider id against the provider/env mapping; model values are validated against OpenCode's ACP `model` config option.
 
-OpenCode provider ids in `data/mapping.toml` are sourced from the OpenCode provider docs and `models.dev`.
+OpenCode provider ids in the provider metadata are sourced from the OpenCode provider docs and `models.dev`.
 
 Cloudflare provider setup requires additional env refs from the mapping:
 

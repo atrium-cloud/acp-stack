@@ -8,9 +8,11 @@ use crate::agent_installer::{InstallerOutcome, install_resolved, run_installer};
 use crate::agent_registry::{InstallSet, RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::auth::generate_api_key;
 use crate::config::{
-    self, AgentConfig, AgentInstallConfig, AgentProviderConfig, ApiConfig, AuthConfig,
-    CloudflareEdgeConfig, CodeSourceConfig, Config, DataSourceConfig, DependencyEntry, EdgeConfig,
-    LoggingConfig, SecurityConfig, SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig,
+    self, AgentConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
+    ApiConfig, AuthConfig, CloudflareEdgeConfig, CodeSourceConfig, Config, CustomProviderApi,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DataSourceConfig,
+    DependencyEntry, EdgeConfig, LoggingConfig, SecurityConfig, SecurityHttpConfig,
+    SupabaseLoggingConfig, WorkspaceConfig,
 };
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -35,6 +37,30 @@ pub struct InitArgs {
     /// Secret ref to inject for the selected initial provider.
     #[arg(long, requires = "provider")]
     api_key_ref: Option<String>,
+    /// Configure the selected provider as a custom provider.
+    #[arg(long, requires = "provider")]
+    custom_provider: bool,
+    /// Display name for a custom provider.
+    #[arg(long = "provider-name", requires = "custom_provider")]
+    provider_name: Option<String>,
+    /// Base URL for a custom provider.
+    #[arg(long = "base-url", requires = "custom_provider")]
+    base_url: Option<String>,
+    /// API family for a custom provider: chat-completions or responses.
+    #[arg(long = "provider-api", requires = "custom_provider")]
+    provider_api: Option<String>,
+    /// Initial custom model id.
+    #[arg(long, requires = "custom_provider")]
+    model: Option<String>,
+    /// Display name for a custom model.
+    #[arg(long = "model-name", requires = "custom_provider")]
+    model_name: Option<String>,
+    /// Context window in tokens for a custom model.
+    #[arg(long, requires = "custom_provider")]
+    context: Option<String>,
+    /// Maximum output tokens for a custom model.
+    #[arg(long = "output-max-tokens", requires = "custom_provider")]
+    output_max_tokens: Option<String>,
     /// Install the selected or already configured agent during init.
     #[arg(long, conflicts_with = "no_install_agent")]
     install_agent: bool,
@@ -456,13 +482,7 @@ fn configure_provider_for_init(
     let Some(provider_id) = select_provider_for_init(args, registry, config)? else {
         return Ok(false);
     };
-    let required_refs = apply_provider_to_config(
-        registry,
-        config,
-        config_path,
-        provider_id,
-        args.api_key_ref.clone(),
-    )?;
+    let required_refs = apply_provider_to_config(args, registry, config, config_path, provider_id)?;
     collect_missing_provider_refs(secret_store, &required_refs)?;
     Ok(true)
 }
@@ -508,11 +528,11 @@ fn select_provider_for_init(
 }
 
 fn apply_provider_to_config(
+    args: &InitArgs,
     registry: &RegistryCatalog,
     config: &mut Config,
     config_path: &Path,
     provider_id: String,
-    api_key_ref: Option<String>,
 ) -> Result<Vec<String>> {
     let entry =
         registry
@@ -529,13 +549,33 @@ fn apply_provider_to_config(
             ),
         });
     }
+    if args.custom_provider {
+        if !entry.allow_custom_provider {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "{} does not support custom provider setup",
+                    config.agent.name
+                ),
+            });
+        }
+        if !entry.allow_custom_model {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("{} does not support custom model setup", config.agent.name),
+            });
+        }
+        return apply_custom_provider_to_config(args, config, config_path, provider_id);
+    }
     if !provider_id_is_known(&provider_id) {
         return Err(StackError::InvalidParam {
             field: "provider",
-            reason: format!("provider `{provider_id}` is not listed in data/mapping.toml"),
+            reason: format!("provider `{provider_id}` is not listed in provider/env mapping"),
         });
     }
-    if !provider_id_supports_agent(&provider_id, &config.agent.id) {
+    if provider_id_is_known(&provider_id)
+        && !provider_id_supports_agent(&provider_id, &config.agent.id)
+    {
         return Err(StackError::InvalidParam {
             field: "provider",
             reason: format!(
@@ -545,7 +585,7 @@ fn apply_provider_to_config(
         });
     }
     if config.agent.id == "codex" && provider_id == "openai" {
-        if api_key_ref.is_some() {
+        if args.api_key_ref.is_some() {
             return Err(StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
                 reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
@@ -555,20 +595,41 @@ fn apply_provider_to_config(
             id: provider_id,
             model: None,
             api_key_ref: None,
+            custom: None,
         });
         return Ok(Vec::new());
     }
     let default_api_key_ref = env_var_for_agent_provider_id(&config.agent.id, &provider_id);
     if default_api_key_ref.is_none() {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: format!(
-                "provider `{provider_id}` has no API-key env mapping for agent `{}`",
-                config.agent.id
-            ),
-        });
+        if !entry.allow_custom_provider {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "{} does not support custom provider setup",
+                    config.agent.name
+                ),
+            });
+        }
+        if !entry.allow_custom_model {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("{} does not support custom model setup", config.agent.name),
+            });
+        }
+        if !args.custom_provider && !confirm_custom_provider_setup(&provider_id)? {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "provider `{provider_id}` has no API-key env mapping for agent `{}`",
+                    config.agent.id
+                ),
+            });
+        }
+        return apply_custom_provider_to_config(args, config, config_path, provider_id);
     }
-    let api_key_ref = api_key_ref
+    let api_key_ref = args
+        .api_key_ref
+        .clone()
         .or_else(|| default_api_key_ref.map(str::to_owned))
         .expect("default API-key ref checked");
 
@@ -582,8 +643,184 @@ fn apply_provider_to_config(
         id: provider_id,
         model: None,
         api_key_ref: Some(api_key_ref),
+        custom: None,
     });
     Ok(required_refs)
+}
+
+fn apply_custom_provider_to_config(
+    args: &InitArgs,
+    config: &mut Config,
+    config_path: &Path,
+    provider_id: String,
+) -> Result<Vec<String>> {
+    let provider_name = required_init_custom_value("provider-name", args.provider_name.clone())?;
+    let base_url = required_init_custom_value("base-url", args.base_url.clone())?;
+    let api_key_ref = required_init_custom_value("api-key-ref", args.api_key_ref.clone())?;
+    let model = required_init_custom_value("model", args.model.clone())?;
+    let model_name = args.model_name.clone().unwrap_or_else(|| model.clone());
+    let api = parse_init_custom_provider_api(
+        args.provider_api.as_deref(),
+        default_init_custom_provider_api(&config.agent.id),
+    )?;
+    if config.agent.id == "codex" && api != CustomProviderApi::Responses {
+        return Err(StackError::InvalidParam {
+            field: "provider-api",
+            reason: "Codex custom providers only support responses".to_owned(),
+        });
+    }
+    let context = parse_init_custom_token_limit(
+        "context",
+        args.context.as_deref(),
+        DEFAULT_CUSTOM_MODEL_CONTEXT,
+    )?;
+    let output_max_tokens = parse_init_custom_token_limit(
+        "output-max-tokens",
+        args.output_max_tokens.as_deref(),
+        DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+    )?;
+    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
+        config.agent.env.push(api_key_ref.clone());
+    }
+    config.agent.provider = Some(AgentProviderConfig {
+        id: provider_id,
+        model: Some(model),
+        api_key_ref: Some(api_key_ref.clone()),
+        custom: Some(AgentCustomProviderConfig {
+            name: provider_name,
+            base_url,
+            api,
+            model_name: Some(model_name),
+            context,
+            output_max_tokens,
+        }),
+    });
+    let canonical = config.to_canonical_toml()?;
+    let validated = config::load_config_from_str(&canonical)?;
+    *config = validated;
+    if config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.custom.as_ref())
+        .is_none()
+    {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: "custom provider config was not retained".to_owned(),
+        });
+    }
+    Ok(vec![api_key_ref])
+}
+
+fn confirm_custom_provider_setup(provider_id: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    print!(
+        "provider `{provider_id}` has no default API-key env mapping; configure it as a custom provider? [y/N]: "
+    );
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: PathBuf::from("stdout"),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: PathBuf::from("stdin"),
+            source,
+        })?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn required_init_custom_value(field: &'static str, value: Option<String>) -> Result<String> {
+    if let Some(value) = value
+        && !value.trim().is_empty()
+        && value.trim().len() == value.len()
+    {
+        return Ok(value);
+    }
+    if !io::stdin().is_terminal() {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!("--{field} is required for custom provider init"),
+        });
+    }
+    print!("{field}: ");
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: PathBuf::from("stdout"),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: PathBuf::from("stdin"),
+            source,
+        })?;
+    let answer = answer.trim().to_owned();
+    if answer.is_empty() {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!("--{field} is required for custom provider init"),
+        });
+    }
+    Ok(answer)
+}
+
+fn default_init_custom_provider_api(agent_id: &str) -> CustomProviderApi {
+    if agent_id == "codex" {
+        CustomProviderApi::Responses
+    } else {
+        CustomProviderApi::ChatCompletions
+    }
+}
+
+fn parse_init_custom_provider_api(
+    value: Option<&str>,
+    default: CustomProviderApi,
+) -> Result<CustomProviderApi> {
+    match value {
+        None => Ok(default),
+        Some("chat-completions") => Ok(CustomProviderApi::ChatCompletions),
+        Some("responses") => Ok(CustomProviderApi::Responses),
+        Some(_) => Err(StackError::InvalidParam {
+            field: "provider-api",
+            reason: "must be `chat-completions` or `responses`".to_owned(),
+        }),
+    }
+}
+
+fn parse_init_custom_token_limit(
+    field: &'static str,
+    value: Option<&str>,
+    default: u64,
+) -> Result<u64> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value.contains(',') {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "must be a plain integer without commas".to_owned(),
+        });
+    }
+    let parsed = value.parse::<u64>().map_err(|_| StackError::InvalidParam {
+        field,
+        reason: "must be a positive integer".to_owned(),
+    })?;
+    if parsed == 0 {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "must be greater than 0".to_owned(),
+        });
+    }
+    Ok(parsed)
 }
 
 fn collect_missing_provider_refs(

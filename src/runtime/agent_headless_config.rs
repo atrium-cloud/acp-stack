@@ -11,10 +11,12 @@ use serde_json::{Map, Value as JsonValue, json};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use toml::{Value as TomlValue, map::Map as TomlMap};
 
-use crate::config::Config;
+use crate::config::{AgentCustomProviderConfig, Config, CustomProviderApi};
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, create_dir_owner_only, parent_dir};
-use crate::runtime::provider_keys::{env_var_for_agent_provider_id, provider_name_for_provider_id};
+use crate::runtime::provider_keys::{
+    agent_provider_id_for_provider_id, env_var_for_agent_provider_id, provider_name_for_provider_id,
+};
 
 const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
@@ -75,11 +77,43 @@ fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf
     };
     let provider_id = provider.id.as_str();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
+    if let Some(custom) = provider.custom.as_ref() {
+        let custom_provider_path =
+            write_goose_custom_provider(home, provider_id, custom, api_key_ref)?;
+        let mut root = read_yaml_mapping(&path)?;
+        let values = [
+            ("GOOSE_PROVIDER", YamlValue::String(provider_id.to_owned())),
+            (
+                "GOOSE_MODEL",
+                YamlValue::String(configured_provider_model(config).unwrap_or("").to_owned()),
+            ),
+            ("GOOSE_MODE", YamlValue::String("auto".to_owned())),
+            (
+                "GOOSE_CONTEXT_STRATEGY",
+                YamlValue::String("summarize".to_owned()),
+            ),
+            ("GOOSE_DISABLE_SESSION_NAMING", YamlValue::Bool(true)),
+        ];
+        for (key, value) in values {
+            root.insert(YamlValue::String(key.to_owned()), value);
+        }
+        write_yaml_mapping(&path, root)?;
+        return Ok(Some(custom_provider_path));
+    }
+    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, provider_id)
+    else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: format!(
+                "goose provider `{provider_id}` has no native provider id in provider/env mapping"
+            ),
+        });
+    };
     let Some(native_ref) = env_var_for_agent_provider_id(&config.agent.id, provider_id) else {
         return Err(StackError::AgentConfigProvision {
             path: path.clone(),
             reason: format!(
-                "goose provider `{provider_id}` has no API-key env mapping in data/mapping.toml"
+                "goose provider `{provider_id}` has no API-key env mapping in provider/env mapping"
             ),
         });
     };
@@ -94,7 +128,10 @@ fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf
 
     let mut root = read_yaml_mapping(&path)?;
     let values = [
-        ("GOOSE_PROVIDER", YamlValue::String(provider_id.to_owned())),
+        (
+            "GOOSE_PROVIDER",
+            YamlValue::String(agent_provider_id.to_owned()),
+        ),
         ("GOOSE_MODE", YamlValue::String("auto".to_owned())),
         (
             "GOOSE_CONTEXT_STRATEGY",
@@ -117,6 +154,49 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
     };
     let provider_id = provider.id.as_str();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
+    if let Some(custom) = provider.custom.as_ref() {
+        let mut root = read_json_object(&path)?;
+        insert_if_missing(
+            &mut root,
+            "$schema",
+            json!("https://opencode.ai/config.json"),
+            &path,
+        )?;
+        if let Some(model) = configured_provider_model(config) {
+            root.insert("model".to_owned(), json!(model));
+        }
+        let providers = ensure_object_field(&mut root, "provider", &path)?;
+        let provider_config = ensure_object_field(providers, provider_id, &path)?;
+        provider_config.insert("npm".to_owned(), json!("@ai-sdk/openai-compatible"));
+        provider_config.insert("name".to_owned(), json!(custom.name.clone()));
+        let options = ensure_object_field(provider_config, "options", &path)?;
+        options.insert("baseURL".to_owned(), json!(custom.base_url.clone()));
+        options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
+        let models = ensure_object_field(provider_config, "models", &path)?;
+        if let Some(model) = configured_provider_model(config) {
+            models.insert(
+                model.to_owned(),
+                json!({
+                    "name": custom.model_name.as_deref().unwrap_or(model),
+                    "limit": {
+                        "context": custom.context,
+                        "output": custom.output_max_tokens
+                    }
+                }),
+            );
+        }
+        write_json_object(&path, root)?;
+        return Ok(Some(path));
+    }
+    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, provider_id)
+    else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.clone(),
+            reason: format!(
+                "opencode provider `{provider_id}` has no native provider id in provider/env mapping"
+            ),
+        });
+    };
     let mut root = read_json_object(&path)?;
     insert_if_missing(
         &mut root,
@@ -129,7 +209,7 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
     }
 
     let provider = ensure_object_field(&mut root, "provider", &path)?;
-    let provider_config = ensure_object_field(provider, provider_id, &path)?;
+    let provider_config = ensure_object_field(provider, agent_provider_id, &path)?;
     insert_if_missing(provider_config, "models", json!({}), &path)?;
     let options = ensure_object_field(provider_config, "options", &path)?;
     let api_key_value = json!(format!("{{env:{api_key_ref}}}"));
@@ -141,9 +221,14 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
 
 fn provision_pi_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
     let path = home.join(".pi").join("agent").join("settings.json");
-    let Some(_) = config.agent.provider.as_ref() else {
+    let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
+    if let Some(custom) = provider.custom.as_ref() {
+        let models_path = home.join(".pi").join("agent").join("models.json");
+        let api_key_ref = require_agent_env_for_provider(config, &provider.id, &models_path)?;
+        write_pi_custom_models_json(&models_path, provider, custom, api_key_ref)?;
+    }
     let Some(model) = configured_provider_model(config) else {
         return Ok(None);
     };
@@ -155,11 +240,98 @@ fn provision_pi_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> 
     Ok(Some(path))
 }
 
+fn write_pi_custom_models_json(
+    path: &Path,
+    provider: &crate::config::AgentProviderConfig,
+    custom: &AgentCustomProviderConfig,
+    api_key_ref: &str,
+) -> Result<()> {
+    let mut root = read_json_object(path)?;
+    let providers = ensure_object_field(&mut root, "providers", path)?;
+    providers.insert(
+        provider.id.clone(),
+        json!({
+            "baseUrl": custom.base_url.clone(),
+            "api": custom.api.as_pi_api(),
+            "apiKey": api_key_ref,
+            "models": [{
+                "id": provider.model.as_deref().unwrap_or(""),
+                "name": custom.model_name.as_deref().unwrap_or_else(|| provider.model.as_deref().unwrap_or("")),
+                "contextWindow": custom.context,
+                "maxTokens": custom.output_max_tokens,
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+            }]
+        }),
+    );
+    write_json_object(path, root)
+}
+
+fn write_goose_custom_provider(
+    home: &Path,
+    provider_id: &str,
+    custom: &AgentCustomProviderConfig,
+    api_key_ref: &str,
+) -> Result<PathBuf> {
+    let path = home
+        .join(".config")
+        .join("goose")
+        .join("custom_providers")
+        .join(format!("{provider_id}.json"));
+    let mut root = Map::new();
+    root.insert("id".to_owned(), json!(provider_id));
+    root.insert("name".to_owned(), json!(custom.name.clone()));
+    root.insert("engine".to_owned(), json!("openai"));
+    root.insert("base_url".to_owned(), json!(custom.base_url.clone()));
+    root.insert("api_key_env".to_owned(), json!(api_key_ref));
+    root.insert("context_limit".to_owned(), json!(custom.context));
+    root.insert(
+        "output_max_tokens".to_owned(),
+        json!(custom.output_max_tokens),
+    );
+    write_json_object(&path, root)?;
+    Ok(path)
+}
+
 fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
     let path = home.join(".codex").join("config.toml");
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
+    if let Some(custom) = provider.custom.as_ref() {
+        if custom.api != CustomProviderApi::Responses {
+            return Err(StackError::AgentConfigProvision {
+                path,
+                reason: "codex custom providers only support responses".to_owned(),
+            });
+        }
+        let Some(model) = configured_provider_model(config) else {
+            return Ok(None);
+        };
+        let api_key_ref = require_agent_env_for_provider(config, &provider.id, &path)?;
+        let mut root = read_toml_table(&path)?;
+        root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
+        root.insert(
+            "model_provider".to_owned(),
+            TomlValue::String(provider.id.clone()),
+        );
+        let providers = ensure_toml_table_field(&mut root, "model_providers", &path)?;
+        let custom_provider = ensure_toml_table_field(providers, &provider.id, &path)?;
+        custom_provider.insert("name".to_owned(), TomlValue::String(custom.name.clone()));
+        custom_provider.insert(
+            "base_url".to_owned(),
+            TomlValue::String(custom.base_url.clone()),
+        );
+        custom_provider.insert(
+            "env_key".to_owned(),
+            TomlValue::String(api_key_ref.to_owned()),
+        );
+        custom_provider.insert(
+            "wire_api".to_owned(),
+            TomlValue::String(custom.api.as_codex_wire_api().to_owned()),
+        );
+        write_toml_table(&path, root)?;
+        return Ok(Some(path));
+    }
     if provider.id == "openai" {
         return provision_codex_openai_config(config, &path);
     }
@@ -181,7 +353,8 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
     else {
         return Err(StackError::AgentConfigProvision {
             path: path.clone(),
-            reason: "codex OpenRouter has no API-key env mapping in data/mapping.toml".to_owned(),
+            reason: "codex OpenRouter has no API-key env mapping in provider/env mapping"
+                .to_owned(),
         });
     };
     if api_key_ref != native_ref {
@@ -202,7 +375,7 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
     let Some(provider_name) = provider_name_for_provider_id(CODEX_OPENROUTER_PROVIDER_ID) else {
         return Err(StackError::AgentConfigProvision {
             path: path.clone(),
-            reason: "codex OpenRouter has no provider metadata in data/mapping.toml".to_owned(),
+            reason: "codex OpenRouter has no provider metadata in provider/env mapping".to_owned(),
         });
     };
     let providers = ensure_toml_table_field(&mut root, "model_providers", &path)?;
@@ -569,6 +742,24 @@ restart = "on-crash"
         .expect("config parses")
     }
 
+    fn custom_provider_config(agent_id: &str, api: crate::config::CustomProviderApi) -> Config {
+        let mut config = config_with_agent(agent_id, &["CUSTOM_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "myprovider".to_owned(),
+            model: Some("my-model".to_owned()),
+            api_key_ref: Some("CUSTOM_API_KEY".to_owned()),
+            custom: Some(crate::config::AgentCustomProviderConfig {
+                name: "My Provider".to_owned(),
+                base_url: "https://api.myprovider.example/v1".to_owned(),
+                api,
+                model_name: Some("My Model".to_owned()),
+                context: 200_000,
+                output_max_tokens: 65_536,
+            }),
+        });
+        config
+    }
+
     #[test]
     fn goose_config_is_skipped_without_configured_provider() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -581,6 +772,34 @@ restart = "on-crash"
     }
 
     #[test]
+    fn goose_custom_provider_writes_provider_file_and_selection() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("goose", crate::config::CustomProviderApi::ChatCompletions);
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let provider_path = tempdir
+            .path()
+            .join(".config/goose/custom_providers/myprovider.json");
+        let provider: Value = serde_json::from_str(
+            &std::fs::read_to_string(provider_path).expect("custom provider should be readable"),
+        )
+        .expect("custom provider parses");
+        assert_eq!(provider["base_url"], "https://api.myprovider.example/v1");
+        assert_eq!(provider["api_key_env"], "CUSTOM_API_KEY");
+        assert_eq!(provider["context_limit"], 200_000);
+
+        let goose_path = tempdir.path().join(".config/goose/config.yaml");
+        let goose: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(goose_path).expect("goose config should be readable"),
+        )
+        .expect("goose config parses");
+        assert_eq!(goose["GOOSE_PROVIDER"], "myprovider");
+        assert_eq!(goose["GOOSE_MODEL"], "my-model");
+    }
+
+    #[test]
     fn goose_config_references_provider_native_env() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut config = config_with_agent("goose", &["OPENROUTER_API_KEY"]);
@@ -588,6 +807,7 @@ restart = "on-crash"
             id: "openrouter".to_owned(),
             model: Some("deepseek/deepseek-v4-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
         });
 
         let provisioned =
@@ -629,6 +849,7 @@ restart = "on-crash"
             id: "cerebras".to_owned(),
             model: Some("llama3.1-8b".to_owned()),
             api_key_ref: Some("CEREBRAS_API_KEY".to_owned()),
+            custom: None,
         });
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
@@ -650,6 +871,7 @@ restart = "on-crash"
             id: "openrouter".to_owned(),
             model: Some("deepseek/deepseek-v4-flash".to_owned()),
             api_key_ref: Some("CUSTOM_OPENROUTER_KEY".to_owned()),
+            custom: None,
         });
 
         let err = provision_agent_headless_config(&config, tempdir.path()).expect_err("fails");
@@ -676,6 +898,7 @@ restart = "on-crash"
             id: "openrouter".to_owned(),
             model: Some("deepseek/deepseek-v4-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
         });
 
         let err = provision_agent_headless_config(&config, tempdir.path()).expect_err("fails");
@@ -694,6 +917,7 @@ restart = "on-crash"
             id: "openrouter".to_owned(),
             model: Some("deepseek/deepseek-v4-flash".to_owned()),
             api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
         });
 
         let provisioned =
@@ -726,6 +950,49 @@ restart = "on-crash"
     }
 
     #[test]
+    fn codex_custom_provider_writes_responses_provider_config() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = custom_provider_config("codex", crate::config::CustomProviderApi::Responses);
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let path = tempdir.path().join(".codex").join("config.toml");
+        let value: toml::Value = toml::from_str(
+            &std::fs::read_to_string(path).expect("codex config should be readable"),
+        )
+        .expect("codex config toml parses");
+        assert_eq!(value["model"].as_str(), Some("my-model"));
+        assert_eq!(value["model_provider"].as_str(), Some("myprovider"));
+        assert_eq!(
+            value["model_providers"]["myprovider"]["base_url"].as_str(),
+            Some("https://api.myprovider.example/v1")
+        );
+        assert_eq!(
+            value["model_providers"]["myprovider"]["env_key"].as_str(),
+            Some("CUSTOM_API_KEY")
+        );
+        assert_eq!(
+            value["model_providers"]["myprovider"]["wire_api"].as_str(),
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn codex_custom_provider_rejects_chat_completions() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("codex", crate::config::CustomProviderApi::ChatCompletions);
+
+        let err = provision_agent_headless_config(&config, tempdir.path()).expect_err("fails");
+
+        assert!(
+            err.to_string()
+                .contains("codex custom providers only support responses"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn codex_openai_model_removes_custom_provider_and_writes_backup() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let codex_dir = tempdir.path().join(".codex");
@@ -752,6 +1019,7 @@ wire_api = "responses"
             id: "openai".to_owned(),
             model: Some("gpt-5.5".to_owned()),
             api_key_ref: None,
+            custom: None,
         });
 
         let provisioned =
@@ -837,6 +1105,7 @@ wire_api = "responses"
             id: "openai".to_owned(),
             model: Some("openai/gpt-5.5".to_owned()),
             api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
         });
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
@@ -851,6 +1120,48 @@ wire_api = "responses"
             "{env:OPENAI_API_KEY}"
         );
         assert_eq!(value["provider"]["openai"]["options"]["timeout"], 600000);
+    }
+
+    #[test]
+    fn opencode_custom_provider_writes_model_limits() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = custom_provider_config(
+            "opencode",
+            crate::config::CustomProviderApi::ChatCompletions,
+        );
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
+        let value: Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("opencode config should be readable"),
+        )
+        .expect("opencode config json parses");
+        assert_eq!(value["model"], "my-model");
+        assert_eq!(
+            value["provider"]["myprovider"]["npm"],
+            "@ai-sdk/openai-compatible"
+        );
+        assert_eq!(
+            value["provider"]["myprovider"]["options"]["baseURL"],
+            "https://api.myprovider.example/v1"
+        );
+        assert_eq!(
+            value["provider"]["myprovider"]["options"]["apiKey"],
+            "{env:CUSTOM_API_KEY}"
+        );
+        assert_eq!(
+            value["provider"]["myprovider"]["models"]["my-model"]["limit"]["context"],
+            200_000
+        );
+        assert_eq!(
+            value["provider"]["myprovider"]["models"]["my-model"]["limit"]["output"],
+            65_536
+        );
     }
 
     #[test]
@@ -880,6 +1191,7 @@ wire_api = "responses"
             id: "opencode-go".to_owned(),
             model: Some("opencode-go/deepseek-v4-flash".to_owned()),
             api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
+            custom: None,
         });
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
@@ -891,6 +1203,41 @@ wire_api = "responses"
         assert_eq!(
             value["enabledModels"],
             json!(["opencode-go/deepseek-v4-flash"])
+        );
+    }
+
+    #[test]
+    fn pi_custom_provider_writes_models_json() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("pi", crate::config::CustomProviderApi::ChatCompletions);
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
+        let models: Value = serde_json::from_str(
+            &std::fs::read_to_string(models_path).expect("models json should be readable"),
+        )
+        .expect("models json parses");
+        assert_eq!(
+            models["providers"]["myprovider"]["baseUrl"],
+            "https://api.myprovider.example/v1"
+        );
+        assert_eq!(
+            models["providers"]["myprovider"]["api"],
+            "openai-completions"
+        );
+        assert_eq!(
+            models["providers"]["myprovider"]["apiKey"],
+            "CUSTOM_API_KEY"
+        );
+        assert_eq!(
+            models["providers"]["myprovider"]["models"][0]["contextWindow"],
+            200_000
+        );
+        assert_eq!(
+            models["providers"]["myprovider"]["models"][0]["maxTokens"],
+            65_536
         );
     }
 

@@ -1,12 +1,12 @@
 # Agent Provider Config
 
-Last updated: May 19, 2026
+Last updated: May 22, 2026
 
 ## Concept
 
 `provider` is the `acps` concept for the model-provider backend an agent should use. It is separate from the ACP agent itself. For example, `opencode` is the agent id, while `opencode-go`, `openai`, or `anthropic` can be provider ids configured for that agent.
 
-Provider ids are resolved against `data/mapping.toml`. Model ids are resolved from the agent's ACP `session/new` config options: the agent advertises a `model` option and `acps` accepts only values from that option.
+Provider ids are resolved against the provider/env mapping. Model ids are resolved from the agent's ACP `session/new` config options: the agent advertises a `model` option and `acps` accepts only values from that option.
 
 ## CLI
 
@@ -14,6 +14,7 @@ Provider config is changed with:
 
 ```sh
 acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]
+acps agent set --custom-provider --provider <provider-id> --provider-name <display-name> --base-url <url> --api-key-ref <ref> --model <model-id> [--provider-api <chat-completions|responses>] [--model-name <display-name>] [--context <tokens>] [--output-max-tokens <tokens>]
 ```
 
 Model-only config is changed with:
@@ -29,14 +30,16 @@ Behavior:
 - rejects provider edits unless the embedded registry entry declares `set_provider = true`
 - rejects model edits unless the embedded registry entry declares `set_model = true`
 - adds the selected API-key ref and provider companion env refs to `[agent].env` when missing
-- rejects provider ids that have no API-key env mapping for the configured agent
+- rejects mapped provider ids that have no API-key env mapping for the configured agent unless `--custom-provider` is used
 - regenerates supported agent-owned config files before writing the main config
 - writes canonical TOML atomically only after generated config provisioning succeeds
 - does not store provider API-key values in plaintext config
 
-When `--api-key-ref` is omitted, `acps` uses the default key ref from [api_key.md](api_key.md). Providers without an API-key env mapping for the configured agent are rejected by generated provider config paths.
+When `--api-key-ref` is omitted, `acps` uses the default key ref from [api_key.md](api_key.md). Providers without an API-key env mapping for the configured agent require custom provider setup.
 
 When `--model` is omitted, interactive terminals start a provisional ACP session and prompt from the advertised `model` config option. Non-interactive invocations print the advertised model values and exit without mutating config.
+
+Custom provider setup writes config only; it does not certify that the underlying agent can talk to the endpoint. OpenCode, Pi, and Goose default custom providers to `chat-completions`. Codex defaults custom providers to `responses` and rejects `chat-completions` because Codex-oriented OpenAI models are Responses-only in this support contract. Custom token limits default to `context = 200000` and `output_max_tokens = 65536`; override values must be plain positive integers without commas.
 
 Mode config is changed with:
 
@@ -56,18 +59,27 @@ model = "<agent-model-id>"
 id = "<provider-id>"
 model = "<agent-model-id>"
 api_key_ref = "<provider-api-key-ref>"
+
+[agent.provider.custom]
+name = "<provider-display-name>"
+base_url = "https://api.example.com/v1"
+api = "chat-completions"
+model_name = "<model-display-name>"
+context = 200000
+output_max_tokens = 65536
 ```
 
 Fields:
 
 - `[agent].model`: exact agent-advertised model id for model-only agents such as Cursor CLI.
-- `[agent.provider].id`: provider id listed for the configured agent in `data/mapping.toml`.
-- `[agent.provider].model`: exact agent-advertised model id for provider-backed agents. Goose uses provider-native model ids, while OpenCode and Pi commonly use `<provider-id>/<model-id>`.
+- `[agent.provider].id`: provider id listed for the configured agent in the provider metadata.
+- `[agent.provider].model`: exact agent-advertised model id for mapped provider-backed agents, or the operator-provided custom model id for custom providers. Goose uses provider-native model ids, while OpenCode and Pi commonly use `<provider-id>/<model-id>`.
 - `[agent.provider].api_key_ref`: secret ref that should be present in `[agent].env` and referenced by generated agent-owned config.
+- `[agent.provider.custom]`: optional custom provider metadata. When present, `model` and `api_key_ref` are required.
 
 ## Accepted Provider IDs And Model Formats
 
-Provider ids must be listed for the configured agent in `data/mapping.toml`. The current CLI accepts non-empty model ids without surrounding whitespace, validates model ids against ACP session config options, and uses [api_key.md](api_key.md) to choose the default API-key ref.
+Mapped provider ids must be listed for the configured agent in the provider metadata. Custom provider ids are operator-defined for agents that declare custom-provider support. The current CLI accepts non-empty model ids without surrounding whitespace, validates mapped model ids against ACP session config options, and uses [api_key.md](api_key.md) to choose the default API-key ref.
 
 Model values are agent-specific:
 
@@ -82,38 +94,38 @@ Model values are agent-specific:
 
 Goose:
 
-- Provider ids must be listed for Goose in `data/mapping.toml`.
+- Provider ids must be listed for Goose in the provider metadata.
 - Model ids should be provider-native for the selected provider.
-- `acps` writes `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, `GOOSE_CONTEXT_STRATEGY = summarize`, and `GOOSE_DISABLE_SESSION_NAMING = true` after provider selection.
+- `acps` writes `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, `GOOSE_CONTEXT_STRATEGY = summarize`, and `GOOSE_DISABLE_SESSION_NAMING = true` after provider selection. Custom providers also write a provider descriptor under `~/.config/goose/custom_providers/`.
 - `acps` stores Goose's selected model in `[agent.provider].model` and applies it through ACP `session/set_config_option` with `configId = "model"` after `session/new` and before the first prompt.
 - Goose consumes provider-native API-key env vars directly. `acps agent set --provider` therefore requires the selected `api_key_ref` to match the default env var from [api_key.md](api_key.md).
 - The current real ACP probe did not advertise Goose mode values.
 
 OpenCode:
 
-- Provider ids must be listed for OpenCode in `data/mapping.toml`.
+- Provider ids must be listed for OpenCode in the provider metadata.
 - Model ids should be provider-qualified.
 - Mode values are validated against OpenCode's ACP-advertised `mode` option. The current real ACP probe returned `build` and `plan`.
-- `acps` writes `~/.config/opencode/opencode.json` with `model` set to the selected model and `provider.<id>.options.apiKey` set to `{env:<api_key_ref>}`.
+- `acps` writes `~/.config/opencode/opencode.json` with `model` set to the selected model and `provider.<id>.options.apiKey` set to `{env:<api_key_ref>}`. Custom providers write `npm = "@ai-sdk/openai-compatible"`, `options.baseURL`, `options.apiKey`, and the custom model limits.
 - OpenCode can use whatever key the configured provider block references; the provider block must match the chosen provider and key.
 - `cloudflare-ai-gateway` defaults to `CLOUDFLARE_API_TOKEN` for OpenCode because that is the OpenCode/models.dev auth contract. `cloudflare-workers-ai` defaults to `CLOUDFLARE_API_KEY`.
 
 Pi:
 
 - Provider is part of the model string.
-- Provider ids must be listed for Pi in `data/mapping.toml`.
+- Provider ids must be listed for Pi in the provider metadata.
 - Model ids should use the form accepted by Pi for the selected provider.
-- `acps agent set` writes `~/.pi/agent/settings.json` `enabledModels` from the explicit configured model.
+- `acps agent set` writes `~/.pi/agent/settings.json` `enabledModels` from the explicit configured model. Custom providers also write `~/.pi/agent/models.json` with provider base URL, API family, API-key ref, and model limits.
 - Pi Cloudflare provider setup follows Pi's provider docs: `cloudflare-workers-ai` requires `CLOUDFLARE_API_KEY` plus `CLOUDFLARE_ACCOUNT_ID`; `cloudflare-ai-gateway` also requires `CLOUDFLARE_GATEWAY_ID`.
 
 Codex:
 
-- Provider ids are limited to `openai` and `openrouter`.
+- Mapped provider ids are limited to `openai` and `openrouter`; custom providers are supported only with `api = "responses"`.
 - `acps agent set --provider openai --model <model-id>` validates the model through Codex ACP session config, writes `[agent.provider]` without `api_key_ref`, and keeps OpenAI auth Codex-native.
 - When switching Codex to `openai`, `acps` writes `~/.codex/config.toml` with `model` and `model_provider = "openai"`. If the previous canonical Codex config selected a generated non-OpenAI provider, `acps` first backs up the file as `config.<provider>.toml` or the next `-1`, `-2` suffix, then removes that provider table from the canonical file.
 - `acps agent set --provider openrouter --model <model-id>` defaults `api_key_ref` to `OPENROUTER_API_KEY`, validates the model through Codex ACP session config, and writes `~/.codex/config.toml` with `model_provider = "openrouter"` and `model_providers.openrouter` using `base_url = "https://openrouter.ai/api/v1/responses"`, `env_key = "OPENROUTER_API_KEY"`, and `wire_api = "responses"`.
 - Mode values are validated against Codex's ACP-advertised `mode` option. The current real ACP probe returned `read-only`, `auto`, and `full-access`.
-- Codex providers other than `openai` and `openrouter` are rejected.
+- Codex mapped providers other than `openai` and `openrouter` are rejected. Custom Codex providers write `model_providers.<id>` with `base_url`, `env_key`, and `wire_api = "responses"`.
 
 Amp Code:
 
@@ -122,11 +134,11 @@ Amp Code:
 
 Cursor CLI:
 
-- Provider ids are not configured for Cursor in `data/mapping.toml`; Cursor model values are selected with `acps agent set --model <model-id>`.
+- Provider ids are not configured for Cursor in the provider metadata; Cursor model values are selected with `acps agent set --model <model-id>`.
 - Model ids are validated against Cursor's ACP-advertised model list. If the operator passes a shorthand model id, `acps` persists the exact advertised model value in `[agent].model`.
 - Mode values are validated against Cursor's ACP-advertised `mode` option. The current real ACP probe returned `agent`, `ask`, and `plan`.
 - Cursor consumes `CURSOR_API_KEY` directly from process env; no generated agent-owned config file is required.
 
 ## Validation
 
-Current validation requires the provider id to be listed for the configured agent in `data/mapping.toml`, the model and API-key ref to be syntactically non-empty, and API-key refs to be valid secret-ref names. Model and mode values are validated against ACP-advertised options before writing config.
+Current validation requires mapped provider ids to be listed for the configured agent in the provider metadata, custom provider metadata to include model and API-key ref, syntactically non-empty model/API-key-ref values, and API-key refs to be valid secret-ref names. Mapped model and mode values are validated against ACP-advertised options before writing config.

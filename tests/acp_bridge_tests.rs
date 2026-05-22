@@ -217,6 +217,7 @@ async fn goose_new_session_sets_configured_model_before_prompt() {
         id: "openrouter".into(),
         model: Some("deepseek/deepseek-v4-flash".into()),
         api_key_ref: Some("OPENROUTER_API_KEY".into()),
+        custom: None,
     });
     let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await
