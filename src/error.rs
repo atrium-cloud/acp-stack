@@ -451,6 +451,9 @@ pub enum StackError {
         message: String,
     },
 
+    #[error("agent test failed at {stage}: {reason}")]
+    AgentTestFailed { stage: String, reason: String },
+
     #[error("session `{id}` was not found")]
     SessionNotFound { id: String },
 
@@ -704,6 +707,7 @@ impl StackError {
             AgentApiRequest { .. } => "agent.api_request_failed",
             AgentApiStatus { .. } => "agent.api_status_failed",
             AgentRequestFailed { .. } => "agent.request_failed",
+            AgentTestFailed { .. } => "agent.test_failed",
             SessionNotFound { .. } => "session.not_found",
             SessionClosed { .. } => "session.closed",
             PromptNotFound { .. } => "prompt.not_found",
@@ -954,6 +958,9 @@ impl StackError {
             AgentRequestFailed { method, .. } => {
                 format!("agent rejected `{method}` request")
             }
+            AgentTestFailed { stage, reason } => {
+                format!("agent test failed at {stage}: {reason}")
+            }
             SessionNotFound { id } => format!("session `{id}` was not found"),
             SessionClosed { id } => format!("session `{id}` is closed"),
             PromptNotFound { id } => format!("prompt `{id}` was not found"),
@@ -1201,7 +1208,7 @@ impl StackError {
             SessionNotFound { .. } | PromptNotFound { .. } => StatusCode::NOT_FOUND,
             SessionClosed { .. } | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
             PromptBodyEmpty | PromptBodyInvalid(_) => StatusCode::BAD_REQUEST,
-            AgentRequestFailed { .. } => StatusCode::BAD_GATEWAY,
+            AgentRequestFailed { .. } | AgentTestFailed { .. } => StatusCode::BAD_GATEWAY,
             // Workspace: client-supplied path / encoding / upload-shape problems
             // are 400; missing files are 404; size cap exceeded is 413; the
             // underlying I/O error is an internal fault (the path itself was

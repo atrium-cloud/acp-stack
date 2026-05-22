@@ -73,7 +73,7 @@
 - [ ] Add installer command status history.
 - [x] Record installed ACP adapter/harness versions and expose them in agent status.
 - [ ] Add an upgrade/check command that reports stale managed agent harnesses or adapters without upgrading automatically.
-- [ ] Verify install scripts and embedded registry entries cannot silently install an older protocol-incompatible adapter.
+- [x] Add a manual end-to-end ACP compatibility test that starts the configured agent and sends a real prompt.
 - [ ] Add retry flow for failed agent installer commands.
 - [ ] Preserve installer logs for audit.
 - [ ] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite.
@@ -111,6 +111,7 @@
 ## Init Testflight
 
 - [ ] After config and secrets are present, run a full init testflight that starts the agent and sends a minimal real prompt.
+- [ ] Integrate the existing `acps agent test` runner into `acps init --testflight` after explicit confirmation.
 - [ ] Testflight must verify session creation, prompt completion, streamed updates, and terminal prompt state, not just process startup.
 - [ ] For each supported agent, smoke test at least one filesystem-visible tool action when the agent supports tools.
 - [ ] Fail testflight if an agent appears active but emits no progress or terminal state within the configured timeout.

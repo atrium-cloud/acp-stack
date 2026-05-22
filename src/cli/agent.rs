@@ -7,8 +7,9 @@ use crate::fs_util::{
     set_owner_only_file,
 };
 use crate::runtime::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
-    session_config_values, session_model_selection_for_value, session_model_values,
+    AcpBridge, AgentSessionConfigCategory, AgentSessionModelSelection, SessionEventSink,
+    session_config_id_for_value, session_config_values, session_model_selection_for_value,
+    session_model_values,
 };
 use crate::runtime::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent_registry::RegistryEntry;
@@ -18,17 +19,25 @@ use crate::runtime::provider_keys::{
 };
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
+use agent_client_protocol::schema::{ContentBlock, PromptRequest, StopReason, TextContent};
 use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tokio::sync::Notify;
 
 use super::core::daemon_base_url;
 
 const ACP_CONFIG_OPTIONS_FIXTURE_ENV: &str = "ACP_STACK_AGENT_CONFIG_OPTIONS_PATH";
 const ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_RESPONSE_PATH";
+const DEFAULT_AGENT_TEST_PROMPT: &str =
+    "Reply with exactly this text and nothing else: acp-stack test ok";
+const DEFAULT_AGENT_TEST_TIMEOUT: &str = "60s";
+const DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT: &str = "30s";
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
@@ -40,8 +49,23 @@ pub enum AgentCommand {
     Stop,
     /// Print the latest persisted agent state from SQLite.
     Status,
+    /// Start the configured agent and send a real ACP prompt.
+    Test(AgentTestArgs),
     /// Set the provider id, model, and API-key ref used by generated agent config.
     Set(AgentSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentTestArgs {
+    /// Prompt text to send. Defaults to a minimal compatibility prompt.
+    #[arg(long)]
+    prompt: Option<String>,
+    /// Maximum time to wait for the prompt request to finish.
+    #[arg(long, default_value = DEFAULT_AGENT_TEST_TIMEOUT)]
+    timeout: String,
+    /// Maximum time to wait for either progress or terminal prompt completion.
+    #[arg(long = "progress-timeout", default_value = DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT)]
+    progress_timeout: String,
 }
 
 #[derive(Debug, Args)]
@@ -66,6 +90,7 @@ pub(super) fn run_agent_command(command: AgentCommand) -> Result<()> {
         AgentCommand::Start => run_agent_daemon_post("/v1/agent/start", "start"),
         AgentCommand::Stop => run_agent_daemon_post("/v1/agent/stop", "stop"),
         AgentCommand::Status => run_agent_status(),
+        AgentCommand::Test(args) => run_agent_test(args),
         AgentCommand::Set(args) => run_agent_set(args),
     }
 }
@@ -626,6 +651,291 @@ impl SessionEventSink for NoopSessionEventSink {
         _payload_json: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async {})
+    }
+}
+
+struct AgentTestSessionEventSink {
+    updates: AtomicUsize,
+    notify: Notify,
+}
+
+impl AgentTestSessionEventSink {
+    fn new() -> Self {
+        Self {
+            updates: AtomicUsize::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn update_count(&self) -> usize {
+        self.updates.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_update_after(&self, observed_updates: usize) {
+        loop {
+            if self.update_count() > observed_updates {
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
+impl SessionEventSink for AgentTestSessionEventSink {
+    fn append<'a>(
+        &'a self,
+        _session_id: &'a str,
+        kind: &'a str,
+        _payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if kind == "session.update" {
+                self.updates.fetch_add(1, Ordering::SeqCst);
+                self.notify.notify_waiters();
+            }
+        })
+    }
+}
+
+struct AgentTestReport {
+    session_id: String,
+    stop_reason: StopReason,
+    updates: usize,
+}
+
+fn run_agent_test(args: AgentTestArgs) -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    let entry =
+        registry
+            .lookup(&config.agent.id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: config.agent.id.clone(),
+            })?;
+    entry.ensure_supported()?;
+
+    let prompt_is_default = args.prompt.is_none();
+    let prompt = args
+        .prompt
+        .unwrap_or_else(|| DEFAULT_AGENT_TEST_PROMPT.to_owned());
+    let timeout = parse_agent_test_duration("agent test --timeout", &args.timeout)?;
+    let progress_timeout =
+        parse_agent_test_duration("agent test --progress-timeout", &args.progress_timeout)?;
+    let env = resolve_agent_env_for_cli(&home, &config)?;
+    let cwd = config
+        .agent
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
+    let agent = config.agent.clone();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    let report = runtime.block_on(async move {
+        run_agent_test_inner(agent, env, cwd, prompt, timeout, progress_timeout).await
+    })?;
+
+    println!("agent test: ok");
+    println!("agent: {}", config.agent.id);
+    println!(
+        "prompt: {}",
+        if prompt_is_default {
+            "default"
+        } else {
+            "provided"
+        }
+    );
+    println!("session_id: {}", report.session_id);
+    println!("stop_reason: {}", stop_reason_label(report.stop_reason));
+    println!("updates: {}", report.updates);
+    Ok(())
+}
+
+fn parse_agent_test_duration(field: &'static str, value: &str) -> Result<Duration> {
+    let duration =
+        config::parse_duration_string(value).ok_or(StackError::InvalidDurationField { field })?;
+    if duration.is_zero() {
+        return Err(StackError::InvalidDurationField { field });
+    }
+    Ok(duration)
+}
+
+async fn run_agent_test_inner(
+    agent: crate::config::AgentConfig,
+    env: HashMap<String, String>,
+    cwd: PathBuf,
+    prompt: String,
+    prompt_timeout: Duration,
+    progress_timeout: Duration,
+) -> Result<AgentTestReport> {
+    let sink = Arc::new(AgentTestSessionEventSink::new());
+    let bridge = AcpBridge::spawn(&agent, env, cwd.clone(), sink.clone(), None)
+        .await
+        .map_err(agent_test_spawn_error)?;
+
+    let result = async {
+        let session = bridge
+            .new_session(cwd, Vec::new())
+            .await
+            .map_err(|err| agent_test_error("session creation", err))?;
+        apply_agent_test_session_config(&bridge, &agent, &session)
+            .await
+            .map_err(|err| agent_test_error("session creation", err))?;
+        let request = PromptRequest::new(
+            session.session_id.clone(),
+            vec![ContentBlock::Text(TextContent::new(prompt))],
+        );
+        let stop_reason = run_agent_test_prompt(
+            &bridge,
+            request,
+            sink.clone(),
+            prompt_timeout,
+            progress_timeout,
+        )
+        .await?;
+        if stop_reason != StopReason::EndTurn {
+            return Err(StackError::AgentTestFailed {
+                stage: "prompt completion".to_owned(),
+                reason: format!(
+                    "expected stop_reason end_turn, got {}",
+                    stop_reason_label(stop_reason)
+                ),
+            });
+        }
+        Ok(AgentTestReport {
+            session_id: session.session_id.to_string(),
+            stop_reason,
+            updates: sink.update_count(),
+        })
+    }
+    .await;
+
+    let shutdown = bridge.shutdown().await;
+    match (result, shutdown) {
+        (Ok(report), Ok(_)) => Ok(report),
+        (Err(err), _) => Err(err),
+        (Ok(_), Err(err)) => Err(agent_test_error("shutdown", err)),
+    }
+}
+
+async fn run_agent_test_prompt(
+    bridge: &AcpBridge,
+    request: PromptRequest,
+    sink: Arc<AgentTestSessionEventSink>,
+    prompt_timeout: Duration,
+    progress_timeout: Duration,
+) -> Result<StopReason> {
+    let prompt_call = async {
+        let prompt_future = bridge.prompt_session(request);
+        tokio::pin!(prompt_future);
+        let mut observed_updates = sink.update_count();
+        loop {
+            let progress_timer = tokio::time::sleep(progress_timeout);
+            tokio::pin!(progress_timer);
+            tokio::select! {
+                result = &mut prompt_future => {
+                    return result.map_err(|err| agent_test_error("prompt completion", err));
+                }
+                _ = sink.wait_for_update_after(observed_updates) => {
+                    observed_updates = sink.update_count();
+                }
+                _ = &mut progress_timer => {
+                    return Err(StackError::AgentTestFailed {
+                        stage: "prompt/progress timeout".to_owned(),
+                        reason: format!(
+                            "no new session/update or terminal prompt response within {}",
+                            human_duration(progress_timeout)
+                        ),
+                    });
+                }
+            }
+        }
+    };
+
+    tokio::time::timeout(prompt_timeout, prompt_call)
+        .await
+        .map_err(|_| StackError::AgentTestFailed {
+            stage: "prompt/progress timeout".to_owned(),
+            reason: format!(
+                "prompt did not complete within {}",
+                human_duration(prompt_timeout)
+            ),
+        })?
+}
+
+async fn apply_agent_test_session_config(
+    bridge: &AcpBridge,
+    agent: &crate::config::AgentConfig,
+    response: &agent_client_protocol::schema::NewSessionResponse,
+) -> Result<()> {
+    if let Some(mode) = agent.mode.as_deref() {
+        let config_id = session_config_id_for_value(
+            response.config_options.as_deref(),
+            AgentSessionConfigCategory::Mode,
+            mode,
+        )?;
+        bridge
+            .set_session_config_option(response.session_id.clone(), &config_id, mode)
+            .await?;
+    }
+    if let Some(model) = agent.model.as_deref().or_else(|| {
+        agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref())
+    }) {
+        match session_model_selection_for_value(response, model)? {
+            AgentSessionModelSelection::ConfigOption { config_id } => {
+                bridge
+                    .set_session_config_option(response.session_id.clone(), &config_id, model)
+                    .await?;
+            }
+            AgentSessionModelSelection::LegacyModel => {
+                bridge
+                    .set_session_model(response.session_id.clone(), model)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn agent_test_spawn_error(error: StackError) -> StackError {
+    let stage = match error {
+        StackError::AgentSpawnFailed { .. } => "spawn/start",
+        StackError::AgentInitializeFailed { .. } => "ACP initialize",
+        _ => "spawn/start",
+    };
+    agent_test_error(stage, error)
+}
+
+fn agent_test_error(stage: &'static str, error: StackError) -> StackError {
+    StackError::AgentTestFailed {
+        stage: stage.to_owned(),
+        reason: error.to_string(),
+    }
+}
+
+fn stop_reason_label(reason: StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".to_owned(),
+        StopReason::MaxTokens => "max_tokens".to_owned(),
+        StopReason::MaxTurnRequests => "max_turn_requests".to_owned(),
+        StopReason::Refusal => "refusal".to_owned(),
+        StopReason::Cancelled => "cancelled".to_owned(),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
+fn human_duration(duration: Duration) -> String {
+    if duration.as_millis() < 1_000 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}s", duration.as_secs())
     }
 }
 

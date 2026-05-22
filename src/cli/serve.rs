@@ -303,6 +303,10 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
 /// - `session/prompt` -> emits two `session/update` notifications with agent
 ///   message chunks, then returns `{ stopReason: "end_turn" }`. With
 ///   `--prompt-cancel` it returns `{ stopReason: "cancelled" }` instead.
+/// - `--initialize-error`, `--session-new-error`, and `--prompt-error` return
+///   JSON-RPC errors for their matching request stages.
+/// - `--model-config-option <value>` advertises that value as a model session
+///   config option.
 /// - any other request -> JSON-RPC method-not-found.
 ///
 /// `session/cancel` notification flips the in-process flag so the next
@@ -319,6 +323,11 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let mut resume_session_cap = true;
     let mut close_session_cap = true;
     let mut prompt_emits_updates = true;
+    let mut initialize_fails = false;
+    let mut session_new_fails = false;
+    let mut prompt_fails = false;
+    let mut prompt_stalls_after_update = false;
+    let mut model_config_option: Option<String> = None;
     let mut expected_model_config: Option<String> = None;
     let mut env_assertions = Vec::new();
     let mut iter = args.iter();
@@ -356,6 +365,23 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             }
             "--prompt-silent" => {
                 prompt_emits_updates = false;
+            }
+            "--initialize-error" => {
+                initialize_fails = true;
+            }
+            "--session-new-error" => {
+                session_new_fails = true;
+            }
+            "--prompt-error" => {
+                prompt_fails = true;
+            }
+            "--prompt-stall-after-update" => {
+                prompt_stalls_after_update = true;
+            }
+            "--model-config-option" => {
+                if let Some(value) = iter.next() {
+                    model_config_option = Some(value.to_owned());
+                }
             }
             "--expect-model-config" => {
                 if let Some(value) = iter.next() {
@@ -408,45 +434,84 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
         };
         let response = match method {
             Some("initialize") => {
-                let mut agent_caps = serde_json::Map::new();
-                agent_caps.insert(
-                    "loadSession".to_owned(),
-                    serde_json::Value::Bool(load_session_cap),
-                );
-                let mut session_caps = serde_json::Map::new();
-                if resume_session_cap {
-                    session_caps.insert("resume".to_owned(), serde_json::json!({}));
-                }
-                if close_session_cap {
-                    session_caps.insert("close".to_owned(), serde_json::json!({}));
-                }
-                agent_caps.insert(
-                    "sessionCapabilities".to_owned(),
-                    serde_json::Value::Object(session_caps),
-                );
-                agent_caps.insert("promptCapabilities".to_owned(), serde_json::json!({}));
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "protocolVersion": 1,
-                        "agentCapabilities": agent_caps,
-                        "agentInfo": {
-                            "name": "acps-fake-agent",
-                            "title": title,
-                            "version": "0.0.1"
-                        },
-                        "authMethods": []
+                if initialize_fails {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": "fake initialize failure"
+                        }
+                    })
+                } else {
+                    let mut agent_caps = serde_json::Map::new();
+                    agent_caps.insert(
+                        "loadSession".to_owned(),
+                        serde_json::Value::Bool(load_session_cap),
+                    );
+                    let mut session_caps = serde_json::Map::new();
+                    if resume_session_cap {
+                        session_caps.insert("resume".to_owned(), serde_json::json!({}));
                     }
-                })
+                    if close_session_cap {
+                        session_caps.insert("close".to_owned(), serde_json::json!({}));
+                    }
+                    agent_caps.insert(
+                        "sessionCapabilities".to_owned(),
+                        serde_json::Value::Object(session_caps),
+                    );
+                    agent_caps.insert("promptCapabilities".to_owned(), serde_json::json!({}));
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": 1,
+                            "agentCapabilities": agent_caps,
+                            "agentInfo": {
+                                "name": "acps-fake-agent",
+                                "title": title,
+                                "version": "0.0.1"
+                            },
+                            "authMethods": []
+                        }
+                    })
+                }
             }
             Some("session/new") => {
-                let counter = session_counter.fetch_add(1, Ordering::SeqCst);
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": { "sessionId": format!("sess_fake_{counter}") }
-                })
+                if session_new_fails {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": "fake session/new failure"
+                        }
+                    })
+                } else {
+                    let counter = session_counter.fetch_add(1, Ordering::SeqCst);
+                    let mut result = serde_json::json!({
+                        "sessionId": format!("sess_fake_{counter}")
+                    });
+                    if let Some(model) = model_config_option.as_deref() {
+                        result["configOptions"] = serde_json::json!([
+                            {
+                                "id": "model",
+                                "name": "Model",
+                                "category": "model",
+                                "type": "select",
+                                "currentValue": model,
+                                "options": [
+                                    { "value": model, "name": model }
+                                ]
+                            }
+                        ]);
+                    }
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result
+                    })
+                }
             }
             Some("session/set_config_option") => {
                 let config_id = value
@@ -477,7 +542,18 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                 })
             }
             Some("session/prompt") => {
-                if expected_model_config.is_some() && !model_configured.load(Ordering::SeqCst) {
+                if prompt_fails {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": "fake prompt failure"
+                        }
+                    })
+                } else if expected_model_config.is_some()
+                    && !model_configured.load(Ordering::SeqCst)
+                {
                     serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -497,7 +573,12 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                         // Push two notifications before the response. The bridge's
                         // SessionEventSink persists them keyed by session_id; tests
                         // assert on the `events.session_id` column.
-                        for text in ["chunk-1", "chunk-2"] {
+                        let chunks: &[&str] = if prompt_stalls_after_update {
+                            &["chunk-1"]
+                        } else {
+                            &["chunk-1", "chunk-2"]
+                        };
+                        for text in chunks {
                             let note = serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "method": "session/update",
@@ -518,6 +599,10 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                                 .flush()
                                 .map_err(|source| StackError::ServeIo { source })?;
                         }
+                    }
+                    if prompt_stalls_after_update {
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
+                        continue;
                     }
                     let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
                         "cancelled"
