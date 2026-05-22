@@ -101,6 +101,10 @@ pub struct InstallerRowDraft {
     pub stderr: String,
     pub exit_status: Option<i32>,
     pub step: String,
+    /// Resolved version the installer wrote. Populated for github_release
+    /// (release tag) and npm installs. Shell-recipe installs leave this `None`;
+    /// `acps agent check` then reports `unknown, manual check required`.
+    pub version: Option<String>,
 }
 
 impl InstallerRowDraft {
@@ -113,6 +117,7 @@ impl InstallerRowDraft {
             stderr: String::new(),
             exit_status: Some(0),
             step: step.to_owned(),
+            version: None,
         }
     }
 
@@ -125,6 +130,7 @@ impl InstallerRowDraft {
             stderr: String::new(),
             exit_status: None,
             step: step.to_owned(),
+            version: None,
         }
     }
 }
@@ -152,6 +158,7 @@ pub struct InstallerSequenceResult {
 /// Convenience wrapper used by call sites that already hold the state store
 /// briefly: runs the escape-hatch installer and persists the row.
 pub fn run_installer(
+    agent_id: &str,
     install: &AgentInstallConfig,
     expected_sha256: Option<&str>,
     agent_env: HashMap<String, String>,
@@ -160,6 +167,7 @@ pub fn run_installer(
 ) -> Result<InstallerOutcome> {
     let result = run_installer_capture(install, expected_sha256, agent_env, workspace_root);
     state.append_installer_run(InstallerRunInput {
+        agent_id,
         started_at: &result.row.started_at,
         finished_at: result.row.finished_at.as_deref(),
         status: &result.row.status,
@@ -167,6 +175,7 @@ pub fn run_installer(
         stderr: &result.row.stderr,
         exit_status: result.row.exit_status,
         step: &result.row.step,
+        version: result.row.version.as_deref(),
     })?;
     result.outcome
 }
@@ -241,6 +250,7 @@ pub fn install_resolved(
     let result = install_resolved_capture(agent, entry, agent_env, workspace_root, dest_dir);
     for row in &result.rows {
         state.append_installer_run(InstallerRunInput {
+            agent_id: &agent.id,
             started_at: &row.started_at,
             finished_at: row.finished_at.as_deref(),
             status: &row.status,
@@ -248,6 +258,7 @@ pub fn install_resolved(
             stderr: &row.stderr,
             exit_status: row.exit_status,
             step: &row.step,
+            version: row.version.as_deref(),
         })?;
     }
     result.outcome
@@ -447,6 +458,10 @@ enum ResolvedInstallSpec {
     Npm {
         package: String,
         creates: String,
+        /// Pinned version when the registry/`acps init` resolved one.
+        /// Unpinned npm installs resolve their version with `npm view` before
+        /// running `npm install`.
+        version: Option<String>,
     },
     GithubRelease {
         repo: String,
@@ -474,6 +489,7 @@ fn select_install_path(
             return Ok(ResolvedInstallSpec::Npm {
                 package: format!("{}@{version}", npm.package),
                 creates: npm.creates.clone(),
+                version: Some(version.to_owned()),
             });
         }
         return Err(StackError::RegistryLoad {
@@ -493,6 +509,7 @@ fn select_install_path(
         return Ok(ResolvedInstallSpec::Npm {
             package: npm.package.clone(),
             creates: npm.creates.clone(),
+            version: None,
         });
     }
     if let Some(github) = &install.github {
@@ -569,9 +586,28 @@ fn run_install_step(
                 &creates,
                 workspace_root,
                 &[dest_dir],
+                None,
             )
         }
-        ResolvedInstallSpec::Npm { package, creates } => {
+        ResolvedInstallSpec::Npm {
+            package,
+            creates,
+            version,
+        } => {
+            let (package, version) = match version {
+                Some(version) => (package, version),
+                None => match resolve_npm_package_version(
+                    step_label,
+                    started_at.clone(),
+                    &package,
+                    agent_env,
+                    workspace_root,
+                    dest_dir,
+                ) {
+                    Ok(version) => (npm_package_with_version(&package, &version), version),
+                    Err(step) => return *step,
+                },
+            };
             let result = run_npm_install(&package, agent_env, workspace_root, dest_dir);
             shell_step_with_creates(
                 step_label,
@@ -580,6 +616,7 @@ fn run_install_step(
                 &creates,
                 workspace_root,
                 &[dest_dir],
+                Some(version),
             )
         }
         ResolvedInstallSpec::GithubRelease {
@@ -618,20 +655,21 @@ fn shell_step_with_creates(
     creates: &str,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
+    version: Option<String>,
 ) -> StepResult {
     let finished_at = current_timestamp();
     match run_result {
         Ok(captured) => {
             let exit_ok = captured.exit_status == Some(0);
-            let row_status = if exit_ok { "ran" } else { "failed" };
-            let row = InstallerRowDraft {
+            let mut row = InstallerRowDraft {
                 started_at,
                 finished_at: Some(finished_at),
-                status: row_status.into(),
+                status: if exit_ok { "ran" } else { "failed" }.into(),
                 stdout: captured.stdout.clone(),
                 stderr: captured.stderr.clone(),
                 exit_status: captured.exit_status,
                 step: step_label.to_owned(),
+                version: version.clone(),
             };
             if !exit_ok {
                 return StepResult {
@@ -647,6 +685,10 @@ fn shell_step_with_creates(
                 .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
                     name: creates.to_owned(),
                 });
+            if let Err(err) = &outcome {
+                row.status = "failed".to_owned();
+                row.stderr = append_stderr_detail(&row.stderr, err);
+            }
             StepResult { outcome, row }
         }
         Err(StackError::AgentInstallerTimeout) => StepResult {
@@ -659,6 +701,7 @@ fn shell_step_with_creates(
                 stderr: "[installer timed out]".into(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                version: version.clone(),
             },
         },
         Err(err) => StepResult {
@@ -671,6 +714,7 @@ fn shell_step_with_creates(
                 stderr: String::new(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                version,
             },
         },
     }
@@ -697,6 +741,7 @@ fn github_release_step(
                 stderr: String::new(),
                 exit_status: Some(0),
                 step: step_label.to_owned(),
+                version: Some(outcome.release_tag),
             },
         },
         Err(err) => {
@@ -711,6 +756,7 @@ fn github_release_step(
                     stderr,
                     exit_status: None,
                     step: step_label.to_owned(),
+                    version: version_pin.map(str::to_owned),
                 },
             }
         }
@@ -729,15 +775,15 @@ fn finalize_shell_step(
     match run_result {
         Ok(captured) => {
             let exit_ok = captured.exit_status == Some(0);
-            let row_status = if exit_ok { "ran" } else { "failed" };
-            let row = InstallerRowDraft {
+            let mut row = InstallerRowDraft {
                 started_at,
                 finished_at: Some(finished_at),
-                status: row_status.into(),
+                status: if exit_ok { "ran" } else { "failed" }.into(),
                 stdout: captured.stdout.clone(),
                 stderr: captured.stderr.clone(),
                 exit_status: captured.exit_status,
                 step: step_label.to_owned(),
+                version: None,
             };
             if !exit_ok {
                 return InstallerResult {
@@ -761,6 +807,10 @@ fn finalize_shell_step(
                     sha256,
                 })
             })();
+            if let Err(err) = &outcome {
+                row.status = "failed".to_owned();
+                row.stderr = append_stderr_detail(&row.stderr, err);
+            }
             InstallerResult { outcome, row }
         }
         Err(StackError::AgentInstallerTimeout) => InstallerResult {
@@ -773,6 +823,7 @@ fn finalize_shell_step(
                 stderr: "[installer timed out]".into(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                version: None,
             },
         },
         Err(err) => InstallerResult {
@@ -785,6 +836,7 @@ fn finalize_shell_step(
                 stderr: String::new(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                version: None,
             },
         },
     }
@@ -841,6 +893,107 @@ fn run_npm_install(
         package.to_owned(),
     ];
     run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir])
+}
+
+fn resolve_npm_package_version(
+    step_label: &'static str,
+    started_at: String,
+    package: &str,
+    agent_env: &HashMap<String, String>,
+    workspace_root: &Path,
+    dest_dir: &Path,
+) -> std::result::Result<String, Box<StepResult>> {
+    let args = vec![
+        "view".to_owned(),
+        package.to_owned(),
+        "version".to_owned(),
+        "--json".to_owned(),
+    ];
+    let result = run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir]);
+    match result {
+        Ok(captured) if captured.exit_status == Some(0) => {
+            let parsed = serde_json::from_str::<String>(captured.stdout.trim()).map_err(|err| {
+                format!("npm view {package} version --json returned invalid JSON string: {err}")
+            });
+            match parsed {
+                Ok(version) if !version.trim().is_empty() => Ok(version),
+                Ok(_) => Err(Box::new(npm_version_failure_step(
+                    step_label,
+                    started_at,
+                    captured,
+                    "npm view returned an empty version".to_owned(),
+                ))),
+                Err(reason) => Err(Box::new(npm_version_failure_step(
+                    step_label, started_at, captured, reason,
+                ))),
+            }
+        }
+        Ok(captured) => {
+            let exit = captured.exit_status;
+            let stderr_tail = tail_bytes(&captured.stderr, STDERR_TAIL_BYTES);
+            Err(Box::new(StepResult {
+                outcome: Err(StackError::AgentInstallerFailed { exit, stderr_tail }),
+                row: InstallerRowDraft {
+                    started_at,
+                    finished_at: Some(current_timestamp()),
+                    status: "failed".into(),
+                    stdout: captured.stdout,
+                    stderr: captured.stderr,
+                    exit_status: captured.exit_status,
+                    step: step_label.to_owned(),
+                    version: None,
+                },
+            }))
+        }
+        Err(err) => Err(Box::new(StepResult {
+            outcome: Err(err),
+            row: InstallerRowDraft {
+                started_at,
+                finished_at: Some(current_timestamp()),
+                status: "failed".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: None,
+                step: step_label.to_owned(),
+                version: None,
+            },
+        })),
+    }
+}
+
+fn npm_version_failure_step(
+    step_label: &'static str,
+    started_at: String,
+    captured: CapturedOutput,
+    reason: String,
+) -> StepResult {
+    StepResult {
+        outcome: Err(StackError::AgentInitializeFailed {
+            reason: reason.clone(),
+        }),
+        row: InstallerRowDraft {
+            started_at,
+            finished_at: Some(current_timestamp()),
+            status: "failed".into(),
+            stdout: captured.stdout,
+            stderr: append_stderr_detail(&captured.stderr, &reason),
+            exit_status: captured.exit_status,
+            step: step_label.to_owned(),
+            version: None,
+        },
+    }
+}
+
+fn npm_package_with_version(package: &str, version: &str) -> String {
+    format!("{package}@{version}")
+}
+
+fn append_stderr_detail(stderr: &str, detail: impl std::fmt::Display) -> String {
+    if stderr.is_empty() {
+        detail.to_string()
+    } else {
+        format!("{stderr}\n{detail}")
+    }
 }
 
 fn run_program_install(
@@ -1117,6 +1270,7 @@ mod tests {
     use super::*;
     use crate::agent_registry::{AdapterSpec, HarnessSpec, ShellInstall};
     use crate::state::StateStore;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     fn open_store() -> (TempDir, StateStore) {
@@ -1243,13 +1397,259 @@ mod tests {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
 
+    fn write_fake_npm(dest_dir: &Path, body: &str) {
+        let npm_path = dest_dir.join("npm");
+        std::fs::write(&npm_path, format!("#!/bin/sh\n{body}")).expect("write fake npm");
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&npm_path, permissions).expect("chmod fake npm");
+    }
+
+    #[test]
+    fn select_install_path_captures_pinned_npm_version() {
+        let install = InstallSet {
+            npm: Some(crate::agent_registry::NpmInstall {
+                package: "@scope/agent".to_owned(),
+                creates: "agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+        let resolved =
+            select_install_path("test", "harness.install", &install, None, Some("1.2.3"))
+                .expect("resolve");
+        match resolved {
+            ResolvedInstallSpec::Npm {
+                package,
+                version,
+                creates,
+            } => {
+                assert_eq!(package, "@scope/agent@1.2.3");
+                assert_eq!(version.as_deref(), Some("1.2.3"));
+                assert_eq!(creates, "agent");
+            }
+            other => panic!("expected Npm variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_install_path_unpinned_npm_has_no_version() {
+        let install = InstallSet {
+            npm: Some(crate::agent_registry::NpmInstall {
+                package: "@scope/agent".to_owned(),
+                creates: "agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+        let resolved =
+            select_install_path("test", "harness.install", &install, None, None).expect("resolve");
+        match resolved {
+            ResolvedInstallSpec::Npm {
+                package,
+                version,
+                creates,
+            } => {
+                assert_eq!(package, "@scope/agent");
+                assert!(version.is_none());
+                assert_eq!(creates, "agent");
+            }
+            other => panic!("expected Npm variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unpinned_npm_install_records_resolved_version() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        write_fake_npm(
+            &dest_dir,
+            r#"
+set -eu
+if [ "$1" = "view" ]; then
+  test "$2" = "@scope/agent"
+  test "$3" = "version"
+  test "$4" = "--json"
+  printf '"1.2.3"\n'
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  test "$2" = "-g"
+  test "$3" = "--prefix"
+  test "$5" = "@scope/agent@1.2.3"
+  mkdir -p "$4/bin"
+  printf agent > "$4/bin/agent"
+  chmod 755 "$4/bin/agent"
+  exit 0
+fi
+exit 99
+"#,
+        );
+        let install = InstallSet {
+            npm: Some(crate::agent_registry::NpmInstall {
+                package: "@scope/agent".to_owned(),
+                creates: "agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+        let entry = native_entry(
+            "npm-agent",
+            "Npm Agent",
+            Some("docs/agents/npm-agent.md"),
+            harness_spec("agent", install),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        result.outcome.expect("npm install should pass");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].status, "ran");
+        assert_eq!(result.rows[0].version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn npm_version_lookup_failure_fails_step() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        write_fake_npm(
+            &dest_dir,
+            r#"
+set -eu
+if [ "$1" = "view" ]; then
+  printf 'registry down\n' >&2
+  exit 7
+fi
+exit 99
+"#,
+        );
+        let install = InstallSet {
+            npm: Some(crate::agent_registry::NpmInstall {
+                package: "@scope/agent".to_owned(),
+                creates: "agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+        let entry = native_entry(
+            "npm-agent",
+            "Npm Agent",
+            Some("docs/agents/npm-agent.md"),
+            harness_spec("agent", install),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        assert!(matches!(
+            result.outcome.expect_err("npm view failure should fail"),
+            StackError::AgentInstallerFailed { exit: Some(7), .. }
+        ));
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].status, "failed");
+        assert_eq!(result.rows[0].exit_status, Some(7));
+        assert!(result.rows[0].version.is_none());
+    }
+
+    #[test]
+    fn npm_version_lookup_invalid_json_fails_step() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        write_fake_npm(
+            &dest_dir,
+            r#"
+set -eu
+if [ "$1" = "view" ]; then
+  printf 'not-json\n'
+  exit 0
+fi
+exit 99
+"#,
+        );
+        let install = InstallSet {
+            npm: Some(crate::agent_registry::NpmInstall {
+                package: "@scope/agent".to_owned(),
+                creates: "agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+        let entry = native_entry(
+            "npm-agent",
+            "Npm Agent",
+            Some("docs/agents/npm-agent.md"),
+            harness_spec("agent", install),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        assert!(matches!(
+            result
+                .outcome
+                .expect_err("invalid npm view JSON should fail"),
+            StackError::AgentInitializeFailed { .. }
+        ));
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].status, "failed");
+        assert!(result.rows[0].stderr.contains("invalid JSON string"));
+        assert!(result.rows[0].version.is_none());
+    }
+
+    #[test]
+    fn shell_install_records_no_version() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let binary_path = tempdir.path().join("shell-agent");
+        let script = shell_string_for_write(&binary_path, "agent");
+        let entry = native_entry(
+            "shell-agent",
+            "Shell Agent",
+            Some("docs/agents/shell-agent.md"),
+            harness_spec("shell-agent", shell_install_set(&script, "shell-agent")),
+        );
+        let result = install_resolved_capture(
+            &agent_config("shell-agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            tempdir.path(),
+        );
+        result.outcome.expect("install ok");
+        assert_eq!(result.rows.len(), 1);
+        assert!(
+            result.rows[0].version.is_none(),
+            "shell installs must leave version unset; got {:?}",
+            result.rows[0].version
+        );
+    }
+
     #[test]
     fn precheck_short_circuits_when_creates_resolves() {
         // `true` ships on every POSIX system; the installer should skip.
         let (_tempdir, store) = open_store();
         let install = install_config("false", "true");
-        let outcome =
-            run_installer(&install, None, HashMap::new(), &workspace_root(), &store).expect("ok");
+        let outcome = run_installer(
+            "test-agent",
+            &install,
+            None,
+            HashMap::new(),
+            &workspace_root(),
+            &store,
+        )
+        .expect("ok");
         assert_eq!(outcome.label(), "already_present");
         let runs = store.query_installer_runs(10).expect("query");
         assert_eq!(runs.len(), 1);
@@ -1262,15 +1662,22 @@ mod tests {
         let (_tempdir, store) = open_store();
         // A successful shell that does NOT actually produce the named binary.
         let install = install_config("true", "definitely-not-a-real-binary-xyz123");
-        let err = run_installer(&install, None, HashMap::new(), &workspace_root(), &store)
-            .expect_err("must fail");
+        let err = run_installer(
+            "test-agent",
+            &install,
+            None,
+            HashMap::new(),
+            &workspace_root(),
+            &store,
+        )
+        .expect_err("must fail");
         assert!(matches!(
             err,
             StackError::AgentInstallerCreatesMissing { .. }
         ));
         let runs = store.query_installer_runs(10).expect("query");
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, "ran");
+        assert_eq!(runs[0].status, "failed");
         assert_eq!(runs[0].step, "install");
     }
 
@@ -1278,8 +1685,15 @@ mod tests {
     fn nonzero_exit_returns_installer_failed() {
         let (_tempdir, store) = open_store();
         let install = install_config("false", "definitely-not-a-real-binary-xyz123");
-        let err = run_installer(&install, None, HashMap::new(), &workspace_root(), &store)
-            .expect_err("must fail");
+        let err = run_installer(
+            "test-agent",
+            &install,
+            None,
+            HashMap::new(),
+            &workspace_root(),
+            &store,
+        )
+        .expect_err("must fail");
         assert!(matches!(
             err,
             StackError::AgentInstallerFailed { exit: Some(1), .. }
@@ -1296,6 +1710,7 @@ mod tests {
         let install = install_config("false", "true");
         let bogus = "0".repeat(64);
         let err = run_installer(
+            "test-agent",
             &install,
             Some(&bogus),
             HashMap::new(),
@@ -1321,7 +1736,14 @@ mod tests {
         // and capture stdout. We don't care that this returns an error after
         // running; we only check the truncation guarantee on what was stored.
         let install = install_config(&shell, "definitely-not-a-real-binary-xyz123");
-        let _ = run_installer(&install, None, HashMap::new(), &workspace_root(), &store);
+        let _ = run_installer(
+            "test-agent",
+            &install,
+            None,
+            HashMap::new(),
+            &workspace_root(),
+            &store,
+        );
         let runs = store.query_installer_runs(10).expect("query");
         assert!(
             runs[0].stdout.len() <= MAX_INSTALLER_STREAM_BYTES + 128,
