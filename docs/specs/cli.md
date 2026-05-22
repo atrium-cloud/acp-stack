@@ -118,6 +118,8 @@ Successful `acps agent set` output prints the configured agent id, changed field
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 
+`acps agent test [--prompt <text>]` starts the configured ACP agent directly, runs `initialize`, creates a session, sends a real prompt, requires `end_turn` prompt completion, and shuts the agent down before exiting. When `--prompt` is omitted, the CLI uses a built-in minimal compatibility prompt. Failures identify the first failing stage: spawn/start, ACP initialize, session creation, prompt/progress timeout, or prompt completion.
+
 `acps agent status` reads local config, the active agent registry, and SQLite state. It prints `agent: <id>`, configured agent params as individual `provider:`, `model:`, and `mode:` lines, grouped supported-but-unconfigured params as `<params> unset`, grouped unsupported params as `<params> unavailable`, the latest successful agent-scoped installer versions as `installed <step>: <version>` or `installed <step>: version unknown`, then the configured command, latest persisted capability snapshot, and recent lifecycle rows. Legacy installer rows without `agent_id` are not shown because they cannot be safely attributed to the active agent.
 
 ## Security Self-Check
