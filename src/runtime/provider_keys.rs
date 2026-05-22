@@ -10,10 +10,12 @@ use serde::Deserialize;
 
 use crate::error::{Result, StackError};
 
-const EMBEDDED_MAPPING: &str = include_str!("../../data/mapping.toml");
+const EMBEDDED_ENV_VARS: &str = include_str!("../../data/env_vars.toml");
+const EMBEDDED_PROVIDERS: &str = include_str!("../../data/providers.toml");
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
-    ProviderKeyMapping::from_toml(EMBEDDED_MAPPING).expect("valid provider mapping")
+    ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
+        .expect("valid provider mapping")
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -31,15 +33,45 @@ pub struct ApiKeyProviderMapping {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ProviderEnvMapping {
-    pub id: String,
+    pub id: Vec<String>,
     pub name: String,
     pub agents: Vec<String>,
     #[serde(default)]
     pub api_key_env_vars: BTreeMap<String, String>,
     #[serde(default)]
+    pub provider_ids: BTreeMap<String, String>,
+    #[serde(default)]
     pub companion_env_vars: Vec<String>,
     #[serde(default)]
     pub optional_env_vars: Vec<String>,
+}
+
+impl ProviderEnvMapping {
+    pub fn ids(&self) -> &[String] {
+        &self.id
+    }
+
+    fn primary_id(&self) -> &str {
+        self.id
+            .first()
+            .expect("provider mapping validated with at least one id")
+    }
+
+    fn contains_id(&self, provider_id: &str) -> bool {
+        self.id.iter().any(|id| id == provider_id)
+    }
+
+    fn agent_native_provider_id(&self, agent_id: &str) -> Option<&str> {
+        if !self.agents.iter().any(|agent| agent == agent_id) {
+            return None;
+        }
+        self.provider_ids
+            .iter()
+            .find_map(|(provider_id, mapped_agent_id)| {
+                (mapped_agent_id == agent_id).then_some(provider_id.as_str())
+            })
+            .or_else(|| Some(self.primary_id()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +84,18 @@ pub struct ProviderKeyMapping {
 struct RawProviderKeyMapping {
     #[serde(default)]
     api_keys: Vec<ApiKeyProviderMapping>,
+    #[serde(default)]
+    providers: Vec<ProviderEnvMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawEnvVarMapping {
+    #[serde(default)]
+    api_keys: Vec<ApiKeyProviderMapping>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProviderMapping {
     #[serde(default)]
     providers: Vec<ProviderEnvMapping>,
 }
@@ -74,6 +118,23 @@ impl ProviderKeyMapping {
         Ok(mapping)
     }
 
+    pub fn from_toml_parts(env_vars_body: &str, providers_body: &str) -> Result<Self> {
+        let env_vars: RawEnvVarMapping =
+            toml::from_str(env_vars_body).map_err(|source| StackError::RegistryLoad {
+                reason: format!("env var mapping TOML is invalid: {source}"),
+            })?;
+        let providers: RawProviderMapping =
+            toml::from_str(providers_body).map_err(|source| StackError::RegistryLoad {
+                reason: format!("provider mapping TOML is invalid: {source}"),
+            })?;
+        let mapping = Self {
+            api_keys: env_vars.api_keys,
+            providers: providers.providers,
+        };
+        mapping.validate()?;
+        Ok(mapping)
+    }
+
     pub fn api_keys(&self) -> &[ApiKeyProviderMapping] {
         &self.api_keys
     }
@@ -88,12 +149,21 @@ impl ProviderKeyMapping {
         self.api_keys
             .iter()
             .find(|mapping| mapping.provider_ids.iter().any(|id| id == provider_id))
+            .or_else(|| {
+                let provider = self.provider_mapping(provider_id)?;
+                self.api_keys.iter().find(|mapping| {
+                    mapping
+                        .provider_ids
+                        .iter()
+                        .any(|api_key_provider_id| provider.contains_id(api_key_provider_id))
+                })
+            })
     }
 
     fn provider_mapping(&self, provider_id: &str) -> Option<&ProviderEnvMapping> {
         self.providers
             .iter()
-            .find(|mapping| mapping.id == provider_id)
+            .find(|mapping| mapping.contains_id(provider_id))
     }
 
     fn validate(&self) -> Result<()> {
@@ -140,60 +210,91 @@ impl ProviderKeyMapping {
 
         let mut provider_overrides = HashSet::new();
         for mapping in &self.providers {
-            validate_token("providers.id", &mapping.id)?;
-            validate_token(&format!("providers.{}.name", mapping.id), &mapping.name)?;
+            if mapping.id.is_empty() {
+                return provider_mapping_error("providers.id must not be empty".to_owned());
+            }
+            validate_tokens("providers.id".to_owned(), &mapping.id)?;
+            let primary_id = mapping.primary_id();
+            validate_token(&format!("providers.{primary_id}.name"), &mapping.name)?;
             if mapping.agents.is_empty() {
                 return provider_mapping_error(format!(
-                    "provider `{}` has no supported agents",
-                    mapping.id
+                    "provider `{primary_id}` has no supported agents"
                 ));
             }
-            validate_tokens(format!("providers.{}.agents", mapping.id), &mapping.agents)?;
+            validate_tokens(format!("providers.{primary_id}.agents"), &mapping.agents)?;
             for agent in &mapping.agents {
-                if !matches!(
-                    agent.as_str(),
-                    "opencode" | "pi" | "cursor" | "goose" | "codex"
-                ) {
+                if !is_supported_agent_id(agent) {
                     return provider_mapping_error(format!(
-                        "provider `{}` references unsupported agent `{agent}`",
-                        mapping.id
+                        "provider `{primary_id}` references unsupported agent `{agent}`"
                     ));
                 }
             }
             for (agent, env_var) in &mapping.api_key_env_vars {
-                validate_token(&format!("providers.{}.api_key_env_vars", mapping.id), agent)?;
+                validate_token(&format!("providers.{primary_id}.api_key_env_vars"), agent)?;
                 validate_token(
-                    &format!("providers.{}.api_key_env_vars.{agent}", mapping.id),
+                    &format!("providers.{primary_id}.api_key_env_vars.{agent}"),
                     env_var,
                 )?;
-                if !matches!(
-                    agent.as_str(),
-                    "opencode" | "pi" | "cursor" | "goose" | "codex"
-                ) {
+                if !is_supported_agent_id(agent) {
                     return provider_mapping_error(format!(
-                        "provider `{}` references unsupported API-key agent `{agent}`",
-                        mapping.id
+                        "provider `{primary_id}` references unsupported API-key agent `{agent}`"
                     ));
                 }
                 if !mapping.agents.iter().any(|supported| supported == agent) {
                     return provider_mapping_error(format!(
-                        "provider `{}` has API-key env var for unsupported agent `{agent}`",
-                        mapping.id
+                        "provider `{primary_id}` has API-key env var for unsupported agent `{agent}`"
                     ));
                 }
             }
-            if !provider_overrides.insert(mapping.id.as_str()) {
-                return provider_mapping_error(format!(
-                    "duplicate provider env mapping `{}`",
-                    mapping.id
-                ));
+            let mut mapped_agents = HashSet::new();
+            for (provider_id, agent_id) in &mapping.provider_ids {
+                validate_token(&format!("providers.{primary_id}.provider_ids"), provider_id)?;
+                validate_token(
+                    &format!("providers.{primary_id}.provider_ids.{provider_id}"),
+                    agent_id,
+                )?;
+                if !mapping.contains_id(provider_id) {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` maps unknown native provider id `{provider_id}`"
+                    ));
+                }
+                if !mapping.agents.iter().any(|agent| agent == agent_id) {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` maps native provider id `{provider_id}` to unsupported agent `{agent_id}`"
+                    ));
+                }
+                if !mapped_agents.insert(agent_id.as_str()) {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` has multiple native provider ids for agent `{agent_id}`"
+                    ));
+                }
+            }
+            if !mapping.provider_ids.is_empty() {
+                for agent_id in &mapping.agents {
+                    if !mapping
+                        .provider_ids
+                        .values()
+                        .any(|mapped| mapped == agent_id)
+                    {
+                        return provider_mapping_error(format!(
+                            "provider `{primary_id}` has no native provider id for agent `{agent_id}`"
+                        ));
+                    }
+                }
+            }
+            for provider_id in &mapping.id {
+                if !provider_overrides.insert(provider_id.as_str()) {
+                    return provider_mapping_error(format!(
+                        "duplicate provider env mapping `{provider_id}`"
+                    ));
+                }
             }
             validate_tokens(
-                format!("providers.{}.companion_env_vars", mapping.id),
+                format!("providers.{primary_id}.companion_env_vars"),
                 &mapping.companion_env_vars,
             )?;
             validate_tokens(
-                format!("providers.{}.optional_env_vars", mapping.id),
+                format!("providers.{primary_id}.optional_env_vars"),
                 &mapping.optional_env_vars,
             )?;
         }
@@ -225,18 +326,21 @@ pub fn env_var_for_provider_id(provider_id: &str) -> Option<&'static str> {
 }
 
 pub fn env_var_for_agent_provider_id(agent_id: &str, provider_id: &str) -> Option<&'static str> {
-    ProviderKeyMapping::load_embedded()
-        .provider_mapping(provider_id)
-        .and_then(|provider| {
-            if !provider.agents.iter().any(|id| id == agent_id) {
-                return None;
-            }
-            provider
-                .api_key_env_vars
-                .get(agent_id)
-                .map(String::as_str)
-                .or_else(|| env_var_for_provider_id(provider_id))
-        })
+    let mapping = ProviderKeyMapping::load_embedded();
+    mapping.provider_mapping(provider_id).and_then(|provider| {
+        if !provider.agents.iter().any(|id| id == agent_id) {
+            return None;
+        }
+        provider
+            .api_key_env_vars
+            .get(agent_id)
+            .map(String::as_str)
+            .or_else(|| {
+                mapping
+                    .mapping_for_provider_id(provider_id)
+                    .map(|key| key.env_var.as_str())
+            })
+    })
 }
 
 pub fn env_refs_for_agent_id(agent_id: &str) -> Vec<&'static str> {
@@ -258,6 +362,15 @@ pub fn provider_id_supports_agent(provider_id: &str, agent_id: &str) -> bool {
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
         .is_some_and(|provider| provider.agents.iter().any(|agent| agent == agent_id))
+}
+
+pub fn agent_provider_id_for_provider_id(
+    agent_id: &str,
+    provider_id: &str,
+) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.agent_native_provider_id(agent_id))
 }
 
 pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> {
@@ -309,7 +422,13 @@ pub fn provider_ids_for_env_refs<'a>(
     let mut provider_ids = BTreeSet::new();
     for env_ref in env_refs {
         if let Some(key_mapping) = mapping.mapping_for_env_var(env_ref) {
-            provider_ids.extend(key_mapping.provider_ids.iter().map(String::as_str));
+            for provider_id in &key_mapping.provider_ids {
+                if let Some(provider) = mapping.provider_mapping(provider_id) {
+                    provider_ids.extend(provider.id.iter().map(String::as_str));
+                } else {
+                    provider_ids.insert(provider_id.as_str());
+                }
+            }
         }
         provider_ids.extend(
             mapping
@@ -321,23 +440,32 @@ pub fn provider_ids_for_env_refs<'a>(
                         .values()
                         .any(|env_var| env_var == env_ref)
                 })
-                .map(|provider| provider.id.as_str()),
+                .flat_map(|provider| provider.id.iter().map(String::as_str)),
         );
     }
     provider_ids
 }
 
 pub fn env_ref_allows_provider(env_var: &str, provider_id: &str) -> bool {
-    mapping_for_env_var(env_var)
-        .is_some_and(|mapping| mapping.provider_ids.iter().any(|id| id == provider_id))
-        || ProviderKeyMapping::load_embedded()
-            .provider_mapping(provider_id)
-            .is_some_and(|provider| {
-                provider
-                    .api_key_env_vars
-                    .values()
-                    .any(|mapped_env_var| mapped_env_var == env_var)
-            })
+    let mapping = ProviderKeyMapping::load_embedded();
+    mapping_for_env_var(env_var).is_some_and(|key_mapping| {
+        key_mapping.provider_ids.iter().any(|id| id == provider_id)
+            || mapping
+                .provider_mapping(provider_id)
+                .is_some_and(|provider| {
+                    key_mapping
+                        .provider_ids
+                        .iter()
+                        .any(|key_provider_id| provider.contains_id(key_provider_id))
+                })
+    }) || mapping
+        .provider_mapping(provider_id)
+        .is_some_and(|provider| {
+            provider
+                .api_key_env_vars
+                .values()
+                .any(|mapped_env_var| mapped_env_var == env_var)
+        })
 }
 
 fn dedupe_refs(refs: Vec<&'static str>) -> Vec<&'static str> {
@@ -368,6 +496,13 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_supported_agent_id(agent_id: &str) -> bool {
+    matches!(
+        agent_id,
+        "amp" | "codex" | "cursor" | "goose" | "opencode" | "pi"
+    )
+}
+
 fn provider_mapping_error<T>(reason: String) -> Result<T> {
     Err(StackError::RegistryLoad { reason })
 }
@@ -378,9 +513,17 @@ mod tests {
 
     #[test]
     fn embedded_mapping_loads_and_validates() {
-        let mapping = ProviderKeyMapping::from_toml(EMBEDDED_MAPPING).expect("mapping parses");
+        let mapping = ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
+            .expect("mapping parses");
 
         assert!(!mapping.api_keys().is_empty());
+        assert!(!mapping.providers.is_empty());
+        assert!(
+            mapping
+                .providers
+                .iter()
+                .all(|provider| !provider.ids().is_empty())
+        );
     }
 
     #[test]
@@ -420,12 +563,19 @@ mod tests {
             "OPENAI_API_KEY",
             "CLOUDFLARE_API_KEY",
             "CLOUDFLARE_API_TOKEN",
+            "AI_GATEWAY_API_KEY",
             "UNKNOWN_KEY",
         ]);
 
         assert_eq!(
             providers.into_iter().collect::<Vec<_>>(),
-            ["cloudflare-ai-gateway", "cloudflare-workers-ai", "openai"]
+            [
+                "cloudflare-ai-gateway",
+                "cloudflare-workers-ai",
+                "openai",
+                "vercel",
+                "vercel-ai-gateway"
+            ]
         );
     }
 
@@ -501,6 +651,38 @@ mod tests {
     }
 
     #[test]
+    fn provider_lookup_works_for_every_collapsed_provider_id() {
+        let mapping = ProviderKeyMapping::load_embedded();
+
+        for provider_id in [
+            "vercel-ai-gateway",
+            "vercel",
+            "fireworks",
+            "fireworks-ai",
+            "together",
+            "togetherai",
+            "kimi-coding",
+            "kimi-for-coding",
+        ] {
+            let provider = mapping
+                .provider_mapping(provider_id)
+                .expect("collapsed provider id resolves");
+            assert!(provider.ids().iter().any(|id| id == provider_id));
+        }
+    }
+
+    #[test]
+    fn models_dev_only_providers_are_opencode_scoped_without_default_env_refs() {
+        for provider_id in ["helicone", "deepinfra", "github-models", "venice"] {
+            assert!(provider_id_is_known(provider_id));
+            assert!(provider_id_supports_agent(provider_id, "opencode"));
+            assert!(!provider_id_supports_agent(provider_id, "pi"));
+            assert_eq!(env_var_for_provider_id(provider_id), None);
+            assert_eq!(env_var_for_agent_provider_id("opencode", provider_id), None);
+        }
+    }
+
+    #[test]
     fn azure_provider_refs_include_base_url_and_documented_options() {
         assert_eq!(
             required_env_refs_for_provider_id("azure-openai-responses", "AZURE_OPENAI_API_KEY"),
@@ -519,9 +701,9 @@ mod tests {
     #[test]
     fn provider_metadata_scopes_supported_agents() {
         assert!(provider_id_supports_agent("fireworks", "pi"));
-        assert!(!provider_id_supports_agent("fireworks", "opencode"));
+        assert!(provider_id_supports_agent("fireworks", "opencode"));
         assert!(provider_id_supports_agent("fireworks-ai", "opencode"));
-        assert!(!provider_id_supports_agent("fireworks-ai", "pi"));
+        assert!(provider_id_supports_agent("fireworks-ai", "pi"));
         assert!(provider_id_supports_agent("openai", "pi"));
         assert!(provider_id_supports_agent("openai", "opencode"));
         assert!(provider_id_supports_agent("openai", "codex"));
@@ -546,6 +728,43 @@ mod tests {
             env_var_for_agent_provider_id("codex", "openrouter"),
             Some("OPENROUTER_API_KEY")
         );
+    }
+
+    #[test]
+    fn agent_native_provider_ids_are_data_driven() {
+        assert_eq!(
+            agent_provider_id_for_provider_id("pi", "vercel"),
+            Some("vercel-ai-gateway")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("opencode", "vercel-ai-gateway"),
+            Some("vercel")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("pi", "fireworks-ai"),
+            Some("fireworks")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("opencode", "fireworks"),
+            Some("fireworks-ai")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("pi", "togetherai"),
+            Some("together")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("opencode", "together"),
+            Some("togetherai")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("pi", "kimi-for-coding"),
+            Some("kimi-coding")
+        );
+        assert_eq!(
+            agent_provider_id_for_provider_id("opencode", "kimi-coding"),
+            Some("kimi-for-coding")
+        );
+        assert_eq!(agent_provider_id_for_provider_id("cursor", "openai"), None);
     }
 
     #[test]
@@ -585,7 +804,7 @@ env_var = "SECOND_API_KEY"
 provider_ids = ["same"]
 
 [[providers]]
-id = "same"
+id = ["same"]
 name = "Same"
 agents = ["pi"]
 "#,
@@ -593,6 +812,84 @@ agents = ["pi"]
         .expect_err("duplicate provider id fails");
 
         assert!(err.to_string().contains("duplicate provider id `same`"));
+    }
+
+    #[test]
+    fn invalid_mapping_rejects_duplicate_provider_metadata_ids() {
+        let err = ProviderKeyMapping::from_toml(
+            r#"
+[[api_keys]]
+env_var = "FIRST_API_KEY"
+provider_ids = ["same"]
+
+[[providers]]
+id = ["same", "alias"]
+name = "Same"
+agents = ["pi"]
+
+[[providers]]
+id = ["alias"]
+name = "Alias"
+agents = ["opencode"]
+"#,
+        )
+        .expect_err("duplicate provider metadata id fails");
+
+        assert!(
+            err.to_string()
+                .contains("duplicate provider env mapping `alias`")
+        );
+    }
+
+    #[test]
+    fn invalid_mapping_rejects_native_provider_id_for_unknown_id() {
+        let err = ProviderKeyMapping::from_toml(
+            r#"
+[[api_keys]]
+env_var = "FIRST_API_KEY"
+provider_ids = ["known"]
+
+[[providers]]
+id = ["known"]
+name = "Known"
+agents = ["pi"]
+
+[providers.provider_ids]
+missing = "pi"
+"#,
+        )
+        .expect_err("unknown native provider id fails");
+
+        assert!(
+            err.to_string()
+                .contains("maps unknown native provider id `missing`")
+        );
+    }
+
+    #[test]
+    fn invalid_mapping_rejects_duplicate_native_agent_mapping() {
+        let err = ProviderKeyMapping::from_toml(
+            r#"
+[[api_keys]]
+env_var = "FIRST_API_KEY"
+provider_ids = ["known"]
+
+[[providers]]
+id = ["known", "alias"]
+name = "Known"
+agents = ["pi"]
+
+[providers.provider_ids]
+known = "pi"
+alias = "pi"
+"#,
+        )
+        .expect_err("duplicate native agent mapping fails");
+
+        assert!(
+            err.to_string()
+                .contains("multiple native provider ids for agent `pi`")
+        );
     }
 
     #[test]
@@ -604,7 +901,7 @@ env_var = ""
 provider_ids = ["openai"]
 
 [[providers]]
-id = "openai"
+id = ["openai"]
 name = "OpenAI"
 agents = ["pi"]
 "#,

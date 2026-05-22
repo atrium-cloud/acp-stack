@@ -1,6 +1,9 @@
 use crate::agent_installer::{install_resolved, run_installer};
 use crate::agent_registry::RegistryCatalog;
-use crate::config::{self, AgentProviderConfig, Config};
+use crate::config::{
+    self, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
@@ -14,8 +17,9 @@ use crate::runtime::acp_bridge::{
 use crate::runtime::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent_registry::RegistryEntry;
 use crate::runtime::provider_keys::{
-    env_refs_for_agent_id, env_var_for_agent_provider_id, optional_env_refs_for_provider_id,
-    provider_id_is_known, provider_id_supports_agent, required_env_refs_for_provider_id,
+    agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
+    optional_env_refs_for_provider_id, provider_id_is_known, provider_id_supports_agent,
+    required_env_refs_for_provider_id,
 };
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
@@ -70,12 +74,33 @@ pub struct AgentTestArgs {
 
 #[derive(Debug, Args)]
 pub struct AgentSetArgs {
+    /// Configure a provider/model outside the embedded provider mapping.
+    #[arg(long)]
+    custom_provider: bool,
     /// Provider id, such as opencode-go, openai, or anthropic.
     #[arg(long)]
     provider: Option<String>,
+    /// Display name for a custom provider.
+    #[arg(long = "provider-name")]
+    provider_name: Option<String>,
+    /// Base URL for a custom provider.
+    #[arg(long = "base-url")]
+    base_url: Option<String>,
+    /// API family for a custom provider: chat-completions or responses.
+    #[arg(long = "provider-api")]
+    provider_api: Option<String>,
     /// Provider-qualified model id or model pattern.
     #[arg(long)]
     model: Option<String>,
+    /// Display name for a custom model.
+    #[arg(long = "model-name")]
+    model_name: Option<String>,
+    /// Context window in tokens for a custom model.
+    #[arg(long)]
+    context: Option<String>,
+    /// Maximum output tokens for a custom model.
+    #[arg(long = "output-max-tokens")]
+    output_max_tokens: Option<String>,
     /// Agent session mode for agents that expose mode as an ACP config option.
     #[arg(long)]
     mode: Option<String>,
@@ -112,6 +137,10 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     let Some(provider_id) = args.provider.clone() else {
         return run_agent_model_set(config, config_path, &home, args, entry);
     };
+    if args.custom_provider {
+        return run_agent_custom_provider_set(config, config_path, &home, args, entry, provider_id);
+    }
+    reject_custom_provider_args(&args)?;
     if !entry.set_provider {
         return Err(StackError::InvalidParam {
             field: "provider",
@@ -133,7 +162,7 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     if !provider_id_is_known(&provider_id) {
         return Err(StackError::InvalidParam {
             field: "provider",
-            reason: format!("provider `{provider_id}` is not listed in data/mapping.toml"),
+            reason: format!("provider `{provider_id}` is not listed in provider/env mapping"),
         });
     }
     if !provider_id_supports_agent(&provider_id, &config.agent.id) {
@@ -181,9 +210,20 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
         id: provider_id.clone(),
         model: None,
         api_key_ref: Some(api_key_ref.clone()),
+        custom: None,
     });
+    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, &provider_id)
+    else {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "provider `{}` is not supported for agent `{}`",
+                provider_id, config.agent.id
+            ),
+        });
+    };
     let model = match args.model {
-        Some(model) => resolve_agent_model_value(&home, &config, Some(&provider_id), &model)?,
+        Some(model) => resolve_agent_model_value(&home, &config, Some(agent_provider_id), &model)?,
         None => {
             if !entry.set_model {
                 return Err(StackError::AgentConfigProvision {
@@ -280,6 +320,7 @@ fn run_codex_openai_set(
         id: provider_id,
         model: Some(requested_model),
         api_key_ref: None,
+        custom: None,
     });
     let canonical = config.to_canonical_toml()?;
     let mut config = config::load_config_from_str(&canonical)?;
@@ -330,6 +371,169 @@ fn run_codex_openai_set(
     Ok(())
 }
 
+fn run_agent_custom_provider_set(
+    mut config: Config,
+    config_path: PathBuf,
+    home: &Path,
+    args: AgentSetArgs,
+    entry: &RegistryEntry,
+    provider_id: String,
+) -> Result<()> {
+    if !entry.allow_custom_provider {
+        return Err(StackError::InvalidParam {
+            field: "custom-provider",
+            reason: format!("{} does not support custom provider setup", entry.name),
+        });
+    }
+    if !entry.allow_custom_model {
+        return Err(StackError::InvalidParam {
+            field: "custom-provider",
+            reason: format!("{} does not support custom model setup", entry.name),
+        });
+    }
+    let provider_name = required_custom_arg("provider-name", args.provider_name)?;
+    let base_url = required_custom_arg("base-url", args.base_url)?;
+    let api_key_ref = required_custom_arg("api-key-ref", args.api_key_ref)?;
+    let model = required_custom_arg("model", args.model)?;
+    let model_name = args.model_name.unwrap_or_else(|| model.clone());
+    let api = parse_custom_provider_api(
+        args.provider_api.as_deref(),
+        default_custom_provider_api(&config.agent.id),
+    )?;
+    if config.agent.id == "codex" && api != CustomProviderApi::Responses {
+        return Err(StackError::InvalidParam {
+            field: "provider-api",
+            reason: "Codex custom providers only support responses".to_owned(),
+        });
+    }
+    let context = parse_custom_token_limit(
+        "context",
+        args.context.as_deref(),
+        DEFAULT_CUSTOM_MODEL_CONTEXT,
+    )?;
+    let output_max_tokens = parse_custom_token_limit(
+        "output-max-tokens",
+        args.output_max_tokens.as_deref(),
+        DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+    )?;
+
+    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
+        config.agent.env.push(api_key_ref.clone());
+    }
+    config.agent.model = None;
+    config.agent.provider = Some(AgentProviderConfig {
+        id: provider_id,
+        model: Some(model),
+        api_key_ref: Some(api_key_ref.clone()),
+        custom: Some(AgentCustomProviderConfig {
+            name: provider_name,
+            base_url,
+            api,
+            model_name: Some(model_name),
+            context,
+            output_max_tokens,
+        }),
+    });
+
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    let provisioned = provision_agent_headless_config(&config, home)?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+
+    print_agent_set_agent(&config);
+    println!(
+        "provider: {}",
+        config.agent.provider.as_ref().expect("provider set").id
+    );
+    println!(
+        "model: {}",
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref())
+            .unwrap_or("")
+    );
+    println!("api_key_ref: {api_key_ref}");
+    for item in provisioned {
+        println!("{}: {}", item.label, item.path.display());
+    }
+    print_agent_set_effective_notice();
+    Ok(())
+}
+
+fn required_custom_arg(field: &'static str, value: Option<String>) -> Result<String> {
+    value
+        .filter(|value| !value.trim().is_empty() && value.trim().len() == value.len())
+        .ok_or_else(|| StackError::InvalidParam {
+            field,
+            reason: format!("--{field} is required for --custom-provider"),
+        })
+}
+
+fn default_custom_provider_api(agent_id: &str) -> CustomProviderApi {
+    if agent_id == "codex" {
+        CustomProviderApi::Responses
+    } else {
+        CustomProviderApi::ChatCompletions
+    }
+}
+
+fn parse_custom_provider_api(
+    value: Option<&str>,
+    default: CustomProviderApi,
+) -> Result<CustomProviderApi> {
+    match value {
+        None => Ok(default),
+        Some("chat-completions") => Ok(CustomProviderApi::ChatCompletions),
+        Some("responses") => Ok(CustomProviderApi::Responses),
+        Some(_) => Err(StackError::InvalidParam {
+            field: "provider-api",
+            reason: "must be `chat-completions` or `responses`".to_owned(),
+        }),
+    }
+}
+
+fn parse_custom_token_limit(field: &'static str, value: Option<&str>, default: u64) -> Result<u64> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value.contains(',') {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "must be a plain integer without commas".to_owned(),
+        });
+    }
+    let parsed = value.parse::<u64>().map_err(|_| StackError::InvalidParam {
+        field,
+        reason: "must be a positive integer".to_owned(),
+    })?;
+    if parsed == 0 {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "must be greater than 0".to_owned(),
+        });
+    }
+    Ok(parsed)
+}
+
+fn reject_custom_provider_args(args: &AgentSetArgs) -> Result<()> {
+    if args.custom_provider
+        || args.provider_name.is_some()
+        || args.base_url.is_some()
+        || args.provider_api.is_some()
+        || args.model_name.is_some()
+        || args.context.is_some()
+        || args.output_max_tokens.is_some()
+    {
+        return Err(StackError::InvalidParam {
+            field: "custom-provider",
+            reason: "custom provider flags require --custom-provider".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn run_agent_model_set(
     mut config: Config,
     config_path: PathBuf,
@@ -337,6 +541,7 @@ fn run_agent_model_set(
     args: AgentSetArgs,
     entry: &RegistryEntry,
 ) -> Result<()> {
+    reject_custom_provider_args(&args)?;
     if args.api_key_ref.is_some() {
         return Err(StackError::InvalidParam {
             field: "api-key-ref",
@@ -413,6 +618,7 @@ fn run_agent_mode_set(
     entry: &RegistryEntry,
     mode: String,
 ) -> Result<()> {
+    reject_custom_provider_args(&args)?;
     if args.provider.is_some() || args.model.is_some() || args.api_key_ref.is_some() {
         return Err(StackError::InvalidParam {
             field: "mode",
