@@ -30,7 +30,7 @@ env = ["AMP_API_KEY"]
 restart = "on-crash"
 ```
 
-Runtime secret refs are defined by the shared API-key mapping in `data/mapping.toml` and summarized in `docs/specs/agents/api_key.md`.
+Runtime secret refs are defined by the shared provider/env mapping and summarized in `docs/specs/agents/api_key.md`.
 
 ## Model And Mode Selection
 

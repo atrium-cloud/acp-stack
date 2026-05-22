@@ -1,4 +1,7 @@
-use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
+use acp_stack::config::{
+    AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_CUSTOM_MODEL_CONTEXT,
+    DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, load_config_from_str,
+};
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
 
@@ -53,6 +56,57 @@ fn canonical_export_keeps_secret_refs_and_omits_secret_values() {
             "canonical export leaked {secret_value}"
         );
     }
+}
+
+#[test]
+fn parses_custom_provider_defaults() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n"
+    );
+
+    let config = load_config_from_str(&config_text).expect("custom provider config should parse");
+    let custom = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.custom.as_ref())
+        .expect("custom provider should load");
+
+    assert_eq!(custom.api, CustomProviderApi::ChatCompletions);
+    assert_eq!(custom.context, DEFAULT_CUSTOM_MODEL_CONTEXT);
+    assert_eq!(
+        custom.output_max_tokens,
+        DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS
+    );
+}
+
+#[test]
+fn rejects_custom_provider_without_api_key_ref() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n"
+    );
+
+    let error =
+        load_config_from_str(&config_text).expect_err("custom provider without ref should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("agent.provider.api_key_ref is required")
+    );
 }
 
 #[test]

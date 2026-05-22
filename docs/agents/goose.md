@@ -35,7 +35,7 @@ env = ["<provider-api-key-env>"]
 restart = "on-crash"
 ```
 
-The runtime launches `goose acp` with `cwd` set to the configured agent cwd or `workspace.root`. Only variables listed in `[agent].env` are injected from the encrypted `acp-stack` secret store. The env var names come from `data/mapping.toml` for the selected provider.
+The runtime launches `goose acp` with `cwd` set to the configured agent cwd or `workspace.root`. Only variables listed in `[agent].env` are injected from the encrypted `acp-stack` secret store. The env var names come from the provider/env mapping for the selected provider.
 
 ## Auth And Provider Setup
 
@@ -48,7 +48,7 @@ GOOSE_CONTEXT_STRATEGY: summarize
 GOOSE_DISABLE_SESSION_NAMING: true
 ```
 
-Goose built-in providers read provider-native environment variables directly. For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var in `data/mapping.toml`. `acp-stack` does not write API key values into Goose YAML.
+Goose built-in providers read provider-native environment variables directly. For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var in the provider/env mapping. `acp-stack` does not write API key values into Goose YAML.
 
 The configured model remains in `[agent.provider].model`. `acp-stack` applies it through ACP `session/set_config_option` with `configId = "model"` immediately after `session/new` succeeds and before the first prompt, instead of persisting `GOOSE_MODEL` in Goose config.
 

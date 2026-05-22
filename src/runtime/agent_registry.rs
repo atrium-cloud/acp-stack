@@ -164,6 +164,10 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_model: bool,
     #[serde(default)]
+    pub allow_custom_provider: bool,
+    #[serde(default)]
+    pub allow_custom_model: bool,
+    #[serde(default)]
     pub set_mode: bool,
     #[serde(default)]
     pub stdio_framing: RegistryStdioFraming,
@@ -466,6 +470,8 @@ mod tests {
         assert!(opencode.headless_compatible);
         assert!(opencode.set_provider);
         assert!(opencode.set_model);
+        assert!(opencode.allow_custom_provider);
+        assert!(opencode.allow_custom_model);
         assert!(opencode.set_mode);
         assert_eq!(
             opencode.support_doc.as_deref(),
@@ -509,6 +515,8 @@ mod tests {
         assert_eq!(cursor.stdio_framing, RegistryStdioFraming::JsonLines);
         assert!(!cursor.set_provider);
         assert!(cursor.set_model);
+        assert!(!cursor.allow_custom_provider);
+        assert!(!cursor.allow_custom_model);
         assert!(cursor.set_mode);
         assert_eq!(cursor.support_doc.as_deref(), Some("docs/agents/cursor.md"));
         let amp = catalog.lookup("amp").expect("amp entry exists");
@@ -516,6 +524,8 @@ mod tests {
         assert!(amp.headless_compatible);
         assert!(!amp.set_provider);
         assert!(!amp.set_model);
+        assert!(!amp.allow_custom_provider);
+        assert!(!amp.allow_custom_model);
         assert!(amp.set_mode);
         assert_eq!(
             amp.adapter.as_ref().map(|adapter| adapter.id.as_str()),
@@ -527,6 +537,8 @@ mod tests {
         assert!(pi.headless_compatible);
         assert!(pi.set_provider);
         assert!(pi.set_model);
+        assert!(pi.allow_custom_provider);
+        assert!(pi.allow_custom_model);
         assert!(!pi.set_mode);
         assert_eq!(pi.stdio_framing, RegistryStdioFraming::JsonLines);
         let goose = catalog.lookup("goose").expect("goose entry exists");
@@ -534,6 +546,8 @@ mod tests {
         assert!(goose.headless_compatible);
         assert!(goose.set_provider);
         assert!(goose.set_model);
+        assert!(goose.allow_custom_provider);
+        assert!(goose.allow_custom_model);
         assert!(!goose.set_mode);
         assert_eq!(goose.stdio_framing, RegistryStdioFraming::JsonLines);
         assert_eq!(goose.support_doc.as_deref(), Some("docs/agents/goose.md"));
@@ -542,6 +556,8 @@ mod tests {
         assert!(codex.headless_compatible);
         assert!(codex.set_provider);
         assert!(codex.set_model);
+        assert!(codex.allow_custom_provider);
+        assert!(codex.allow_custom_model);
         assert!(codex.set_mode);
         assert_eq!(
             codex.adapter.as_ref().map(|adapter| adapter.id.as_str()),

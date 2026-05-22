@@ -448,6 +448,160 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 }
 
 #[test]
+fn init_custom_opencode_provider_writes_generated_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OpenCode config:"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "myprovider""#));
+    assert!(config.contains(r#"api_key_ref = "CUSTOM_API_KEY""#));
+    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains(r#"api = "chat-completions""#));
+    assert!(config.contains(r#"env = ["CUSTOM_API_KEY"]"#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert_eq!(opencode["model"], "my-model");
+    assert_eq!(
+        opencode["provider"]["myprovider"]["options"]["apiKey"],
+        "{env:CUSTOM_API_KEY}"
+    );
+}
+
+#[test]
+fn init_custom_codex_provider_allows_known_mapped_provider_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "codex",
+            "--provider",
+            "anthropic",
+            "--custom-provider",
+            "--provider-name",
+            "Anthropic Custom",
+            "--base-url",
+            "https://api.anthropic.example/v1",
+            "--api-key-ref",
+            "ANTHROPIC_API_KEY",
+            "--model",
+            "claude-custom",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Codex config:"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "anthropic""#));
+    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains(r#"api = "responses""#));
+
+    let codex_path = tempdir.path().join(".codex").join("config.toml");
+    let codex: toml::Value =
+        toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
+            .expect("codex config should parse");
+    assert_eq!(codex["model_provider"].as_str(), Some("anthropic"));
+    assert_eq!(
+        codex["model_providers"]["anthropic"]["wire_api"].as_str(),
+        Some("responses")
+    );
+}
+
+#[test]
+fn init_custom_codex_provider_allows_openai_provider_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "codex",
+            "--provider",
+            "openai",
+            "--custom-provider",
+            "--provider-name",
+            "OpenAI Compatible",
+            "--base-url",
+            "https://api.compat.example/v1",
+            "--api-key-ref",
+            "CUSTOM_OPENAI_API_KEY",
+            "--model",
+            "custom-responses-model",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Codex config:"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"api_key_ref = "CUSTOM_OPENAI_API_KEY""#));
+    assert!(config.contains("[agent.provider.custom]"));
+}
+
+#[test]
+fn init_custom_provider_fails_noninteractive_when_required_fields_are_missing() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--provider-name is required for custom provider init",
+        ));
+}
+
+#[test]
 fn init_codex_openai_rejects_api_key_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
@@ -592,6 +746,145 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
         opencode["provider"]["openai"]["options"]["apiKey"],
         "{env:OPENAI_API_KEY}"
     );
+}
+
+#[test]
+fn agent_set_uses_agent_native_provider_id_for_collapsed_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &["vercel/test-model"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "agent",
+            "set",
+            "--provider",
+            "vercel-ai-gateway",
+            "--model",
+            "test-model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("api_key_ref: AI_GATEWAY_API_KEY"));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains(r#"id = "vercel-ai-gateway""#));
+    assert!(config.contains(r#"model = "vercel/test-model""#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert_eq!(opencode["model"], "vercel/test-model");
+    assert_eq!(
+        opencode["provider"]["vercel"]["options"]["apiKey"],
+        "{env:AI_GATEWAY_API_KEY}"
+    );
+    assert!(opencode["provider"]["vercel-ai-gateway"].is_null());
+}
+
+#[test]
+fn agent_set_custom_opencode_provider_writes_generated_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+            "--model-name",
+            "My Model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("api_key_ref: CUSTOM_API_KEY"));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains(r#"id = "myprovider""#));
+    assert!(config.contains(r#"api_key_ref = "CUSTOM_API_KEY""#));
+    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains(r#"context = 200000"#));
+    assert!(config.contains(r#"output_max_tokens = 65536"#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert_eq!(opencode["model"], "my-model");
+    assert_eq!(
+        opencode["provider"]["myprovider"]["options"]["apiKey"],
+        "{env:CUSTOM_API_KEY}"
+    );
+    assert_eq!(
+        opencode["provider"]["myprovider"]["models"]["my-model"]["limit"]["context"],
+        200000
+    );
+}
+
+#[test]
+fn agent_set_custom_provider_rejects_comma_token_limits() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+            "--context",
+            "200,000",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "must be a plain integer without commas",
+        ));
 }
 
 #[test]
@@ -866,6 +1159,84 @@ fn agent_set_codex_rejects_unsupported_provider() {
 }
 
 #[test]
+fn agent_set_codex_custom_provider_defaults_to_responses() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Codex config:"));
+
+    let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
+        .expect("updated config should be readable");
+    assert!(config.contains(r#"api = "responses""#));
+
+    let codex_path = tempdir.path().join(".codex").join("config.toml");
+    let codex: toml::Value =
+        toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
+            .expect("codex config should parse");
+    assert_eq!(codex["model_provider"].as_str(), Some("myprovider"));
+    assert_eq!(
+        codex["model_providers"]["myprovider"]["wire_api"].as_str(),
+        Some("responses")
+    );
+}
+
+#[test]
+fn agent_set_codex_rejects_chat_completions_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--provider-api",
+            "chat-completions",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Codex custom providers only support responses",
+        ));
+}
+
+#[test]
 fn agent_set_cursor_accepts_openai_model_from_acp_options() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -953,6 +1324,53 @@ creates = "opencode"
 }
 
 #[test]
+fn agent_set_amp_rejects_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "amp-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["AMP_API_KEY"]"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Amp Code does not support custom provider setup",
+        ));
+}
+
+#[test]
 fn agent_set_opencode_rejects_model_without_provider() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -984,14 +1402,14 @@ fn agent_set_rejects_provider_not_supported_by_agent() {
             "agent",
             "set",
             "--provider",
-            "fireworks",
+            "azure-openai-responses",
             "--model",
-            "fireworks/test-model",
+            "azure-openai-responses/test-model",
         ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "provider `fireworks` is not supported for agent `opencode`",
+            "provider `azure-openai-responses` is not supported for agent `opencode`",
         ));
 
     let after =

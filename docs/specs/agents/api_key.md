@@ -21,13 +21,13 @@ Supported agents use these paths:
 
 `provider` is a first-class `acps` concept defined in [config.md](config.md). During init, the operator picks an agent, installs it when requested, then may pick the initial provider. Init uses provider metadata to choose required refs, collect missing values into the encrypted secret store, and write `[agent.provider]` with provider id and API-key ref. Init does not select or synthesize a model.
 
-For Goose, this distinction matters because provider auth is consumed from provider-native env vars, so `api_key_ref` must match the provider's mapped default ref. For OpenCode, the generated provider block can reference the selected key using `{env:...}`. For Pi, the provider is part of the model string. Cursor exposes its supported models through ACP and uses `CURSOR_API_KEY` directly, without an `acps` provider id. Codex uses `openai` without an `acps` API-key ref and uses `OPENROUTER_API_KEY` only for the supported OpenRouter Responses provider. Amp Code does not accept raw provider/model designations through this support contract.
+For Goose, this distinction matters because mapped provider auth is consumed from provider-native env vars, so `api_key_ref` must match the provider's mapped default ref. For OpenCode, the generated provider block can reference the selected key using `{env:...}`. For Pi, the provider is part of the model string. Cursor exposes its supported models through ACP and uses `CURSOR_API_KEY` directly, without an `acps` provider id. Codex uses `openai` without an `acps` API-key ref and uses `OPENROUTER_API_KEY` only for the supported OpenRouter Responses provider. Amp Code does not accept raw provider/model designations through this support contract.
 
-`acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` is the CLI shape for editing provider config after init. `acps agent set --model <model>` is the model-only shape for Cursor. If `--api-key-ref` is omitted on provider-backed edits, `acps` should use the default key ref from the mapping below, except Codex `openai`, which rejects `--api-key-ref`. Model values come from the agent's ACP `model` config option: explicit `--model` values are validated against it, interactive terminals prompt from it when provider-backed `--model` is omitted, and non-interactive runs print advertised model values without mutating config.
+`acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` is the CLI shape for editing mapped provider config after init. `acps agent set --custom-provider ...` is the shape for explicit custom provider/model setup on agents that allow it. `acps agent set --model <model>` is the model-only shape for Cursor. If `--api-key-ref` is omitted on mapped provider-backed edits, `acps` should use the default key ref from the mapping below, except Codex `openai`, which rejects `--api-key-ref`. Model values for mapped providers come from the agent's ACP `model` config option: explicit `--model` values are validated against it, interactive terminals prompt from it when provider-backed `--model` is omitted, and non-interactive runs print advertised model values without mutating config. Custom model ids are operator-provided and are not an `acps` compatibility guarantee.
 
 ## API Key Provider Mapping
 
-The mapping below defines default API-key env vars for provider ids. It is not a universal claim that a provider cannot be configured with another key reference; it is the default prompt/storage contract used by provider-management commands. Provider ids come from Goose, Pi, and OpenCode provider docs, with display names from `https://models.dev/api.json` where the provider id is present there. The mapping also scopes provider ids to the agents that support them.
+The mapping below defines default API-key env vars for provider ids. It is not a universal claim that a provider cannot be configured with another key reference; it is the default prompt/storage contract used by mapped provider-management commands. Provider ids come from Goose, Pi, and OpenCode provider docs, with display names from `https://models.dev/api.json` where the provider id is present there. The mapping also scopes provider ids to the agents that support them. Provider rows without default env refs can still be used through explicit custom provider setup when the selected agent allows it.
 
 | API key env var                 | Provider ids                                     |
 | ------------------------------- | ------------------------------------------------ |
@@ -56,7 +56,7 @@ The mapping below defines default API-key env vars for provider ids. It is not a
 | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` | `xiaomi-token-plan-ams`                          |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | `xiaomi-token-plan-sgp`                          |
 
-Direct agent API-key refs are also centralized in `data/mapping.toml`:
+Direct agent API-key refs are also centralized in the provider/env mapping:
 
 | API key env var   | Agent id |
 | ----------------- | -------- |

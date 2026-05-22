@@ -37,9 +37,9 @@ restart = "on-crash"
 
 For headless deployments, use Pi's API-key provider env vars or a pre-provisioned auth file.
 
-Runtime secret refs are defined by the shared API-key/provider mapping in `data/mapping.toml` and summarized in `docs/specs/agents/api_key.md`. The embedded mapping covers Pi's documented API-key provider ids. Where Pi and OpenCode or Models.dev use different ids for the same service, Pi keeps the Pi provider id and the alternate catalog id is scoped to OpenCode.
+Runtime secret refs are defined by the shared provider/env mapping and summarized in `docs/specs/agents/api_key.md`. The embedded mapping covers Pi's documented API-key provider ids. Where Pi and OpenCode or Models.dev use different ids for the same service, Pi keeps the Pi provider id and the alternate catalog id is mapped to the agent that needs it.
 
-Pi provider ids in `data/mapping.toml` are sourced from Pi Agent Providers docs page.
+Pi provider ids in the provider metadata are sourced from Pi Agent Providers docs page.
 
 Pi's provider is part of the model string. `acps init` may select the initial provider to collect required env refs, but it does not infer `enabledModels` from configured secret refs. `acps agent set` validates the selected model against Pi's ACP `model` config option and writes `[agent.provider].model` into `~/.pi/agent/settings.json`.
 

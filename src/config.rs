@@ -256,6 +256,66 @@ pub struct AgentProviderConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<AgentCustomProviderConfig>,
+}
+
+/// Fallback custom-model limits used when an operator does not provide agent
+/// config values. They match the documented defaults for the custom provider
+/// setup flow and keep the literals centralized across CLI and init paths.
+pub const DEFAULT_CUSTOM_MODEL_CONTEXT: u64 = 200_000;
+pub const DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS: u64 = 65_536;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCustomProviderConfig {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api: CustomProviderApi,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default = "default_custom_model_context")]
+    pub context: u64,
+    #[serde(default = "default_custom_model_output_max_tokens")]
+    pub output_max_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomProviderApi {
+    ChatCompletions,
+    Responses,
+}
+
+impl Default for CustomProviderApi {
+    fn default() -> Self {
+        Self::ChatCompletions
+    }
+}
+
+impl CustomProviderApi {
+    pub fn as_pi_api(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "openai-completions",
+            Self::Responses => "openai-responses",
+        }
+    }
+
+    pub fn as_codex_wire_api(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat",
+        }
+    }
+}
+
+fn default_custom_model_context() -> u64 {
+    DEFAULT_CUSTOM_MODEL_CONTEXT
+}
+
+fn default_custom_model_output_max_tokens() -> u64 {
+    DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -700,6 +760,53 @@ fn validate_agent_provider(provider: &AgentProviderConfig) -> Result<()> {
     }
     if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
         validate_secret_ref_name_value(api_key_ref)?;
+    }
+    if let Some(custom) = provider.custom.as_ref() {
+        if provider.model.is_none() {
+            return Err(StackError::MissingField {
+                field: "agent.provider.model",
+            });
+        }
+        if provider.api_key_ref.is_none() {
+            return Err(StackError::MissingField {
+                field: "agent.provider.api_key_ref",
+            });
+        }
+        validate_agent_custom_provider(custom)?;
+    }
+    Ok(())
+}
+
+fn validate_agent_custom_provider(custom: &AgentCustomProviderConfig) -> Result<()> {
+    validate_non_empty_trimmed("agent.provider.custom.name", &custom.name)?;
+    validate_non_empty_trimmed("agent.provider.custom.base_url", &custom.base_url)?;
+    if !custom.base_url.starts_with("http://") && !custom.base_url.starts_with("https://") {
+        return Err(StackError::InvalidParam {
+            field: "agent.provider.custom.base_url",
+            reason: "must start with http:// or https://".to_owned(),
+        });
+    }
+    if let Some(model_name) = custom.model_name.as_deref() {
+        validate_non_empty_trimmed("agent.provider.custom.model_name", model_name)?;
+    }
+    if custom.context == 0 {
+        return Err(StackError::InvalidParam {
+            field: "agent.provider.custom.context",
+            reason: "must be greater than 0".to_owned(),
+        });
+    }
+    if custom.output_max_tokens == 0 {
+        return Err(StackError::InvalidParam {
+            field: "agent.provider.custom.output_max_tokens",
+            reason: "must be greater than 0".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_non_empty_trimmed(field: &'static str, value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.trim().len() != value.len() {
+        return Err(StackError::MissingField { field });
     }
     Ok(())
 }
