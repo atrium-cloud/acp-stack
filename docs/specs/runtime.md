@@ -90,6 +90,18 @@ consults a per-step verifier before deciding whether to re-execute:
   resolves on PATH (or under `~/.local/bin`).
 - `workspace_materialize` — verifier checks every declared code/data
   source's destination has the `.acp-stack-source.json` sentinel.
+  When executed, each source operation writes stdout/stderr capture
+  pairs to
+  `~/.local/share/acp-stack/workspace-init-logs/<init_run_id>/<source-tag>/<operation>.<nanos>[.SEQ].{stdout,stderr}`,
+  where `<nanos>` is a 20-digit wall-clock nanosecond stamp and `.SEQ`
+  is an optional 2-digit collision suffix. Each retry lands new files
+  rather than overwriting the prior capture, so a resume preserves the
+  full chain of attempts. Git operations store the child-process
+  streams. Rust-native data operations (`copy`, `download`, `extract`,
+  `s3-download`) store deterministic summaries on stdout and failure
+  detail on stderr while preserving the original typed
+  `StackError::Workspace*`/download/archive error surface. The step's
+  `init_steps.log_dir` points at the run-level directory.
 - `init_complete` — verifier checks an `init.completed` event for this
   run id is already recorded in the unified log.
 - Other phases (`provider_configure`, `agent_headless_config`,
