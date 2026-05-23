@@ -120,7 +120,7 @@
 
 ## Test Hardening
 
-- [ ] Cover the two-step install flow in `tests/agent_install_tests.rs` end-to-end against a mocked GitHub API.
+- [x] Cover the two-step install flow in `tests/agent_install_tests.rs` end-to-end against a mocked GitHub API.
 
 ## Security Self-Check
 
