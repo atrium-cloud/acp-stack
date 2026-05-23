@@ -69,13 +69,13 @@
 ## Installer UX
 
 - [ ] Define resumable init step state: completed steps are verified and reused, failed or incomplete steps resume from the first failing point.
-- [ ] Define fail-on-nonempty collision behavior for init-created code and data directories.
+- [x] Define fail-on-nonempty collision behavior for init-created code and data directories.
 - [x] Add installer command status history.
 - [x] Record installed ACP adapter/harness versions and expose them in agent status.
 - [x] Add an upgrade/check command that reports stale managed agent harnesses or adapters without upgrading automatically.
 - [x] Add a manual end-to-end ACP compatibility test that starts the configured agent and sends a real prompt.
 - [ ] Add retry flow for failed agent installer commands.
-- [ ] Preserve installer logs for audit.
+- [x] Preserve installer logs for audit.
 - [ ] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite.
 - [x] Surface expected command and hash verification failures clearly.
 
@@ -135,10 +135,10 @@
 
 ## acpctl Hardening
 
-- [ ] Audit each `acpctl` command for permission boundaries.
-- [ ] Ensure high-risk local commands cannot be self-approved unless policy explicitly allows it.
-- [ ] Add durable audit records for all `acpctl` actions.
-- [ ] Add tests proving `acpctl` cannot read secrets or rotate API keys.
+- [x] Audit each `acpctl` command for permission boundaries.
+- [x] Ensure high-risk local commands cannot be self-approved unless policy explicitly allows it.
+- [x] Add durable audit records for all `acpctl` actions.
+- [x] Add tests proving `acpctl` cannot read secrets or rotate API keys.
 
 ## Acceptance
 
