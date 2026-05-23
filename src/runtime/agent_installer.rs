@@ -56,9 +56,9 @@ const STDERR_TAIL_BYTES: usize = 2 * 1024;
 // Step labels persisted to `installer_runs.step`. Centralized here so the
 // state-side filter that the future operator UI will use stays consistent
 // with what the installer writes.
-const STEP_INSTALL: &str = "install";
-const STEP_HARNESS: &str = "harness";
-const STEP_ADAPTER: &str = "adapter";
+pub(crate) const STEP_INSTALL: &str = "install";
+pub(crate) const STEP_HARNESS: &str = "harness";
+pub(crate) const STEP_ADAPTER: &str = "adapter";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallerOutcome {

@@ -66,6 +66,21 @@ pub(super) fn row_to_agent_lifecycle(
     })
 }
 
+fn row_to_installer_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstallerRun> {
+    Ok(InstallerRun {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        started_at: row.get(2)?,
+        finished_at: row.get(3)?,
+        status: row.get(4)?,
+        stdout: row.get(5)?,
+        stderr: row.get(6)?,
+        exit_status: row.get(7)?,
+        step: row.get(8)?,
+        version: row.get(9)?,
+    })
+}
+
 /// Defense-in-depth cap on installer_runs row size. The agent_installer module
 /// caps as it captures; this re-truncates so a future regression upstream
 /// cannot still bloat SQLite. Truncates on a UTF-8 char boundary.
@@ -237,7 +252,31 @@ impl StateStore {
     }
 
     pub fn query_installer_runs(&self, limit: u32) -> Result<Vec<InstallerRun>> {
+        self.query_installer_runs_filtered(None, limit)
+    }
+
+    /// Like [`query_installer_runs`] but filters by agent id when provided.
+    /// Passing `None` returns rows for every agent (including legacy rows that
+    /// predate the `agent_id` column being written, which carry NULL there).
+    pub fn query_installer_runs_filtered(
+        &self,
+        agent_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<InstallerRun>> {
         let limit = i64::from(limit);
+        if let Some(agent_id) = agent_id {
+            let mut statement = self.connection().prepare(
+                r#"
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version
+                FROM installer_runs
+                WHERE agent_id = ?1
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?2
+                "#,
+            )?;
+            let rows = statement.query_map(params![agent_id, limit], row_to_installer_run)?;
+            return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
         let mut statement = self.connection().prepare(
             r#"
             SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version
@@ -246,20 +285,7 @@ impl StateStore {
             LIMIT ?1
             "#,
         )?;
-        let rows = statement.query_map(params![limit], |row| {
-            Ok(InstallerRun {
-                id: row.get(0)?,
-                agent_id: row.get(1)?,
-                started_at: row.get(2)?,
-                finished_at: row.get(3)?,
-                status: row.get(4)?,
-                stdout: row.get(5)?,
-                stderr: row.get(6)?,
-                exit_status: row.get(7)?,
-                step: row.get(8)?,
-                version: row.get(9)?,
-            })
-        })?;
+        let rows = statement.query_map(params![limit], row_to_installer_run)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -283,20 +309,7 @@ impl StateStore {
             ORDER BY step
             "#,
         )?;
-        let rows = statement.query_map(params![agent_id], |row| {
-            Ok(InstallerRun {
-                id: row.get(0)?,
-                agent_id: row.get(1)?,
-                started_at: row.get(2)?,
-                finished_at: row.get(3)?,
-                status: row.get(4)?,
-                stdout: row.get(5)?,
-                stderr: row.get(6)?,
-                exit_status: row.get(7)?,
-                step: row.get(8)?,
-                version: row.get(9)?,
-            })
-        })?;
+        let rows = statement.query_map(params![agent_id], row_to_installer_run)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }

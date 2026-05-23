@@ -70,9 +70,9 @@
 
 - [ ] Define resumable init step state: completed steps are verified and reused, failed or incomplete steps resume from the first failing point.
 - [ ] Define fail-on-nonempty collision behavior for init-created code and data directories.
-- [ ] Add installer command status history.
+- [x] Add installer command status history.
 - [x] Record installed ACP adapter/harness versions and expose them in agent status.
-- [ ] Add an upgrade/check command that reports stale managed agent harnesses or adapters without upgrading automatically.
+- [x] Add an upgrade/check command that reports stale managed agent harnesses or adapters without upgrading automatically.
 - [x] Add a manual end-to-end ACP compatibility test that starts the configured agent and sends a real prompt.
 - [ ] Add retry flow for failed agent installer commands.
 - [ ] Preserve installer logs for audit.

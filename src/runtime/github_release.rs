@@ -50,6 +50,18 @@ pub struct GithubReleaseOutcome {
     pub release_tag: String,
 }
 
+/// Resolve the tag of the latest published release for a GitHub repo. Used
+/// by `acps agent check` to compare an installed adapter/harness against
+/// upstream without downloading the asset. Returns the raw release tag (e.g.
+/// `v0.11.1`) so callers can do a stringly compare against
+/// `installer_runs.version`.
+pub fn latest_release_tag(repo: &str) -> Result<String> {
+    let client = build_client()?;
+    let token = resolve_token();
+    let release = fetch_release(&client, repo, None, token.as_deref())?;
+    Ok(release.tag_name)
+}
+
 pub fn install(
     spec: GithubReleaseInstall<'_>,
     version: Option<&str>,

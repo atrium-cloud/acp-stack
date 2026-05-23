@@ -369,6 +369,11 @@ pub enum StackError {
     #[error("{name} is not currently supported. Please try a different agent.")]
     AgentUnsupported { name: String },
 
+    #[error(
+        "one or more managed agent components are stale or missing; re-run `acps agent install` to upgrade"
+    )]
+    AgentCheckStale,
+
     #[error("agent registry could not be loaded: {reason}")]
     RegistryLoad { reason: String },
 
@@ -378,6 +383,16 @@ pub enum StackError {
         #[source]
         source: reqwest::Error,
     },
+
+    #[error("failed to query npm registry for `{package}`: {source}")]
+    NpmRegistryFetch {
+        package: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("npm registry returned an empty version for `{package}`")]
+    NpmRegistryEmptyVersion { package: String },
 
     #[error("no release asset for {repo} matched pattern `{pattern}`")]
     GithubReleaseAssetNotFound { repo: String, pattern: String },
@@ -690,8 +705,11 @@ impl StackError {
             AgentInstallerTimeout => "agent.installer_timeout",
             AgentRegistryMissing { .. } => "agent.registry_missing",
             AgentUnsupported { .. } => "agent.unsupported",
+            AgentCheckStale => "agent.check_stale",
             RegistryLoad { .. } => "agent.registry_load_failed",
             GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
+            NpmRegistryFetch { .. } => "agent.npm_registry_fetch_failed",
+            NpmRegistryEmptyVersion { .. } => "agent.npm_registry_empty_version",
             GithubReleaseAssetNotFound { .. } => "agent.github_release_asset_not_found",
             GithubReleaseAssetAmbiguous { .. } => "agent.github_release_asset_ambiguous",
             GithubReleaseArchiveExtract { .. } => "agent.github_release_archive_extract_failed",
@@ -908,9 +926,18 @@ impl StackError {
             AgentUnsupported { name } => {
                 format!("{name} is not currently supported. Please try a different agent.")
             }
+            AgentCheckStale => {
+                "one or more managed agent components are stale or missing; re-run `acps agent install` to upgrade".to_owned()
+            }
             RegistryLoad { reason } => format!("agent registry could not be loaded: {reason}"),
             GithubReleaseFetch { repo, .. } => {
                 format!("failed to query GitHub Releases for {repo}")
+            }
+            NpmRegistryFetch { package, .. } => {
+                format!("failed to query npm registry for `{package}`")
+            }
+            NpmRegistryEmptyVersion { package } => {
+                format!("npm registry returned an empty version for `{package}`")
             }
             GithubReleaseAssetNotFound { repo, pattern } => {
                 format!("no release asset for {repo} matched pattern `{pattern}`")
@@ -1181,6 +1208,7 @@ impl StackError {
             // Agent-related: classify client-facing vs internal vs upstream.
             AgentNotConfigured => StatusCode::BAD_REQUEST,
             AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
+            AgentCheckStale => StatusCode::CONFLICT,
             AgentAlreadyRunning | AgentNotRunning => StatusCode::CONFLICT,
             AgentNotInitialized => StatusCode::NOT_FOUND,
             AgentUnsupportedCapability { .. } => StatusCode::NOT_IMPLEMENTED,
@@ -1193,6 +1221,8 @@ impl StackError {
             | AgentRegistryMissing { .. }
             | RegistryLoad { .. }
             | GithubReleaseFetch { .. }
+            | NpmRegistryFetch { .. }
+            | NpmRegistryEmptyVersion { .. }
             | GithubReleaseAssetNotFound { .. }
             | GithubReleaseAssetAmbiguous { .. }
             | GithubReleaseArchiveExtract { .. }

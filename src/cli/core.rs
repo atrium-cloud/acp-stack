@@ -11,6 +11,7 @@ use super::auth::AuthCommand;
 use super::config::ConfigCommand;
 use super::deps::DepsCommand;
 use super::init::InitArgs;
+use super::installer::InstallerCommand;
 use super::logs::LogsCommand;
 use super::metrics::MetricsCommand;
 use super::reset::ResetArgs;
@@ -58,6 +59,11 @@ enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    /// Inspect persisted installer step history.
+    Installer {
+        #[command(subcommand)]
+        command: InstallerCommand,
     },
     Sessions {
         #[command(subcommand)]
@@ -124,6 +130,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Config { command } => super::config::run_config_command(command),
         Command::Logs { command } => super::logs::run_logs_command(command),
         Command::Agent { command } => super::agent::run_agent_command(command),
+        Command::Installer { command } => super::installer::run_installer_command(command),
         Command::Sessions { command } => super::sessions::run_sessions_command(command),
         Command::Deps { command } => super::deps::run_deps_command(command),
         Command::Security { command } => super::security::run_security_command(command),

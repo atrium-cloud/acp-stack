@@ -2286,6 +2286,170 @@ fn status_reports_config_state_schema_and_latest_event() {
 }
 
 #[test]
+fn agent_check_reports_no_runs_when_state_is_empty() {
+    // Without successful installer_runs the check command should report the
+    // expected native install step as missing without hitting the network.
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "check"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("install: not installed"));
+}
+
+#[test]
+fn agent_check_reports_missing_adapter_step() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), amp_config()).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "amp",
+            started_at: "2026-05-22T00:00:00.000000000Z",
+            finished_at: Some("2026-05-22T00:00:01.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: None,
+        })
+        .expect("seed harness row");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "check"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("harness: unknown"))
+        .stdout(predicates::str::contains("adapter: not installed"));
+}
+
+#[test]
+fn installer_history_reports_empty_state_when_nothing_recorded() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    fs::create_dir_all(tempdir.path().join(".config/acp-stack"))
+        .expect("config dir should be created");
+    fs::write(
+        tempdir.path().join(".config/acp-stack/acp-stack.toml"),
+        VALID_CONFIG,
+    )
+    .expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["installer", "history"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no installer runs recorded"));
+}
+
+#[test]
+fn installer_history_renders_rows_with_filter() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    fs::create_dir_all(tempdir.path().join(".config/acp-stack"))
+        .expect("config dir should be created");
+    fs::write(
+        tempdir.path().join(".config/acp-stack/acp-stack.toml"),
+        VALID_CONFIG,
+    )
+    .expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "opencode",
+            started_at: "2026-05-22T00:00:00.000000000Z",
+            finished_at: Some("2026-05-22T00:00:00.250000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.0.0"),
+        })
+        .expect("seed harness row");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "codex",
+            started_at: "2026-05-22T00:00:01.000000000Z",
+            finished_at: Some("2026-05-22T00:00:02.000000000Z"),
+            status: "failed",
+            stdout: "",
+            stderr: "boom",
+            exit_status: Some(2),
+            step: "adapter",
+            version: None,
+        })
+        .expect("seed adapter row");
+    drop(store);
+
+    // No filter: both rows visible, newest (codex) first.
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["installer", "history"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("started_at"))
+        .stdout(predicates::str::contains("codex"))
+        .stdout(predicates::str::contains("opencode"))
+        .stdout(predicates::str::contains("v1.0.0"))
+        .stdout(predicates::str::contains("failed"));
+
+    // Filter to opencode: only the harness row should appear.
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["installer", "history", "--agent", "opencode"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("opencode"))
+        .stdout(predicates::str::contains("v1.0.0"))
+        .stdout(predicates::str::contains("codex").not());
+}
+
+#[test]
+fn installer_history_rejects_zero_limit() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    fs::create_dir_all(tempdir.path().join(".config/acp-stack"))
+        .expect("config dir should be created");
+    fs::write(
+        tempdir.path().join(".config/acp-stack/acp-stack.toml"),
+        VALID_CONFIG,
+    )
+    .expect("config should be written");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["installer", "history", "--limit", "0"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("limit must be"));
+}
+
+#[test]
 fn agent_status_surfaces_installed_versions_from_state() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -3302,6 +3466,24 @@ fn codex_config() -> String {
         .replace(r#"command = "opencode""#, r#"command = "codex-acp""#)
         .replace(r#"args = ["acp"]"#, r#"args = []"#)
         .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        )
+}
+
+fn amp_config() -> String {
+    VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "amp-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["AMP_API_KEY"]"#)
         .replace(
             r#"
 [agent.install]
