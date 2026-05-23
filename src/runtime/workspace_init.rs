@@ -356,6 +356,26 @@ fn materialize_code_source(
     })
 }
 
+/// Cap stored stderr from materializer subprocesses (git, curl, tar) so a
+/// chatty failure does not poison the error variant. Matches the 2 KiB tail
+/// used by `agent_installer::tail_bytes` for installer-step stderr; operators
+/// expecting consistent failure ergonomics get the same envelope here.
+const WORKSPACE_STDERR_TAIL_BYTES: usize = 2 * 1024;
+
+fn tail_stderr_bytes(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text.trim();
+    if trimmed.len() <= WORKSPACE_STDERR_TAIL_BYTES {
+        return trimmed.to_owned();
+    }
+    let start = trimmed.len() - WORKSPACE_STDERR_TAIL_BYTES;
+    let mut cutoff = start;
+    while cutoff < trimmed.len() && !trimmed.is_char_boundary(cutoff) {
+        cutoff += 1;
+    }
+    trimmed[cutoff..].to_owned()
+}
+
 fn run_git_clone(
     repo: &str,
     branch: Option<&str>,
@@ -390,12 +410,10 @@ fn run_git_clone(
             reason: format!("spawning `git clone` failed: {source}"),
         })?;
     if !output.status.success() {
-        return Err(StackError::WorkspaceMaterializeFailed {
-            reason: format!(
-                "`git clone` exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+        return Err(StackError::WorkspaceCommandFailed {
+            command: "git clone",
+            exit: output.status.code(),
+            stderr_tail: tail_stderr_bytes(&output.stderr),
         });
     }
     Ok(())
@@ -413,18 +431,18 @@ fn run_git_rev_parse(dest: &Path) -> Result<String> {
             reason: format!("spawning `git rev-parse` failed: {source}"),
         })?;
     if !output.status.success() {
-        return Err(StackError::WorkspaceMaterializeFailed {
-            reason: format!(
-                "`git rev-parse HEAD` exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+        return Err(StackError::WorkspaceCommandFailed {
+            command: "git rev-parse HEAD",
+            exit: output.status.code(),
+            stderr_tail: tail_stderr_bytes(&output.stderr),
         });
     }
     let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if commit.is_empty() {
-        return Err(StackError::WorkspaceMaterializeFailed {
-            reason: "`git rev-parse HEAD` returned empty output".to_owned(),
+        return Err(StackError::WorkspaceCommandFailed {
+            command: "git rev-parse HEAD",
+            exit: output.status.code(),
+            stderr_tail: "command produced no output".to_owned(),
         });
     }
     Ok(commit)
@@ -1213,6 +1231,41 @@ mod tests {
         assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
         let rerun = materialize_workspace(&workspace, &secrets).expect("rerun");
         assert_eq!(rerun.data[0].outcome, MaterializeOutcome::Verified);
+    }
+
+    #[test]
+    fn git_clone_against_nonexistent_path_surfaces_typed_command_failure() {
+        if !git_available() {
+            eprintln!("skip git_clone_against_nonexistent_path: git not in PATH");
+            return;
+        }
+        let root_dir = tempdir().expect("root");
+        let bogus = root_dir.path().join("does-not-exist");
+        let mut workspace = workspace_with(root_dir.path());
+        workspace.code_sources.push(CodeSourceConfig {
+            source_type: "git".to_owned(),
+            repo: Some(bogus.display().to_string()),
+            branch: None,
+            credential_ref: None,
+            name: Some("bogus".to_owned()),
+        });
+        let secrets = empty_secret_store();
+        let err = materialize_workspace(&workspace, &secrets)
+            .expect_err("git clone of missing local repo must fail");
+        match err {
+            StackError::WorkspaceCommandFailed {
+                command,
+                stderr_tail,
+                exit,
+            } => {
+                assert_eq!(command, "git clone");
+                // Git surfaces an explanatory stderr; we just assert it's
+                // non-empty so the typed variant carries a useful tail.
+                assert!(!stderr_tail.is_empty(), "stderr_tail must not be empty");
+                assert!(exit.is_some(), "git clone must report an exit code");
+            }
+            other => panic!("expected WorkspaceCommandFailed, got {other:?}"),
+        }
     }
 
     #[test]
