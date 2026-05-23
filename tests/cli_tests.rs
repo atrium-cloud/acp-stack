@@ -970,7 +970,7 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
         .stdout(predicates::str::contains("agent: opencode"))
         .stdout(predicates::str::contains("api_key_ref: OPENAI_API_KEY"))
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
@@ -1180,8 +1180,11 @@ creates = "opencode"
         .stdout(predicates::str::contains("agent: goose"))
         .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
         .stdout(predicates::str::contains("Goose config:"))
+        // Goose-specific notice: model is switchable live via ACP
+        // session/set_config_option; other settings still apply on
+        // new sessions.
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "model can be switched live via ACP session/set_config_option",
         ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
@@ -1231,7 +1234,7 @@ fn agent_set_codex_openrouter_writes_responses_provider_config() {
         .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
         .stdout(predicates::str::contains("Codex config:"))
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
@@ -1304,7 +1307,7 @@ wire_api = "responses"
         .stdout(predicates::str::contains("model: gpt-5.5"))
         .stdout(predicates::str::contains("api_key_ref:").not())
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config = fs::read_to_string(config_dir.join("acp-stack.toml"))
@@ -1940,7 +1943,7 @@ creates = "opencode"
         .stdout(predicates::str::contains("agent: amp"))
         .stdout(predicates::str::contains("mode: smart"))
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config =
@@ -1967,7 +1970,7 @@ fn agent_set_opencode_accepts_mode_only() {
         .stdout(predicates::str::contains("agent: opencode"))
         .stdout(predicates::str::contains("mode: plan"))
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config =
@@ -2011,7 +2014,7 @@ creates = "opencode"
         .stdout(predicates::str::contains("agent: cursor"))
         .stdout(predicates::str::contains("mode: plan"))
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config =
@@ -2039,7 +2042,7 @@ fn agent_set_codex_accepts_mode_only() {
         .stdout(predicates::str::contains("agent: codex"))
         .stdout(predicates::str::contains("mode: full-access"))
         .stdout(predicates::str::contains(
-            "settings will take effect on new sessions",
+            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config =

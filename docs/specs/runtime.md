@@ -139,10 +139,10 @@ Provider management includes a provider/model resolution layer for provider refr
 
 - resolve provider ids through the embedded provider mapping
 - start a provisional ACP session and read its `configOptions` before accepting a model or mode choice in `acps agent set`
-- expose ACP-advertised model/mode choices through the unified API so clients can render selection without scraping agent-specific CLIs (planned)
+- expose ACP-advertised model/mode choices through the unified API so clients can render selection without scraping agent-specific CLIs
 - map available secret refs and required companion refs to allowed provider ids before accepting a provider choice
 - preserve the resolved provider id, model id, and selected secret refs as non-secret config plus secret references
-- update generated agent config before writing the main config; later relaunch the active Goose, OpenCode, or Pi process so the new provider/model takes effect. For Goose, model changes take effect through the next session's ACP model config update instead of `GOOSE_MODEL`.
+- update generated agent config before writing the main config; when a process-level reload is required, operators restart the supervised agent explicitly. For Goose, model changes take effect through the next session's ACP model config update instead of `GOOSE_MODEL`.
 
 ACP session config options are discovery data, not an execution dependency for every prompt. If discovery fails during an already-configured deployment, the runtime should keep the existing provider/model config and report the refresh failure. Init should fail fast only when no valid provider/model choice is available.
 
