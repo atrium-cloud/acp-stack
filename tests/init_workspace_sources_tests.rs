@@ -12,6 +12,8 @@
 //!   * `--data-from http://...` is rejected by the CLI parser before any
 //!     network IO.
 
+use acp_stack::runtime::init_runner::step_kind;
+use acp_stack::state::{StateStore, default_state_path};
 use assert_cmd::Command;
 use base64::Engine;
 use flate2::Compression;
@@ -121,6 +123,20 @@ fn acps_init(home: &Path, workspace_root: &Path, extra: &[&str]) -> assert_cmd::
         cmd.arg(value);
     }
     cmd
+}
+
+fn capture_names(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("read capture dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+fn has_capture(names: &[String], tag: &str, extension: &str) -> bool {
+    names
+        .iter()
+        .any(|name| name.starts_with(&format!("{tag}.")) && name.ends_with(extension))
 }
 
 struct HttpsArchiveServer {
@@ -313,6 +329,46 @@ fn init_downloads_and_extracts_https_archive_source() {
         b"from https\n"
     );
     assert!(dest.join(".acp-stack-source.json").is_file());
+
+    let store = StateStore::open(default_state_path(home.path())).expect("state open");
+    let run = store
+        .latest_init_run()
+        .expect("latest init run")
+        .expect("init run exists");
+    let steps = store.query_init_steps(&run.id).expect("init steps");
+    let workspace_step = steps
+        .iter()
+        .find(|step| step.kind == step_kind::WORKSPACE_MATERIALIZE)
+        .expect("workspace materialize step");
+    let log_dir = workspace_step
+        .log_dir
+        .as_deref()
+        .map(Path::new)
+        .expect("workspace step log_dir");
+    assert!(log_dir.is_dir(), "workspace log dir missing");
+    let data_log_dir = log_dir.join("data-000");
+    assert!(data_log_dir.is_dir(), "data source log dir missing");
+    let captures = capture_names(&data_log_dir);
+    assert!(
+        has_capture(&captures, "download", ".stdout"),
+        "download stdout missing under {}: {captures:?}",
+        data_log_dir.display(),
+    );
+    assert!(
+        has_capture(&captures, "download", ".stderr"),
+        "download stderr missing under {}: {captures:?}",
+        data_log_dir.display(),
+    );
+    assert!(
+        has_capture(&captures, "extract", ".stdout"),
+        "extract stdout missing under {}: {captures:?}",
+        data_log_dir.display(),
+    );
+    assert!(
+        has_capture(&captures, "extract", ".stderr"),
+        "extract stderr missing under {}: {captures:?}",
+        data_log_dir.display(),
+    );
 
     let second = acps_init(home.path(), &workspace_path, &[])
         .env("ACP_STACK_TEST_INSECURE_HTTPS", "1")

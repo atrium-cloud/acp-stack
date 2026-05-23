@@ -145,6 +145,26 @@ pub fn record_step(
     verify: impl FnOnce() -> Result<bool>,
     body: impl FnOnce() -> Result<StepOutcome>,
 ) -> Result<StepDisposition> {
+    record_step_with_default_log_dir(store, run, ordinal, kind, None, verify, body)
+}
+
+/// Like [`record_step`] but stamps `default_log_dir` onto the
+/// `init_steps` row whether the body succeeds OR fails. Used by phases
+/// (workspace materialization, in-process installers) that pre-create
+/// the on-disk log directory before invoking the body — so a failure
+/// halfway through the body still points the operator at the captured
+/// stdout/stderr instead of recording `log_dir = NULL`. The success
+/// path lets the body override via [`StepOutcome::log_dir`].
+#[allow(clippy::too_many_arguments)]
+pub fn record_step_with_default_log_dir(
+    store: &StateStore,
+    run: &InitRunRecord,
+    ordinal: i64,
+    kind: &str,
+    default_log_dir: Option<&str>,
+    verify: impl FnOnce() -> Result<bool>,
+    body: impl FnOnce() -> Result<StepOutcome>,
+) -> Result<StepDisposition> {
     let prior = store.lookup_init_step(&run.id, ordinal)?;
 
     let step_id = match prior.as_ref() {
@@ -191,17 +211,14 @@ pub fn record_step(
     store.mark_init_step_running(&step_id)?;
     match body() {
         Ok(outcome) => {
-            store.mark_init_step_succeeded(
-                &step_id,
-                outcome.log_dir.as_deref(),
-                &outcome.payload_json,
-            )?;
+            let log_dir = outcome.log_dir.as_deref().or(default_log_dir);
+            store.mark_init_step_succeeded(&step_id, log_dir, &outcome.payload_json)?;
             Ok(StepDisposition::Executed)
         }
         Err(error) => {
             store.mark_init_step_failed(
                 &step_id,
-                None,
+                default_log_dir,
                 error.error_code(),
                 &error.to_string(),
                 "{}",
@@ -451,6 +468,38 @@ mod tests {
         let steps = store.query_init_steps(&run.id).expect("steps");
         assert_eq!(steps[0].status, INIT_STEP_FAILED);
         assert_eq!(steps[0].error_kind.as_deref(), Some(error.error_code()));
+    }
+
+    #[test]
+    fn record_step_with_default_log_dir_records_log_dir_on_failure() {
+        // Regression: prior to this helper, a phase that pre-created an
+        // on-disk log directory and then failed in the body left
+        // `init_steps.log_dir = NULL`. The operator would then have no
+        // pointer from SQLite to the captured failure logs. The helper
+        // stamps `default_log_dir` on both the success and failure paths.
+        let (_dir, store) = open_store();
+        let run = begin_run(&store, None, None, "{}").expect("begin");
+        record_step_with_default_log_dir(
+            &store,
+            &run,
+            1,
+            step_kind::WORKSPACE_MATERIALIZE,
+            Some("/tmp/workspace-init-logs/irun_test"),
+            || Ok(false),
+            || {
+                Err(StackError::AgentInitializeFailed {
+                    reason: "clone bombed".into(),
+                })
+            },
+        )
+        .expect_err("must propagate body error");
+        let steps = store.query_init_steps(&run.id).expect("steps");
+        assert_eq!(steps[0].status, INIT_STEP_FAILED);
+        assert_eq!(
+            steps[0].log_dir.as_deref(),
+            Some("/tmp/workspace-init-logs/irun_test"),
+            "failed step must record the pre-computed log_dir for audit",
+        );
     }
 
     #[test]
