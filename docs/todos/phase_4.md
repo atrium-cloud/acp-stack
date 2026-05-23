@@ -76,7 +76,7 @@
 - [x] Add a manual end-to-end ACP compatibility test that starts the configured agent and sends a real prompt.
 - [x] Add retry flow for failed agent installer commands.
 - [x] Preserve installer logs for audit.
-- [ ] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite.
+- [x] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite. (Workspace git clone + rev-parse stdout/stderr land on disk; pure-Rust local copy, HTTPS download/extract/fallback copy, and S3 ingest write synthetic stdout/stderr audit captures under the same per-source log tree while preserving typed errors.)
 - [x] Surface expected command and hash verification failures clearly.
 
 ## Provider And Model Selection

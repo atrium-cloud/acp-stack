@@ -434,19 +434,35 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     if !args.skip_workspace_init
         || step_needs_resume(&prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
     {
-        let result = record_step(
+        let log_paths = crate::runtime::workspace_init::WorkspaceLogPaths::for_run(
+            &crate::runtime::workspace_init::default_workspace_init_log_base(&home),
+            &init_run.id,
+        );
+        create_dir_owner_only(&log_paths.run_dir)?;
+        // Pre-compute the log_dir path so a mid-clone failure still
+        // records it on the init_steps row — otherwise the operator
+        // would see `log_dir = NULL` exactly when they need the
+        // captured stderr most.
+        let log_dir_str = log_paths.run_dir.display().to_string();
+        let result = crate::runtime::init_runner::record_step_with_default_log_dir(
             &store,
             &init_run,
             4,
             step_kind::WORKSPACE_MATERIALIZE,
+            Some(&log_dir_str),
             || Ok(workspace_postcondition_holds(&workspace_for_verify)),
             || {
                 let report = crate::runtime::workspace_init::materialize_workspace(
                     &config.workspace,
                     &secret_store,
+                    Some(&log_paths),
                 )?;
+                let step_log_dir = report.log_dir.as_ref().map(|p| p.display().to_string());
                 materialize_report = Some(report);
-                Ok(StepOutcome::empty())
+                Ok(StepOutcome {
+                    log_dir: step_log_dir,
+                    payload_json: "{}".to_owned(),
+                })
             },
         );
         if let Err(error) = result {
