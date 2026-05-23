@@ -451,22 +451,6 @@ pub fn install_resolved_capture(
     } else {
         STEP_INSTALL
     };
-    let harness_spec = match select_install_path(
-        &entry.id,
-        "harness.install",
-        &harness.install,
-        entry.github.as_deref(),
-        agent.harness_version.as_deref(),
-    ) {
-        Ok(spec) => spec,
-        Err(err) => {
-            return InstallerSequenceResult {
-                outcome: Err(err),
-                rows,
-            };
-        }
-    };
-
     if entry.kind == RegistryKind::Adapter {
         let adapter = match entry.adapter.as_ref() {
             Some(adapter) => adapter,
@@ -479,69 +463,71 @@ pub fn install_resolved_capture(
                 };
             }
         };
-        let adapter_spec = match select_install_path(
-            &entry.id,
-            "adapter.install",
-            &adapter.install,
-            adapter.github.as_deref(),
-            None,
-        ) {
-            Ok(spec) => spec,
-            Err(err) => {
-                return InstallerSequenceResult {
-                    outcome: Err(err),
-                    rows,
-                };
-            }
-        };
 
+        // Harness + adapter install in parallel. Each side tries its
+        // priority chain (shell → npm → github_release for floating,
+        // github → npm for pinned) internally so a single broken path
+        // doesn't abort the install when a sibling would have worked.
         let harness_workspace = workspace_root.to_path_buf();
         let harness_dest = dest_dir.to_path_buf();
         let harness_env = installer_env.clone();
+        let harness_install = harness.install.clone();
+        let harness_github = entry.github.clone();
+        let harness_version = agent.harness_version.clone();
+        let harness_id = entry.id.clone();
         let adapter_workspace = workspace_root.to_path_buf();
         let adapter_dest = dest_dir.to_path_buf();
         let adapter_env = installer_env.clone();
+        let adapter_install = adapter.install.clone();
+        let adapter_github = adapter.github.clone();
+        let adapter_id = entry.id.clone();
         let harness_thread = std::thread::spawn(move || {
-            run_install_step(
+            install_one_with_fallback(
+                &harness_id,
+                "harness.install",
                 STEP_HARNESS,
-                harness_spec,
+                &harness_install,
+                harness_github.as_deref(),
+                harness_version.as_deref(),
                 &harness_env,
                 &harness_workspace,
                 &harness_dest,
             )
         });
         let adapter_thread = std::thread::spawn(move || {
-            run_install_step(
+            install_one_with_fallback(
+                &adapter_id,
+                "adapter.install",
                 STEP_ADAPTER,
-                adapter_spec,
+                &adapter_install,
+                adapter_github.as_deref(),
+                None,
                 &adapter_env,
                 &adapter_workspace,
                 &adapter_dest,
             )
         });
-        let harness_step = harness_thread.join().unwrap_or_else(|_| StepResult {
-            row: InstallerRowDraft::config_error(STEP_HARNESS),
-            outcome: Err(StackError::AgentInitializeFailed {
+        let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
+            rows: vec![InstallerRowDraft::config_error(STEP_HARNESS)],
+            terminal_error: Some(StackError::AgentInitializeFailed {
                 reason: "harness installer thread panicked".to_owned(),
             }),
         });
-        let adapter_step = adapter_thread.join().unwrap_or_else(|_| StepResult {
-            row: InstallerRowDraft::config_error(STEP_ADAPTER),
-            outcome: Err(StackError::AgentInitializeFailed {
+        let adapter_chain = adapter_thread.join().unwrap_or_else(|_| FallbackChain {
+            rows: vec![InstallerRowDraft::config_error(STEP_ADAPTER)],
+            terminal_error: Some(StackError::AgentInitializeFailed {
                 reason: "adapter installer thread panicked".to_owned(),
             }),
         });
-        let harness_outcome = harness_step.outcome;
-        let adapter_outcome = adapter_step.outcome;
-        rows.push(harness_step.row);
-        rows.push(adapter_step.row);
-        if let Err(err) = harness_outcome {
+        rows.extend(harness_chain.rows);
+        rows.extend(adapter_chain.rows);
+        if let Some(err) = harness_chain.terminal_error {
             return InstallerSequenceResult {
                 outcome: Err(err),
                 rows,
             };
         }
-        if let Err(err) = adapter_outcome {
+        if let Some(err) = adapter_chain.terminal_error {
             return InstallerSequenceResult {
                 outcome: Err(err),
                 rows,
@@ -551,15 +537,19 @@ pub fn install_resolved_capture(
         return final_verification(agent, workspace_root, dest_dir, rows);
     }
 
-    let step = run_install_step(
+    let chain = install_one_with_fallback(
+        &entry.id,
+        "harness.install",
         harness_step_label,
-        harness_spec,
+        &harness.install,
+        entry.github.as_deref(),
+        agent.harness_version.as_deref(),
         &installer_env,
         workspace_root,
         dest_dir,
     );
-    rows.push(step.row);
-    if let Err(err) = step.outcome {
+    rows.extend(chain.rows);
+    if let Some(err) = chain.terminal_error {
         return InstallerSequenceResult {
             outcome: Err(err),
             rows,
@@ -567,6 +557,103 @@ pub fn install_resolved_capture(
     }
 
     final_verification(agent, workspace_root, dest_dir, rows)
+}
+
+/// Result of walking the `[shell, npm, github]` chain for one install
+/// field. `rows` contains the per-attempt `installer_runs` draft (so
+/// every attempt is preserved for audit, not just the winner);
+/// `terminal_error` is `None` when any path succeeded, otherwise the
+/// LAST path's error.
+struct FallbackChain {
+    rows: Vec<InstallerRowDraft>,
+    terminal_error: Option<StackError>,
+}
+
+/// Try each install path declared on the given field in priority order
+/// (shell → npm → github_release for floating versions; github → npm for
+/// pinned). Returns once one succeeds, or once all declared paths have
+/// been exhausted. Each attempt is recorded so the operator can see the
+/// fallback chain after the fact via `acps installer history`.
+#[allow(clippy::too_many_arguments)]
+fn install_one_with_fallback(
+    agent_id: &str,
+    field: &str,
+    step_label: &'static str,
+    install: &InstallSet,
+    github_url: Option<&str>,
+    version_pin: Option<&str>,
+    env: &HashMap<String, String>,
+    workspace_root: &Path,
+    dest_dir: &Path,
+) -> FallbackChain {
+    let mut remaining = install.clone();
+    let mut rows = Vec::new();
+    let mut last_error: Option<StackError> = None;
+    loop {
+        let spec = match select_install_path(agent_id, field, &remaining, github_url, version_pin) {
+            Ok(spec) => spec,
+            Err(err) => {
+                if rows.is_empty() {
+                    // No path was ever runnable. Surface that as the
+                    // single registry error with a placeholder row so
+                    // the audit log records the attempt.
+                    rows.push(InstallerRowDraft::config_error(step_label));
+                    return FallbackChain {
+                        rows,
+                        terminal_error: Some(err),
+                    };
+                }
+                return FallbackChain {
+                    rows,
+                    terminal_error: last_error.or(Some(err)),
+                };
+            }
+        };
+        let kind = path_kind_of(&spec);
+        let step = run_install_step(step_label, spec, env, workspace_root, dest_dir);
+        let ok = step.outcome.is_ok();
+        rows.push(step.row);
+        match step.outcome {
+            Ok(_) => {
+                return FallbackChain {
+                    rows,
+                    terminal_error: None,
+                };
+            }
+            Err(err) => {
+                last_error = Some(err);
+                // Drop the path we just exhausted so the next select
+                // resolves a different one.
+                match kind {
+                    InstallPathKind::Shell => remaining.shell = None,
+                    InstallPathKind::Npm => remaining.npm = None,
+                    InstallPathKind::Github => remaining.github = None,
+                }
+            }
+        }
+        let _ = ok;
+        if remaining.shell.is_none() && remaining.npm.is_none() && remaining.github.is_none() {
+            return FallbackChain {
+                rows,
+                terminal_error: last_error,
+            };
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InstallPathKind {
+    Shell,
+    Npm,
+    Github,
+}
+
+fn path_kind_of(spec: &ResolvedInstallSpec) -> InstallPathKind {
+    match spec {
+        ResolvedInstallSpec::Shell { .. } => InstallPathKind::Shell,
+        ResolvedInstallSpec::Npm { .. } => InstallPathKind::Npm,
+        ResolvedInstallSpec::GithubRelease { .. } => InstallPathKind::Github,
+    }
 }
 
 fn final_verification(
@@ -1357,11 +1444,24 @@ fn path_env_with_extra_dirs(extra_path_dirs: &[&Path]) -> Option<std::ffi::OsStr
     std::env::join_paths(paths).ok()
 }
 
+/// Public verifier used by `acps init --resume` for `agent_install`.
+/// It intentionally delegates to the same resolver used by the installer:
+/// absolute paths are checked directly, slash-containing paths are resolved
+/// under `workspace_root`, and bare names are checked in the managed local
+/// bin directory before falling back to the process PATH.
+pub fn resolve_creates_for_init_resume(
+    name: &str,
+    workspace_root: &Path,
+    extra_path_dirs: &[&Path],
+) -> Option<PathBuf> {
+    resolve_creates(name, workspace_root, extra_path_dirs)
+}
+
 /// Resolve `[agent.install].creates` to a real path. Matches the documented
 /// behavior in `docs/specs/runtime.md`: absolute paths used as-is; paths
 /// containing `/` resolved relative to `workspace_root` so an installer can
 /// declare `creates = "bin/agent"` without depending on operator cwd; bare
-/// names looked up on `PATH`.
+/// names looked up in caller-provided extra directories and then `PATH`.
 fn resolve_creates(
     name: &str,
     workspace_root: &Path,
@@ -1451,6 +1551,33 @@ mod tests {
 
     fn workspace_root() -> PathBuf {
         std::env::temp_dir()
+    }
+
+    #[test]
+    fn init_resume_creates_resolver_checks_local_bin_and_workspace_relative_paths() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let workspace_root = tempdir.path().join("workspace");
+        let local_bin = tempdir.path().join(".local/bin");
+        std::fs::create_dir_all(workspace_root.join("bin")).expect("workspace bin");
+        std::fs::create_dir_all(&local_bin).expect("local bin");
+        let workspace_agent = workspace_root.join("bin/agent");
+        let local_agent = local_bin.join("managed-agent");
+        std::fs::write(&workspace_agent, b"#!/bin/sh\n").expect("workspace agent");
+        std::fs::write(&local_agent, b"#!/bin/sh\n").expect("local agent");
+
+        assert_eq!(
+            resolve_creates_for_init_resume("bin/agent", &workspace_root, &[&local_bin]),
+            Some(workspace_agent),
+        );
+        assert_eq!(
+            resolve_creates_for_init_resume("managed-agent", &workspace_root, &[&local_bin]),
+            Some(local_agent),
+        );
+        assert_eq!(
+            resolve_creates_for_init_resume("managed-agent", &workspace_root, &[]),
+            None,
+            "custom [agent.install] verifier must not search managed local bin unless it is on PATH",
+        );
     }
 
     fn agent_config(command: &str) -> AgentConfig {
@@ -1775,6 +1902,71 @@ exit 99
         assert_eq!(result.rows[0].status, "failed");
         assert!(result.rows[0].stderr.contains("invalid JSON string"));
         assert!(result.rows[0].version.is_none());
+    }
+
+    #[test]
+    fn install_records_every_fallback_attempt_when_first_path_fails() {
+        // The first declared path is a shell recipe that exits 1
+        // without producing `creates`. The second is an npm package that
+        // npm/npx can't actually fetch in the test sandbox. The
+        // important guarantee being asserted: BOTH attempts get recorded
+        // as `installer_runs` rows (not just the first one). This proves
+        // `install_one_with_fallback` walked past the failed shell path
+        // and tried npm, rather than the pre-audit behavior of bailing
+        // on the first failure.
+        let tempdir = TempDir::new().expect("tempdir");
+
+        let install = InstallSet {
+            shell: Some(ShellInstall {
+                script: "exit 1".to_owned(),
+                creates: "fallback-agent".to_owned(),
+            }),
+            npm: Some(crate::runtime::agent_registry::NpmInstall {
+                package: "@acp-stack/definitely-not-published".to_owned(),
+                creates: "fallback-agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+        let entry = native_entry(
+            "fallback-agent",
+            "Fallback Agent",
+            Some("docs/agents/fallback-agent.md"),
+            harness_spec("fallback-agent", install),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("fallback-agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            tempdir.path(),
+        );
+
+        // The chain exhausted both paths, so the overall outcome is Err.
+        // But the rows must include BOTH attempts — proof that the
+        // fallback walk actually happened.
+        assert!(
+            result.outcome.is_err(),
+            "every declared path is unreachable; expected Err",
+        );
+        assert!(
+            result.rows.len() >= 2,
+            "expected fallback chain to record both attempts, got {:?}",
+            result
+                .rows
+                .iter()
+                .map(|r| (r.status.as_str(), r.exit_status))
+                .collect::<Vec<_>>(),
+        );
+        // Both rows must record the failure outcome — proves the runner
+        // didn't skip the second attempt after the first failed.
+        for (i, row) in result.rows.iter().enumerate() {
+            assert_eq!(
+                row.status, "failed",
+                "attempt #{i} should be `failed`, got `{}`",
+                row.status,
+            );
+        }
     }
 
     #[test]

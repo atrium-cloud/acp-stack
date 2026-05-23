@@ -68,6 +68,41 @@ pub struct MaterializeReport {
     pub data: Vec<SourceReport>,
 }
 
+/// True when every declared code/data source's destination directory has
+/// the sentinel file written by a prior successful materialization. Used
+/// by the init orchestrator's resume verifier to skip the
+/// `workspace_materialize` step when nothing needs re-fetching. Failures
+/// to compute names or stat the lane root return `Err`, which the caller
+/// treats as a verifier miss (forces re-execution).
+pub fn all_sources_have_sentinel(workspace: &WorkspaceConfig) -> Result<bool> {
+    if workspace.code_sources.is_empty() && workspace.data_sources.is_empty() {
+        return Ok(true);
+    }
+    let root = Path::new(&workspace.root);
+    if !root.is_absolute() {
+        return Ok(false);
+    }
+    let code_root = root.join(CODE_LANE_DIR);
+    let data_root = root.join(DATA_LANE_DIR);
+    for source in &workspace.code_sources {
+        let Ok(name) = derive_code_source_name(source) else {
+            return Ok(false);
+        };
+        if !code_root.join(&name).join(SOURCE_SENTINEL_FILE).is_file() {
+            return Ok(false);
+        }
+    }
+    for source in &workspace.data_sources {
+        let Ok(name) = derive_data_source_name(source) else {
+            return Ok(false);
+        };
+        if !data_root.join(&name).join(SOURCE_SENTINEL_FILE).is_file() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Materialize every declared code and data source. No-op when both
 /// vectors are empty.
 pub fn materialize_workspace(

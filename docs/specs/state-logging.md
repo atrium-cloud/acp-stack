@@ -83,9 +83,14 @@ migrations/
   005_commands_schema.sqlite.sql
   006_permissions.sqlite.sql
   007_events_source.sqlite.sql
+  008_sink_outbox.sqlite.sql
+  009_installer_runs_step.sqlite.sql
+  010_installer_runs_version.sqlite.sql
+  011_installer_runs_log_dir.sqlite.sql
+  012_init_runs.sqlite.sql
 ```
 
-Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Migration 007 adds a `source` column to `events` (default `system`) so log queries can filter by writer origin (`api`, `acp`, `command`, `permission`, `cli`, `local`). The `local` source is produced by the `acpctl` UDS listener (see `acpctl.md`): every call through the Unix-domain socket lands an `api.request` row with `source = "local"` and `key_kind = "local"` in the payload, and workspace mutations triggered through that path inherit the same source. Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
+Migration 006 introduces the `permission_requests` and `permission_decisions` tables that back the permissions module. Migration 007 adds a `source` column to `events` (default `system`) so log queries can filter by writer origin (`api`, `acp`, `command`, `permission`, `cli`, `local`). The `local` source is produced by the `acpctl` UDS listener (see `acpctl.md`): every call through the Unix-domain socket lands an `api.request` row with `source = "local"` and `key_kind = "local"` in the payload, and workspace mutations triggered through that path inherit the same source. Migrations 009–011 evolve `installer_runs` with per-step labels, the resolved installed version, and the on-disk log directory. Migration 012 introduces the `init_runs` and `init_steps` tables that back the `acps init` orchestrator: one `init_runs` row per invocation, plus `init_steps` rows for phases that execute or resume (`secrets_init`, `agent_install`, `provider_configure`, `workspace_materialize`, `agent_headless_config`, `edge_artifacts`, `init_complete`, `testflight`), each carrying its `status`, `started_at`, `finished_at`, optional `log_dir`, and a typed `(error_kind, error_detail)` tuple on failure. Resume semantics consult per-phase verifiers to replay any prior `succeeded` row as `skipped` when the postcondition still holds. Postgres equivalents are emitted on the same shared migration ids when external logging is enabled.
 
 Rules:
 

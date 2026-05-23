@@ -9,7 +9,7 @@ The CLI should call the same core service layer as the HTTP API where practical.
 Initial CLI commands:
 
 ```sh
-acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--custom-provider ...] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init] [--testflight|--skip-testflight]
+acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--custom-provider ...] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init] [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
 acps serve
 acps status
 acps reset --yes
@@ -61,6 +61,25 @@ acps deps apply
 ## Init
 
 `acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Interactive init prompts for one supported agent, updates `[agent]` with the registry-recommended launch command, then asks whether to install that agent. Non-interactive init skips agent selection and install unless `--agent <id>` and/or `--install-agent` are supplied; `--no-install-agent` suppresses the install prompt in interactive runs. Provider-backed init fails before writing provider config unless every required secret ref exists; interactive init may collect missing values, while non-interactive init requires the refs to already be present.
+
+Each invocation records one row in the `init_runs` SQLite table and an
+`init_steps` row for each phase that executes or resumes (`secrets_init`,
+`agent_install`, `provider_configure`, `workspace_materialize`,
+`agent_headless_config`, `edge_artifacts`, `init_complete`, `testflight`).
+Optional phases are absent when they are not requested and have no prior
+unsettled row. The orchestrator stamps each recorded step `running`, then
+settles it to `succeeded` or `failed`; on a
+re-run, any prior `succeeded` row whose postcondition still verifies
+(secret refs present, installer binary on PATH, workspace source
+sentinels intact, etc.) is replayed as `skipped` and its body is not
+re-executed. `acps init --resume` continues the most recent
+non-terminal run; `acps init --resume --run-id <id>` targets a specific
+historical row; `acps init --fresh` begins a new run even when an
+incomplete one exists. The previously TTY-only "try the next install
+path?" prompt is gone — installer retries are durable and re-attempted
+by re-running `acps init` (or `acps init --resume`), so non-interactive
+deployments recover from a flaky download exactly the same way an
+operator at a terminal would.
 
 When creating a starter config, deployment tooling may pass `--workspace-root`, `--workspace-uploads`, and `--runtime-user` so the generated `[workspace]` block matches the process manager's user, working directory, and writable paths. These flags affect only a newly-created config; re-running init against an existing config validates and preserves the file, and rejects deployment override values that contradict the persisted `[workspace]` block.
 

@@ -45,8 +45,8 @@
 
 - [x] Validate ownership of workspace, config, state, age key, and encrypted secret store.
 - [x] Add remediation hints for incorrect ownership.
-- [ ] Ensure daemon, agent, MCP servers, and mediated commands run as the runtime user.
-- [ ] Keep root execution limited to explicit disposable/dev profile behavior.
+- [x] Ensure daemon, agent, MCP servers, and mediated commands run as the runtime user.
+- [x] Keep root execution limited to explicit disposable/dev profile behavior.
 
 ## Config Import/Export Hardening
 
@@ -68,13 +68,13 @@
 
 ## Installer UX
 
-- [ ] Define resumable init step state: completed steps are verified and reused, failed or incomplete steps resume from the first failing point.
+- [x] Define resumable init step state: completed steps are verified and reused, failed or incomplete steps resume from the first failing point.
 - [x] Define fail-on-nonempty collision behavior for init-created code and data directories.
 - [x] Add installer command status history.
 - [x] Record installed ACP adapter/harness versions and expose them in agent status.
 - [x] Add an upgrade/check command that reports stale managed agent harnesses or adapters without upgrading automatically.
 - [x] Add a manual end-to-end ACP compatibility test that starts the configured agent and sends a real prompt.
-- [ ] Add retry flow for failed agent installer commands.
+- [x] Add retry flow for failed agent installer commands.
 - [x] Preserve installer logs for audit.
 - [ ] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite.
 - [x] Surface expected command and hash verification failures clearly.
@@ -86,17 +86,17 @@
 - [ ] Validate explicit model and mode values against ACP-advertised session config options before writing config.
 - [ ] When provider-backed `--model` is omitted in non-interactive mode, print ACP-advertised model values and exit without mutating config.
 - [ ] Expose provider/model discovery through the unified API using provider metadata and ACP-advertised model options.
-- [ ] Validate provider ids against the provider/env mapping and enforce the configured agent's provider scope from the mapping.
-- [ ] Resolve default API-key refs, companion refs, and optional provider refs from the provider/env mapping.
-- [ ] Persist only non-secret provider id, ACP-advertised model id, supported mode value, and secret refs without storing secret values in plaintext config.
-- [ ] Regenerate supported agent-owned config before writing canonical config when provider/model settings change.
+- [x] Validate provider ids against the provider/env mapping and enforce the configured agent's provider scope from the mapping.
+- [x] Resolve default API-key refs, companion refs, and optional provider refs from the provider/env mapping.
+- [x] Persist only non-secret provider id, ACP-advertised model id, supported mode value, and secret refs without storing secret values in plaintext config.
+- [x] Regenerate supported agent-owned config before writing canonical config when provider/model settings change.
 - [ ] Relaunch the active agent only when provider/model changes require process-level config reload; apply Goose model changes through ACP session config.
-- [ ] Document whether each supported agent can change model/mode after session creation; reject unsupported live changes explicitly.
+- [x] Document whether each supported agent can change model/mode after session creation; reject unsupported live changes explicitly.
 
 ## Config And Agent Setup Hardening
 
-- [ ] Document agent-owned config lifecycle for supported agents: when config files are written, when they are read, and whether relaunch or new session is required.
-- [ ] Treat plugin/skill/hook setup as unsupported unless a supported agent has a verified non-interactive setup path.
+- [x] Document agent-owned config lifecycle for supported agents: when config files are written, when they are read, and whether relaunch or new session is required.
+- [x] Treat plugin/skill/hook setup as unsupported unless a supported agent has a verified non-interactive setup path.
 
 ## Workspace Init Sources
 
@@ -146,5 +146,5 @@
 - [x] The runtime can be deployed through systemd.
 - [x] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
 - [ ] `acps deps apply` supports only narrow, explicit installation behavior.
-- [ ] Security self-checks are available through CLI and API.
-- [ ] `acpctl` permission boundaries are tested and audited.
+- [x] Security self-checks are available through CLI and API.
+- [x] `acpctl` permission boundaries are tested and audited.

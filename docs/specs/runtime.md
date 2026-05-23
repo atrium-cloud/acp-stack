@@ -67,6 +67,49 @@ Agent processes start from a scrubbed environment. `acp-stack` sets only the man
 
 The embedded registry replaces an earlier runtime fetch of `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. Upstream is now a reference: the dev-only `sync-registry-check` tool fetches upstream `registry.json` and verifies that every embedded sync id is still present upstream. A sync id is `adapter.id` for adapter-backed entries and top-level `id` for native entries. Upstream entries that are not embedded are reported for awareness but do not fail the check.
 
+### Init run state machine
+
+`acps init` records one row in `init_runs` per invocation and an
+`init_steps` row for each phase that is executed or resumed. Tracked phase
+kinds (in order) are `secrets_init`, `agent_install`, `provider_configure`,
+`workspace_materialize`, `agent_headless_config`, `edge_artifacts`,
+`init_complete`, and `testflight`. Optional phases are absent when they are
+not requested and have no prior unsettled row. Each recorded step starts as
+`pending`, transitions to `running` when its body executes, and settles to
+`succeeded`, `skipped`, or `failed`. `init_runs.status` aggregates to
+`succeeded` when every recorded step succeeded or was skipped; any
+unsettled or failed recorded step keeps the run `failed` and bubbles the
+typed error.
+
+On rerun the orchestrator looks up each step by `(run_id, ordinal)` and
+consults a per-step verifier before deciding whether to re-execute:
+
+- `secrets_init` — verifier checks both `[auth]` secret refs are present
+  in the encrypted secret store.
+- `agent_install` — verifier checks the configured `creates` binary
+  resolves on PATH (or under `~/.local/bin`).
+- `workspace_materialize` — verifier checks every declared code/data
+  source's destination has the `.acp-stack-source.json` sentinel.
+- `init_complete` — verifier checks an `init.completed` event for this
+  run id is already recorded in the unified log.
+- Other phases (`provider_configure`, `agent_headless_config`,
+  `edge_artifacts`, `testflight`) are cheap and idempotent; they
+  re-execute on every resume without consulting a verifier.
+
+The installer retry that previously lived behind a TTY prompt
+(`Try the next install path now? [y/N]`) is removed. `install_resolved`
+already walks `shell → npm → github` in sequence within one call, and
+re-running `acps init --resume` re-executes the failed `agent_install`
+step from scratch with the current registry. Non-interactive deployments
+recover from a transient download failure the same way an operator at
+a terminal would: by re-running the command.
+
+`acps init --resume` continues the latest non-terminal run; with
+`--run-id <id>` it targets a specific historical row. `acps init
+--fresh` begins a brand-new run row even when an incomplete one exists.
+Without either flag, init always begins a fresh row; auto-resume across
+unrelated invocations is intentionally opt-in.
+
 ## Provider And Model Resolution
 
 `acps init` selects the supported agent and may select the initial provider, but it does not infer a model from API-key refs or test-only defaults. Provider-backed generated config is written only after `[agent.provider]` is explicit:
@@ -78,13 +121,13 @@ The embedded registry replaces an earlier runtime fetch of `https://cdn.agentcli
 
 Provider id validation uses the reusable API-key/provider mapping in the runtime.
 
-Model and mode values are validated against the ACP `session/new` response before config is written. Cursor is model-only and stores the exact advertised value in `[agent].model`; OpenCode, Cursor, Codex, and `amp-acp v0.1.1` currently advertise ACP modes, while Pi and Goose do not.
+Provider/model edit paths validate model and mode values against the ACP `session/new` response before config is written. `acps init --provider` currently records mapped provider refs without selecting a model unless the operator uses the explicit custom-provider path. Cursor is model-only and stores the exact advertised value in `[agent].model`; OpenCode, Cursor, Codex, and `amp-acp v0.1.1` currently advertise ACP modes, while Pi and Goose do not.
 
-Provider management includes a provider/model resolution layer for init and provider refresh:
+Provider management includes a provider/model resolution layer for provider refresh:
 
 - resolve provider ids through the embedded provider mapping
-- start a provisional ACP session and read its `configOptions` before accepting a model or mode choice
-- expose ACP-advertised model/mode choices through the unified API so clients can render selection without scraping agent-specific CLIs
+- start a provisional ACP session and read its `configOptions` before accepting a model or mode choice in `acps agent set`
+- expose ACP-advertised model/mode choices through the unified API so clients can render selection without scraping agent-specific CLIs (planned)
 - map available secret refs and required companion refs to allowed provider ids before accepting a provider choice
 - preserve the resolved provider id, model id, and selected secret refs as non-secret config plus secret references
 - update generated agent config before writing the main config; later relaunch the active Goose, OpenCode, or Pi process so the new provider/model takes effect. For Goose, model changes take effect through the next session's ACP model config update instead of `GOOSE_MODEL`.

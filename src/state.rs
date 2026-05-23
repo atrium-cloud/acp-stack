@@ -13,6 +13,7 @@ mod commands;
 mod core;
 mod events;
 mod ids;
+mod init;
 mod metrics;
 mod permissions;
 mod records;
@@ -35,6 +36,11 @@ pub use events::{
 pub use ids::{
     next_command_id, next_permission_decision_id, next_permission_request_id, next_prompt_id,
     next_session_id,
+};
+pub use init::{
+    INIT_RUN_FAILED, INIT_RUN_PENDING, INIT_RUN_RUNNING, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
+    INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED, InitRunRecord,
+    InitStepRecord, NewInitRun, NewInitStep,
 };
 pub use metrics::{
     ApiConnectionMetrics, CommandMetrics, MetricsSummary, MetricsWindow, PermissionMetrics,

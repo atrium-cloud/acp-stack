@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 
 use crate::agent_installer::{InstallerOutcome, install_resolved, run_installer};
-use crate::agent_registry::{InstallSet, RegistryCatalog, RegistryEntry, RegistryKind};
+use crate::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::auth::generate_api_key;
 use crate::config::{
     self, AgentConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
@@ -19,12 +19,19 @@ use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_file, write_new_file_owner_only,
 };
+use crate::runtime::init_runner::{
+    self, StepDisposition, StepOutcome, begin_run, finalize_run, find_resumable_run, record_step,
+    step_kind,
+};
 use crate::runtime::provider_keys::{
     env_refs_for_agent_id, env_var_for_agent_provider_id, provider_id_is_known,
     provider_id_supports_agent, required_env_refs_for_provider_id,
 };
 use crate::secrets::{SecretStore, age_key_path, secret_store_path};
-use crate::state::{StateStore, default_state_path};
+use crate::state::{
+    INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
+    InitRunRecord, InitStepRecord, StateStore, default_state_path,
+};
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
@@ -110,6 +117,17 @@ pub struct InitArgs {
     /// Suppress the end-of-init testflight even in interactive runs.
     #[arg(long)]
     skip_testflight: bool,
+    /// Resume the most recent non-terminal init run. With `--run-id`, resume
+    /// the specified run. Conflicts with `--fresh`.
+    #[arg(long, conflicts_with = "fresh")]
+    resume: bool,
+    /// Force a brand-new init run even if a prior run was incomplete.
+    /// Conflicts with `--resume`.
+    #[arg(long)]
+    fresh: bool,
+    /// Target a specific init run id when resuming. Implies `--resume`.
+    #[arg(long, value_name = "ID", requires = "resume")]
+    run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -161,7 +179,7 @@ const STARTER_AGENT_INSTALL_CREATES: &str = "acp-agent";
 const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
 const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
 
-pub(super) fn run_init(args: InitArgs) -> Result<()> {
+pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
     let state_path = default_state_path(&home);
@@ -171,6 +189,10 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
     create_dir_owner_only(config_dir)?;
     create_dir_owner_only(state_dir)?;
 
+    // Preflight (untracked): config + state migration must succeed before we
+    // have anywhere to record init steps. Both are idempotent and cheap, so
+    // a partial failure here will be re-attempted on the next `acps init`
+    // without needing resume semantics.
     let config_status = if config_path.exists() {
         // Repair perms before validation so a failure to parse the file does not
         // leave a permissive config on disk; matches the behavior of `acps status`.
@@ -203,113 +225,322 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
     }
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
 
-    let session_ref = config.auth.session_key_ref.clone();
-    let admin_ref = config.auth.admin_key_ref.clone();
-    let store_existed = secret_store_path(&home).exists();
-    let mut secret_store = SecretStore::open_or_create(&home)?;
-    let session_present = secret_store.contains(&session_ref);
-    let admin_present = secret_store.contains(&admin_ref);
-    let auth_status = if store_existed {
-        // Pre-existing store: both refs must be present. Half-initialized state
-        // (e.g. one ref deleted, or unrelated secrets but no auth refs) is an
-        // anomaly. Refuse to proceed — admin key is not regenerable in place;
-        // the documented recovery path is `acps reset --yes`.
-        if !admin_present {
-            return Err(StackError::MissingAdminKey { name: admin_ref });
-        }
-        if !session_present {
-            return Err(StackError::MissingSessionKey { name: session_ref });
-        }
-        "preserved existing API keys"
+    // Pick the run row: either resume an existing one (explicit `--resume` or
+    // auto-detected non-terminal latest) or start fresh. Recording every
+    // tracked phase as a step lets `acps init resume` continue from the first
+    // unsettled step on the next invocation.
+    let init_run = resolve_init_run(&args, &store)?;
+    let prior_init_steps = store.query_init_steps(&init_run.id)?;
+    let resumed = args.resume;
+    if resumed {
+        println!("resuming init run {}", init_run.id);
     } else {
-        // Fresh store: generate both keys. Print the values BEFORE the durable
-        // event write, so a downstream failure in `append_event` cannot leave
-        // the persisted-but-never-revealed admin key unrecoverable.
-        let session_value = generate_api_key();
-        let admin_value = generate_api_key();
-        println!("---");
-        println!("session key ({session_ref}): {session_value}");
-        println!("admin key ({admin_ref}): {admin_value}");
-        println!(
-            "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
-        );
-        println!("---");
-        // Write both refs in one atomic persist so a mid-init failure cannot
-        // leave the store with one key set and the other missing, which the
-        // fail-fast logic would then treat as a corrupted state requiring
-        // reset.
-        secret_store.set_many([
-            (session_ref.as_str(), session_value.as_str()),
-            (admin_ref.as_str(), admin_value.as_str()),
-        ])?;
-        store.append_event_with_source(
-            "info",
-            "auth.keys_generated",
-            crate::state::EVENT_SOURCE_CLI,
-            "generated session and admin API keys",
-            &serde_json::json!({
-                "session_key_ref": session_ref,
-                "admin_key_ref": admin_ref,
-            })
-            .to_string(),
-        )?;
-        "generated session and admin API keys"
-    };
-
-    let install_requested = should_install_agent(&args, selected_agent.is_some())?;
-    let install_outcome = if install_requested {
-        Some(install_configured_agent(&home, &config, &registry, &store)?)
-    } else {
-        None
-    };
-
-    let provider_configured = configure_provider_for_init(
-        &args,
-        &registry,
-        &mut config,
-        &config_path,
-        &mut secret_store,
-    )?;
-    if selected_agent.is_some() || provider_configured || edge_requested {
-        let canonical = config.to_canonical_toml()?;
-        config = config::load_config_from_str(&canonical)?;
-        atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+        println!("init run {}", init_run.id);
     }
 
-    let materialize_report = if args.skip_workspace_init {
+    let recorded_args = if resumed {
+        Some(recorded_init_args(&init_run)?)
+    } else {
         None
-    } else {
-        Some(crate::runtime::workspace_init::materialize_workspace(
-            &config.workspace,
-            &secret_store,
-        )?)
     };
-
-    let provisioned_agent_configs =
-        crate::runtime::agent_headless_config::provision_agent_headless_config(&config, &home)?;
-    let provisioned_edge_artifacts = if edge_requested {
-        let config_dir = parent_dir(&config_path)?;
-        match config.edge.cloudflare.as_ref() {
-            Some(cloudflare) if cloudflare.enabled => {
-                let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
-                crate::edge::write_cloudflare_artifacts(config_dir, cloudflare, &service_url)?
-            }
-            _ => Vec::new(),
+    if args.provider.is_none()
+        && step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE)
+    {
+        args.provider = recorded_args
+            .as_ref()
+            .and_then(|recorded| recorded.provider.clone())
+            .or_else(|| {
+                config
+                    .agent
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider.id.clone())
+            });
+        if args.provider.is_none() {
+            return finalize_with_error(
+                &store,
+                &init_run,
+                StackError::InitRunCorrupted {
+                    reason: format!(
+                        "init run {} has a failed provider_configure step but no provider id is available; pass --provider on resume",
+                        init_run.id
+                    ),
+                },
+            );
         }
+    }
+    if step_needs_resume(&prior_init_steps, step_kind::TESTFLIGHT) {
+        args.testflight = true;
+        args.skip_testflight = false;
+    }
+
+    let mut auth_status: &'static str = "preserved existing API keys";
+    let session_ref_str = config.auth.session_key_ref.clone();
+    let admin_ref_str = config.auth.admin_key_ref.clone();
+
+    // -----------------------------------------------------------------
+    // Step 1: secrets_init — generate or preserve session + admin keys.
+    // Verifier: both refs present in the secret store.
+    //
+    // `store_existed` must be captured BEFORE `open_or_create` so the
+    // "fresh store" branch fires when the file doesn't yet exist; the
+    // open call writes the empty store and would otherwise make the
+    // existence probe always succeed.
+    // -----------------------------------------------------------------
+    let store_existed_before_open = secret_store_path(&home).exists();
+    let mut secret_store = SecretStore::open_or_create(&home)?;
+    let verify_session_ref = session_ref_str.clone();
+    let verify_admin_ref = admin_ref_str.clone();
+    let verify_home = home.clone();
+    let step_result = record_step(
+        &store,
+        &init_run,
+        1,
+        step_kind::SECRETS_INIT,
+        || {
+            let store = SecretStore::open(&verify_home)?;
+            Ok(store.contains(&verify_session_ref) && store.contains(&verify_admin_ref))
+        },
+        || {
+            let outcome = perform_secrets_init(
+                store_existed_before_open,
+                &session_ref_str,
+                &admin_ref_str,
+                &mut secret_store,
+                &store,
+            )?;
+            auth_status = outcome.status;
+            Ok(StepOutcome::with_payload(format!(
+                r#"{{"session_key_ref":"{}","admin_key_ref":"{}","status":"{}"}}"#,
+                session_ref_str, admin_ref_str, outcome.status
+            )))
+        },
+    );
+    let disposition = match step_result {
+        Ok(d) => d,
+        Err(error) => return finalize_with_error(&store, &init_run, error),
+    };
+    // Honest "auth:" line for the skipped path — we did not generate keys
+    // this run, we trusted the verifier instead.
+    let auth_status = if matches!(disposition, StepDisposition::Skipped) {
+        "preserved existing API keys"
     } else {
-        Vec::new()
+        auth_status
     };
 
-    // Record init.completed AFTER secret-store setup so a half-finished init
-    // (e.g. failed key generation) does not leave a misleading
-    // "initialized" event in the durable log.
-    store.append_event_with_source(
-        "info",
-        "init.completed",
-        crate::state::EVENT_SOURCE_CLI,
-        "initialized",
-        "{}",
-    )?;
+    // -----------------------------------------------------------------
+    // Step 2: agent_install — install the configured agent if requested.
+    // -----------------------------------------------------------------
+    let install_requested = should_install_agent(&args, selected_agent.is_some())?;
+    let mut install_outcome: Option<InstallerOutcome> = None;
+    let install_step_needs_resume = step_needs_resume(&prior_init_steps, step_kind::AGENT_INSTALL);
+    if install_requested || install_step_needs_resume {
+        let verify_config = config.clone();
+        let verify_workspace_root = PathBuf::from(config.workspace.root.clone());
+        let verify_local_bin_dir = local_bin_dir(&home);
+        let result = record_step(
+            &store,
+            &init_run,
+            2,
+            step_kind::AGENT_INSTALL,
+            || {
+                Ok(installer_postcondition_holds(
+                    &verify_config,
+                    &verify_workspace_root,
+                    &verify_local_bin_dir,
+                ))
+            },
+            || {
+                // Snapshot the latest installer_runs row ids for this
+                // agent so the install closure can correlate the init
+                // step row to whichever installer attempts the install
+                // produced. Doing the lookup before AND after the
+                // install lets the payload list precisely the rows that
+                // belong to this attempt.
+                let prior_ids: std::collections::HashSet<String> = store
+                    .query_installer_runs_filtered(Some(&config.agent.id), 1024)
+                    .map(|rows| rows.into_iter().map(|r| r.id).collect())
+                    .unwrap_or_default();
+                let outcome = install_configured_agent(&home, &config, &registry, &store)?;
+                let label = outcome.label();
+                let path = outcome.path().display().to_string();
+                let new_installer_run_ids: Vec<String> = store
+                    .query_installer_runs_filtered(Some(&config.agent.id), 1024)
+                    .map(|rows| {
+                        rows.into_iter()
+                            .map(|r| r.id)
+                            .filter(|id| !prior_ids.contains(id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                install_outcome = Some(outcome.clone());
+                let payload = serde_json::json!({
+                    "label": label,
+                    "path": path,
+                    "installer_run_ids": new_installer_run_ids,
+                });
+                Ok(StepOutcome::with_payload(payload.to_string()))
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 3: provider_configure — write provider/model into the config
+    // and persist canonical TOML if anything changed.
+    // -----------------------------------------------------------------
+    let result = record_step(
+        &store,
+        &init_run,
+        3,
+        step_kind::PROVIDER_CONFIGURE,
+        || {
+            // Provider config is idempotent only when there's no explicit
+            // change requested. We always re-run on resume so partial writes
+            // (e.g. missing secret refs) get re-collected.
+            Ok(args.provider.is_none())
+        },
+        || {
+            let provider_configured = configure_provider_for_init(
+                &args,
+                &registry,
+                &mut config,
+                &config_path,
+                &mut secret_store,
+            )?;
+            if selected_agent.is_some() || provider_configured || edge_requested {
+                let canonical = config.to_canonical_toml()?;
+                config = config::load_config_from_str(&canonical)?;
+                atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+            }
+            Ok(StepOutcome::with_payload(format!(
+                r#"{{"provider_configured":{provider_configured}}}"#
+            )))
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&store, &init_run, error);
+    }
+
+    // -----------------------------------------------------------------
+    // Step 4: workspace_materialize — clone repos + download/extract
+    // data sources into /workspace/usr/. Skipped if --skip-workspace-init.
+    // Verifier: every source destination has its sentinel file.
+    // -----------------------------------------------------------------
+    let workspace_for_verify = config.workspace.clone();
+    let mut materialize_report = None;
+    if !args.skip_workspace_init
+        || step_needs_resume(&prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
+    {
+        let result = record_step(
+            &store,
+            &init_run,
+            4,
+            step_kind::WORKSPACE_MATERIALIZE,
+            || Ok(workspace_postcondition_holds(&workspace_for_verify)),
+            || {
+                let report = crate::runtime::workspace_init::materialize_workspace(
+                    &config.workspace,
+                    &secret_store,
+                )?;
+                materialize_report = Some(report);
+                Ok(StepOutcome::empty())
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 5: agent_headless_config — write the agent's local config
+    // files so the harness can start without first-run prompts.
+    // -----------------------------------------------------------------
+    let mut provisioned_agent_configs = Vec::new();
+    let result = record_step(
+        &store,
+        &init_run,
+        5,
+        step_kind::AGENT_HEADLESS_CONFIG,
+        || {
+            // provision is idempotent (atomic_write_owner_only); cheap to
+            // re-run, so the verifier just always says no — every run we
+            // re-derive the canonical output. This is correct for resume
+            // because the operator's config may have changed since last run.
+            Ok(false)
+        },
+        || {
+            provisioned_agent_configs =
+                crate::runtime::agent_headless_config::provision_agent_headless_config(
+                    &config, &home,
+                )?;
+            Ok(StepOutcome::empty())
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&store, &init_run, error);
+    }
+
+    // -----------------------------------------------------------------
+    // Step 6: edge_artifacts — render Cloudflare config files when an
+    // edge profile was requested.
+    // -----------------------------------------------------------------
+    let mut provisioned_edge_artifacts = Vec::new();
+    if edge_requested || step_needs_resume(&prior_init_steps, step_kind::EDGE_ARTIFACTS) {
+        let result = record_step(
+            &store,
+            &init_run,
+            6,
+            step_kind::EDGE_ARTIFACTS,
+            || Ok(false),
+            || {
+                let config_dir = parent_dir(&config_path)?;
+                provisioned_edge_artifacts = match config.edge.cloudflare.as_ref() {
+                    Some(cloudflare) if cloudflare.enabled => {
+                        let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
+                        crate::edge::write_cloudflare_artifacts(
+                            config_dir,
+                            cloudflare,
+                            &service_url,
+                        )?
+                    }
+                    _ => Vec::new(),
+                };
+                Ok(StepOutcome::empty())
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 7: init_complete — record the durable "initialized" event.
+    // Resume verifier: the event is already present in the unified log.
+    // -----------------------------------------------------------------
+    let verify_run_id = init_run.id.clone();
+    let result = record_step(
+        &store,
+        &init_run,
+        7,
+        step_kind::INIT_COMPLETE,
+        || Ok(init_complete_event_already_recorded(&store, &verify_run_id)),
+        || {
+            store.append_event_with_source(
+                "info",
+                "init.completed",
+                crate::state::EVENT_SOURCE_CLI,
+                "initialized",
+                &serde_json::json!({ "init_run_id": init_run.id }).to_string(),
+            )?;
+            Ok(StepOutcome::empty())
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&store, &init_run, error);
+    }
 
     println!("initialized acp-stack");
     println!("{config_status}: {}", config_path.display());
@@ -346,29 +577,241 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Step 8: testflight — optional real-prompt smoke. Decision uses
+    // the resolver above; only `Run` actually executes the agent.
+    // -----------------------------------------------------------------
     if let Some(decision) = resolve_testflight_decision(&args, &config, &registry)? {
-        match decision {
-            TestflightDecision::Run => {
-                println!("---");
-                println!("running real-prompt agent testflight");
-                crate::cli::agent::run_init_testflight(&home, &config, &registry)?;
-            }
-            TestflightDecision::SkipExplicit => {
-                println!("testflight: skipped (--skip-testflight)");
-            }
-            TestflightDecision::SkipNonInteractive => {
-                println!("testflight: skipped (non-interactive run; pass --testflight to opt in)");
-            }
-            TestflightDecision::SkipDeclined => {
-                println!("testflight: skipped (declined at prompt)");
-            }
-            TestflightDecision::SkipUnsupported => {
-                println!("testflight: skipped (agent does not support headless testflight)");
-            }
+        let result = record_step(
+            &store,
+            &init_run,
+            8,
+            step_kind::TESTFLIGHT,
+            || Ok(matches!(decision, TestflightDecision::Run).not()),
+            || {
+                match decision {
+                    TestflightDecision::Run => {
+                        println!("---");
+                        println!("running real-prompt agent testflight");
+                        crate::cli::agent::run_init_testflight(&home, &config, &registry)?;
+                    }
+                    TestflightDecision::SkipExplicit => {
+                        println!("testflight: skipped (--skip-testflight)");
+                    }
+                    TestflightDecision::SkipNonInteractive => {
+                        println!(
+                            "testflight: skipped (non-interactive run; pass --testflight to opt in)"
+                        );
+                    }
+                    TestflightDecision::SkipDeclined => {
+                        println!("testflight: skipped (declined at prompt)");
+                    }
+                    TestflightDecision::SkipUnsupported => {
+                        println!(
+                            "testflight: skipped (agent does not support headless testflight)"
+                        );
+                    }
+                }
+                Ok(StepOutcome::with_payload(format!(
+                    r#"{{"decision":"{decision:?}"}}"#
+                )))
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
         }
     }
 
+    // Resume-aware finalization. If a prior step in this run is still
+    // `pending`, `running`, or `failed` (because the current invocation's
+    // flags skipped over it — e.g. `--resume --run-id <id>` without
+    // `--install-agent` after the original run failed at `agent_install`),
+    // the aggregate run status must NOT settle to `succeeded`. We mark
+    // it `failed` instead and surface a clear error so the operator
+    // knows to re-run with the original flags.
+    let prior_steps = store.query_init_steps(&init_run.id)?;
+    let unsettled: Vec<&str> = prior_steps
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status.as_str(),
+                INIT_STEP_PENDING | INIT_STEP_RUNNING | INIT_STEP_FAILED
+            )
+        })
+        .map(|s| s.kind.as_str())
+        .collect();
+    if !unsettled.is_empty() {
+        finalize_run(&store, &init_run.id, INIT_RUN_FAILED)?;
+        return Err(StackError::InitRunCorrupted {
+            reason: format!(
+                "init run {} has unsettled steps {unsettled:?}; re-run with the original flags to drive them to completion",
+                init_run.id,
+            ),
+        });
+    }
+    finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
     Ok(())
+}
+
+/// Pick the run row for this invocation. `--resume [--run-id <id>]` resumes
+/// an existing row; `--fresh` always begins a new one; without either flag
+/// the orchestrator begins fresh too — auto-resume would otherwise change
+/// the meaning of unrelated `acps init` calls without warning.
+fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<InitRunRecord> {
+    let args_json = serde_json::json!({
+        "agent": args.agent,
+        "provider": args.provider,
+        "testflight": args.testflight,
+        "skip_testflight": args.skip_testflight,
+        "fresh": args.fresh,
+        "resume": args.resume,
+    })
+    .to_string();
+
+    if args.resume {
+        let existing = if let Some(id) = args.run_id.as_deref() {
+            init_runner::lookup_run(store, id)?.ok_or_else(|| StackError::InitRunCorrupted {
+                reason: format!("no init run with id `{id}`"),
+            })?
+        } else {
+            find_resumable_run(store)?.ok_or_else(|| StackError::InitRunCorrupted {
+                reason: "no resumable init run found; re-run without --resume".to_owned(),
+            })?
+        };
+        return Ok(existing);
+    }
+
+    begin_run(store, None, args.agent.as_deref(), &args_json)
+}
+
+#[derive(Default, serde::Deserialize)]
+struct RecordedInitArgs {
+    provider: Option<String>,
+}
+
+fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
+    serde_json::from_str(&run.args_json).map_err(|source| StackError::InitRunCorrupted {
+        reason: format!("init run {} has invalid args_json: {source}", run.id),
+    })
+}
+
+fn step_needs_resume(steps: &[InitStepRecord], kind: &str) -> bool {
+    steps.iter().any(|step| {
+        step.kind == kind
+            && matches!(
+                step.status.as_str(),
+                INIT_STEP_PENDING | INIT_STEP_RUNNING | INIT_STEP_FAILED
+            )
+    })
+}
+
+fn finalize_with_error(store: &StateStore, run: &InitRunRecord, error: StackError) -> Result<()> {
+    finalize_run(store, &run.id, INIT_RUN_FAILED)?;
+    Err(error)
+}
+
+struct SecretsInitOutcome {
+    status: &'static str,
+}
+
+fn perform_secrets_init(
+    store_existed: bool,
+    session_ref: &str,
+    admin_ref: &str,
+    secret_store: &mut SecretStore,
+    store: &StateStore,
+) -> Result<SecretsInitOutcome> {
+    let session_present = secret_store.contains(session_ref);
+    let admin_present = secret_store.contains(admin_ref);
+    if store_existed {
+        if !admin_present {
+            return Err(StackError::MissingAdminKey {
+                name: admin_ref.to_owned(),
+            });
+        }
+        if !session_present {
+            return Err(StackError::MissingSessionKey {
+                name: session_ref.to_owned(),
+            });
+        }
+        return Ok(SecretsInitOutcome {
+            status: "preserved existing API keys",
+        });
+    }
+    let session_value = generate_api_key();
+    let admin_value = generate_api_key();
+    println!("---");
+    println!("session key ({session_ref}): {session_value}");
+    println!("admin key ({admin_ref}): {admin_value}");
+    println!(
+        "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
+    );
+    println!("---");
+    secret_store.set_many([
+        (session_ref, session_value.as_str()),
+        (admin_ref, admin_value.as_str()),
+    ])?;
+    store.append_event_with_source(
+        "info",
+        "auth.keys_generated",
+        crate::state::EVENT_SOURCE_CLI,
+        "generated session and admin API keys",
+        &serde_json::json!({
+            "session_key_ref": session_ref,
+            "admin_key_ref": admin_ref,
+        })
+        .to_string(),
+    )?;
+    Ok(SecretsInitOutcome {
+        status: "generated session and admin API keys",
+    })
+}
+
+fn installer_postcondition_holds(
+    config: &Config,
+    workspace_root: &Path,
+    local_bin_dir: &Path,
+) -> bool {
+    let (target, extra_path_dirs): (&str, Vec<&Path>) =
+        if let Some(install) = config.agent.install.as_ref() {
+            (install.creates.as_str(), Vec::new())
+        } else {
+            (config.agent.command.as_str(), vec![local_bin_dir])
+        };
+    crate::runtime::agent_installer::resolve_creates_for_init_resume(
+        target,
+        workspace_root,
+        &extra_path_dirs,
+    )
+    .is_some()
+}
+
+fn workspace_postcondition_holds(workspace: &crate::config::WorkspaceConfig) -> bool {
+    crate::runtime::workspace_init::all_sources_have_sentinel(workspace).unwrap_or(false)
+}
+
+fn init_complete_event_already_recorded(store: &StateStore, run_id: &str) -> bool {
+    let Ok(events) = store.query_events(crate::state::EventFilter {
+        limit: 64,
+        kind: Some("init.completed"),
+        ..crate::state::EventFilter::default()
+    }) else {
+        return false;
+    };
+    events
+        .iter()
+        .any(|event| event.payload_json.contains(run_id))
+}
+
+/// Tiny inverter so a `match` arm doesn't need its own helper.
+trait BoolNot {
+    fn not(self) -> bool;
+}
+
+impl BoolNot for bool {
+    fn not(self) -> bool {
+        !self
+    }
 }
 
 /// What `acps init` should do with the post-init testflight phase. Resolved
@@ -1021,6 +1464,15 @@ fn should_install_agent(args: &InitArgs, selected_agent: bool) -> Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
+/// Run the installer for the configured agent. The TTY-only "try the next
+/// install path?" prompt that used to live here is gone: `install_resolved`
+/// already walks `shell → npm → github_release` in sequence, and any
+/// remaining failure is captured by the init orchestrator's
+/// `agent_install` step. The operator re-attempts by running
+/// `acps init --resume`, which re-executes the failed step using the
+/// current registry — picking up a newer harness version, a now-reachable
+/// npm registry, or a freshly released GitHub artifact without ever
+/// requiring a TTY.
 fn install_configured_agent(
     home: &Path,
     config: &Config,
@@ -1047,7 +1499,7 @@ fn install_configured_agent(
             .ok_or_else(|| StackError::AgentRegistryMissing {
                 id: config.agent.id.clone(),
             })?;
-    match install_resolved(
+    install_resolved(
         &config.agent,
         entry,
         Default::default(),
@@ -1055,109 +1507,7 @@ fn install_configured_agent(
         &local_bin_dir(home),
         store,
         Some(&log_base),
-    ) {
-        Ok(outcome) => Ok(outcome),
-        Err(first_error) if io::stdin().is_terminal() => {
-            if let Some(retry_entry) = prompt_retry_install_path(
-                entry,
-                config.agent.harness_version.as_deref(),
-                &first_error,
-            )? {
-                install_resolved(
-                    &config.agent,
-                    &retry_entry,
-                    Default::default(),
-                    &workspace_root,
-                    &local_bin_dir(home),
-                    store,
-                    Some(&log_base),
-                )
-            } else {
-                Err(first_error)
-            }
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn prompt_retry_install_path(
-    entry: &RegistryEntry,
-    version_pin: Option<&str>,
-    first_error: &StackError,
-) -> Result<Option<RegistryEntry>> {
-    let mut retry = entry.clone();
-    let mut options = Vec::new();
-    if let Some(harness) = retry.harness.as_mut()
-        && let Some(label) = remove_selected_path(&mut harness.install, version_pin)
-    {
-        options.push(format!("harness via {label}"));
-    }
-    if let Some(adapter) = retry.adapter.as_mut()
-        && let Some(label) = remove_selected_path(&mut adapter.install, None)
-    {
-        options.push(format!("adapter via {label}"));
-    }
-    if options.is_empty() {
-        return Ok(None);
-    }
-    println!("agent install failed: {first_error}");
-    println!("available retry path: {}", options.join(", "));
-    print!("Try the next install path now? [y/N]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    if matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes") {
-        Ok(Some(retry))
-    } else {
-        Ok(None)
-    }
-}
-
-fn remove_selected_path(
-    install: &mut InstallSet,
-    version_pin: Option<&str>,
-) -> Option<&'static str> {
-    if version_pin.is_some() {
-        if install.github.take().is_some() {
-            return next_path_label(install);
-        }
-        if install.npm.take().is_some() {
-            return next_path_label(install);
-        }
-        return None;
-    }
-    if install.shell.take().is_some() {
-        return next_path_label(install);
-    }
-    if install.npm.take().is_some() {
-        return next_path_label(install);
-    }
-    if install.github.take().is_some() {
-        return next_path_label(install);
-    }
-    None
-}
-
-fn next_path_label(install: &InstallSet) -> Option<&'static str> {
-    if install.shell.is_some() {
-        Some("shell")
-    } else if install.npm.is_some() {
-        Some("npm")
-    } else if install.github.is_some() {
-        Some("github")
-    } else {
-        None
-    }
+    )
 }
 
 fn resolve_agent_env(home: &Path, config: &Config) -> Result<HashMap<String, String>> {
