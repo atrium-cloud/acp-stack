@@ -142,3 +142,33 @@ Cursor CLI:
 ## Validation
 
 Current validation requires mapped provider ids to be listed for the configured agent in the provider metadata, custom provider metadata to include model and API-key ref, syntactically non-empty model/API-key-ref values, and API-key refs to be valid secret-ref names. Mapped model and mode values are validated against ACP-advertised options before writing config.
+
+## Agent-owned Config Lifecycle
+
+Every supported agent reads its own configuration from a well-known path under the operator's home. `acps` writes those files during `acps init` (initial agent selection) and `acps agent set` (subsequent provider/model/mode edits), and reads them indirectly when the agent process starts. The table below pins the write path, the read trigger, and whether a live edit requires the agent to be relaunched. Operators planning a model swap during an active session should consult the right column before running `acps agent set`.
+
+| Agent | Generated config file | Written by | Read by agent at | Live model swap | Live mode swap | Relaunch on edit? |
+| ----- | --------------------- | ---------- | ---------------- | --------------- | -------------- | ----------------- |
+| Goose | `~/.config/goose/config.yaml` (+ `~/.config/goose/custom_providers/<id>.yaml` for custom providers) | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider` | process start | ACP `session/set_config_option` with `configId = "model"` on the existing session — no relaunch | not advertised | no for model; n/a for mode |
+| OpenCode | `~/.config/opencode/opencode.json` | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider` | process start | new session only — current sessions keep the previous model | new session only | yes for model and mode |
+| Pi | `~/.pi/agent/settings.json` (+ `~/.pi/agent/models.json` for custom providers) | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider` | process start | new session only | not advertised | yes for model |
+| Codex | `~/.codex/config.toml` (provider switches back up the previous file as `config.<provider>.toml`) | `acps init`, `acps agent set --provider openai`, `acps agent set --provider openrouter`, `acps agent set --custom-provider` | process start | new session only | ACP `session/set_config_option` with `configId = "mode"` on the existing session — no relaunch | yes for model; no for mode |
+| Amp Code | none (Amp reads `AMP_API_KEY` from process env) | n/a | n/a | not supported through `acps` | ACP `session/set_config_option` with `configId = "mode"` on the existing session — no relaunch | n/a for model; no for mode |
+| Cursor CLI | none (Cursor reads `CURSOR_API_KEY` from process env) | n/a | n/a | new session only via ACP `session/set_model` | new session only | yes for model and mode |
+
+Operational rules that follow from the table:
+
+- `acps agent set` regenerates the relevant config file BEFORE it writes the canonical `acp-stack.toml`. A generated-config write failure aborts the canonical write so the on-disk pair stays consistent.
+- `acps agent set` does not currently relaunch the agent process. When the table says "yes for model/mode", operators must restart the agent through `acps agent stop` + `acps agent start` for the new value to take effect on subsequent sessions. The CLI prints an explicit "settings will take effect on new sessions" note in that case.
+- Live changes that the table marks as supported are only valid against existing ACP sessions that have not been closed; they do not retroactively apply to historical session prompts. Unsupported live changes are rejected by the relevant route handler with an explicit "<agent> does not support live <model|mode> changes" error rather than silently accepted.
+- Custom-provider edits never apply live: they always require the agent to restart so it can re-read the regenerated config file and pick up the new base URL / model. The CLI emits the same restart hint.
+
+## Out-of-scope Agent Setup
+
+`acps init` and `acps agent set` deliberately do not touch:
+
+- Agent plugins or extensions distributed outside the embedded registry. Each supported agent's plugin manager is operator-managed; `acps` does not write plugin manifests or install plugin packages.
+- Agent skill catalogs, prompt libraries, or other user-extensible content. The embedded registry pins the binary surface; skill curation lives in the operator's home.
+- Pre-prompt or post-prompt hooks, including agent-side automation triggers. `acps` exposes its own permission and command pipelines instead, which give operators the same observability without the agent having to learn a foreign hook protocol.
+
+A future verified non-interactive setup path may lift one of these, but until that exists per supported agent, `acps agent set --plugin`, `--skill`, `--hook` and similar flags are not implemented and the CLI returns "unknown argument" rather than silently writing partial config. Operators who need any of the above should configure them directly through the upstream agent's own tooling and accept that `acps` does not include those artifacts in `acps config export`.

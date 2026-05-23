@@ -5,6 +5,7 @@ pub mod agent_registry;
 pub mod commands;
 pub mod deps;
 pub mod github_release;
+pub mod init_runner;
 pub mod mcp;
 pub mod npm_registry;
 pub mod permissions;

@@ -380,6 +380,9 @@ pub enum StackError {
     #[error("ACP registry does not contain agent `{id}`")]
     AgentRegistryMissing { id: String },
 
+    #[error("init run state is corrupted: {reason}")]
+    InitRunCorrupted { reason: String },
+
     #[error("{name} is not currently supported. Please try a different agent.")]
     AgentUnsupported { name: String },
 
@@ -726,6 +729,7 @@ impl StackError {
             AgentInstallerTimeout => "agent.installer_timeout",
             AgentInstallerLogPersist { .. } => "agent.installer_log_persist_failed",
             AgentRegistryMissing { .. } => "agent.registry_missing",
+            InitRunCorrupted { .. } => "init.run_corrupted",
             AgentUnsupported { .. } => "agent.unsupported",
             AgentCheckStale => "agent.check_stale",
             RegistryLoad { .. } => "agent.registry_load_failed",
@@ -949,6 +953,7 @@ impl StackError {
             AgentRegistryMissing { id } => {
                 format!("ACP registry does not contain agent `{id}`")
             }
+            InitRunCorrupted { reason } => format!("init run state is corrupted: {reason}"),
             AgentUnsupported { name } => {
                 format!("{name} is not currently supported. Please try a different agent.")
             }
@@ -1251,6 +1256,7 @@ impl StackError {
             | AgentInstallerTimeout
             | AgentInstallerLogPersist { .. }
             | AgentRegistryMissing { .. }
+            | InitRunCorrupted { .. }
             | RegistryLoad { .. }
             | GithubReleaseFetch { .. }
             | NpmRegistryFetch { .. }

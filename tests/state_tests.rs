@@ -1,6 +1,8 @@
 use acp_stack::state::{
-    AuthFailureFilter, EventFilter, InstallerRunInput, NewPermissionRequest, PermissionStatus,
-    StateStore, default_state_path,
+    AuthFailureFilter, EventFilter, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
+    INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
+    InstallerRunInput, NewInitRun, NewInitStep, NewPermissionRequest, PermissionStatus, StateStore,
+    default_state_path,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -32,7 +34,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        11
+        12
     );
 }
 
@@ -319,7 +321,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 11")
+            .contains("state schema version 99 is newer than supported version 12")
     );
 }
 
@@ -900,4 +902,211 @@ fn metrics_summary_returns_zero_when_window_misses_all_rows() {
     // semantically, even when the column counts to 0.
     assert!(summary.usage.tokens_input.is_none());
     assert!(summary.api_connections.request_count.is_none());
+}
+
+#[test]
+fn init_run_records_round_trip_with_steps() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let run = store
+        .create_init_run(NewInitRun {
+            runtime_user: Some("acp"),
+            agent_id: Some("codex"),
+            args_json: r#"{"agent":"codex"}"#,
+        })
+        .expect("init run should append");
+    assert_eq!(run.status, "pending");
+    assert!(run.id.starts_with("irun_"));
+
+    let step = store
+        .append_init_step(NewInitStep {
+            run_id: &run.id,
+            ordinal: 1,
+            kind: "agent_install",
+            payload_json: r#"{"step":"agent_install"}"#,
+        })
+        .expect("step should append");
+    assert_eq!(step.status, INIT_STEP_PENDING);
+
+    store
+        .mark_init_step_running(&step.id)
+        .expect("running mark should succeed");
+    store
+        .mark_init_step_succeeded(
+            &step.id,
+            Some("/tmp/install-logs/agent_install"),
+            r#"{"installer_run_id":"ins_abc"}"#,
+        )
+        .expect("succeeded mark should succeed");
+
+    let steps = store.query_init_steps(&run.id).expect("steps should query");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].status, INIT_STEP_SUCCEEDED);
+    assert_eq!(
+        steps[0].log_dir.as_deref(),
+        Some("/tmp/install-logs/agent_install"),
+    );
+    assert!(steps[0].started_at.is_some());
+    assert!(steps[0].finished_at.is_some());
+
+    store
+        .finalize_init_run(&run.id, INIT_RUN_SUCCEEDED)
+        .expect("finalize should succeed");
+    let reloaded = store
+        .lookup_init_run(&run.id)
+        .expect("lookup should succeed")
+        .expect("run row should exist");
+    assert_eq!(reloaded.status, INIT_RUN_SUCCEEDED);
+    assert!(reloaded.finished_at.is_some());
+}
+
+#[test]
+fn init_step_skipped_keeps_started_at_and_clears_error() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let run = store
+        .create_init_run(NewInitRun {
+            runtime_user: None,
+            agent_id: None,
+            args_json: "{}",
+        })
+        .expect("init run should append");
+    let step = store
+        .append_init_step(NewInitStep {
+            run_id: &run.id,
+            ordinal: 1,
+            kind: "config_validate",
+            payload_json: "{}",
+        })
+        .expect("step should append");
+
+    store
+        .mark_init_step_running(&step.id)
+        .expect("running mark");
+    store
+        .mark_init_step_failed(
+            &step.id,
+            None,
+            "config.invalid",
+            "missing field foo",
+            r#"{"attempt":1}"#,
+        )
+        .expect("failed mark");
+
+    let steps = store.query_init_steps(&run.id).expect("steps");
+    assert_eq!(steps[0].status, INIT_STEP_FAILED);
+    assert_eq!(steps[0].error_kind.as_deref(), Some("config.invalid"));
+
+    // Re-run: verifier-skipped path must clear the prior error tuple.
+    store
+        .mark_init_step_skipped(&step.id, r#"{"attempt":1,"verified":true}"#)
+        .expect("skipped mark");
+    let steps = store.query_init_steps(&run.id).expect("steps reloaded");
+    assert_eq!(steps[0].status, INIT_STEP_SKIPPED);
+    assert!(steps[0].error_kind.is_none());
+    assert!(steps[0].error_detail.is_none());
+    assert!(steps[0].payload_json.contains("\"verified\":true"));
+}
+
+#[test]
+fn init_run_finalize_failed_records_terminal_status() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let run = store
+        .create_init_run(NewInitRun {
+            runtime_user: None,
+            agent_id: None,
+            args_json: "{}",
+        })
+        .expect("init run should append");
+    let step = store
+        .append_init_step(NewInitStep {
+            run_id: &run.id,
+            ordinal: 1,
+            kind: "agent_install",
+            payload_json: "{}",
+        })
+        .expect("step should append");
+    store.mark_init_step_running(&step.id).expect("running");
+    store
+        .mark_init_step_failed(&step.id, None, "installer.exit_nonzero", "exit=1", "{}")
+        .expect("failed");
+    store
+        .finalize_init_run(&run.id, INIT_RUN_FAILED)
+        .expect("finalize failed");
+
+    let latest = store
+        .latest_init_run()
+        .expect("latest")
+        .expect("latest row");
+    assert_eq!(latest.id, run.id);
+    assert_eq!(latest.status, INIT_RUN_FAILED);
+    let _ = INIT_STEP_RUNNING;
+}
+
+#[test]
+fn init_step_payload_must_be_valid_json() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let run = store
+        .create_init_run(NewInitRun {
+            runtime_user: None,
+            agent_id: None,
+            args_json: "{}",
+        })
+        .expect("init run");
+    let error = store
+        .append_init_step(NewInitStep {
+            run_id: &run.id,
+            ordinal: 1,
+            kind: "agent_install",
+            payload_json: "not json",
+        })
+        .expect_err("invalid payload should be rejected");
+    assert!(error.to_string().to_lowercase().contains("json"));
+}
+
+#[test]
+fn duplicate_ordinal_within_run_is_rejected() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let run = store
+        .create_init_run(NewInitRun {
+            runtime_user: None,
+            agent_id: None,
+            args_json: "{}",
+        })
+        .expect("init run");
+    store
+        .append_init_step(NewInitStep {
+            run_id: &run.id,
+            ordinal: 1,
+            kind: "agent_install",
+            payload_json: "{}",
+        })
+        .expect("first step");
+    let error = store
+        .append_init_step(NewInitStep {
+            run_id: &run.id,
+            ordinal: 1,
+            kind: "config_validate",
+            payload_json: "{}",
+        })
+        .expect_err("duplicate ordinal should fail UNIQUE");
+    assert!(error.to_string().to_lowercase().contains("unique"));
 }

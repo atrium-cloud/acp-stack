@@ -33,6 +33,8 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("permission_decisions", 6),
     ("sink_outbox", 8),
     ("sink_failures_summary", 8),
+    ("init_runs", 12),
+    ("init_steps", 12),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../../migrations/manifest.toml");
@@ -147,6 +149,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         postgres_file: "011_installer_runs_log_dir.postgres.sql",
         sqlite: include_str!("../../migrations/011_installer_runs_log_dir.sqlite.sql"),
         postgres: include_str!("../../migrations/011_installer_runs_log_dir.postgres.sql"),
+    },
+    Migration {
+        id: 12,
+        name: "init_runs",
+        sqlite_file: "012_init_runs.sqlite.sql",
+        postgres_file: "012_init_runs.postgres.sql",
+        sqlite: include_str!("../../migrations/012_init_runs.sqlite.sql"),
+        postgres: include_str!("../../migrations/012_init_runs.postgres.sql"),
     },
 ];
 
