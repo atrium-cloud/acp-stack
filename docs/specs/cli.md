@@ -20,6 +20,8 @@ acps agent install
 acps agent start
 acps agent stop
 acps agent status
+acps agent check
+acps installer history [--agent <id>] [--limit <n>]
 
 acps config validate [path]
 acps config export [--output path]
@@ -126,6 +128,10 @@ Successful `acps agent set` output prints the configured agent id, changed field
 
 `acps agent status` reads local config, the active agent registry, and SQLite state. It prints `agent: <id>`, configured agent params as individual `provider:`, `model:`, and `mode:` lines, grouped supported-but-unconfigured params as `<params> unset`, grouped unsupported params as `<params> unavailable`, the latest successful agent-scoped installer versions as `installed <step>: <version>` or `installed <step>: version unknown`, then the configured command, latest persisted capability snapshot, and recent lifecycle rows. Legacy installer rows without `agent_id` are not shown because they cannot be safely attributed to the active agent.
 
+`acps agent check` compares the active registry entry's expected managed installer steps against the latest successful agent-scoped installer rows. Native agents expect `install`; adapter-backed agents expect `harness` and `adapter`. Each expected step prints `up-to-date`, `stale`, `unknown`, or `not installed`. Stale and missing steps exit non-zero without upgrading automatically; unknown steps exit successfully because shell installs and missing recorded versions may not have machine-checkable freshness.
+
+`acps installer history [--agent <id>] [--limit <n>]` prints recent `installer_runs` rows from SQLite, newest first, including step status, duration, exit status, and recorded version. `--agent` filters to one agent id, and `--limit` must be between 1 and 500.
+
 ## Security Self-Check
 
 `acps security check` runs the local self-check described in [security](security.md). Findings render in the rule order produced by `security::check()` as `- <severity> <code>: <message>`; when a finding carries a remediation hint it appears on an indented `hint:` line directly below the diagnostic:
@@ -163,6 +169,8 @@ The first implemented CLI surface focuses on local config, durable state, the se
 - `acps agent start`
 - `acps agent stop`
 - `acps agent status`
+- `acps agent check`
+- `acps installer history [--agent <id>] [--limit <n>]`
 - `acps logs query [--limit <n>] [--level <level>] [--since <duration|rfc3339>] [--until <duration|rfc3339>] [--kind <kind|prefix.>] [--source <writer>] [--session <id>] [--command <id>] [--permission <id>] [--after <cursor>]`
 - `acps logs tail [--topic <name>]...`
 - `acps metrics summary [--since <duration|rfc3339>] [--until <duration|rfc3339>]`
