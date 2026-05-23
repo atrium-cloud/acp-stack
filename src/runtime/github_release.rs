@@ -29,6 +29,28 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
 
+/// Env-overridable base URL for the GitHub Releases API. Tests bind a
+/// local axum mock to `127.0.0.1:0` and set this var so the same
+/// install machinery exercised in production drives against the mock,
+/// rather than reaching out to the live api.github.com (which would
+/// rate-limit CI and is not deterministic). The empty/unset case falls
+/// back to the upstream constant.
+fn github_api_base() -> String {
+    match std::env::var("ACP_STACK_GITHUB_API_BASE") {
+        Ok(value) if !value.trim().is_empty() => value.trim_end_matches('/').to_owned(),
+        _ => GITHUB_API_BASE.to_owned(),
+    }
+}
+
+/// True when the resolved base URL is the canonical `api.github.com`.
+/// Used to decide whether to forward `GITHUB_TOKEN` on outgoing
+/// requests — a redirected base (test mock or, in the worst case, a
+/// misconfigured override) must never receive the operator's PAT.
+fn base_is_upstream(base: &str) -> bool {
+    base.trim_end_matches('/')
+        .eq_ignore_ascii_case(GITHUB_API_BASE)
+}
+
 #[derive(Debug, Clone)]
 pub struct GithubReleaseInstall<'a> {
     pub repo: &'a str,
@@ -57,8 +79,21 @@ pub struct GithubReleaseOutcome {
 /// `installer_runs.version`.
 pub fn latest_release_tag(repo: &str) -> Result<String> {
     let client = build_client()?;
-    let token = resolve_token();
-    let release = fetch_release(&client, repo, None, token.as_deref())?;
+    // Resolve the base ONCE and reuse it. Reading the env twice (once
+    // for the token decision, once inside `fetch_release` to build the
+    // URL) would let a concurrent env mutation flip the security
+    // decision between those reads, which would defeat the
+    // "redirected base must never receive GITHUB_TOKEN" invariant.
+    let base = github_api_base();
+    let token = if base_is_upstream(&base) {
+        resolve_token()
+    } else {
+        // The base has been redirected (test mock, mis-set override).
+        // Forwarding GITHUB_TOKEN to a non-upstream endpoint would
+        // hand a PAT to an attacker-controlled host, so we drop it.
+        None
+    };
+    let release = fetch_release(&client, &base, repo, None, token.as_deref())?;
     Ok(release.tag_name)
 }
 
@@ -70,9 +105,16 @@ pub fn install(
 ) -> Result<GithubReleaseOutcome> {
     let mut log = LogBuf::new();
     let client = build_client()?;
-    let token = resolve_token();
+    // Resolve the base ONCE and reuse it (see `latest_release_tag` —
+    // the token decision and the URL target must read the same value).
+    let base = github_api_base();
+    let token = if base_is_upstream(&base) {
+        resolve_token()
+    } else {
+        None
+    };
 
-    let release = fetch_release(&client, spec.repo, version, token.as_deref())?;
+    let release = fetch_release(&client, &base, spec.repo, version, token.as_deref())?;
     log.line(format!(
         "resolved {} release `{}`",
         spec.repo, release.tag_name
@@ -189,13 +231,14 @@ fn resolve_token() -> Option<String> {
 
 fn fetch_release(
     client: &reqwest::blocking::Client,
+    base: &str,
     repo: &str,
     version: Option<&str>,
     token: Option<&str>,
 ) -> Result<ReleaseResponse> {
     let url = match version {
-        Some(tag) => format!("{GITHUB_API_BASE}/repos/{repo}/releases/tags/{tag}"),
-        None => format!("{GITHUB_API_BASE}/repos/{repo}/releases/latest"),
+        Some(tag) => format!("{base}/repos/{repo}/releases/tags/{tag}"),
+        None => format!("{base}/repos/{repo}/releases/latest"),
     };
     let mut request = client
         .get(&url)
