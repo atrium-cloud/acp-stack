@@ -6,6 +6,7 @@ pub mod commands;
 pub mod deps;
 pub mod github_release;
 pub mod mcp;
+pub mod npm_registry;
 pub mod permissions;
 pub mod provider_keys;
 pub mod s3_client;
