@@ -44,6 +44,56 @@ pub const CODE_LANE_DIR: &str = "usr/code";
 /// Subdirectory under `workspace.root` for data lanes.
 pub const DATA_LANE_DIR: &str = "usr/data";
 
+const CAPTURE_TAG_GIT_CLONE: &str = "git-clone";
+const CAPTURE_TAG_GIT_REV_PARSE: &str = "git-rev-parse";
+const CAPTURE_TAG_DOWNLOAD: &str = "download";
+const CAPTURE_TAG_EXTRACT: &str = "extract";
+const CAPTURE_TAG_COPY: &str = "copy";
+const CAPTURE_TAG_S3_DOWNLOAD: &str = "s3-download";
+
+/// Canonical on-disk root for workspace materialization logs. Mirrors
+/// the layout used by installer step logs (`default_installer_log_base`)
+/// so backups and log rotation can target one directory.
+pub fn default_workspace_init_log_base(home: &Path) -> PathBuf {
+    home.join(".local")
+        .join("share")
+        .join("acp-stack")
+        .join("workspace-init-logs")
+}
+
+/// Per-run capture location for workspace materialization. The init
+/// orchestrator constructs one of these per `init_runs.id` and passes
+/// it into [`materialize_workspace`]; each source gets a subdirectory
+/// underneath it, and each subprocess invocation writes its full
+/// stdout/stderr there.
+#[derive(Debug, Clone)]
+pub struct WorkspaceLogPaths {
+    /// `<log_base>/<init_run_id>/`. Becomes the `log_dir` recorded on the
+    /// init step row so the operator can drill into any source.
+    pub run_dir: PathBuf,
+}
+
+impl WorkspaceLogPaths {
+    pub fn for_run(log_base: &Path, init_run_id: &str) -> Self {
+        Self {
+            run_dir: log_base.join(sanitize_segment(init_run_id)),
+        }
+    }
+}
+
+fn sanitize_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Outcome of a single source materialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaterializeOutcome {
@@ -60,12 +110,23 @@ pub struct SourceReport {
     pub name: String,
     pub destination: PathBuf,
     pub outcome: MaterializeOutcome,
+    /// On-disk directory under `WorkspaceLogPaths.run_dir` holding this
+    /// source's capture files. Git sources persist subprocess stdout/stderr;
+    /// Rust-native data sources persist synthetic stdout/stderr audit entries.
+    /// `None` when materialization was a verifier-only skip OR when the caller
+    /// did not provide a `WorkspaceLogPaths`.
+    pub log_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeReport {
     pub code: Vec<SourceReport>,
     pub data: Vec<SourceReport>,
+    /// Root capture directory shared by every source in this run.
+    /// `Some(...)` whenever the caller passed a `WorkspaceLogPaths`,
+    /// even if no source actually ran (the directory is still
+    /// pre-created so audit tooling can land logs under a stable path).
+    pub log_dir: Option<PathBuf>,
 }
 
 /// True when every declared code/data source's destination directory has
@@ -104,10 +165,17 @@ pub fn all_sources_have_sentinel(workspace: &WorkspaceConfig) -> Result<bool> {
 }
 
 /// Materialize every declared code and data source. No-op when both
-/// vectors are empty.
+/// vectors are empty. When `log_paths` is `Some(...)`, every source
+/// operation writes capture pairs under
+/// `log_paths.run_dir/<source-tag>/<operation>.{stdout,stderr}`. Git
+/// operations persist the child-process streams; Rust-native data
+/// operations persist a deterministic summary on stdout and failure
+/// detail on stderr. When `None`, the existing tail-on-failure behavior
+/// is preserved (used by tests that don't need durable logs).
 pub fn materialize_workspace(
     workspace: &WorkspaceConfig,
     secrets: &SecretStore,
+    log_paths: Option<&WorkspaceLogPaths>,
 ) -> Result<MaterializeReport> {
     let root = Path::new(&workspace.root);
     if !root.is_absolute() {
@@ -122,22 +190,249 @@ pub fn materialize_workspace(
     let code_root = root.join(CODE_LANE_DIR);
     let data_root = root.join(DATA_LANE_DIR);
 
-    let mut report = MaterializeReport::default();
+    let mut report = MaterializeReport {
+        log_dir: log_paths.map(|p| p.run_dir.clone()),
+        ..MaterializeReport::default()
+    };
+
+    if let Some(paths) = log_paths {
+        ensure_workspace_log_dir(&paths.run_dir)?;
+    }
 
     for (index, source) in workspace.code_sources.iter().enumerate() {
         ensure_lane_root(&code_root)?;
-        report
-            .code
-            .push(materialize_code_source(index, source, &code_root, secrets)?);
+        let source_log_dir = log_paths
+            .map(|p| p.run_dir.join(format!("code-{index:03}")))
+            .map(|p| {
+                ensure_workspace_log_dir(&p)?;
+                Ok::<PathBuf, StackError>(p)
+            })
+            .transpose()?;
+        report.code.push(materialize_code_source(
+            index,
+            source,
+            &code_root,
+            secrets,
+            source_log_dir.as_deref(),
+        )?);
     }
     for (index, source) in workspace.data_sources.iter().enumerate() {
         ensure_lane_root(&data_root)?;
-        report
-            .data
-            .push(materialize_data_source(index, source, &data_root, secrets)?);
+        let source_log_dir = log_paths
+            .map(|p| p.run_dir.join(format!("data-{index:03}")))
+            .map(|p| {
+                ensure_workspace_log_dir(&p)?;
+                Ok::<PathBuf, StackError>(p)
+            })
+            .transpose()?;
+        report.data.push(materialize_data_source(
+            index,
+            source,
+            &data_root,
+            secrets,
+            source_log_dir.as_deref(),
+        )?);
     }
 
     Ok(report)
+}
+
+fn ensure_workspace_log_dir(path: &Path) -> Result<()> {
+    // Workspace captures contain full git stdout/stderr, which can
+    // include private repo URLs and (rarely) credentials in error
+    // messages. Match the project-wide owner-only directory convention
+    // so a permissive umask doesn't leak any of that to other local
+    // users. `create_dir_owner_only` is idempotent.
+    crate::fs_util::create_dir_owner_only(path)
+}
+
+/// Persist a subprocess capture to `<log_dir>/<command>.{stdout,stderr}`.
+/// Errors propagate — losing the audit copy on success would mean the
+/// promise of "structured step status + per-step log files" is violated
+/// for the operator. Empty streams are still written so the operator can
+/// distinguish "ran with no output" from "logs never persisted".
+fn write_command_capture(
+    log_dir: Option<&Path>,
+    command_tag: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Option<PathBuf>> {
+    let Some(dir) = log_dir else {
+        return Ok(None);
+    };
+    // Each call lands a fresh pair of files so a resume that re-runs
+    // the same step preserves the prior failure's capture chain. The
+    // base suffix is a wall-clock nanosecond stamp (natural sort
+    // order). On collision — two captures landing in the same
+    // nanosecond on a coarse clock, or under a concurrent resume — we
+    // extend with a 2-digit sequence number and try `create_new` again.
+    // `create_new` is the O_CREAT|O_EXCL atomic-create syscall, so the
+    // loop terminates with file ownership guaranteed by the OS rather
+    // than by an existence probe.
+    let base_stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0);
+    let CaptureFiles {
+        stdout_path,
+        stdout_file: mut stdout_file_owned,
+        stderr_path,
+        stderr_file: mut stderr_file_owned,
+    } = create_capture_file_pair(dir, command_tag, base_stamp)?;
+    let stdout_file = &mut stdout_file_owned;
+    let stderr_file = &mut stderr_file_owned;
+    std::io::Write::write_all(stdout_file, stdout).map_err(|source| {
+        StackError::WorkspaceMaterializeFailed {
+            reason: format!("write `{}`: {source}", stdout_path.display()),
+        }
+    })?;
+    std::io::Write::write_all(stderr_file, stderr).map_err(|source| {
+        StackError::WorkspaceMaterializeFailed {
+            reason: format!("write `{}`: {source}", stderr_path.display()),
+        }
+    })?;
+    // fsync both the files AND the parent directory before returning,
+    // so a crash between this point and SQLite's `init_steps.log_dir`
+    // write cannot leave the row pointing at a missing or zero-length
+    // file. Matches the installer log persistence contract.
+    stdout_file
+        .sync_all()
+        .map_err(|source| StackError::WorkspaceMaterializeFailed {
+            reason: format!("fsync `{}`: {source}", stdout_path.display()),
+        })?;
+    stderr_file
+        .sync_all()
+        .map_err(|source| StackError::WorkspaceMaterializeFailed {
+            reason: format!("fsync `{}`: {source}", stderr_path.display()),
+        })?;
+    sync_capture_dir(dir)?;
+    Ok(Some(dir.to_path_buf()))
+}
+
+fn write_operation_capture(
+    log_dir: Option<&Path>,
+    operation_tag: &str,
+    stdout: &str,
+    stderr: &str,
+) -> Result<Option<PathBuf>> {
+    write_command_capture(log_dir, operation_tag, stdout.as_bytes(), stderr.as_bytes())
+}
+
+fn capture_error(log_dir: Option<&Path>, operation_tag: &str, error: &StackError) {
+    if let Err(capture_error) =
+        write_operation_capture(log_dir, operation_tag, "", &format!("{error}\n"))
+    {
+        tracing::warn!(
+            error = %capture_error,
+            original_error = %error,
+            operation = operation_tag,
+            "failed to persist workspace materialization error capture"
+        );
+    }
+}
+
+fn sync_capture_dir(dir: &Path) -> Result<()> {
+    let directory =
+        std::fs::File::open(dir).map_err(|source| StackError::WorkspaceMaterializeFailed {
+            reason: format!("open `{}` for fsync: {source}", dir.display()),
+        })?;
+    directory
+        .sync_all()
+        .map_err(|source| StackError::WorkspaceMaterializeFailed {
+            reason: format!("fsync directory `{}`: {source}", dir.display()),
+        })
+}
+
+struct CaptureFiles {
+    stdout_path: PathBuf,
+    stdout_file: std::fs::File,
+    stderr_path: PathBuf,
+    stderr_file: std::fs::File,
+}
+
+/// Reserve the stdout AND stderr filenames for one capture as an
+/// atomic pair. Picking each independently would let two concurrent
+/// resumes interleave: process A claims `stdout.00`, process B then
+/// claims `stdout.01` followed by `stderr.00`, and process A finally
+/// claims `stderr.01` — mismatched pairs that defeat the audit log.
+/// This loop reserves both files at the same suffix or rolls both on
+/// any collision.
+fn create_capture_file_pair(
+    dir: &Path,
+    command_tag: &str,
+    base_stamp: i64,
+) -> Result<CaptureFiles> {
+    for sequence in 0u32..64 {
+        let suffix = if sequence == 0 {
+            format!("{base_stamp:020}")
+        } else {
+            format!("{base_stamp:020}.{sequence:02}")
+        };
+        let stdout_path = dir.join(format!("{command_tag}.{suffix}.stdout"));
+        let stderr_path = dir.join(format!("{command_tag}.{suffix}.stderr"));
+        let stdout_file = match create_new_owner_only(&stdout_path) {
+            Ok(file) => file,
+            Err(CaptureCreateError::Collision) => continue,
+            Err(CaptureCreateError::Io(err)) => {
+                return Err(StackError::WorkspaceMaterializeFailed {
+                    reason: format!("create `{}`: {err}", stdout_path.display()),
+                });
+            }
+        };
+        match create_new_owner_only(&stderr_path) {
+            Ok(stderr_file) => {
+                return Ok(CaptureFiles {
+                    stdout_path,
+                    stdout_file,
+                    stderr_path,
+                    stderr_file,
+                });
+            }
+            Err(CaptureCreateError::Collision) => {
+                // Roll the pair: drop the stdout we just claimed so a
+                // concurrent resume sees a clean slot at the next suffix.
+                drop(stdout_file);
+                let _ = std::fs::remove_file(&stdout_path);
+                continue;
+            }
+            Err(CaptureCreateError::Io(err)) => {
+                drop(stdout_file);
+                let _ = std::fs::remove_file(&stdout_path);
+                return Err(StackError::WorkspaceMaterializeFailed {
+                    reason: format!("create `{}`: {err}", stderr_path.display()),
+                });
+            }
+        }
+    }
+    Err(StackError::WorkspaceMaterializeFailed {
+        reason: format!(
+            "exhausted 64 capture-filename retries for `{command_tag}` under `{}`",
+            dir.display(),
+        ),
+    })
+}
+
+enum CaptureCreateError {
+    Collision,
+    Io(std::io::Error),
+}
+
+fn create_new_owner_only(path: &Path) -> std::result::Result<std::fs::File, CaptureCreateError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        // Captures can carry private repo URLs and (rarely) credential
+        // material in error messages. Set 0o600 atomically at create
+        // time so a permissive umask never opens a window for other
+        // local users to read the bytes between create and chmod.
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(file) => Ok(file),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(CaptureCreateError::Collision)
+        }
+        Err(err) => Err(CaptureCreateError::Io(err)),
+    }
 }
 
 fn ensure_lane_root(path: &Path) -> Result<()> {
@@ -319,6 +614,7 @@ fn materialize_code_source(
     source: &CodeSourceConfig,
     code_root: &Path,
     secrets: &SecretStore,
+    log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let name = derive_code_source_name(source)
         .map_err(|reason| StackError::WorkspaceCodeSourceInvalid { index, reason })?;
@@ -346,6 +642,7 @@ fn materialize_code_source(
                     name,
                     destination: dest,
                     outcome: MaterializeOutcome::Verified,
+                    log_dir: None,
                 });
             }
             return Err(StackError::WorkspaceDestinationNotEmpty {
@@ -370,24 +667,43 @@ fn materialize_code_source(
         None => None,
     };
 
-    let outcome = run_git_clone(repo, source.branch.as_deref(), credential.as_deref(), &dest);
+    let outcome = run_git_clone(
+        repo,
+        source.branch.as_deref(),
+        credential.as_deref(),
+        &dest,
+        log_dir,
+    );
     if let Err(err) = outcome {
         // Clean up the partially-clobbered destination so a rerun can retry.
         return Err(cleanup_partial_destination(&dest, err));
     }
 
-    let commit = run_git_rev_parse(&dest)?;
-    Sentinel::new(SentinelBody::Git {
+    // Everything from here to the sentinel write is "after a successful
+    // clone but before the source is durably marked done". A failure
+    // here — git rev-parse, the per-step log writes that now run inside
+    // it, or the sentinel write itself — leaves a populated destination
+    // without a sentinel, which the next `acps init` would reject under
+    // the non-empty destination guard. Funnel every failure through
+    // `cleanup_partial_destination` so a retry can proceed.
+    let commit = match run_git_rev_parse(&dest, log_dir) {
+        Ok(commit) => commit,
+        Err(err) => return Err(cleanup_partial_destination(&dest, err)),
+    };
+    let sentinel = Sentinel::new(SentinelBody::Git {
         repo: repo.to_owned(),
         branch: source.branch.clone(),
         commit,
-    })
-    .write(&dest)?;
+    });
+    if let Err(err) = sentinel.write(&dest) {
+        return Err(cleanup_partial_destination(&dest, err));
+    }
 
     Ok(SourceReport {
         name,
         destination: dest,
         outcome: MaterializeOutcome::Created,
+        log_dir: log_dir.map(Path::to_path_buf),
     })
 }
 
@@ -416,6 +732,7 @@ fn run_git_clone(
     branch: Option<&str>,
     credential: Option<&str>,
     dest: &Path,
+    log_dir: Option<&Path>,
 ) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.arg("clone").arg("--depth").arg("1");
@@ -444,6 +761,18 @@ fn run_git_clone(
         .map_err(|source| StackError::WorkspaceMaterializeFailed {
             reason: format!("spawning `git clone` failed: {source}"),
         })?;
+    // Persist captured streams to disk so a failed clone is auditable
+    // without re-running. Successful clones land the same capture so the
+    // operator can inspect what git actually did. Write before the
+    // exit-status check; the failure tail in `WorkspaceCommandFailed`
+    // remains the primary error surface, but the full capture is the
+    // audit copy.
+    write_command_capture(
+        log_dir,
+        CAPTURE_TAG_GIT_CLONE,
+        &output.stdout,
+        &output.stderr,
+    )?;
     if !output.status.success() {
         return Err(StackError::WorkspaceCommandFailed {
             command: "git clone",
@@ -454,7 +783,7 @@ fn run_git_clone(
     Ok(())
 }
 
-fn run_git_rev_parse(dest: &Path) -> Result<String> {
+fn run_git_rev_parse(dest: &Path, log_dir: Option<&Path>) -> Result<String> {
     let output = Command::new("git")
         .arg("rev-parse")
         .arg("HEAD")
@@ -465,6 +794,12 @@ fn run_git_rev_parse(dest: &Path) -> Result<String> {
         .map_err(|source| StackError::WorkspaceMaterializeFailed {
             reason: format!("spawning `git rev-parse` failed: {source}"),
         })?;
+    write_command_capture(
+        log_dir,
+        CAPTURE_TAG_GIT_REV_PARSE,
+        &output.stdout,
+        &output.stderr,
+    )?;
     if !output.status.success() {
         return Err(StackError::WorkspaceCommandFailed {
             command: "git rev-parse HEAD",
@@ -521,15 +856,16 @@ fn materialize_data_source(
     source: &DataSourceConfig,
     data_root: &Path,
     secrets: &SecretStore,
+    log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let name = derive_data_source_name(source)
         .map_err(|reason| StackError::WorkspaceDataSourceInvalid { index, reason })?;
     let dest = data_root.join(&name);
 
     match source.source_type.as_str() {
-        "local" => materialize_local(index, source, &name, &dest),
-        "https" => materialize_https(index, source, &name, &dest),
-        "s3" => materialize_s3(index, source, &name, &dest, secrets),
+        "local" => materialize_local(index, source, &name, &dest, log_dir),
+        "https" => materialize_https(index, source, &name, &dest, log_dir),
+        "s3" => materialize_s3(index, source, &name, &dest, secrets, log_dir),
         other => Err(StackError::WorkspaceDataSourceInvalid {
             index,
             reason: format!("unsupported type `{other}`"),
@@ -542,6 +878,7 @@ fn materialize_local(
     source: &DataSourceConfig,
     name: &str,
     dest: &Path,
+    log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let path = source
         .path
@@ -608,6 +945,7 @@ fn materialize_local(
                 name: name.to_owned(),
                 destination: dest.to_path_buf(),
                 outcome: MaterializeOutcome::Verified,
+                log_dir: None,
             });
         }
     }
@@ -616,19 +954,41 @@ fn materialize_local(
         reason: format!("create dest `{}`: {source_err}", dest.display()),
     })?;
 
-    let copy = copy_tree(&canonical_src, dest)?;
+    let copy = match copy_tree(&canonical_src, dest) {
+        Ok(copy) => copy,
+        Err(err) => {
+            capture_error(log_dir, CAPTURE_TAG_COPY, &err);
+            return Err(cleanup_partial_destination(dest, err));
+        }
+    };
+    write_operation_capture(
+        log_dir,
+        CAPTURE_TAG_COPY,
+        &format!(
+            "source={}\ndestination={}\nbytes={}\nentries={}\n",
+            canonical_src.display(),
+            dest.display(),
+            copy.bytes,
+            copy.entries,
+        ),
+        "",
+    )
+    .map_err(|err| cleanup_partial_destination(dest, err))?;
 
-    Sentinel::new(SentinelBody::Local {
+    let sentinel = Sentinel::new(SentinelBody::Local {
         path: canonical_src.display().to_string(),
         bytes: copy.bytes,
         entries: copy.entries,
-    })
-    .write(dest)?;
+    });
+    if let Err(err) = sentinel.write(dest) {
+        return Err(cleanup_partial_destination(dest, err));
+    }
 
     Ok(SourceReport {
         name: name.to_owned(),
         destination: dest.to_path_buf(),
         outcome: MaterializeOutcome::Created,
+        log_dir: log_dir.map(Path::to_path_buf),
     })
 }
 
@@ -752,6 +1112,7 @@ fn materialize_https(
     source: &DataSourceConfig,
     name: &str,
     dest: &Path,
+    log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     let url = source
         .url
@@ -786,6 +1147,7 @@ fn materialize_https(
                 name: name.to_owned(),
                 destination: dest.to_path_buf(),
                 outcome: MaterializeOutcome::Verified,
+                log_dir: None,
             });
         }
         existing_sentinel_diverged = true;
@@ -819,7 +1181,25 @@ fn materialize_https(
             reason: format!("create download temp: {source_err}"),
         }
     })?;
-    let report = download_to_file(url, tmp.path(), &opts)?;
+    let report = match download_to_file(url, tmp.path(), &opts) {
+        Ok(report) => report,
+        Err(err) => {
+            capture_error(log_dir, CAPTURE_TAG_DOWNLOAD, &err);
+            return Err(err);
+        }
+    };
+    write_operation_capture(
+        log_dir,
+        CAPTURE_TAG_DOWNLOAD,
+        &format!(
+            "url={url}\nfinal_url={}\nbytes={}\nsha256={}\ncontent_type={}\n",
+            report.final_url,
+            report.bytes_written,
+            report.sha256,
+            report.content_type.as_deref().unwrap_or(""),
+        ),
+        "",
+    )?;
     let bytes = report.bytes_written;
     let sha256 = report.sha256.clone();
 
@@ -828,38 +1208,84 @@ fn materialize_https(
         extract_opts.max_total_bytes = limit;
     }
     let extracted = match extract_archive(tmp.path(), dest, &extract_opts) {
-        Ok(_) => true,
+        Ok(report) => {
+            write_operation_capture(
+                log_dir,
+                CAPTURE_TAG_EXTRACT,
+                &format!(
+                    "archive={}\ndestination={}\nentries={}\nbytes={}\ntop_level_dir={}\n",
+                    tmp.path().display(),
+                    dest.display(),
+                    report.entries_written,
+                    report.bytes_written,
+                    report.top_level_dir.as_deref().unwrap_or(""),
+                ),
+                "",
+            )
+            .map_err(|err| cleanup_partial_destination(dest, err))?;
+            true
+        }
         Err(StackError::ArchiveUnsupportedFormat) => {
+            write_operation_capture(
+                log_dir,
+                CAPTURE_TAG_EXTRACT,
+                &format!(
+                    "archive={}\ndestination={}\nunsupported_format=true\nfallback=copy\n",
+                    tmp.path().display(),
+                    dest.display(),
+                ),
+                "",
+            )?;
             // Not an archive: place the file at <dest>/<basename> instead.
             let leaf = derive_leaf_from_url(url);
             let target = dest.join(leaf);
-            std::fs::copy(tmp.path(), &target).map_err(|source_err| {
-                StackError::WorkspaceMaterializeFailed {
-                    reason: format!(
-                        "copy downloaded body to `{}`: {source_err}",
-                        target.display()
-                    ),
+            let copied = match std::fs::copy(tmp.path(), &target) {
+                Ok(bytes) => bytes,
+                Err(source_err) => {
+                    let err = StackError::WorkspaceMaterializeFailed {
+                        reason: format!(
+                            "copy downloaded body to `{}`: {source_err}",
+                            target.display()
+                        ),
+                    };
+                    capture_error(log_dir, CAPTURE_TAG_COPY, &err);
+                    return Err(cleanup_partial_destination(dest, err));
                 }
-            })?;
+            };
+            write_operation_capture(
+                log_dir,
+                CAPTURE_TAG_COPY,
+                &format!(
+                    "source={}\ndestination={}\nbytes={copied}\nentries=1\n",
+                    tmp.path().display(),
+                    target.display(),
+                ),
+                "",
+            )
+            .map_err(|err| cleanup_partial_destination(dest, err))?;
             false
         }
         Err(err) => {
+            capture_error(log_dir, CAPTURE_TAG_EXTRACT, &err);
             return Err(cleanup_partial_destination(dest, err));
         }
     };
 
-    Sentinel::new(SentinelBody::Https {
+    let sentinel = Sentinel::new(SentinelBody::Https {
         url: url.to_owned(),
         sha256,
         bytes,
         extracted,
-    })
-    .write(dest)?;
+    });
+    if let Err(err) = sentinel.write(dest) {
+        return Err(cleanup_partial_destination(dest, err));
+    }
 
     Ok(SourceReport {
         name: name.to_owned(),
         destination: dest.to_path_buf(),
         outcome: MaterializeOutcome::Created,
+        log_dir: log_dir.map(Path::to_path_buf),
     })
 }
 
@@ -880,6 +1306,7 @@ fn materialize_s3(
     name: &str,
     dest: &Path,
     secrets: &SecretStore,
+    log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
     use crate::runtime::s3_client::{Credentials, S3Client};
 
@@ -936,6 +1363,7 @@ fn materialize_s3(
             name: name.to_owned(),
             destination: dest.to_path_buf(),
             outcome: MaterializeOutcome::Verified,
+            log_dir: None,
         });
     }
     ensure_dest_or_fail(dest)?;
@@ -963,25 +1391,44 @@ fn materialize_s3(
 
     let outcome = download_s3_objects(&client, bucket, prefix.as_deref(), dest, max_total_bytes);
     let (bytes, objects) = match outcome {
-        Ok(value) => value,
+        Ok(value) => {
+            write_operation_capture(
+                log_dir,
+                CAPTURE_TAG_S3_DOWNLOAD,
+                &format!(
+                    "bucket={bucket}\nprefix={}\nregion={region}\ndestination={}\nbytes={}\nobjects={}\n",
+                    prefix.as_deref().unwrap_or(""),
+                    dest.display(),
+                    value.0,
+                    value.1,
+                ),
+                "",
+            )
+            .map_err(|err| cleanup_partial_destination(dest, err))?;
+            value
+        }
         Err(err) => {
+            capture_error(log_dir, CAPTURE_TAG_S3_DOWNLOAD, &err);
             return Err(cleanup_partial_destination(dest, err));
         }
     };
 
-    Sentinel::new(SentinelBody::S3 {
+    let sentinel = Sentinel::new(SentinelBody::S3 {
         bucket: bucket.to_owned(),
         prefix,
         region: region.to_owned(),
         bytes,
         objects,
-    })
-    .write(dest)?;
+    });
+    if let Err(err) = sentinel.write(dest) {
+        return Err(cleanup_partial_destination(dest, err));
+    }
 
     Ok(SourceReport {
         name: name.to_owned(),
         destination: dest.to_path_buf(),
         outcome: MaterializeOutcome::Created,
+        log_dir: log_dir.map(Path::to_path_buf),
     })
 }
 
@@ -1158,12 +1605,26 @@ mod tests {
         })
     }
 
+    fn capture_names(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("read capture dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn has_capture(names: &[String], tag: &str, extension: &str) -> bool {
+        names
+            .iter()
+            .any(|name| name.starts_with(&format!("{tag}.")) && name.ends_with(extension))
+    }
+
     #[test]
     fn no_op_when_both_lanes_empty() {
         let root_dir = tempdir().expect("root");
         let workspace = workspace_with(root_dir.path());
         let secrets = empty_secret_store();
-        let report = materialize_workspace(&workspace, &secrets).expect("ok");
+        let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
         assert!(report.code.is_empty());
         assert!(report.data.is_empty());
         assert!(!root_dir.path().join("usr").exists());
@@ -1188,7 +1649,7 @@ mod tests {
             name: Some("upstream".to_owned()),
         });
         let secrets = empty_secret_store();
-        let report = materialize_workspace(&workspace, &secrets).expect("ok");
+        let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
         let entry = &report.code[0];
         assert_eq!(entry.name, "upstream");
         assert_eq!(entry.outcome, MaterializeOutcome::Created);
@@ -1198,8 +1659,147 @@ mod tests {
         assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
 
         // Rerun is idempotent.
-        let report2 = materialize_workspace(&workspace, &secrets).expect("rerun");
+        let report2 = materialize_workspace(&workspace, &secrets, None).expect("rerun");
         assert_eq!(report2.code[0].outcome, MaterializeOutcome::Verified);
+    }
+
+    #[test]
+    fn captures_git_clone_stdout_and_stderr_to_log_dir() {
+        if !git_available() {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let upstream = tempdir().expect("upstream");
+        run_git_init(upstream.path());
+        git_commit_in(upstream.path(), "README.md", "hello\n", "init");
+        let root_dir = tempdir().expect("root");
+        let log_root = tempdir().expect("log root");
+        let mut workspace = workspace_with(root_dir.path());
+        workspace.code_sources.push(CodeSourceConfig {
+            source_type: "git".to_owned(),
+            repo: Some(upstream.path().display().to_string()),
+            branch: None,
+            credential_ref: None,
+            name: Some("upstream".to_owned()),
+        });
+        let secrets = empty_secret_store();
+        let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_test_run_001");
+        let report = materialize_workspace(&workspace, &secrets, Some(&log_paths))
+            .expect("clone with log capture");
+
+        // The run-level log dir is recorded on the report so the init
+        // orchestrator can stamp it onto the workspace_materialize
+        // init_steps row.
+        let report_log_dir = report
+            .log_dir
+            .as_ref()
+            .expect("log_dir should be Some when log_paths supplied");
+        assert_eq!(report_log_dir, &log_paths.run_dir);
+        assert!(report_log_dir.is_dir(), "run-level log dir must exist");
+
+        // Per-source log dir exists and carries the captured streams.
+        let source_log_dir = report.code[0]
+            .log_dir
+            .as_ref()
+            .expect("per-source log_dir set");
+        assert!(source_log_dir.starts_with(&log_paths.run_dir));
+        // Capture filenames carry a per-attempt nanosecond suffix so a
+        // resume that re-runs the same step doesn't overwrite the prior
+        // failure's capture. Match on the prefix.
+        let captures = capture_names(source_log_dir);
+        assert!(
+            has_capture(&captures, CAPTURE_TAG_GIT_CLONE, ".stdout"),
+            "no git-clone.*.stdout capture under {}: {captures:?}",
+            source_log_dir.display(),
+        );
+        assert!(
+            has_capture(&captures, CAPTURE_TAG_GIT_CLONE, ".stderr"),
+            "no git-clone.*.stderr capture under {}: {captures:?}",
+            source_log_dir.display(),
+        );
+        let rev_parse_stdout = captures
+            .iter()
+            .find(|n| {
+                n.starts_with(&format!("{CAPTURE_TAG_GIT_REV_PARSE}.")) && n.ends_with(".stdout")
+            })
+            .expect("git-rev-parse.*.stdout capture missing");
+        // git-rev-parse stdout for HEAD is the commit hash + newline.
+        let head = std::fs::read_to_string(source_log_dir.join(rev_parse_stdout))
+            .expect("read rev-parse stdout");
+        assert!(
+            head.trim().chars().all(|c| c.is_ascii_hexdigit()),
+            "expected hex commit hash in capture, got `{head}`",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_files_are_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().expect("tempdir");
+        let written =
+            write_command_capture(Some(dir.path()), CAPTURE_TAG_GIT_CLONE, b"out", b"err")
+                .expect("capture");
+        assert!(written.is_some());
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "capture must produce at least one file"
+        );
+        for entry in entries {
+            let metadata = entry.metadata().expect("stat");
+            let mode = metadata.permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "capture file {:?} should be owner-only (0o600), got {:o}",
+                entry.path(),
+                mode,
+            );
+        }
+    }
+
+    #[test]
+    fn capture_filenames_do_not_overwrite_across_repeated_calls() {
+        // Regression: prior to the timestamp suffix, two `write_command_capture`
+        // calls into the same dir clobbered each other, losing the first
+        // attempt's audit copy when a resume retried. Each call must
+        // produce a fresh pair of files.
+        let dir = tempdir().expect("tempdir");
+        let _ = write_command_capture(
+            Some(dir.path()),
+            CAPTURE_TAG_GIT_CLONE,
+            b"first stdout",
+            b"first stderr",
+        )
+        .expect("first write");
+        // Spin briefly so the nanosecond stamp differs between calls
+        // even on machines with coarse clocks. 1ms is enough on every
+        // platform we ship to.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = write_command_capture(
+            Some(dir.path()),
+            CAPTURE_TAG_GIT_CLONE,
+            b"second stdout",
+            b"second stderr",
+        )
+        .expect("second write");
+        let stdouts: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| {
+                n.starts_with(&format!("{CAPTURE_TAG_GIT_CLONE}.")) && n.ends_with(".stdout")
+            })
+            .collect();
+        assert_eq!(
+            stdouts.len(),
+            2,
+            "expected 2 distinct stdout captures, got {stdouts:?}",
+        );
     }
 
     #[test]
@@ -1224,7 +1824,7 @@ mod tests {
         std::fs::create_dir_all(&dest).expect("create");
         std::fs::write(dest.join("stowed.bin"), b"existing").expect("write");
         let secrets = empty_secret_store();
-        let err = materialize_workspace(&workspace, &secrets).expect_err("non-empty");
+        let err = materialize_workspace(&workspace, &secrets, None).expect_err("non-empty");
         assert!(matches!(
             err,
             StackError::WorkspaceDestinationNotEmpty { .. }
@@ -1255,7 +1855,7 @@ mod tests {
             secret_key_ref: None,
         });
         let secrets = empty_secret_store();
-        let report = materialize_workspace(&workspace, &secrets).expect("ok");
+        let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
         assert_eq!(report.data[0].outcome, MaterializeOutcome::Created);
         let dest = root_dir.path().join(DATA_LANE_DIR).join("dataset");
         assert_eq!(std::fs::read(dest.join("a.txt")).expect("a"), b"alpha");
@@ -1264,8 +1864,148 @@ mod tests {
             b"beta"
         );
         assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
-        let rerun = materialize_workspace(&workspace, &secrets).expect("rerun");
+        let rerun = materialize_workspace(&workspace, &secrets, None).expect("rerun");
         assert_eq!(rerun.data[0].outcome, MaterializeOutcome::Verified);
+    }
+
+    #[test]
+    fn captures_local_data_copy_to_log_dir() {
+        let upstream = tempdir().expect("upstream");
+        std::fs::write(upstream.path().join("dataset.txt"), b"alpha").expect("write");
+        let root_dir = tempdir().expect("root");
+        let log_root = tempdir().expect("log root");
+        let mut workspace = workspace_with(root_dir.path());
+        workspace.data_sources.push(DataSourceConfig {
+            source_type: "local".to_owned(),
+            name: Some("dataset".to_owned()),
+            path: Some(upstream.path().display().to_string()),
+            url: None,
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+            access_key_ref: None,
+            secret_key_ref: None,
+        });
+        let secrets = empty_secret_store();
+        let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_data_local");
+        let report =
+            materialize_workspace(&workspace, &secrets, Some(&log_paths)).expect("materialize");
+        let source_log_dir = report.data[0].log_dir.as_ref().expect("data log dir");
+        assert!(source_log_dir.starts_with(&log_paths.run_dir));
+        let captures = capture_names(source_log_dir);
+        assert!(has_capture(&captures, CAPTURE_TAG_COPY, ".stdout"));
+        assert!(has_capture(&captures, CAPTURE_TAG_COPY, ".stderr"));
+        let copy_stdout = captures
+            .iter()
+            .find(|name| {
+                name.starts_with(&format!("{CAPTURE_TAG_COPY}.")) && name.ends_with(".stdout")
+            })
+            .expect("copy stdout capture");
+        let copy_stdout_text =
+            std::fs::read_to_string(source_log_dir.join(copy_stdout)).expect("copy stdout text");
+        assert!(copy_stdout_text.contains("bytes=5"));
+        assert!(copy_stdout_text.contains("entries=1"));
+    }
+
+    #[test]
+    fn captures_https_download_failure_to_log_dir() {
+        let root_dir = tempdir().expect("root");
+        let log_root = tempdir().expect("log root");
+        let mut workspace = workspace_with(root_dir.path());
+        workspace.data_sources.push(DataSourceConfig {
+            source_type: "https".to_owned(),
+            name: Some("dataset".to_owned()),
+            path: None,
+            url: Some("https://127.0.0.1:1/dataset.tar.gz".to_owned()),
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+            access_key_ref: None,
+            secret_key_ref: None,
+        });
+        let secrets = empty_secret_store();
+        let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_data_https_fail");
+        let err = materialize_workspace(&workspace, &secrets, Some(&log_paths))
+            .expect_err("download should fail");
+        assert!(
+            matches!(err, StackError::SafeDownloadFailed { .. }),
+            "got: {err:?}",
+        );
+        let data_log_dir = log_paths.run_dir.join("data-000");
+        let captures = capture_names(&data_log_dir);
+        assert!(has_capture(&captures, CAPTURE_TAG_DOWNLOAD, ".stderr"));
+    }
+
+    #[test]
+    fn capture_failure_after_local_copy_cleans_partial_destination() {
+        let upstream = tempdir().expect("upstream");
+        std::fs::write(upstream.path().join("dataset.txt"), b"alpha").expect("write");
+        let root_dir = tempdir().expect("root");
+        let data_root = root_dir.path().join(DATA_LANE_DIR);
+        std::fs::create_dir_all(&data_root).expect("data root");
+        let dest = data_root.join("dataset");
+        let log_file = tempfile::NamedTempFile::new().expect("log file");
+        let source = DataSourceConfig {
+            source_type: "local".to_owned(),
+            name: Some("dataset".to_owned()),
+            path: Some(upstream.path().display().to_string()),
+            url: None,
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+            access_key_ref: None,
+            secret_key_ref: None,
+        };
+
+        let err = materialize_local(0, &source, "dataset", &dest, Some(log_file.path()))
+            .expect_err("capture write should fail");
+        assert!(
+            matches!(err, StackError::WorkspaceMaterializeFailed { .. }),
+            "got: {err:?}",
+        );
+        assert!(
+            !dest.exists(),
+            "partial destination must be removed after post-copy capture failure",
+        );
+    }
+
+    #[test]
+    fn failed_error_capture_does_not_mask_download_error() {
+        let root_dir = tempdir().expect("root");
+        let data_root = root_dir.path().join(DATA_LANE_DIR);
+        std::fs::create_dir_all(&data_root).expect("data root");
+        let dest = data_root.join("dataset");
+        let log_file = tempfile::NamedTempFile::new().expect("log file");
+        let source = DataSourceConfig {
+            source_type: "https".to_owned(),
+            name: Some("dataset".to_owned()),
+            path: None,
+            url: Some("https://127.0.0.1:1/dataset.tar.gz".to_owned()),
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+            access_key_ref: None,
+            secret_key_ref: None,
+        };
+
+        let err = materialize_https(0, &source, "dataset", &dest, Some(log_file.path()))
+            .expect_err("download should fail");
+        assert!(
+            matches!(err, StackError::SafeDownloadFailed { .. }),
+            "got: {err:?}",
+        );
     }
 
     #[test]
@@ -1285,7 +2025,7 @@ mod tests {
             name: Some("bogus".to_owned()),
         });
         let secrets = empty_secret_store();
-        let err = materialize_workspace(&workspace, &secrets)
+        let err = materialize_workspace(&workspace, &secrets, None)
             .expect_err("git clone of missing local repo must fail");
         match err {
             StackError::WorkspaceCommandFailed {
@@ -1325,7 +2065,7 @@ mod tests {
             secret_key_ref: None,
         });
         let secrets = empty_secret_store();
-        let err = materialize_workspace(&workspace, &secrets).expect_err("symlink");
+        let err = materialize_workspace(&workspace, &secrets, None).expect_err("symlink");
         assert!(
             matches!(
                 err,
@@ -1461,12 +2201,15 @@ mod tests {
             secret_key_ref: Some("AWS_SECRET_ACCESS_KEY".to_owned()),
         });
 
+        let log_root = tempdir().expect("log root");
+        let log_paths = WorkspaceLogPaths::for_run(log_root.path(), "irun_s3_mock");
+
         // SAFETY: tests in this binary share env; mock URL is per-test.
         // We unset on the way out so a panic mid-test still cleans up.
         unsafe {
             std::env::set_var("ACP_STACK_S3_ENDPOINT_OVERRIDE", format!("http://{addr}"));
         }
-        let result = materialize_workspace(&workspace, &secrets);
+        let result = materialize_workspace(&workspace, &secrets, Some(&log_paths));
         unsafe {
             std::env::remove_var("ACP_STACK_S3_ENDPOINT_OVERRIDE");
         }
@@ -1483,12 +2226,17 @@ mod tests {
             b"beta-body"
         );
         assert!(dest.join(SOURCE_SENTINEL_FILE).is_file());
+        let source_log_dir = report.data[0].log_dir.as_ref().expect("s3 log dir");
+        assert!(source_log_dir.starts_with(&log_paths.run_dir));
+        let captures = capture_names(source_log_dir);
+        assert!(has_capture(&captures, CAPTURE_TAG_S3_DOWNLOAD, ".stdout"));
+        assert!(has_capture(&captures, CAPTURE_TAG_S3_DOWNLOAD, ".stderr"));
 
         // Rerun must skip cleanly.
         unsafe {
             std::env::set_var("ACP_STACK_S3_ENDPOINT_OVERRIDE", format!("http://{addr}"));
         }
-        let rerun = materialize_workspace(&workspace, &secrets);
+        let rerun = materialize_workspace(&workspace, &secrets, None);
         unsafe {
             std::env::remove_var("ACP_STACK_S3_ENDPOINT_OVERRIDE");
         }
@@ -1525,7 +2273,7 @@ mod tests {
             secret_key_ref: Some("AWS_SECRET_ACCESS_KEY".to_owned()),
         });
         let secrets = empty_secret_store();
-        let err = materialize_workspace(&workspace, &secrets).expect_err("missing secrets");
+        let err = materialize_workspace(&workspace, &secrets, None).expect_err("missing secrets");
         assert!(
             matches!(err, StackError::SecretNotFound { .. }),
             "got: {err:?}"
