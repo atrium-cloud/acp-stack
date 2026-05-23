@@ -16,6 +16,8 @@ stdio_framing = "json-lines"
 website = "https://opencode.ai"
 github = "anomalyco/opencode"
 support_doc = "docs/agents/opencode.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
 id = "opencode"
@@ -59,6 +61,8 @@ set_mode = true # agent, plan, ask
 stdio_framing = "json-lines"
 website = "https://cursor.com/cli"
 support_doc = "docs/agents/cursor.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
 id = "cursor-agent"
@@ -89,6 +93,8 @@ set_mode = true # smart, rush, deep
 stdio_framing = "json-lines"
 website = "https://ampcode.com/"
 support_doc = "docs/agents/amp.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
 id = "amp-acp"
@@ -133,6 +139,8 @@ stdio_framing = "json-lines"
 website = "https://pi.dev"
 github = "earendil-works/pi"
 support_doc = "docs/agents/pi.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
 id = "pi-acp"
@@ -185,6 +193,8 @@ stdio_framing = "json-lines"
 website = "https://goose-docs.ai/"
 github = "aaif-goose/goose"
 support_doc = "docs/agents/goose.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
 id = "goose"
@@ -216,6 +226,8 @@ stdio_framing = "json-lines"
 website = "https://developers.openai.com/codex/"
 github = "openai/codex"
 support_doc = "docs/agents/codex.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
 id = "codex-acp"
