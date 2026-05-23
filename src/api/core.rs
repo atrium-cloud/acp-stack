@@ -40,7 +40,8 @@ use super::auth::{
     require_session, track_active_requests,
 };
 use super::routes::agent::{
-    agent_capabilities_handler, agent_install_handler, agent_start_handler, agent_stop_handler,
+    agent_capabilities_handler, agent_install_handler, agent_restart_handler, agent_start_handler,
+    agent_stop_handler,
 };
 use super::routes::commands::{
     commands_cancel_handler, commands_get_handler, commands_list_handler, commands_submit_handler,
@@ -59,6 +60,7 @@ use super::routes::permissions::{
     permissions_approve_handler, permissions_deny_handler, permissions_get_handler,
     permissions_pending_handler,
 };
+use super::routes::providers::{models_handler, providers_handler};
 use super::routes::security::security_check_handler;
 use super::routes::sessions::{
     sessions_cancel_handler, sessions_close_handler, sessions_create_handler,
@@ -88,6 +90,15 @@ use crate::supervisor::AgentSupervisor;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
+    /// Mutable agent-block cache. Initialized from `config.agent` at
+    /// startup and updated by `POST /v1/agent/restart` after it reads
+    /// the freshly-on-disk config. Handlers that pass session-affecting
+    /// agent fields (`agent.model`, `agent.mode`, `agent.provider`)
+    /// into the supervisor read from this so a post-restart session
+    /// creation honors the new values; handlers that only read static
+    /// fields (`agent.id`, install spec, adapter metadata) can keep
+    /// using `config.agent` since those don't change on a model swap.
+    pub live_agent_config: Arc<TokioMutex<crate::config::AgentConfig>>,
     pub effective_bind: Arc<String>,
     pub runtime_paths: Arc<RuntimePaths>,
     pub state: Arc<TokioMutex<StateStore>>,
@@ -219,8 +230,10 @@ impl AppState {
             &config_arc.security.http,
         ));
         let ws_registry = Arc::new(super::ws_registry::WsRegistry::default());
+        let live_agent_config = Arc::new(TokioMutex::new(config_arc.agent.clone()));
         Self {
             config: config_arc,
+            live_agent_config,
             effective_bind: Arc::new(effective_bind),
             runtime_paths: Arc::new(runtime_paths),
             state: state_arc,
@@ -352,6 +365,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/commands/{id}/cancel", post(commands_cancel_handler))
         .route("/v1/deps", get(deps_get_handler))
         .route("/v1/deps/check", post(deps_check_handler))
+        // `/v1/providers` is pure embedded-mapping lookup. `/v1/models`
+        // spawns a bounded provisional ACP session for picker data; both
+        // are session-tier discovery surfaces.
+        .route("/v1/providers", get(providers_handler))
+        .route("/v1/models", get(models_handler))
         .route("/v1/permissions/pending", get(permissions_pending_handler))
         .route("/v1/permissions/{id}", get(permissions_get_handler))
         .route(
@@ -382,6 +400,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/agent/install", post(agent_install_handler))
         .route("/v1/agent/start", post(agent_start_handler))
         .route("/v1/agent/stop", post(agent_stop_handler))
+        .route("/v1/agent/restart", post(agent_restart_handler))
         .route("/v1/config/import", post(config_import_handler))
         .route(
             "/v1/secrets",
