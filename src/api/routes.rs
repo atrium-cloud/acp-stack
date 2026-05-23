@@ -5,6 +5,7 @@ pub(crate) mod deps;
 pub(crate) mod logs;
 pub(crate) mod metrics;
 pub(crate) mod permissions;
+pub(crate) mod providers;
 pub(crate) mod security;
 pub(crate) mod sessions;
 pub(crate) mod status;

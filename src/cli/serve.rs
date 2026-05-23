@@ -309,8 +309,10 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
 ///   `--prompt-cancel` it returns `{ stopReason: "cancelled" }` instead.
 /// - `--initialize-error`, `--session-new-error`, and `--prompt-error` return
 ///   JSON-RPC errors for their matching request stages.
+/// - `--session-new-stall` accepts initialize but never answers `session/new`.
 /// - `--model-config-option <value>` advertises that value as a model session
 ///   config option.
+/// - `--write-pid <path>` writes the fake agent's process id for cleanup tests.
 /// - any other request -> JSON-RPC method-not-found.
 ///
 /// `session/cancel` notification flips the in-process flag so the next
@@ -329,10 +331,12 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let mut prompt_emits_updates = true;
     let mut initialize_fails = false;
     let mut session_new_fails = false;
+    let mut session_new_stalls = false;
     let mut prompt_fails = false;
     let mut prompt_stalls_after_update = false;
     let mut model_config_option: Option<String> = None;
     let mut expected_model_config: Option<String> = None;
+    let mut pid_path: Option<String> = None;
     let mut env_assertions = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -376,6 +380,9 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             "--session-new-error" => {
                 session_new_fails = true;
             }
+            "--session-new-stall" => {
+                session_new_stalls = true;
+            }
             "--prompt-error" => {
                 prompt_fails = true;
             }
@@ -392,8 +399,17 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                     expected_model_config = Some(value.to_owned());
                 }
             }
+            "--write-pid" => {
+                if let Some(value) = iter.next() {
+                    pid_path = Some(value.to_owned());
+                }
+            }
             _ => {}
         }
+    }
+    if let Some(path) = pid_path {
+        std::fs::write(path, std::process::id().to_string())
+            .map_err(|source| StackError::ServeIo { source })?;
     }
     if title == "acps fake agent" && args.iter().any(|arg| arg.starts_with("--assert-env-")) {
         title = if env_assertions.is_empty() {
@@ -491,6 +507,10 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                             "message": "fake session/new failure"
                         }
                     })
+                } else if session_new_stalls {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
+                    }
                 } else {
                     let counter = session_counter.fetch_add(1, Ordering::SeqCst);
                     let mut result = serde_json::json!({
