@@ -1028,6 +1028,7 @@ fn install_configured_agent(
     store: &StateStore,
 ) -> Result<InstallerOutcome> {
     let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let log_base = crate::state::default_installer_log_base(home);
     if let Some(install) = config.agent.install.as_ref() {
         let env = resolve_agent_env(home, config)?;
         return run_installer(
@@ -1037,6 +1038,7 @@ fn install_configured_agent(
             env,
             &workspace_root,
             store,
+            Some(&log_base),
         );
     }
     let entry =
@@ -1052,6 +1054,7 @@ fn install_configured_agent(
         &workspace_root,
         &local_bin_dir(home),
         store,
+        Some(&log_base),
     ) {
         Ok(outcome) => Ok(outcome),
         Err(first_error) if io::stdin().is_terminal() => {
@@ -1067,6 +1070,7 @@ fn install_configured_agent(
                     &workspace_root,
                     &local_bin_dir(home),
                     store,
+                    Some(&log_base),
                 )
             } else {
                 Err(first_error)

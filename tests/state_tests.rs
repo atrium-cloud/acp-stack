@@ -32,7 +32,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        10
+        11
     );
 }
 
@@ -110,6 +110,7 @@ fn installer_runs_round_trip_records_and_returns_version() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.2.3"),
+            log_dir: None,
         })
         .expect("harness row should append");
     store
@@ -123,6 +124,7 @@ fn installer_runs_round_trip_records_and_returns_version() {
             exit_status: Some(0),
             step: "adapter",
             version: None,
+            log_dir: None,
         })
         .expect("adapter row should append");
 
@@ -171,6 +173,7 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            log_dir: None,
         })
         .expect("first agent row should append");
     store
@@ -184,6 +187,7 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v9.9.9"),
+            log_dir: None,
         })
         .expect("second agent row should append");
 
@@ -193,6 +197,36 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
     assert_eq!(latest.len(), 1);
     assert_eq!(latest[0].agent_id.as_deref(), Some("first-agent"));
     assert_eq!(latest[0].version.as_deref(), Some("v1.0.0"));
+}
+
+#[test]
+fn installer_runs_round_trip_records_log_dir() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "test-agent",
+            started_at: "2026-05-22T10:00:00.000000000Z",
+            finished_at: Some("2026-05-22T10:00:01.000000000Z"),
+            status: "ran",
+            stdout: "out",
+            stderr: "err",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.0.0"),
+            log_dir: Some("/var/lib/acp-stack/installer-logs/test-agent/2026-05-22T10:00:00.000000000Z/harness"),
+        })
+        .expect("row with log_dir should append");
+
+    let history = store.query_installer_runs(10).expect("query");
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].log_dir.as_deref(),
+        Some("/var/lib/acp-stack/installer-logs/test-agent/2026-05-22T10:00:00.000000000Z/harness")
+    );
 }
 
 #[test]
@@ -213,6 +247,7 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             exit_status: Some(0),
             step: "install",
             version: Some("v1.0.0"),
+            log_dir: None,
         })
         .expect("first ran row should append");
     store
@@ -226,6 +261,7 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             exit_status: Some(1),
             step: "install",
             version: None,
+            log_dir: None,
         })
         .expect("second failed row should append");
 
@@ -283,7 +319,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 10")
+            .contains("state schema version 99 is newer than supported version 11")
     );
 }
 

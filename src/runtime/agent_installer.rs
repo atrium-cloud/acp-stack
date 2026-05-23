@@ -33,7 +33,7 @@
 //! a dependency on the `which` crate.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -105,6 +105,11 @@ pub struct InstallerRowDraft {
     /// (release tag) and npm installs. Shell-recipe installs leave this `None`;
     /// `acps agent check` then reports `unknown, manual check required`.
     pub version: Option<String>,
+    /// On-disk directory the surrounding wrappers populated with the full
+    /// stdout/stderr capture. The `*_capture` functions leave this `None`;
+    /// the persisting wrappers (`run_installer`, `install_resolved`, and
+    /// the HTTP route equivalents) set it after they write the files.
+    pub log_dir: Option<String>,
 }
 
 impl InstallerRowDraft {
@@ -118,6 +123,7 @@ impl InstallerRowDraft {
             exit_status: Some(0),
             step: step.to_owned(),
             version: None,
+            log_dir: None,
         }
     }
 
@@ -131,6 +137,7 @@ impl InstallerRowDraft {
             exit_status: None,
             step: step.to_owned(),
             version: None,
+            log_dir: None,
         }
     }
 }
@@ -156,7 +163,11 @@ pub struct InstallerSequenceResult {
 // =================================================================
 
 /// Convenience wrapper used by call sites that already hold the state store
-/// briefly: runs the escape-hatch installer and persists the row.
+/// briefly: runs the escape-hatch installer and persists the row. When
+/// `log_base` is `Some`, the wrapper writes the full stdout/stderr capture
+/// to a per-step subdirectory and records the path on the row; pass
+/// `state::default_installer_log_base(&home)` to land logs under the
+/// canonical `~/.local/share/acp-stack/installer-logs/` tree.
 pub fn run_installer(
     agent_id: &str,
     install: &AgentInstallConfig,
@@ -164,8 +175,10 @@ pub fn run_installer(
     agent_env: HashMap<String, String>,
     workspace_root: &Path,
     state: &StateStore,
+    log_base: Option<&Path>,
 ) -> Result<InstallerOutcome> {
-    let result = run_installer_capture(install, expected_sha256, agent_env, workspace_root);
+    let mut result = run_installer_capture(install, expected_sha256, agent_env, workspace_root);
+    persist_step_logs_to_disk(&mut result.row, agent_id, log_base)?;
     state.append_installer_run(InstallerRunInput {
         agent_id,
         started_at: &result.row.started_at,
@@ -176,8 +189,139 @@ pub fn run_installer(
         exit_status: result.row.exit_status,
         step: &result.row.step,
         version: result.row.version.as_deref(),
+        log_dir: result.row.log_dir.as_deref(),
     })?;
     result.outcome
+}
+
+/// Write the unbounded stdout/stderr for a single installer step to a
+/// per-step directory under `log_base/<agent_id>/<sanitized started_at>/<step>/`
+/// and stamp the path onto the row. Skipped step rows have empty streams,
+/// so we don't bother creating a directory in that case. Persistence is
+/// fail-fast because the full logs are the audit copy; the caller should not
+/// append a history row claiming a completed run when that copy was lost.
+pub fn persist_step_logs_to_disk(
+    row: &mut InstallerRowDraft,
+    agent_id: &str,
+    log_base: Option<&Path>,
+) -> Result<()> {
+    let Some(base) = log_base else {
+        return Ok(());
+    };
+    if row.stdout.is_empty() && row.stderr.is_empty() {
+        return Ok(());
+    }
+    let sanitized_started = sanitize_for_path(&row.started_at);
+    let log_dir = base
+        .join(sanitize_for_path(agent_id))
+        .join(sanitized_started)
+        .join(sanitize_for_path(&row.step));
+    create_dir_tree_synced(&log_dir)?;
+    if !row.stdout.is_empty() {
+        write_synced_log_file(&log_dir.join("stdout"), row.stdout.as_bytes())?;
+    }
+    if !row.stderr.is_empty() {
+        write_synced_log_file(&log_dir.join("stderr"), row.stderr.as_bytes())?;
+    }
+    sync_directory(&log_dir)?;
+    row.log_dir = Some(log_dir.to_string_lossy().into_owned());
+    Ok(())
+}
+
+fn create_dir_tree_synced(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() || current == Path::new("/") {
+            continue;
+        }
+        match std::fs::metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(StackError::AgentInstallerLogPersist {
+                    path: current,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "path exists and is not a directory",
+                    ),
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|source| {
+                    StackError::AgentInstallerLogPersist {
+                        path: current.clone(),
+                        source,
+                    }
+                })?;
+                sync_parent_directory(&current)?;
+            }
+            Err(source) => {
+                return Err(StackError::AgentInstallerLogPersist {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_synced_log_file(path: &Path, body: &[u8]) -> Result<()> {
+    let mut file =
+        std::fs::File::create(path).map_err(|source| StackError::AgentInstallerLogPersist {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(body)
+        .map_err(|source| StackError::AgentInstallerLogPersist {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.sync_all()
+        .map_err(|source| StackError::AgentInstallerLogPersist {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    sync_directory(parent)
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    let directory =
+        std::fs::File::open(path).map_err(|source| StackError::AgentInstallerLogPersist {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    directory
+        .sync_all()
+        .map_err(|source| StackError::AgentInstallerLogPersist {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Convert an arbitrary string into a path-safe single segment. Replaces
+/// `/`, `\`, and ASCII control chars with `_`. The `agent_id` and `step`
+/// values are already safe (alphanumeric and `-`), so this is defense in
+/// depth; `started_at` carries `:` which is fine on POSIX but worth keeping
+/// readable.
+fn sanitize_for_path(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Run the escape-hatch installer WITHOUT touching the state store. Returns
@@ -246,8 +390,12 @@ pub fn install_resolved(
     workspace_root: &Path,
     dest_dir: &Path,
     state: &StateStore,
+    log_base: Option<&Path>,
 ) -> Result<InstallerOutcome> {
-    let result = install_resolved_capture(agent, entry, agent_env, workspace_root, dest_dir);
+    let mut result = install_resolved_capture(agent, entry, agent_env, workspace_root, dest_dir);
+    for row in result.rows.iter_mut() {
+        persist_step_logs_to_disk(row, &agent.id, log_base)?;
+    }
     for row in &result.rows {
         state.append_installer_run(InstallerRunInput {
             agent_id: &agent.id,
@@ -259,6 +407,7 @@ pub fn install_resolved(
             exit_status: row.exit_status,
             step: &row.step,
             version: row.version.as_deref(),
+            log_dir: row.log_dir.as_deref(),
         })?;
     }
     result.outcome
@@ -670,6 +819,7 @@ fn shell_step_with_creates(
                 exit_status: captured.exit_status,
                 step: step_label.to_owned(),
                 version: version.clone(),
+                log_dir: None,
             };
             if !exit_ok {
                 return StepResult {
@@ -702,6 +852,7 @@ fn shell_step_with_creates(
                 exit_status: None,
                 step: step_label.to_owned(),
                 version: version.clone(),
+                log_dir: None,
             },
         },
         Err(err) => StepResult {
@@ -715,6 +866,7 @@ fn shell_step_with_creates(
                 exit_status: None,
                 step: step_label.to_owned(),
                 version,
+                log_dir: None,
             },
         },
     }
@@ -742,6 +894,7 @@ fn github_release_step(
                 exit_status: Some(0),
                 step: step_label.to_owned(),
                 version: Some(outcome.release_tag),
+                log_dir: None,
             },
         },
         Err(err) => {
@@ -757,6 +910,7 @@ fn github_release_step(
                     exit_status: None,
                     step: step_label.to_owned(),
                     version: version_pin.map(str::to_owned),
+                    log_dir: None,
                 },
             }
         }
@@ -784,6 +938,7 @@ fn finalize_shell_step(
                 exit_status: captured.exit_status,
                 step: step_label.to_owned(),
                 version: None,
+                log_dir: None,
             };
             if !exit_ok {
                 return InstallerResult {
@@ -824,6 +979,7 @@ fn finalize_shell_step(
                 exit_status: None,
                 step: step_label.to_owned(),
                 version: None,
+                log_dir: None,
             },
         },
         Err(err) => InstallerResult {
@@ -837,6 +993,7 @@ fn finalize_shell_step(
                 exit_status: None,
                 step: step_label.to_owned(),
                 version: None,
+                log_dir: None,
             },
         },
     }
@@ -942,6 +1099,7 @@ fn resolve_npm_package_version(
                     exit_status: captured.exit_status,
                     step: step_label.to_owned(),
                     version: None,
+                    log_dir: None,
                 },
             }))
         }
@@ -956,6 +1114,7 @@ fn resolve_npm_package_version(
                 exit_status: None,
                 step: step_label.to_owned(),
                 version: None,
+                log_dir: None,
             },
         })),
     }
@@ -980,6 +1139,7 @@ fn npm_version_failure_step(
             exit_status: captured.exit_status,
             step: step_label.to_owned(),
             version: None,
+            log_dir: None,
         },
     }
 }
@@ -1645,6 +1805,101 @@ exit 99
     }
 
     #[test]
+    fn persist_step_logs_writes_files_and_sets_log_dir() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut row = InstallerRowDraft {
+            started_at: "2026-05-22T00:00:00.123456789Z".to_owned(),
+            finished_at: Some("2026-05-22T00:00:01.000000000Z".to_owned()),
+            status: "ran".into(),
+            stdout: "hello stdout\n".into(),
+            stderr: "hello stderr\n".into(),
+            exit_status: Some(0),
+            step: "harness".into(),
+            version: Some("v1.0.0".into()),
+            log_dir: None,
+        };
+        persist_step_logs_to_disk(&mut row, "test-agent", Some(tempdir.path()))
+            .expect("logs should persist");
+        let log_dir = row.log_dir.as_deref().expect("log_dir set on success");
+        let stdout_path = std::path::Path::new(log_dir).join("stdout");
+        let stderr_path = std::path::Path::new(log_dir).join("stderr");
+        let stdout_body = std::fs::read_to_string(&stdout_path).expect("stdout written");
+        let stderr_body = std::fs::read_to_string(&stderr_path).expect("stderr written");
+        assert_eq!(stdout_body, "hello stdout\n");
+        assert_eq!(stderr_body, "hello stderr\n");
+    }
+
+    #[test]
+    fn persist_step_logs_skips_when_streams_empty() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut row = InstallerRowDraft {
+            started_at: "2026-05-22T00:00:00.000000000Z".to_owned(),
+            finished_at: Some("2026-05-22T00:00:00.000000000Z".to_owned()),
+            status: "skipped".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: Some(0),
+            step: "install".into(),
+            version: None,
+            log_dir: None,
+        };
+        persist_step_logs_to_disk(&mut row, "test-agent", Some(tempdir.path()))
+            .expect("empty streams should be a no-op");
+        assert!(
+            row.log_dir.is_none(),
+            "log_dir must stay None when both streams are empty"
+        );
+    }
+
+    #[test]
+    fn persist_step_logs_is_a_no_op_when_log_base_is_none() {
+        let mut row = InstallerRowDraft {
+            started_at: "2026-05-22T00:00:00.000000000Z".to_owned(),
+            finished_at: None,
+            status: "ran".into(),
+            stdout: "anything".into(),
+            stderr: String::new(),
+            exit_status: Some(0),
+            step: "harness".into(),
+            version: None,
+            log_dir: None,
+        };
+        persist_step_logs_to_disk(&mut row, "test-agent", None)
+            .expect("missing log base should be a no-op");
+        assert!(row.log_dir.is_none());
+    }
+
+    #[test]
+    fn installer_log_persist_failure_prevents_history_row() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let (_state_dir, store) = open_store();
+        let log_base_file = tempdir.path().join("not-a-directory");
+        std::fs::write(&log_base_file, b"file blocks log dir").expect("write blocker file");
+        let install = install_config(
+            "printf 'audit stdout\n'; mkdir -p bin; printf agent > bin/test-agent",
+            "bin/test-agent",
+        );
+
+        let err = run_installer(
+            "test-agent",
+            &install,
+            None,
+            HashMap::new(),
+            tempdir.path(),
+            &store,
+            Some(&log_base_file),
+        )
+        .expect_err("log persistence failure must fail install wrapper");
+
+        assert!(matches!(err, StackError::AgentInstallerLogPersist { .. }));
+        let runs = store.query_installer_runs(10).expect("query");
+        assert!(
+            runs.is_empty(),
+            "installer history must not record a row without the audit log"
+        );
+    }
+
+    #[test]
     fn precheck_short_circuits_when_creates_resolves() {
         // `true` ships on every POSIX system; the installer should skip.
         let (_tempdir, store) = open_store();
@@ -1656,6 +1911,7 @@ exit 99
             HashMap::new(),
             &workspace_root(),
             &store,
+            None,
         )
         .expect("ok");
         assert_eq!(outcome.label(), "already_present");
@@ -1677,6 +1933,7 @@ exit 99
             HashMap::new(),
             &workspace_root(),
             &store,
+            None,
         )
         .expect_err("must fail");
         assert!(matches!(
@@ -1700,6 +1957,7 @@ exit 99
             HashMap::new(),
             &workspace_root(),
             &store,
+            None,
         )
         .expect_err("must fail");
         assert!(matches!(
@@ -1724,6 +1982,7 @@ exit 99
             HashMap::new(),
             &workspace_root(),
             &store,
+            None,
         )
         .expect_err("must fail");
         assert!(matches!(err, StackError::AgentSha256Mismatch { .. }));
@@ -1751,6 +2010,7 @@ exit 99
             HashMap::new(),
             &workspace_root(),
             &store,
+            None,
         );
         let runs = store.query_installer_runs(10).expect("query");
         assert!(

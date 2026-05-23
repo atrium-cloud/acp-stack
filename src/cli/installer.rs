@@ -100,6 +100,14 @@ fn print_history_table(rows: &[InstallerRun]) {
             exit = exit,
             version = version,
         );
+        // log_dir is rendered as a continuation line because the full path
+        // would otherwise blow out the fixed-width table. The leading
+        // indentation matches the data columns so a grep on `log_dir:` still
+        // picks it up. Rows that never wrote logs (config_error, legacy)
+        // suppress the line entirely.
+        if let Some(dir) = row.log_dir.as_deref() {
+            println!("  log_dir: {dir}");
+        }
     }
 }
 

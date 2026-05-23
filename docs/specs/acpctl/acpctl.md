@@ -63,6 +63,41 @@ acpctl ws sessions
 
 The sanitized view may include connection id, age, topics, derived subscribed session ids, origin kind, coarse Cloudflare country/region metadata, and last activity. It must not expose raw IP addresses, raw `Origin`, raw `User-Agent`, Cloudflare credentials, or disconnect controls. Matching `acpctl mcp serve` tools should mirror only the two view operations.
 
+## Per-command Permission Boundary
+
+The table below is the source of truth for `acpctl`'s direct command permission audit. Every direct route-backed CLI subcommand maps to exactly one allowlisted UDS route, and every off-allowlist HTTP route returns 404 over the UDS (so it cannot be reached even if a future operator misconfigures the socket). `acpctl mcp serve` is the one non-direct command: it starts a tool facade, and each tool call maps to one of the same allowlisted routes documented below. Routes in the right column form the hard-blocked deny list; they are absent from `src/local_listener/router.rs::build_local_router` and remain reachable only through the public HTTP API behind admin-tier authentication.
+
+| acpctl subcommand | UDS route | Permission tier | High-risk? | Audit source |
+| ----------------- | --------- | --------------- | ---------- | ------------ |
+| `acpctl status` | `GET /v1/status` | local | no | `api.request source=local` |
+| `acpctl security check` | `GET /v1/security/check` | local | no | `api.request source=local` |
+| `acpctl deps check` | `POST /v1/deps/check` | local | no | `api.request source=local` |
+| `acpctl logs query` | `GET /v1/logs/events` | local | no | `api.request source=local` |
+| `acpctl workspace list` | `GET /v1/files` | local | no | `api.request source=local` |
+| `acpctl workspace read` | `GET /v1/files/content` | local | no | `api.request source=local` |
+| `acpctl workspace write` | `PUT /v1/files/content` | local | no | `api.request source=local`, `workspace.write` event |
+| `acpctl command run` | `POST /v1/commands` | local | mediated | `api.request source=local`, command-gateway events |
+| `acpctl config export` | `GET /v1/config/export` | local | no (refs only) | `api.request source=local` |
+| `acpctl permissions pending` | `GET /v1/permissions/pending` | local (read-only) | no | `api.request source=local` |
+| `acpctl ws connections` | `GET /v1/ws/connections` | local (read-only) | no | `api.request source=local` |
+| `acpctl ws sessions` | `GET /v1/ws/sessions` | local (read-only) | no | `api.request source=local` |
+
+`acpctl mcp serve` exposes exactly twelve tools matching the direct allowlist: `status`, `security_check`, `deps_check`, `logs_query`, `workspace_list`, `workspace_read`, `workspace_write`, `command_run`, `config_export`, `permissions_pending`, `ws_connections`, and `ws_sessions`. The MCP dispatcher sends every tool call through the existing `acpctl.sock` UDS client, so the same router allowlist, `KeyKind::Local` tagging, and `api.request source=local` audit rows apply. Denied capabilities are not registered as MCP tools.
+
+| Capability denied to `acpctl` | Off-allowlist route | Enforcement |
+| ----------------------------- | ------------------- | ----------- |
+| Read secret values | `GET /v1/secrets/{name}` | 404 (route absent) |
+| Write/rotate secrets, incl. API keys | `POST /v1/secrets`, `DELETE /v1/secrets/{name}` | 404 (route absent) |
+| Approve own permission requests | `POST /v1/permissions/{id}/approve` | 404 (route absent) |
+| Deny permission requests | `POST /v1/permissions/{id}/deny` | 404 (route absent) |
+| Install agent | `POST /v1/agent/install` | 404 (route absent) |
+| Start/stop the agent process | `POST /v1/agent/start`, `POST /v1/agent/stop` | 404 (route absent) |
+| Import config | `POST /v1/config/import` | 404 (route absent) |
+| Disconnect WebSocket clients | `POST /v1/ws/connections/disconnect`, `POST /v1/ws/sessions/disconnect` | 404 (route absent) |
+| Toggle permissions, rate limits, CORS, security logging | configuration mutation | no exposed route |
+
+A change to either table must be paired with a matching change in `src/local_listener/router.rs::build_local_router` and the deny-list assertions in `tests/acpctl_tests.rs`. Drift between this table, the router allowlist, and the test deny-list is treated as a P0 spec violation.
+
 ## Implementation (Phase 3)
 
 The Phase 3 implementation realizes this surface as a `tokio` Unix-domain-socket listener inside the `acps` daemon (`src/local_listener.rs`, with router/socket internals under `src/local_listener/`). When `acps serve` starts it binds the socket at `~/.local/share/acp-stack/acpctl.sock` (override with `[acpctl] socket_path` in the TOML), sets the file mode to `0600` inside a `0700` parent directory, and unlinks the socket on graceful shutdown. The listener serves an Axum router that mounts an explicit allowlist of local operations; any other route returns 404, including the public-API routes for secret values, API-key rotation, permission approve/deny, config import, agent install/start/stop, and WebSocket disconnect. A `tag_local` middleware stamps every UDS request with `KeyKind::Local` so the public router's tier gate rejects the tag if it ever leaks across listeners, and reused handlers attribute durable writes (`api.request`, `workspace.write`, etc.) to `source = "local"`. The `acpctl` binary entrypoint (`src/bin/acpctl/main.rs`) speaks HTTP/1.1 over the socket through helper modules under `src/bin/acpctl/` and forwards each subcommand to its mapped route; it sends no `Authorization` header — filesystem permissions on the socket are the access control.

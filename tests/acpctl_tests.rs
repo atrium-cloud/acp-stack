@@ -488,6 +488,63 @@ async fn local_router_returns_404_for_secrets_delete() {
 }
 
 #[tokio::test]
+async fn local_router_cannot_rotate_api_keys_via_secrets_write() {
+    // "Rotating API keys" through acpctl boils down to overwriting the
+    // session or admin key ref in the secret store. The fixture config uses
+    // `acps_session_key` and `acps_admin_key` as the canonical refs; both
+    // POSTs must 404 over the UDS regardless of payload so a compromised
+    // agent process cannot pivot a session-tier capability into admin-tier.
+    let harness = Harness::spawn().await;
+    for ref_name in ["acps_session_key", "acps_admin_key"] {
+        let body = serde_json::json!({ "name": ref_name, "value": "evil" }).to_string();
+        let resp = request(
+            &harness.socket,
+            "POST",
+            "/v1/secrets",
+            Some(body.as_bytes()),
+        )
+        .await;
+        assert_eq!(
+            resp.status, 404,
+            "POST /v1/secrets must 404 for ref `{ref_name}` over UDS"
+        );
+        let resp = request(
+            &harness.socket,
+            "DELETE",
+            &format!("/v1/secrets/{ref_name}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            resp.status, 404,
+            "DELETE /v1/secrets/{ref_name} must 404 over UDS"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_router_cannot_read_api_keys_via_secrets_get() {
+    // Read-side companion: agents asking acpctl for the value of either auth
+    // ref must hit a hard 404 — the spec deny list says secrets read is
+    // off-allowlist, and the test pins the contract for the two refs the
+    // public API uses for authentication.
+    let harness = Harness::spawn().await;
+    for ref_name in ["acps_session_key", "acps_admin_key"] {
+        let resp = request(
+            &harness.socket,
+            "GET",
+            &format!("/v1/secrets/{ref_name}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            resp.status, 404,
+            "GET /v1/secrets/{ref_name} must 404 over UDS"
+        );
+    }
+}
+
+#[tokio::test]
 async fn local_router_returns_404_for_permissions_deny() {
     // Mirrors the existing /approve negative test. Together they prove that
     // acpctl (or anything else inside the runtime that talks to the UDS)

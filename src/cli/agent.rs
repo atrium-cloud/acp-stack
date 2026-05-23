@@ -1458,6 +1458,7 @@ fn run_agent_install() -> Result<()> {
     set_owner_only_file(&state_path)?;
 
     let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = config.agent.install.as_ref() {
         // Operator escape-hatch shell recipe takes precedence over the
@@ -1472,6 +1473,7 @@ fn run_agent_install() -> Result<()> {
             env,
             &workspace_root,
             &store,
+            Some(&log_base),
         )?
     } else {
         let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
@@ -1489,6 +1491,7 @@ fn run_agent_install() -> Result<()> {
             &workspace_root,
             &dest,
             &store,
+            Some(&log_base),
         )?
     };
 
@@ -1973,6 +1976,7 @@ mod tests {
             exit_status: Some(0),
             step: step.to_owned(),
             version: version.map(str::to_owned),
+            log_dir: None,
         }
     }
 

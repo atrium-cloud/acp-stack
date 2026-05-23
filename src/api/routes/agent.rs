@@ -29,18 +29,24 @@ pub(crate) async fn agent_install_handler(
     let workspace_root = std::path::PathBuf::from(state.config.workspace.root.clone());
     let home = home_dir()?;
     let local_bin = home.join(".local").join("bin");
+    let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = state.config.agent.install.clone() {
         // Escape-hatch shell recipe. One row, persisted after the shell runs.
         let env = open_agent_env(&state.config)?;
         let expected_sha256 = state.config.agent.expected_sha256.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let mut result = tokio::task::spawn_blocking(move || {
             run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
         })
         .await
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
+        crate::runtime::agent_installer::persist_step_logs_to_disk(
+            &mut result.row,
+            &state.config.agent.id,
+            Some(&log_base),
+        )?;
         {
             let store = state.state.lock().await;
             store.append_installer_run(InstallerRunInput {
@@ -53,6 +59,7 @@ pub(crate) async fn agent_install_handler(
                 exit_status: result.row.exit_status,
                 step: &result.row.step,
                 version: result.row.version.as_deref(),
+                log_dir: result.row.log_dir.as_deref(),
             })?;
         }
         result.outcome?
@@ -67,7 +74,7 @@ pub(crate) async fn agent_install_handler(
             })?
             .clone();
         let agent = state.config.agent.clone();
-        let result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
+        let mut result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
             install_resolved_capture(
                 &agent,
                 &entry,
@@ -80,6 +87,13 @@ pub(crate) async fn agent_install_handler(
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
+        for row in result.rows.iter_mut() {
+            crate::runtime::agent_installer::persist_step_logs_to_disk(
+                row,
+                &state.config.agent.id,
+                Some(&log_base),
+            )?;
+        }
         {
             let store = state.state.lock().await;
             for row in &result.rows {
@@ -93,6 +107,7 @@ pub(crate) async fn agent_install_handler(
                     exit_status: row.exit_status,
                     step: &row.step,
                     version: row.version.as_deref(),
+                    log_dir: row.log_dir.as_deref(),
                 })?;
             }
         }

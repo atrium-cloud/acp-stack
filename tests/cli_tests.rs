@@ -2281,7 +2281,7 @@ fn status_reports_config_state_schema_and_latest_event() {
         .success()
         .stdout(predicates::str::contains("config: ok"))
         .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 10"))
+        .stdout(predicates::str::contains("schema_version: 11"))
         .stdout(predicates::str::contains("latest_event:"));
 }
 
@@ -2326,6 +2326,7 @@ fn agent_check_reports_missing_adapter_step() {
             exit_status: Some(0),
             step: "harness",
             version: None,
+            log_dir: None,
         })
         .expect("seed harness row");
     drop(store);
@@ -2387,6 +2388,7 @@ fn installer_history_renders_rows_with_filter() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            log_dir: None,
         })
         .expect("seed harness row");
     store
@@ -2400,6 +2402,7 @@ fn installer_history_renders_rows_with_filter() {
             exit_status: Some(2),
             step: "adapter",
             version: None,
+            log_dir: None,
         })
         .expect("seed adapter row");
     drop(store);
@@ -2427,6 +2430,49 @@ fn installer_history_renders_rows_with_filter() {
         .stdout(predicates::str::contains("opencode"))
         .stdout(predicates::str::contains("v1.0.0"))
         .stdout(predicates::str::contains("codex").not());
+}
+
+#[test]
+fn installer_history_renders_log_dir_continuation_line() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    fs::create_dir_all(tempdir.path().join(".config/acp-stack"))
+        .expect("config dir should be created");
+    fs::write(
+        tempdir.path().join(".config/acp-stack/acp-stack.toml"),
+        VALID_CONFIG,
+    )
+    .expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "opencode",
+            started_at: "2026-05-22T01:00:00.000000000Z",
+            finished_at: Some("2026-05-22T01:00:01.000000000Z"),
+            status: "ran",
+            stdout: "hi",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.0.0"),
+            log_dir: Some("/tmp/installer-logs/opencode/2026-05-22T01:00:00.000000000Z/harness"),
+        })
+        .expect("seed row with log_dir");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["installer", "history"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "log_dir: /tmp/installer-logs/opencode/2026-05-22T01:00:00.000000000Z/harness",
+        ));
 }
 
 #[test]
@@ -2476,6 +2522,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.2.3"),
+            log_dir: None,
         })
         .expect("harness row should append");
     store
@@ -2489,6 +2536,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
             exit_status: Some(0),
             step: "adapter",
             version: None,
+            log_dir: None,
         })
         .expect("adapter row should append");
     drop(store);
