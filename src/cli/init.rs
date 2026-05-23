@@ -103,6 +103,13 @@ pub struct InitArgs {
     /// do not need actual content fetched/cloned.
     #[arg(long)]
     skip_workspace_init: bool,
+    /// Run the real-prompt agent testflight at the end of init. Warns about
+    /// provider credit consumption. Mutually exclusive with `--skip-testflight`.
+    #[arg(long, conflicts_with = "skip_testflight")]
+    testflight: bool,
+    /// Suppress the end-of-init testflight even in interactive runs.
+    #[arg(long)]
+    skip_testflight: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -187,6 +194,11 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
     let mut config = Config::load_from_path(&config_path)?;
     let selected_agent = select_agent_for_init(&args, &registry)?;
     if let Some(entry) = selected_agent {
+        // Fail fast on agents the runtime cannot drive headlessly (browser
+        // OAuth, terminal-only adapters, etc.). Without this check init would
+        // happily install the binary and only fail at first session spawn,
+        // wasting bandwidth and operator time.
+        entry.ensure_supported()?;
         apply_registry_entry_to_config(&mut config, entry);
     }
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
@@ -334,7 +346,120 @@ pub(super) fn run_init(args: InitArgs) -> Result<()> {
         }
     }
 
+    if let Some(decision) = resolve_testflight_decision(&args, &config, &registry)? {
+        match decision {
+            TestflightDecision::Run => {
+                println!("---");
+                println!("running real-prompt agent testflight");
+                crate::cli::agent::run_init_testflight(&home, &config, &registry)?;
+            }
+            TestflightDecision::SkipExplicit => {
+                println!("testflight: skipped (--skip-testflight)");
+            }
+            TestflightDecision::SkipNonInteractive => {
+                println!("testflight: skipped (non-interactive run; pass --testflight to opt in)");
+            }
+            TestflightDecision::SkipDeclined => {
+                println!("testflight: skipped (declined at prompt)");
+            }
+            TestflightDecision::SkipUnsupported => {
+                println!("testflight: skipped (agent does not support headless testflight)");
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// What `acps init` should do with the post-init testflight phase. Resolved
+/// from the operator's flags + TTY state + agent registry support so the
+/// outer flow can render a clear log line for every path, and the test suite
+/// can assert each case without exercising the real ACP bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestflightDecision {
+    /// All preconditions met and the operator opted in (explicit flag or
+    /// interactive yes).
+    Run,
+    /// Operator passed `--skip-testflight`.
+    SkipExplicit,
+    /// Non-interactive run and `--testflight` was not passed.
+    SkipNonInteractive,
+    /// Interactive run and the operator answered no at the credit-warning
+    /// prompt.
+    SkipDeclined,
+    /// Selected agent isn't headless-compatible; the testflight would fail
+    /// at spawn. Surface the skip so the operator isn't surprised.
+    SkipUnsupported,
+}
+
+fn resolve_testflight_decision(
+    args: &InitArgs,
+    config: &Config,
+    registry: &RegistryCatalog,
+) -> Result<Option<TestflightDecision>> {
+    if args.skip_testflight {
+        return Ok(Some(TestflightDecision::SkipExplicit));
+    }
+    let Some(entry) = registry.lookup(&config.agent.id) else {
+        // Operator's `[agent].id` doesn't match the registry (e.g., escape
+        // hatch). No registry entry means we don't know the testflight
+        // capabilities, so don't auto-run. Surface as a separate state only
+        // if the operator explicitly asked.
+        if args.testflight {
+            return Err(StackError::AgentRegistryMissing {
+                id: config.agent.id.clone(),
+            });
+        }
+        return Ok(None);
+    };
+    if !entry.headless_compatible {
+        if args.testflight {
+            return Err(StackError::AgentUnsupported {
+                name: entry.name.clone(),
+            });
+        }
+        return Ok(Some(TestflightDecision::SkipUnsupported));
+    }
+    if args.testflight {
+        print_testflight_credit_warning(entry);
+        return Ok(Some(TestflightDecision::Run));
+    }
+    if !io::stdin().is_terminal() {
+        return Ok(Some(TestflightDecision::SkipNonInteractive));
+    }
+    if confirm_testflight_credit_warning(entry)? {
+        Ok(Some(TestflightDecision::Run))
+    } else {
+        Ok(Some(TestflightDecision::SkipDeclined))
+    }
+}
+
+fn confirm_testflight_credit_warning(entry: &RegistryEntry) -> Result<bool> {
+    print_testflight_credit_warning(entry);
+    print!("run testflight now? [y/N]: ");
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: PathBuf::from("stdout"),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: PathBuf::from("stdin"),
+            source,
+        })?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn print_testflight_credit_warning(entry: &RegistryEntry) {
+    println!("---");
+    println!(
+        "init testflight will start `{}` and send a real prompt to the configured provider.",
+        entry.name
+    );
+    println!("this may consume provider credits.");
 }
 
 fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config) -> Result<bool> {
@@ -827,35 +952,42 @@ fn collect_missing_provider_refs(
     secret_store: &mut SecretStore,
     required_refs: &[String],
 ) -> Result<()> {
-    if !io::stdin().is_terminal() {
-        return Ok(());
+    if io::stdin().is_terminal() {
+        let mut collected = Vec::new();
+        for env_ref in required_refs {
+            if secret_store.contains(env_ref) {
+                continue;
+            }
+            print!("{env_ref}: ");
+            io::stdout()
+                .flush()
+                .map_err(|source| StackError::ConfigWrite {
+                    path: PathBuf::from("stdout"),
+                    source,
+                })?;
+            let mut value = String::new();
+            io::stdin()
+                .read_line(&mut value)
+                .map_err(|source| StackError::StdinRead { source })?;
+            let value = value.trim_end_matches(['\n', '\r']).to_owned();
+            if !value.is_empty() {
+                collected.push((env_ref.as_str(), value));
+            }
+        }
+        secret_store.set_many(
+            collected
+                .iter()
+                .map(|(name, value)| (*name, value.as_str())),
+        )?;
     }
-    let mut collected = Vec::new();
     for env_ref in required_refs {
-        if secret_store.contains(env_ref) {
-            continue;
-        }
-        print!("{env_ref}: ");
-        io::stdout()
-            .flush()
-            .map_err(|source| StackError::ConfigWrite {
-                path: PathBuf::from("stdout"),
-                source,
-            })?;
-        let mut value = String::new();
-        io::stdin()
-            .read_line(&mut value)
-            .map_err(|source| StackError::StdinRead { source })?;
-        let value = value.trim_end_matches(['\n', '\r']).to_owned();
-        if !value.is_empty() {
-            collected.push((env_ref.as_str(), value));
+        if !secret_store.contains(env_ref) {
+            return Err(StackError::SecretNotFound {
+                name: env_ref.clone(),
+            });
         }
     }
-    secret_store.set_many(
-        collected
-            .iter()
-            .map(|(name, value)| (*name, value.as_str())),
-    )
+    Ok(())
 }
 
 fn default_agent_env_refs(agent_id: &str) -> Vec<String> {
@@ -1198,8 +1330,8 @@ fn data_sources_from_args(args: &InitArgs) -> Result<Vec<DataSourceConfig>> {
 }
 
 fn classify_data_from(value: &str) -> Result<DataSourceConfig> {
-    if let Some(url) = value.strip_prefix("https://") {
-        let _ = url;
+    if value.strip_prefix("https://").is_some() {
+        reject_unsupported_https_data_source(value)?;
         return Ok(DataSourceConfig {
             source_type: "https".to_owned(),
             name: None,
@@ -1241,4 +1373,47 @@ fn classify_data_from(value: &str) -> Result<DataSourceConfig> {
         access_key_ref: None,
         secret_key_ref: None,
     })
+}
+
+/// Reject HTTPS data sources that the materializer cannot satisfy headlessly.
+/// Catches three known failure modes BEFORE init writes any state, so the
+/// operator gets a clear error pointing at the actual URL rather than a vague
+/// download/extract failure halfway through materialization.
+///
+/// Patterns rejected:
+/// - `drive.google.com/file/d/.../view` (private file view link; needs the
+///   `uc?export=download&id=` form to expose a usable HTTPS download)
+/// - `drive.google.com/drive/folders/...` (folder, not an archive; the
+///   materializer downloads single files)
+/// - `dropbox.com/.../?dl=0` or no `dl` param (preview link; needs `?dl=1`)
+fn reject_unsupported_https_data_source(value: &str) -> Result<()> {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("drive.google.com/file/d/")
+        && !lower.contains("uc?export=download")
+        && !lower.contains("uc?id=")
+    {
+        return Err(StackError::InvalidParam {
+            field: "data-from",
+            reason: format!(
+                "`{value}` is a private Drive file viewer link; pass the `https://drive.google.com/uc?export=download&id=<ID>` form instead"
+            ),
+        });
+    }
+    if lower.contains("drive.google.com/drive/folders/") {
+        return Err(StackError::InvalidParam {
+            field: "data-from",
+            reason: format!(
+                "`{value}` is a Drive folder; init only supports single-archive downloads. Export the folder as an archive and link to the archive."
+            ),
+        });
+    }
+    if lower.contains("dropbox.com/") && !lower.contains("dl=1") && !lower.contains("raw=1") {
+        return Err(StackError::InvalidParam {
+            field: "data-from",
+            reason: format!(
+                "`{value}` is a Dropbox preview link; append `?dl=1` so the materializer receives the file bytes"
+            ),
+        });
+    }
+    Ok(())
 }

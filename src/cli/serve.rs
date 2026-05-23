@@ -26,6 +26,10 @@ pub struct ServeArgs {
 }
 
 const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
+#[cfg(debug_assertions)]
+const FAKE_AGENT_TESTFLIGHT_MARKER: &str = ".acp-stack-testflight.txt";
+#[cfg(debug_assertions)]
+const FAKE_AGENT_TESTFLIGHT_CONTENT: &[u8] = b"acp-stack testflight ok\n";
 
 fn allow_root_env_enabled() -> bool {
     std::env::var(ALLOW_ROOT_ENV).is_ok_and(|value| value == "1")
@@ -569,6 +573,10 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                         .and_then(|s| s.as_str())
                         .unwrap_or("sess_fake_unknown")
                         .to_owned();
+                    if value.to_string().contains(FAKE_AGENT_TESTFLIGHT_MARKER) {
+                        std::fs::write(FAKE_AGENT_TESTFLIGHT_MARKER, FAKE_AGENT_TESTFLIGHT_CONTENT)
+                            .map_err(|source| StackError::ServeIo { source })?;
+                    }
                     if prompt_emits_updates {
                         // Push two notifications before the response. The bridge's
                         // SessionEventSink persists them keyed by session_id; tests
