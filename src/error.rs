@@ -370,6 +370,13 @@ pub enum StackError {
     #[error("agent installer hit the 10-minute timeout")]
     AgentInstallerTimeout,
 
+    #[error("failed to persist installer log at {path}: {source}")]
+    AgentInstallerLogPersist {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("ACP registry does not contain agent `{id}`")]
     AgentRegistryMissing { id: String },
 
@@ -717,6 +724,7 @@ impl StackError {
             AgentInstallerFailed { .. } => "agent.installer_failed",
             AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
             AgentInstallerTimeout => "agent.installer_timeout",
+            AgentInstallerLogPersist { .. } => "agent.installer_log_persist_failed",
             AgentRegistryMissing { .. } => "agent.registry_missing",
             AgentUnsupported { .. } => "agent.unsupported",
             AgentCheckStale => "agent.check_stale",
@@ -935,6 +943,9 @@ impl StackError {
                 format!("agent installer ran but `creates = {name}` did not resolve afterwards")
             }
             AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
+            AgentInstallerLogPersist { path, .. } => {
+                format!("failed to persist installer log at {}", path.display())
+            }
             AgentRegistryMissing { id } => {
                 format!("ACP registry does not contain agent `{id}`")
             }
@@ -1238,6 +1249,7 @@ impl StackError {
             AgentInstallerFailed { .. }
             | AgentInstallerCreatesMissing { .. }
             | AgentInstallerTimeout
+            | AgentInstallerLogPersist { .. }
             | AgentRegistryMissing { .. }
             | RegistryLoad { .. }
             | GithubReleaseFetch { .. }
