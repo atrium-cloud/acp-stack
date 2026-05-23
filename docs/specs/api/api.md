@@ -54,13 +54,15 @@ Errors:
 - `POST /v1/agent/install`
 - `POST /v1/agent/start`
 - `POST /v1/agent/stop`
+- `POST /v1/agent/restart`
 - `GET /v1/agent/status`
 - `GET /v1/agent/capabilities`
 
 Phase 4 provider/model API:
 
-- `GET /v1/agent/models` (session-tier) - returns the filtered provider/model catalog for the configured agent. The server fetches `https://models.dev/api.json`, filters through the embedded provider mapping, and never returns secret values.
-- `POST /v1/agent/provider-config` (admin-tier) - accepts a selected provider id, model id, and explicit secret refs; validates them against the resolved catalog; atomically writes the generated OpenCode or Pi provider config file; then stops and restarts the active agent process when it is running. Response includes `{ applied: true, restarted: true|false }`.
+- `GET /v1/providers` (session-tier) — returns the provider summary list described under the Providers and Models API section below.
+- `GET /v1/models` (session-tier) — returns ACP-advertised model + mode values for the configured agent (spawns a provisional ACP session).
+- `POST /v1/agent/restart` (admin-tier) — stops the supervised agent if running, then starts it with the current `[agent]` config. Used after `acps agent set` writes provider/model changes that require a process-level reload. Goose model changes do NOT require this; clients can switch live via ACP `session/set_config_option`. Response: `{ stopped_at, started_at, prior_exit_status?, capabilities, pid? }`. When the agent was already stopped, the call degenerates into a plain start and `prior_exit_status` is `null`.
 
 ### Session API
 
@@ -234,6 +236,13 @@ Session-tier.
 - `POST /v1/deps/check` - re-runs validation.
 
 Phase 2 reports missing dependencies but does not attempt broad installation by default. Commands are checked via PATH lookup. Packages, runtimes, and MCP cross-references are declarative-only and report `available = false` with a `<kind>-check-not-implemented` reason in this phase (MCP entries cross-reference `[[mcp.servers]]` for declaration presence).
+
+### Providers and Models API
+
+Session-tier.
+
+- `GET /v1/providers` - returns the providers supported for the configured agent, sourced from the embedded provider/env mapping. Each item carries `id`, `name`, optional `agent_provider_id` (when the agent uses a different native id), optional `default_api_key_ref`, and optional `companion_env_refs` / `optional_env_refs` arrays. Pure embedded-mapping lookup — does not spawn the agent.
+- `GET /v1/models` - spawns a provisional ACP session against the configured agent, reads its `session/new` advertised `config_options`, and returns `{ agent_id, models: [...], modes: [...] }`. Mirrors what `acps agent set` reads when prompting interactively, so a UI driver can render the same picker without shelling out. Empty `modes` indicates the agent does not advertise a mode option. The agent must be installed and the per-call discovery can take several seconds; `session/new` is bounded by a timeout and the provisional agent process is shut down before the endpoint returns.
 
 ### Status, Logs, and Metrics API
 

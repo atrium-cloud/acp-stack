@@ -159,7 +159,7 @@ Every supported agent reads its own configuration from a well-known path under t
 Operational rules that follow from the table:
 
 - `acps agent set` regenerates the relevant config file BEFORE it writes the canonical `acp-stack.toml`. A generated-config write failure aborts the canonical write so the on-disk pair stays consistent.
-- `acps agent set` does not currently relaunch the agent process. When the table says "yes for model/mode", operators must restart the agent through `acps agent stop` + `acps agent start` for the new value to take effect on subsequent sessions. The CLI prints an explicit "settings will take effect on new sessions" note in that case.
+- `acps agent set` does not currently relaunch the agent process. When the table says "yes for model/mode", operators must restart the supervised agent through `POST /v1/agent/restart` so the daemon re-reads the on-disk config before starting the next supervised process. The CLI prints an explicit restart hint in that case.
 - Live changes that the table marks as supported are only valid against existing ACP sessions that have not been closed; they do not retroactively apply to historical session prompts. Unsupported live changes are rejected by the relevant route handler with an explicit "<agent> does not support live <model|mode> changes" error rather than silently accepted.
 - Custom-provider edits never apply live: they always require the agent to restart so it can re-read the regenerated config file and pick up the new base URL / model. The CLI emits the same restart hint.
 

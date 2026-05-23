@@ -252,7 +252,7 @@ init hard-fails with `workspace.destination_not_empty`.
 
 Init does not infer model config from API-key refs. It may write provider/auth config after provider selection and required ref collection. `acps agent set` writes supported model config after the model is explicit. `acp-stack` does not store provider API key values in plaintext.
 
-Phase 4 expands this into a unified provider/model API that resolves provider ids through the provider/env mapping, validates selected model and mode values against ACP session config options, updates the agent-owned config file, and relaunches the active agent.
+Phase 4 expands this into a unified provider/model API that resolves provider ids through the provider/env mapping, validates selected model and mode values against ACP session config options, updates the agent-owned config file, and exposes a manual supervised-agent restart path for changes that require process-level reload.
 
 ## Request Size Limits
 

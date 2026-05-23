@@ -7,6 +7,7 @@ pub mod deps;
 pub mod github_release;
 pub mod init_runner;
 pub mod mcp;
+pub mod model_discovery;
 pub mod npm_registry;
 pub mod permissions;
 pub mod provider_keys;

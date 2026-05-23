@@ -379,6 +379,96 @@ pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> 
         .map(|provider| provider.name.as_str())
 }
 
+/// Compact summary of one provider available to a given agent. Used by
+/// the `/v1/providers` API and the future operator UI to render a
+/// provider picker without any further mapping logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProviderSummary {
+    /// Operator-facing provider id (the value the operator passes as
+    /// `--provider`). Always a value listed in the embedded mapping.
+    pub id: &'static str,
+    /// Human-readable name pulled from the provider mapping.
+    pub name: &'static str,
+    /// Agent-native provider id when the agent uses a different label
+    /// than the operator-facing id (e.g. Codex uses `openai` natively
+    /// but the operator might pass `openai-chat`). `None` when the
+    /// agent uses the same id.
+    pub agent_provider_id: Option<&'static str>,
+    /// Default API-key env var ref for this (agent, provider) pair, if
+    /// the embedded mapping declares one. `None` indicates the
+    /// operator must configure a custom provider OR the provider uses
+    /// agent-native auth (e.g. Codex+OpenAI).
+    pub default_api_key_ref: Option<&'static str>,
+    /// Required companion env vars beyond the API key.
+    pub companion_env_refs: Vec<&'static str>,
+    /// Optional env vars the operator may set for this provider.
+    pub optional_env_refs: Vec<&'static str>,
+}
+
+/// Every operator-facing provider id supported for `agent_id`, in
+/// embedded-mapping order. Empty when the agent has no provider scope.
+pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
+    let mapping = ProviderKeyMapping::load_embedded();
+    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    let mut summaries = Vec::new();
+    for provider in &mapping.providers {
+        if !provider.agents.iter().any(|agent| agent == agent_id) {
+            continue;
+        }
+        for id in &provider.id {
+            // Each provider mapping may list multiple alias ids
+            // (e.g. `openai` + `openai-chat`). Emit each as its own
+            // operator-facing entry so the API surface mirrors what
+            // `acps init --provider <id>` accepts.
+            if !seen.insert(static_str(id)) {
+                continue;
+            }
+            let id_static = static_str(id);
+            let mut default = env_var_for_agent_provider_id(agent_id, id_static);
+            // Codex + OpenAI is special-cased throughout the CLI: it
+            // uses Codex-native auth, NOT `OPENAI_API_KEY`. Advertising
+            // a default here would let a UI client write a config the
+            // CLI then rejects with "Codex OpenAI uses Codex-native
+            // auth". Drop the default so clients see "no api_key_ref
+            // required" and route through Codex's own login flow.
+            if agent_id == "codex" && id_static == "openai" {
+                default = None;
+            }
+            let native = provider.agent_native_provider_id(agent_id).map(static_str);
+            // Only surface `agent_provider_id` when it actually differs
+            // from the operator-facing id. Always serializing it
+            // (even when equal) made every provider look like an
+            // alias, which the docs explicitly say it isn't.
+            let agent_provider_id = match native {
+                Some(value) if value == id_static => None,
+                other => other,
+            };
+            summaries.push(AgentProviderSummary {
+                id: id_static,
+                name: static_str(&provider.name),
+                agent_provider_id,
+                default_api_key_ref: default,
+                companion_env_refs: companion_env_refs_for_provider_id(id_static),
+                optional_env_refs: optional_env_refs_for_provider_id(id_static),
+            });
+        }
+    }
+    summaries
+}
+
+/// Re-borrow an embedded `String` as a `'static` `&str`. The provider
+/// mapping is loaded into a `LazyLock` that lives for the program's
+/// lifetime, so any string borrowed from it is effectively `'static`;
+/// the explicit transmute makes that promise explicit and lets the
+/// summary structs hold `&'static str` for cheap cloning.
+fn static_str(value: &str) -> &'static str {
+    // SAFETY: `value` is borrowed from `PROVIDER_KEY_MAPPING`, a
+    // `LazyLock<ProviderKeyMapping>` that is never dropped. Extending
+    // the lifetime to `'static` is sound because the underlying
+    // allocation outlives the program.
+    unsafe { std::mem::transmute::<&str, &'static str>(value) }
+}
+
 pub fn required_env_refs_for_provider_id(provider_id: &str, api_key_ref: &str) -> Vec<String> {
     let mut refs = vec![api_key_ref.to_owned()];
     refs.extend(

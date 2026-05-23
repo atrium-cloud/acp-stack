@@ -297,7 +297,7 @@ fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
-    print_agent_set_effective_notice();
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
 
@@ -372,7 +372,7 @@ fn run_codex_openai_set(
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
-    print_agent_set_effective_notice();
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
 
@@ -463,7 +463,7 @@ fn run_agent_custom_provider_set(
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
-    print_agent_set_effective_notice();
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
 
@@ -611,7 +611,7 @@ fn run_agent_model_set(
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
-    print_agent_set_effective_notice();
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
 
@@ -648,7 +648,7 @@ fn run_agent_mode_set(
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
     print_agent_set_agent(&config);
     println!("mode: {mode}");
-    print_agent_set_effective_notice();
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
 
@@ -656,8 +656,30 @@ fn print_agent_set_agent(config: &Config) {
     println!("agent: {}", config.agent.id);
 }
 
-fn print_agent_set_effective_notice() {
-    println!("settings will take effect on new sessions");
+/// Effective-notice variant aware of the configured agent. Most agents
+/// read provider/model from their on-disk config at process start, so a
+/// running agent must be restarted through `POST /v1/agent/restart`
+/// before the new settings take effect. Goose is the exception: clients
+/// can switch model live via ACP `session/set_config_option`. When
+/// `agent_id` is provided we surface the correct guidance; passing
+/// `None` keeps the generic "new sessions" message for paths where the
+/// agent id is not known to the caller.
+fn print_agent_set_effective_notice_for(agent_id: Option<&str>) {
+    match agent_id {
+        Some("goose") => {
+            println!(
+                "model can be switched live via ACP session/set_config_option; \
+                 other changes apply to new sessions"
+            );
+        }
+        Some(_) => {
+            println!(
+                "settings take effect on new sessions; restart the supervised \
+                 agent (`POST /v1/agent/restart`) to reload from disk"
+            );
+        }
+        None => println!("settings will take effect on new sessions"),
+    }
 }
 
 fn default_api_key_ref_for_agent_provider(agent_id: &str, provider_id: &str) -> Option<String> {

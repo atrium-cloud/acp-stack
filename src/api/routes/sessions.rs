@@ -83,10 +83,17 @@ pub(crate) async fn sessions_create_handler(
     let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
     let mcp_servers = open_mcp_servers(&state.config)?;
     let server_names = crate::mcp::server_names(&mcp_servers);
+    // Read the agent block from the live cache instead of the cached
+    // `state.config.agent`. After `POST /v1/agent/restart` updates
+    // the cache, this is how subsequent session creates see the new
+    // `agent.model` / `agent.mode` / `agent.provider`. Without this,
+    // a post-restart session would still receive the stale config
+    // and silently downgrade to the prior model.
+    let agent_for_session = state.live_agent_config.lock().await.clone();
     let record = state
         .agent_supervisor
         .create_session(
-            &state.config.agent,
+            &agent_for_session,
             &state.config.workspace.root,
             Some(cwd),
             mcp_servers,

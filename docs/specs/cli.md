@@ -106,7 +106,7 @@ Phase 4 expands init into a resumable orchestration flow:
 - create or import config
 - prompt for the agent, provider id, and missing required secret references without echoing values
 - resolve provider selection through the provider/env mapping and validate model/mode values through ACP session config options
-- update generated OpenCode or Pi provider config and relaunch the active agent when provider/model settings change
+- update generated OpenCode or Pi provider config and surface the supervised-agent restart step when provider/model settings require process-level reload
 - set up code sources under `/workspace/usr/code/<repo-name>/`
 - set up data sources under `/workspace/usr/data/<data-dir-name>/`
 - run agent harness and adapter installation as runtime-managed installer steps
@@ -139,7 +139,7 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 
 `acps agent set --mode <mode>` updates `[agent].mode` for agents whose registry entry declares `set_mode = true` and whose ACP session advertises a `mode` config option. Current real ACP probes advertise OpenCode `build`/`plan`, Cursor `agent`/`ask`/`plan`, Codex `read-only`/`auto`/`full-access`, and `amp-acp v0.1.1` `smart`/`rush`/`deep`; Pi and Goose do not advertise mode values.
 
-Successful `acps agent set` output prints the configured agent id, changed fields, and `settings will take effect on new sessions`.
+Successful `acps agent set` output prints the configured agent id, changed fields, and agent-specific guidance for whether a supervised-agent restart is required.
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 
