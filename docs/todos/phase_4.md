@@ -77,7 +77,7 @@
 - [ ] Add retry flow for failed agent installer commands.
 - [ ] Preserve installer logs for audit.
 - [ ] Preserve init/download/extraction stdout and stderr in per-step log files while recording structured step status in SQLite.
-- [ ] Surface expected command and hash verification failures clearly.
+- [x] Surface expected command and hash verification failures clearly.
 
 ## Provider And Model Selection
 
@@ -110,11 +110,11 @@
 
 ## Init Testflight
 
-- [ ] After config and secrets are present, run a full init testflight that starts the agent and sends a minimal real prompt.
+- [x] After config and secrets are present, run a full init testflight that starts the agent and sends a minimal real prompt.
 - [x] Integrate the existing `acps agent test` runner into `acps init --testflight` after explicit confirmation.
-- [ ] Testflight must verify session creation, prompt completion, streamed updates, and terminal prompt state, not just process startup.
+- [x] Testflight must verify session creation, prompt completion, streamed updates, and terminal prompt state, not just process startup.
 - [x] For each supported agent, smoke test at least one filesystem-visible tool action when the agent supports tools.
-- [ ] Fail testflight if an agent appears active but emits no progress or terminal state within the configured timeout.
+- [x] Fail testflight if an agent appears active but emits no progress or terminal state within the configured timeout.
 - [x] Warn that real-prompt testflight may consume provider credits and provide an explicit skip/confirmation path.
 - [x] Hard-fail unsupported init paths early: browser OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, and missing required secrets.
 

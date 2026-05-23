@@ -244,6 +244,13 @@ pub enum StackError {
     #[error("workspace materialization failed: {reason}")]
     WorkspaceMaterializeFailed { reason: String },
 
+    #[error("{}", workspace_command_failed_message(command, *exit, stderr_tail))]
+    WorkspaceCommandFailed {
+        command: &'static str,
+        exit: Option<i32>,
+        stderr_tail: String,
+    },
+
     #[error("download exceeded the {limit}-byte size limit")]
     SafeDownloadTooLarge { limit: u64 },
 
@@ -619,6 +626,13 @@ pub enum StackError {
     SecretRefLooksLikeValue { field: &'static str },
 }
 
+fn workspace_command_failed_message(command: &str, exit: Option<i32>, stderr_tail: &str) -> String {
+    match exit {
+        Some(code) => format!("`{command}` exited with status {code}: {stderr_tail}"),
+        None => format!("`{command}` exited without a status: {stderr_tail}"),
+    }
+}
+
 impl StackError {
     /// Dotted-namespace code suitable for the HTTP error envelope at
     /// `docs/specs/api/api.md:20-42`. The set is intentionally coarse: it
@@ -743,6 +757,7 @@ impl StackError {
             WorkspaceDestinationNotEmpty { .. } => "workspace.destination_not_empty",
             WorkspaceDestinationOutsideRoot { .. } => "workspace.destination_outside_root",
             WorkspaceMaterializeFailed { .. } => "workspace.materialize_failed",
+            WorkspaceCommandFailed { .. } => "workspace.command_failed",
             SafeDownloadTooLarge { .. } => "download.too_large",
             SafeDownloadInsecureRedirect { .. } => "download.insecure_redirect",
             SafeDownloadHttpStatus { .. } => "download.http_status",
@@ -1021,6 +1036,11 @@ impl StackError {
             WorkspaceDestinationOutsideRoot { dest, root } => {
                 format!("workspace destination `{dest}` is outside workspace.root `{root}`")
             }
+            WorkspaceCommandFailed {
+                command,
+                exit,
+                stderr_tail,
+            } => workspace_command_failed_message(command, *exit, stderr_tail),
             WorkspaceMaterializeFailed { reason } => {
                 format!("workspace materialization failed: {reason}")
             }
@@ -1259,6 +1279,7 @@ impl StackError {
                 StatusCode::CONFLICT
             }
             WorkspaceMaterializeFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            WorkspaceCommandFailed { .. } => StatusCode::BAD_GATEWAY,
             SafeDownloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             SafeDownloadInsecureRedirect { .. } => StatusCode::BAD_REQUEST,
             SafeDownloadHttpStatus { .. }
@@ -1293,3 +1314,37 @@ impl StackError {
 }
 
 pub type Result<T> = std::result::Result<T, StackError>;
+
+#[cfg(test)]
+mod tests {
+    use super::StackError;
+
+    #[test]
+    fn workspace_command_failure_display_formats_exit_status_plainly() {
+        let exited = StackError::WorkspaceCommandFailed {
+            command: "git clone",
+            exit: Some(128),
+            stderr_tail: "repository not found".to_owned(),
+        }
+        .to_string();
+        assert_eq!(
+            exited,
+            "`git clone` exited with status 128: repository not found"
+        );
+        assert!(
+            !exited.contains("Some("),
+            "exit status must not expose Option debug formatting: {exited}"
+        );
+
+        let signaled = StackError::WorkspaceCommandFailed {
+            command: "git clone",
+            exit: None,
+            stderr_tail: "terminated by signal".to_owned(),
+        }
+        .to_string();
+        assert_eq!(
+            signaled,
+            "`git clone` exited without a status: terminated by signal"
+        );
+    }
+}
