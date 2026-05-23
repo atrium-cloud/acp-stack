@@ -9,7 +9,7 @@ The CLI should call the same core service layer as the HTTP API where practical.
 Initial CLI commands:
 
 ```sh
-acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--custom-provider ...] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init]
+acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--custom-provider ...] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init] [--testflight|--skip-testflight]
 acps serve
 acps status
 acps reset --yes
@@ -58,7 +58,7 @@ acps deps apply
 
 ## Init
 
-`acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Interactive init prompts for one supported agent, updates `[agent]` with the registry-recommended launch command, then asks whether to install that agent. Non-interactive init skips agent selection and install unless `--agent <id>` and/or `--install-agent` are supplied; `--no-install-agent` suppresses the install prompt in interactive runs.
+`acps init` creates or validates local config and state, initializes the age-encrypted secret store, and generates the two API keys named by `[auth]`. Interactive init prompts for one supported agent, updates `[agent]` with the registry-recommended launch command, then asks whether to install that agent. Non-interactive init skips agent selection and install unless `--agent <id>` and/or `--install-agent` are supplied; `--no-install-agent` suppresses the install prompt in interactive runs. Provider-backed init fails before writing provider config unless every required secret ref exists; interactive init may collect missing values, while non-interactive init requires the refs to already be present.
 
 When creating a starter config, deployment tooling may pass `--workspace-root`, `--workspace-uploads`, and `--runtime-user` so the generated `[workspace]` block matches the process manager's user, working directory, and writable paths. These flags affect only a newly-created config; re-running init against an existing config validates and preserves the file, and rejects deployment override values that contradict the persisted `[workspace]` block.
 
@@ -122,7 +122,7 @@ Successful `acps agent set` output prints the configured agent id, changed field
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 
-`acps agent test [--prompt <text>]` starts the configured ACP agent directly, runs `initialize`, creates a session, sends a real prompt, requires `end_turn` prompt completion, and shuts the agent down before exiting. When `--prompt` is omitted, the CLI uses a built-in minimal compatibility prompt. Failures identify the first failing stage: spawn/start, ACP initialize, session creation, prompt/progress timeout, or prompt completion.
+`acps agent test [--prompt <text>]` starts the configured ACP agent directly, runs `initialize`, creates a session, sends a real prompt, requires `end_turn` prompt completion, and shuts the agent down before exiting. When `--prompt` is omitted, the CLI uses the active registry entry's `testflight_prompt` when present, otherwise a built-in minimal compatibility prompt. Registry entries may also declare `testflight_expect_fs`; in that case the test removes a stale regular marker before the prompt and then requires a non-empty regular file under `workspace.root` after prompt completion. Failures identify the first failing stage: spawn/start, ACP initialize, session creation, prompt/progress timeout, prompt completion, shutdown, or filesystem smoke.
 
 `acps agent status` reads local config, the active agent registry, and SQLite state. It prints `agent: <id>`, configured agent params as individual `provider:`, `model:`, and `mode:` lines, grouped supported-but-unconfigured params as `<params> unset`, grouped unsupported params as `<params> unavailable`, the latest successful agent-scoped installer versions as `installed <step>: <version>` or `installed <step>: version unknown`, then the configured command, latest persisted capability snapshot, and recent lifecycle rows. Legacy installer rows without `agent_id` are not shown because they cannot be safely attributed to the active agent.
 

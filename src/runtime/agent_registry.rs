@@ -124,6 +124,16 @@ impl RegistryCatalog {
             if let Some(github) = &entry.github {
                 github_url_from_value(&entry.id, "github", github)?;
             }
+            if let Some(expect) = entry.testflight_expect_fs.as_deref() {
+                validate_testflight_expect_fs(&entry.id, expect)?;
+            }
+            if let Some(prompt) = entry.testflight_prompt.as_deref()
+                && prompt.trim().is_empty()
+            {
+                return Err(StackError::RegistryLoad {
+                    reason: format!("agent `{}` testflight_prompt is empty", entry.id),
+                });
+            }
             let harness = entry.harness.as_ref().expect("validated harness presence");
             harness.validate(&entry.id, entry.github.as_deref())?;
             if entry.kind == RegistryKind::Adapter {
@@ -177,6 +187,20 @@ pub struct RegistryEntry {
     pub github: Option<String>,
     #[serde(default)]
     pub support_doc: Option<String>,
+    /// Real-prompt smoke text sent during `acps agent test` / init testflight
+    /// when the operator did not pass `--prompt`. Should be deterministic and
+    /// cheap; for filesystem-tool-capable agents it should ask the agent to
+    /// create the `testflight_expect_fs` path so the runtime can verify the
+    /// agent actually did the work and did not just hallucinate a reply.
+    #[serde(default)]
+    pub testflight_prompt: Option<String>,
+    /// Workspace-relative path the testflight prompt is expected to create
+    /// (or modify). `acps agent test` resolves this against `workspace.root`
+    /// and asserts the file exists with non-zero size after the prompt
+    /// completes. `None` means the testflight only verifies session/prompt
+    /// completion; useful for agents that don't expose filesystem tools.
+    #[serde(default)]
+    pub testflight_expect_fs: Option<String>,
     #[serde(default)]
     pub adapter: Option<AdapterSpec>,
     pub harness: Option<HarnessSpec>,
@@ -385,6 +409,35 @@ impl ArchMap {
     }
 }
 
+/// Reject registry-declared testflight FS paths that would escape the
+/// workspace root. `acps agent test` joins this onto `workspace.root`, so an
+/// absolute path or one containing `..` would either bypass the workspace
+/// (absolute) or traverse outside it (`..`). The intended use is a stable
+/// in-workspace marker like `.acp-stack-testflight.txt`.
+fn validate_testflight_expect_fs(agent_id: &str, value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(StackError::RegistryLoad {
+            reason: format!("agent `{agent_id}` testflight_expect_fs is empty"),
+        });
+    }
+    if std::path::Path::new(trimmed).is_absolute() {
+        return Err(StackError::RegistryLoad {
+            reason: format!(
+                "agent `{agent_id}` testflight_expect_fs `{trimmed}` must be workspace-relative, not absolute"
+            ),
+        });
+    }
+    if trimmed.split('/').any(|segment| segment == "..") {
+        return Err(StackError::RegistryLoad {
+            reason: format!(
+                "agent `{agent_id}` testflight_expect_fs `{trimmed}` may not contain `..` segments"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn validate_nonempty(agent_id: &str, field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         Err(StackError::RegistryLoad {
@@ -498,6 +551,27 @@ mod tests {
             supported,
             ["opencode", "cursor", "amp", "pi", "goose", "codex"]
         );
+        for entry in catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.headless_compatible)
+        {
+            assert_eq!(
+                entry.testflight_expect_fs.as_deref(),
+                Some(".acp-stack-testflight.txt"),
+                "{} must declare filesystem smoke output",
+                entry.id
+            );
+            let prompt = entry
+                .testflight_prompt
+                .as_deref()
+                .unwrap_or_else(|| panic!("{} must declare a testflight prompt", entry.id));
+            assert!(
+                prompt.contains(".acp-stack-testflight.txt"),
+                "{} prompt must mention smoke output path",
+                entry.id
+            );
+        }
     }
 
     #[test]
@@ -728,6 +802,124 @@ creates = "adapter"
         match err {
             StackError::RegistryLoad { reason } => {
                 assert!(reason.contains("[agents.adapter]"), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_optional_testflight_smoke_fields() {
+        let body = r#"
+[[agents]]
+id = "smoke-agent"
+name = "Smoke Agent"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/smoke-agent.md"
+testflight_prompt = "Create /workspace/.acp-stack-testflight.txt with text 'ok'"
+testflight_expect_fs = ".acp-stack-testflight.txt"
+
+[agents.harness]
+id = "smoke-agent"
+
+[agents.harness.install.npm]
+package = "smoke-agent"
+creates = "smoke-agent"
+"#;
+        let catalog = RegistryCatalog::from_toml(body).expect("registry should parse");
+        let entry = catalog.lookup("smoke-agent").expect("entry exists");
+        assert_eq!(
+            entry.testflight_prompt.as_deref(),
+            Some("Create /workspace/.acp-stack-testflight.txt with text 'ok'")
+        );
+        assert_eq!(
+            entry.testflight_expect_fs.as_deref(),
+            Some(".acp-stack-testflight.txt")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_absolute_testflight_expect_fs() {
+        let body = r#"
+[[agents]]
+id = "bad-expect"
+name = "Bad Expect"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad-expect.md"
+testflight_expect_fs = "/etc/passwd"
+
+[agents.harness]
+id = "bad-expect"
+
+[agents.harness.install.npm]
+package = "bad-expect"
+creates = "bad-expect"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("absolute testflight_expect_fs must be rejected");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(
+                    reason.contains("must be workspace-relative"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_testflight_expect_fs_with_parent_segment() {
+        let body = r#"
+[[agents]]
+id = "bad-expect"
+name = "Bad Expect"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad-expect.md"
+testflight_expect_fs = "subdir/../escape.txt"
+
+[agents.harness]
+id = "bad-expect"
+
+[agents.harness.install.npm]
+package = "bad-expect"
+creates = "bad-expect"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("testflight_expect_fs with `..` must be rejected");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("`..`"), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_testflight_prompt() {
+        let body = r#"
+[[agents]]
+id = "bad-prompt"
+name = "Bad Prompt"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad-prompt.md"
+testflight_prompt = "   "
+
+[agents.harness]
+id = "bad-prompt"
+
+[agents.harness.install.npm]
+package = "bad-prompt"
+creates = "bad-prompt"
+"#;
+        let err =
+            RegistryCatalog::from_toml(body).expect_err("empty testflight_prompt must be rejected");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("testflight_prompt"), "reason: {reason}");
             }
             other => panic!("expected RegistryLoad, got {other:?}"),
         }

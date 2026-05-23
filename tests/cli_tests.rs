@@ -131,6 +131,16 @@ fn write_cli_home(home: &std::path::Path, base_url: &str, admin_key: &str) {
         .expect("auth keys should be stored");
 }
 
+fn seed_init_secrets(home: &std::path::Path, extra: &[(&str, &str)]) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    let mut entries = vec![
+        ("ACP_STACK_SESSION_KEY", SESSION_KEY),
+        ("ACP_STACK_ADMIN_KEY", ADMIN_KEY),
+    ];
+    entries.extend_from_slice(extra);
+    store.set_many(entries).expect("secrets should be stored");
+}
+
 fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
     let config_dir = home.join(".config/acp-stack");
     let workspace = home.join("workspace");
@@ -144,6 +154,14 @@ fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
         .collect::<Vec<_>>()
         .join(", ");
     let config = VALID_CONFIG
+        .replace(
+            r#"root = "/workspace""#,
+            &format!(r#"root = "{}""#, workspace.display()),
+        )
+        .replace(
+            r#"uploads = "/workspace/uploads""#,
+            &format!(r#"uploads = "{}/uploads""#, workspace.display()),
+        )
         .replace(
             r#"command = "opencode""#,
             &format!("command = {}", toml_string(env!("CARGO_BIN_EXE_acps"))),
@@ -325,6 +343,180 @@ fn init_creates_config_and_state() {
 }
 
 #[test]
+fn init_rejects_private_drive_file_viewer_url_as_data_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-install-agent",
+            "--skip-testflight",
+            "--data-from",
+            "https://drive.google.com/file/d/abc123/view",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("private Drive file viewer link"));
+}
+
+#[test]
+fn init_accepts_drive_uc_export_download_url_as_data_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-install-agent",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--data-from",
+            "https://drive.google.com/uc?export=download&id=abc123",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn init_rejects_drive_folder_url_as_data_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-install-agent",
+            "--skip-testflight",
+            "--data-from",
+            "https://drive.google.com/drive/folders/abc123",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Drive folder"));
+}
+
+#[test]
+fn init_rejects_dropbox_preview_url_without_dl_flag() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-install-agent",
+            "--skip-testflight",
+            "--data-from",
+            "https://www.dropbox.com/scl/fi/abc123/file.zip?dl=0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Dropbox preview link"));
+}
+
+#[test]
+fn init_accepts_dropbox_url_with_dl_one() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-install-agent",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--data-from",
+            "https://www.dropbox.com/scl/fi/abc123/file.zip?dl=1",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn init_default_skips_testflight_under_non_interactive_runs() {
+    // Non-interactive default with a registered agent: no --testflight, no
+    // --skip-testflight, no stdin TTY. The runner should announce the skip
+    // rather than silently continue — operators reading the log need to see
+    // why testflight was not run.
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["init", "--agent", "opencode", "--no-install-agent"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "testflight: skipped (non-interactive run; pass --testflight to opt in)",
+        ));
+}
+
+#[test]
+fn init_skip_testflight_flag_is_acknowledged_in_output() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--no-install-agent",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "testflight: skipped (--skip-testflight)",
+        ));
+}
+
+#[test]
+fn init_rejects_combining_testflight_and_skip_testflight() {
+    // clap conflicts_with should fail at parse time, so init never starts.
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-install-agent",
+            "--testflight",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn init_explicit_testflight_prints_provider_credit_warning() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--no-install-agent",
+            "--testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains(
+            "this may consume provider credits.",
+        ));
+}
+
+#[test]
 fn init_writes_deployment_controlled_workspace_defaults() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
@@ -404,6 +596,7 @@ fn init_skips_opencode_config_without_configured_provider() {
 #[test]
 fn init_provider_sets_opencode_auth_config_without_model() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
     Command::cargo_bin("acps")
         .expect("binary should build")
@@ -448,8 +641,57 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 }
 
 #[test]
+fn init_provider_fails_noninteractive_when_default_secret_is_missing() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "secret `OPENAI_API_KEY` was not found in the secret store",
+        ));
+}
+
+#[test]
+fn init_provider_succeeds_noninteractive_when_default_secret_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OpenCode config:"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
+    assert!(config.contains(r#"env = ["OPENAI_API_KEY"]"#));
+}
+
+#[test]
 fn init_custom_opencode_provider_writes_generated_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test-custom-key")]);
 
     Command::cargo_bin("acps")
         .expect("binary should build")
@@ -502,6 +744,10 @@ fn init_custom_opencode_provider_writes_generated_config() {
 #[test]
 fn init_custom_codex_provider_allows_known_mapped_provider_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("ANTHROPIC_API_KEY", "test-anthropic-key")],
+    );
 
     Command::cargo_bin("acps")
         .expect("binary should build")
@@ -547,6 +793,10 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
 #[test]
 fn init_custom_codex_provider_allows_openai_provider_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("CUSTOM_OPENAI_API_KEY", "test-custom-openai-key")],
+    );
 
     Command::cargo_bin("acps")
         .expect("binary should build")
@@ -2122,8 +2372,9 @@ fn agent_test_uses_default_prompt_when_omitted() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent test: ok"))
-        .stdout(predicates::str::contains("prompt: default"))
-        .stdout(predicates::str::contains("stop_reason: end_turn"));
+        .stdout(predicates::str::contains("prompt: registry"))
+        .stdout(predicates::str::contains("stop_reason: end_turn"))
+        .stdout(predicates::str::contains("fs_smoke: ok"));
 }
 
 #[test]

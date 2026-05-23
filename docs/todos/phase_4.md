@@ -111,12 +111,12 @@
 ## Init Testflight
 
 - [ ] After config and secrets are present, run a full init testflight that starts the agent and sends a minimal real prompt.
-- [ ] Integrate the existing `acps agent test` runner into `acps init --testflight` after explicit confirmation.
+- [x] Integrate the existing `acps agent test` runner into `acps init --testflight` after explicit confirmation.
 - [ ] Testflight must verify session creation, prompt completion, streamed updates, and terminal prompt state, not just process startup.
-- [ ] For each supported agent, smoke test at least one filesystem-visible tool action when the agent supports tools.
+- [x] For each supported agent, smoke test at least one filesystem-visible tool action when the agent supports tools.
 - [ ] Fail testflight if an agent appears active but emits no progress or terminal state within the configured timeout.
-- [ ] Warn that real-prompt testflight may consume provider credits and provide an explicit skip/confirmation path.
-- [ ] Hard-fail unsupported init paths early: browser OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, and missing required secrets.
+- [x] Warn that real-prompt testflight may consume provider credits and provide an explicit skip/confirmation path.
+- [x] Hard-fail unsupported init paths early: browser OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, and missing required secrets.
 
 ## Test Hardening
 
