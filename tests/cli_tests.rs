@@ -790,6 +790,590 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
     );
 }
 
+// L84-L87 cover the provisional ACP discovery flow during init: validate
+// explicit `--model`/`--mode` against the harness's advertised values
+// (L86) and surface the list when non-interactive callers omit `--model`
+// (L87). The fixture env var short-circuits the actual spawn so these
+// tests don't depend on a real opencode binary being installed; the
+// guard in `configure_model_and_mode_for_init` checks workspace.root +
+// agent.command exist first, hence the workspace setup + pointing
+// `command` at `/bin/true`.
+fn write_workspace_init_config(home: &std::path::Path) {
+    let config_dir = home.join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir");
+    let workspace = home.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace dir");
+    let config = VALID_CONFIG
+        .replace(
+            r#"root = "/workspace""#,
+            &format!(r#"root = "{}""#, workspace.display()),
+        )
+        .replace(
+            r#"uploads = "/workspace/uploads""#,
+            &format!(r#"uploads = "{}/uploads""#, workspace.display()),
+        )
+        .replace(
+            r#"cwd = "/workspace""#,
+            &format!(r#"cwd = "{}""#, workspace.display()),
+        )
+        .replace(r#"command = "opencode""#, r#"command = "/bin/true""#);
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config");
+}
+
+#[test]
+fn init_explicit_model_validates_against_acp_advertised_values() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "openai/gpt-5.5",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"model = "openai/gpt-5.5""#));
+}
+
+#[test]
+fn init_rejected_model_restores_prior_headless_config() {
+    // Pre-write a prior opencode headless config, then run init with
+    // an unadvertised --model. The init must reject the value AND
+    // leave the prior headless config exactly as it was (rollback
+    // guarantee).
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
+    let prior_opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    fs::create_dir_all(prior_opencode_path.parent().expect("parent")).expect("opencode dir");
+    let prior_bytes = b"{\"prior\":\"sentinel\"}";
+    fs::write(&prior_opencode_path, prior_bytes).expect("prior opencode config");
+
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "definitely-not-advertised",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure();
+
+    let after = fs::read(&prior_opencode_path).expect("opencode config readable after rejection");
+    assert_eq!(
+        after, prior_bytes,
+        "rejected --model must restore prior opencode headless config exactly",
+    );
+}
+
+#[test]
+fn init_explicit_model_rejects_value_not_in_advertised_list() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "made-up-model",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent did not advertise `made-up-model` as an available `model`",
+        ))
+        .stderr(predicates::str::contains(
+            "advertised models: [openai/gpt-5.5]",
+        ));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(!config.contains("made-up-model"));
+}
+
+#[test]
+fn init_noninteractive_missing_model_prints_advertised_values_without_mutating_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5", "openai/o4-mini"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("advertised models for OpenCode:"))
+        .stdout(predicates::str::contains("openai/gpt-5.5"))
+        .stdout(predicates::str::contains("openai/o4-mini"))
+        .stdout(predicates::str::contains(
+            "rerun with `acps init --model <value>` to write a model into config",
+        ));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    // L87 contract: provider was set this run, but the no-flag path
+    // must not write a model into config.
+    assert!(config.contains(r#"id = "openai""#));
+    assert!(!config.contains(r#"model = "openai/"#));
+}
+
+#[test]
+fn init_explicit_mode_validates_against_acp_advertised_values() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "openai/gpt-5.5",
+            "--mode",
+            "plan",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"mode = "plan""#));
+}
+
+#[test]
+fn init_explicit_mode_rejects_value_not_in_advertised_list() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "openai/gpt-5.5",
+            "--mode",
+            "executor",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent did not advertise `executor` as an available `mode`",
+        ))
+        .stderr(predicates::str::contains("advertised modes: [build, plan]"));
+}
+
+#[test]
+fn init_mode_only_does_not_print_model_picker() {
+    // OpenCode advertises both model and mode. Running --mode plan
+    // (no --model, no --provider) should only exercise the mode lane;
+    // the model lane stays dormant. Regression for an audit-flagged
+    // bug where `configure_model_for_init` ran whenever set_model was
+    // true, surfacing an unrelated advertised-models block.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--mode",
+            "plan",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("advertised models").not())
+        .stdout(predicates::str::contains("advertised modes").not());
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"mode = "plan""#));
+}
+
+#[test]
+fn init_provider_change_without_model_clears_stale_opencode_model() {
+    // Pre-existing opencode.json with a stale model from a prior run.
+    // An init that switches provider without picking a new model
+    // (L87 path) must clear the stale model field so the launched
+    // harness doesn't silently use it under the new provider.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    fs::create_dir_all(opencode_path.parent().expect("parent")).expect("opencode dir");
+    fs::write(
+        &opencode_path,
+        br#"{"model":"anthropic/claude-sonnet-stale","provider":{"anthropic":{}}}"#,
+    )
+    .expect("prior opencode config");
+
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success();
+
+    let after: Value =
+        serde_json::from_str(&fs::read_to_string(&opencode_path).expect("opencode readable"))
+            .expect("opencode parses");
+    assert!(
+        after.get("model").is_none(),
+        "opencode.json must not retain the stale model field after L87 provider-only init",
+    );
+}
+
+#[test]
+fn init_same_provider_without_model_preserves_existing_model() {
+    // First init pins provider=openai, model=openai/gpt-5.5. Second
+    // init re-runs with --provider openai but no --model. The L87
+    // path must print the advertised list while preserving the
+    // previously-pinned model — wiping it would silently change the
+    // launched harness's model on a no-op rerun.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5", "openai/o4-mini"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "openai/gpt-5.5",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--no-install-agent",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(
+        config.contains(r#"model = "openai/gpt-5.5""#),
+        "second init --provider openai (no --model) must preserve the previously pinned model",
+    );
+}
+
+#[test]
+fn init_rejects_mode_for_agents_without_set_mode_before_discovery() {
+    // Pi has set_model=true and set_mode=false. The unsupported-mode
+    // rejection must fire as a capability check, BEFORE any binary /
+    // cwd / discovery error can hide the real reason.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("ANTHROPIC_API_KEY", "test")]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "pi",
+            "--provider",
+            "anthropic",
+            "--api-key-ref",
+            "ANTHROPIC_API_KEY",
+            "--mode",
+            "plan",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "does not support mode configuration through `acps init`",
+        ));
+}
+
+#[test]
+fn init_custom_provider_still_validates_mode_against_acp_advertised_values() {
+    // Custom-provider skips MODEL validation (the model id is freeform),
+    // but MODE is independent of provider choice and must still be
+    // validated against the agent's ACP advertisement.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test")]);
+    let options_path =
+        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-freeform-model",
+            "--mode",
+            "executor",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "agent did not advertise `executor` as an available `mode`",
+        ));
+}
+
+#[test]
+fn init_goose_custom_provider_provision_failure_removes_sidecar() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test")]);
+    let goose_config_path = tempdir
+        .path()
+        .join(".config")
+        .join("goose")
+        .join("config.yaml");
+    fs::create_dir_all(goose_config_path.parent().expect("parent")).expect("goose config dir");
+    fs::write(&goose_config_path, "[").expect("invalid goose config");
+
+    let sidecar_path = tempdir
+        .path()
+        .join(".config")
+        .join("goose")
+        .join("custom_providers")
+        .join("myprovider.json");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "goose",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-freeform-model",
+            "--no-install-agent",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("existing YAML is invalid"));
+
+    assert!(
+        !sidecar_path.exists(),
+        "failed goose custom-provider init must remove the generated sidecar",
+    );
+}
+
+#[test]
+fn init_pi_custom_provider_provision_failure_removes_models_json() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test")]);
+    let settings_path = tempdir
+        .path()
+        .join(".pi")
+        .join("agent")
+        .join("settings.json");
+    fs::create_dir_all(settings_path.parent().expect("parent")).expect("pi settings dir");
+    fs::write(&settings_path, "not json").expect("invalid pi settings");
+
+    let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "pi",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-freeform-model",
+            "--no-install-agent",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("existing JSON is invalid"));
+
+    assert!(
+        !models_path.exists(),
+        "failed pi custom-provider init must remove generated models.json",
+    );
+}
+
+#[test]
+fn init_rejects_model_for_agents_without_set_model_before_discovery() {
+    // amp has set_model=false; --model must fail fast as a capability
+    // check rather than being silently ignored or surfacing as a
+    // downstream "binary not on PATH" error.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test")]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "amp",
+            "--model",
+            "anything",
+            "--no-install-agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "does not support model configuration through `acps init`",
+        ));
+}
+
 #[test]
 fn init_custom_codex_provider_allows_openai_provider_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
@@ -1204,7 +1788,7 @@ creates = "opencode"
     )
     .expect("goose config should parse");
     assert_eq!(goose["GOOSE_PROVIDER"], "openrouter");
-    assert_eq!(goose["GOOSE_MODEL"], serde_yaml::Value::Null);
+    assert_eq!(goose["GOOSE_MODEL"], "deepseek/deepseek-v4-flash");
 }
 
 #[test]

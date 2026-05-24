@@ -9,7 +9,7 @@ The CLI should call the same core service layer as the HTTP API where practical.
 Initial CLI commands:
 
 ```sh
-acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--custom-provider ...] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init] [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
+acps init [--agent <id>] [--provider <provider-id>] [--api-key-ref <ref>] [--model <model-id>] [--mode <mode>] [--custom-provider ...] [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] [--code-from <url>]... [--data-from <path-or-url>]... [--skip-workspace-init] [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
 acps serve
 acps status
 acps reset --yes
@@ -132,7 +132,17 @@ scope = "user"              # or "system"; system actions need uid 0
 
 For supported OpenCode and Pi configs, `acps init` does not infer model config from default API-key refs. Init may select the initial provider, collect the required provider refs, and write `[agent.provider]` without a model. `acps agent set` is the edit path that can later write the model.
 
-When a selected provider has no default env mapping and the agent supports custom providers, interactive init can collect custom provider fields and write generated agent config. Non-interactive init requires the explicit custom flags: `--custom-provider --provider <id> --provider-name <display-name> --base-url <url> --api-key-ref <ref> --model <model-id>`, with optional `--provider-api <chat-completions|responses>`, `--model-name <display-name>`, `--context <tokens>`, and `--output-max-tokens <tokens>`.
+Interactive `acps init` picks the provider from `data/providers.toml` filtered by the configured agent (the same source feeding `GET /v1/providers`). The picker accepts the listed number or a literal provider id. Non-interactive runs need an explicit `--provider <id>`.
+
+Model and mode selection during `acps init` source their truth from the installed harness over ACP — not from a registry snapshot — because advertised models change frequently. Once the provider lane has settled and the agent's headless config is on disk, init opens one provisional ACP session via `session/new`, reads the advertised `model` and `mode` `config_options`, and applies them as follows:
+
+- Explicit `--model <id>` / `--mode <value>` is validated against the advertised list before the canonical config is written. Unadvertised values fail with the rejection reason and the advertised list; the canonical `acp-stack.toml` and the agent's generated headless config files are rolled back to their pre-discovery state. Provider secrets the operator entered earlier in the same run remain in the secret store — that mutation is owned by the secrets phase, not the model/mode validation.
+- Interactive runs render a numbered picker of advertised values for each category the agent supports (`set_model = true` and/or `set_mode = true`). Selecting by number or by literal value both work; a blank line skips the category for this invocation.
+- Non-interactive runs that omit `--model` after a provider was just set print the advertised model values and continue without mutating the model field. The same print-and-skip behavior covers `--mode` when omitted.
+
+`acps init` skips the discovery step (with a printed note) when the agent binary is not on `PATH` or the agent's spawn cwd (the `[agent].cwd` override when set, otherwise `[workspace].root`) does not yet exist, so partial setups remain progressable. An explicit `--model`/`--mode` in that state fails loudly rather than silently bypassing validation.
+
+When a selected provider has no default env mapping and the agent supports custom providers, interactive init can collect custom provider fields and write generated agent config. Non-interactive init requires the explicit custom flags: `--custom-provider --provider <id> --provider-name <display-name> --base-url <url> --api-key-ref <ref> --model <model-id>`, with optional `--provider-api <chat-completions|responses>`, `--model-name <display-name>`, `--context <tokens>`, and `--output-max-tokens <tokens>`. Custom-provider model ids are taken verbatim and not validated against the ACP advertised list.
 
 ## Serve
 
