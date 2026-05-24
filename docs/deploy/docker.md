@@ -102,7 +102,7 @@ scripts/docker-smoke.sh --persistent --reset
 
 ## Railway
 
-For Railway, use the root `Dockerfile` and attach a persistent volume at `/home/acp`. The repository includes `railway.toml` so Railway builds with the Dockerfile and treats `/home/acp` as the required volume mount path.
+For Railway, use the root `Dockerfile` and attach a persistent volume at `/home/acp`. Provide a Railway service config that uses the Dockerfile builder and marks `/home/acp` as the required volume mount path.
 
 Railway provides `PORT`; the Docker image binds `acps` to `0.0.0.0:${PORT}` automatically. When Railway's platform variables are present, the entrypoint defaults `ACP_STACK_AUTO_INIT=1` so a missing `/home/acp/.config/acp-stack/acp-stack.toml` is initialized on first boot. If Railway starts the image as root for a mounted volume, the entrypoint also defaults `ACP_STACK_ALLOW_ROOT=1` for that Railway runtime only. Set either variable explicitly in Railway if you need to override those defaults.
 
