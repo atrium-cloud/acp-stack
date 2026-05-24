@@ -59,12 +59,12 @@
 
 ## Dependency Apply
 
-- [ ] Define narrow supported `acps deps apply` actions.
-- [ ] Require explicit user confirmation before applying dependency changes.
-- [ ] Log dependency apply stdout, stderr, exit status, and timestamps.
-- [ ] Report dependency status before and after apply.
-- [ ] Avoid broad cross-distro package reconciliation.
-- [ ] Distinguish privileged OS-wide dependency installation from runtime-user agent harness and adapter installation.
+- [x] Define narrow supported `acps deps apply` actions.
+- [x] Require explicit user confirmation before applying dependency changes.
+- [x] Log dependency apply stdout, stderr, exit status, and timestamps.
+- [x] Report dependency status before and after apply.
+- [x] Avoid broad cross-distro package reconciliation.
+- [x] Distinguish privileged OS-wide dependency installation from runtime-user agent harness and adapter installation.
 
 ## Installer UX
 
@@ -145,6 +145,6 @@
 - [x] The runtime can be deployed through Docker.
 - [x] The runtime can be deployed through systemd.
 - [x] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
-- [ ] `acps deps apply` supports only narrow, explicit installation behavior.
+- [x] `acps deps apply` supports only narrow, explicit installation behavior.
 - [x] Security self-checks are available through CLI and API.
 - [x] `acpctl` permission boundaries are tested and audited.
