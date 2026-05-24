@@ -250,6 +250,18 @@ mod tests {
         let readonly = tempdir.path().join("ro");
         std::fs::create_dir(&readonly).expect("create");
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let probe = readonly.join("probe");
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .is_ok()
+        {
+            std::fs::remove_file(&probe).expect("remove probe");
+            std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700))
+                .expect("restore mode");
+            return;
+        }
         assert!(!workspace_writable(&readonly));
         // Restore mode so the test framework can clean up.
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700))

@@ -3166,10 +3166,30 @@ fn agent_status_surfaces_installed_versions_from_state() {
     let store = StateStore::open(&state_path).expect("state should open");
     store.migrate().expect("migration should pass");
     store
+        .upsert_agent_capabilities(
+            "opencode",
+            r#"{"protocol_version":1,"capabilities":{"loadSession":true},"agent_name":"opencode","agent_title":"OpenCode","agent_version":"1.15.10"}"#,
+        )
+        .expect("capability row should append");
+    store
         .append_installer_run(InstallerRunInput {
             agent_id: "opencode",
             started_at: "2026-05-21T00:00:00.000000000Z",
             finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+            status: "ran",
+            stdout: "",
+            stderr: "",
+            exit_status: Some(0),
+            step: "install",
+            version: Some("1.15.10"),
+            log_dir: None,
+        })
+        .expect("install row should append");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "opencode",
+            started_at: "2026-05-21T00:00:02.000000000Z",
+            finished_at: Some("2026-05-21T00:00:03.000000000Z"),
             status: "ran",
             stdout: "",
             stderr: "",
@@ -3182,8 +3202,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
     store
         .append_installer_run(InstallerRunInput {
             agent_id: "opencode",
-            started_at: "2026-05-21T00:00:02.000000000Z",
-            finished_at: Some("2026-05-21T00:00:03.000000000Z"),
+            started_at: "2026-05-21T00:00:04.000000000Z",
+            finished_at: Some("2026-05-21T00:00:05.000000000Z"),
             status: "ran",
             stdout: "",
             stderr: "",
@@ -3201,10 +3221,12 @@ fn agent_status_surfaces_installed_versions_from_state() {
         .args(["agent", "status"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("installed harness: v1.2.3"))
+        .stdout(predicates::str::contains("agent version: 1.15.10"))
+        .stdout(predicates::str::contains("harness version: v1.2.3"))
         .stdout(predicates::str::contains(
-            "installed adapter: version unknown",
-        ));
+            "adapter version: version unknown",
+        ))
+        .stdout(predicates::str::contains("ACP version: 1"));
 }
 
 #[test]

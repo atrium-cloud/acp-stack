@@ -1796,6 +1796,12 @@ fn run_agent_status() -> Result<()> {
 
     match store.latest_agent_capabilities(&config.agent.id)? {
         Some(record) => {
+            if let Ok(capabilities) = serde_json::from_str::<
+                crate::runtime::acp_bridge::AgentCapabilitiesDto,
+            >(&record.capabilities_json)
+            {
+                println!("ACP version: {}", capabilities.protocol_version);
+            }
             println!("latest capabilities captured: {}", record.captured_at);
             println!("capabilities_json: {}", record.capabilities_json);
         }
@@ -1906,12 +1912,22 @@ fn print_installed_versions(rows: &[crate::state::InstallerRun]) {
         return;
     }
     for row in rows {
+        let label = installed_version_label(&row.step);
         match row.version.as_deref() {
             Some(value) if !value.is_empty() => {
-                println!("installed {}: {value}", row.step);
+                println!("{label}: {value}");
             }
-            _ => println!("installed {}: version unknown", row.step),
+            _ => println!("{label}: version unknown"),
         }
+    }
+}
+
+fn installed_version_label(step: &str) -> String {
+    match step {
+        STEP_INSTALL => "agent version".to_owned(),
+        STEP_HARNESS => "harness version".to_owned(),
+        STEP_ADAPTER => "adapter version".to_owned(),
+        other => format!("{other} version"),
     }
 }
 
