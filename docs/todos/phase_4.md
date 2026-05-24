@@ -81,10 +81,10 @@
 
 ## Provider And Model Selection
 
-- [ ] Start a provisional ACP session during interactive provider/model setup.
-- [ ] Read ACP-advertised `model` and `mode` session config options before accepting model or mode choices.
-- [ ] Validate explicit model and mode values against ACP-advertised session config options before writing config.
-- [ ] When provider-backed `--model` is omitted in non-interactive mode, print ACP-advertised model values and exit without mutating config.
+- [x] Start a provisional ACP session during interactive provider/model setup.
+- [x] Read ACP-advertised `model` and `mode` session config options before accepting model or mode choices.
+- [x] Validate explicit model and mode values against ACP-advertised session config options before writing config.
+- [x] When provider-backed `--model` is omitted in non-interactive mode, print ACP-advertised model values without writing a model into config (the provider lane still persists per its own step).
 - [x] Expose provider/model discovery through the unified API using provider metadata and ACP-advertised model options.
 - [x] Validate provider ids against the provider/env mapping and enforce the configured agent's provider scope from the mapping.
 - [x] Resolve default API-key refs, companion refs, and optional provider refs from the provider/env mapping.

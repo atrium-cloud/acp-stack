@@ -19,13 +19,17 @@ use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_file, write_new_file_owner_only,
 };
+use crate::runtime::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::init_runner::{
     self, StepDisposition, StepOutcome, begin_run, finalize_run, find_resumable_run, record_step,
     step_kind,
 };
+use crate::runtime::model_discovery::{
+    advertised_values_for_category, fetch_session_config, validate_advertised_value,
+};
 use crate::runtime::provider_keys::{
     env_refs_for_agent_id, env_var_for_agent_provider_id, provider_id_is_known,
-    provider_id_supports_agent, required_env_refs_for_provider_id,
+    provider_id_supports_agent, providers_for_agent, required_env_refs_for_provider_id,
 };
 use crate::secrets::{SecretStore, age_key_path, secret_store_path};
 use crate::state::{
@@ -56,9 +60,16 @@ pub struct InitArgs {
     /// API family for a custom provider: chat-completions or responses.
     #[arg(long = "provider-api", requires = "custom_provider")]
     provider_api: Option<String>,
-    /// Initial custom model id.
-    #[arg(long, requires = "custom_provider")]
+    /// Initial model id. With `--custom-provider`, taken verbatim as the
+    /// custom model id. Otherwise validated against the agent's
+    /// ACP-advertised `model` values discovered via a provisional
+    /// session.
+    #[arg(long)]
     model: Option<String>,
+    /// Initial mode value. Validated against the agent's ACP-advertised
+    /// `mode` values discovered via the same provisional session.
+    #[arg(long)]
+    mode: Option<String>,
     /// Display name for a custom model.
     #[arg(long = "model-name", requires = "custom_provider")]
     model_name: Option<String>,
@@ -243,30 +254,59 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     } else {
         None
     };
-    if args.provider.is_none()
-        && step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE)
-    {
-        args.provider = recorded_args
-            .as_ref()
-            .and_then(|recorded| recorded.provider.clone())
-            .or_else(|| {
-                config
-                    .agent
-                    .provider
-                    .as_ref()
-                    .map(|provider| provider.id.clone())
-            });
+    if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE) {
+        // Restore the original `--model`/`--mode` requests
+        // unconditionally so the resumed provider_configure step
+        // re-applies the explicit selection even if `--provider`
+        // is supplied (or omitted) on the resume invocation.
+        // Without this, an operator who corrects an invalid
+        // `--model` by passing it again on resume but also
+        // forgetting `--provider` could either error or drop the
+        // selection.
+        if args.model.is_none() {
+            args.model = recorded_args
+                .as_ref()
+                .and_then(|recorded| recorded.model.clone());
+        }
+        if args.mode.is_none() {
+            args.mode = recorded_args
+                .as_ref()
+                .and_then(|recorded| recorded.mode.clone());
+        }
         if args.provider.is_none() {
-            return finalize_with_error(
-                &store,
-                &init_run,
-                StackError::InitRunCorrupted {
-                    reason: format!(
-                        "init run {} has a failed provider_configure step but no provider id is available; pass --provider on resume",
-                        init_run.id
-                    ),
-                },
-            );
+            args.provider = recorded_args
+                .as_ref()
+                .and_then(|recorded| recorded.provider.clone())
+                .or_else(|| {
+                    config
+                        .agent
+                        .provider
+                        .as_ref()
+                        .map(|provider| provider.id.clone())
+                });
+            // A failed provider_configure step that owned ONLY
+            // model/mode (no provider was ever set) can legitimately
+            // resume without `--provider` — the model/mode lane will
+            // still re-run via the orchestrator's normal step flow.
+            // Only error when we know provider is required AND
+            // absent: the prior args_json captured provider too, so a
+            // truly corrupt run shows up as "recorded provider was
+            // Some, current is None, config has none". For the
+            // provider-less model-only case (e.g. cursor --model),
+            // continuing is correct.
+            let resume_recorded_provider = recorded_args.as_ref().and_then(|r| r.provider.clone());
+            if args.provider.is_none() && resume_recorded_provider.is_some() {
+                return finalize_with_error(
+                    &store,
+                    &init_run,
+                    StackError::InitRunCorrupted {
+                        reason: format!(
+                            "init run {} has a failed provider_configure step recorded with a provider but no provider id is available now; pass --provider on resume",
+                            init_run.id
+                        ),
+                    },
+                );
+            }
         }
     }
     if step_needs_resume(&prior_init_steps, step_kind::TESTFLIGHT) {
@@ -398,9 +438,14 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         step_kind::PROVIDER_CONFIGURE,
         || {
             // Provider config is idempotent only when there's no explicit
-            // change requested. We always re-run on resume so partial writes
-            // (e.g. missing secret refs) get re-collected.
-            Ok(args.provider.is_none())
+            // change requested for any of the three lanes this step
+            // now owns (provider, model, mode). We always re-run on
+            // resume so partial writes (e.g. missing secret refs) get
+            // re-collected, and so a resumed `--model`/`--mode` still
+            // gets validated and persisted rather than silently
+            // skipped because the prior succeeded row passes the
+            // verifier.
+            Ok(args.provider.is_none() && args.model.is_none() && args.mode.is_none())
         },
         || {
             let provider_configured = configure_provider_for_init(
@@ -410,13 +455,28 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
                 &config_path,
                 &mut secret_store,
             )?;
-            if selected_agent.is_some() || provider_configured || edge_requested {
+            let model_mode_outcome = configure_model_and_mode_for_init(
+                &args,
+                &home,
+                &registry,
+                &mut config,
+                &config_path,
+            )?;
+            let model_mode_changed =
+                matches!(model_mode_outcome.model_action, ModelModeAction::Set)
+                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
+            if selected_agent.is_some()
+                || provider_configured
+                || edge_requested
+                || model_mode_changed
+            {
                 let canonical = config.to_canonical_toml()?;
                 config = config::load_config_from_str(&canonical)?;
                 atomic_write_owner_only(&config_path, canonical.as_bytes())?;
             }
             Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured}}}"#
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}"}}"#,
+                model_mode_outcome.model_action, model_mode_outcome.mode_action,
             )))
         },
     );
@@ -488,11 +548,28 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             Ok(false)
         },
         || {
-            provisioned_agent_configs =
-                crate::runtime::agent_headless_config::provision_agent_headless_config(
-                    &config, &home,
-                )?;
-            Ok(StepOutcome::empty())
+            let candidate_paths = headless_config_candidate_paths(&config.agent.id, &home);
+            let snapshots = capture_path_snapshots(&candidate_paths)?;
+            let mut dir_scan = candidate_paths
+                .iter()
+                .filter_map(|path| path.parent().map(Path::to_path_buf))
+                .collect::<Vec<_>>();
+            dir_scan.extend(headless_config_side_dirs(&config.agent.id, &home));
+            let dir_listings = capture_dir_listings_for(&dir_scan)?;
+
+            match crate::runtime::agent_headless_config::provision_agent_headless_config(
+                &config, &home,
+            ) {
+                Ok(paths) => {
+                    provisioned_agent_configs = paths;
+                    Ok(StepOutcome::empty())
+                }
+                Err(error) => {
+                    restore_headless_snapshots(snapshots);
+                    remove_new_files_in_dirs(dir_listings);
+                    Err(error)
+                }
+            }
         },
     );
     if let Err(error) = result {
@@ -677,6 +754,8 @@ fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<InitRunRecord
     let args_json = serde_json::json!({
         "agent": args.agent,
         "provider": args.provider,
+        "model": args.model,
+        "mode": args.mode,
         "testflight": args.testflight,
         "skip_testflight": args.skip_testflight,
         "fresh": args.fresh,
@@ -703,6 +782,8 @@ fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<InitRunRecord
 #[derive(Default, serde::Deserialize)]
 struct RecordedInitArgs {
     provider: Option<String>,
+    model: Option<String>,
+    mode: Option<String>,
 }
 
 fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
@@ -1020,8 +1101,14 @@ fn select_agent_for_init<'a>(
             field: "agent",
             reason: format!("invalid selection `{answer}`"),
         })?;
+    if index == 0 {
+        return Err(StackError::InvalidParam {
+            field: "agent",
+            reason: format!("selection `{answer}` is out of range"),
+        });
+    }
     entries
-        .get(index.saturating_sub(1))
+        .get(index - 1)
         .ok_or_else(|| StackError::InvalidParam {
             field: "agent",
             reason: format!("selection `{answer}` is out of range"),
@@ -1030,17 +1117,27 @@ fn select_agent_for_init<'a>(
 }
 
 fn apply_registry_entry_to_config(config: &mut Config, entry: &RegistryEntry) {
+    // When the operator re-confirms the SAME agent (e.g. `acps init
+    // --agent X` again to refresh secrets or pick up registry changes
+    // for the launch command), preserve provider/model/mode/env so a
+    // bare re-run doesn't quietly drop a previously pinned model or
+    // mode. When switching to a DIFFERENT agent, clear the agent
+    // block so leftover provider/model/mode from the prior agent
+    // can't poison the new launch context.
+    let agent_changed = config.agent.id != entry.id;
     config.agent.id = entry.id.clone();
     config.agent.name = entry.name.clone();
     config.agent.cwd = Some(config.workspace.root.clone());
-    config.agent.env = default_agent_env_refs(&entry.id);
+    if agent_changed {
+        config.agent.env = default_agent_env_refs(&entry.id);
+        config.agent.mode = None;
+        config.agent.model = None;
+        config.agent.provider = None;
+    }
     config.agent.expected_sha256 = None;
     config.agent.restart = "on-crash".to_owned();
-    config.agent.mode = None;
-    config.agent.model = None;
     config.agent.harness_version = None;
     config.agent.adapter = None;
-    config.agent.provider = None;
     config.agent.install = None;
 
     match entry.kind {
@@ -1072,6 +1169,636 @@ fn configure_provider_for_init(
     Ok(true)
 }
 
+/// Outcome of a single category (model or mode) selection step.
+/// `Skipped` covers both "agent doesn't support this category" and
+/// "no flag, no resume, no interactive prompt"; `PrintedList` is the
+/// L87 path where non-interactive init prints advertised values but
+/// declines to mutate config; `Set` triggers a canonical re-write.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ModelModeAction {
+    #[default]
+    Skipped,
+    Set,
+    PrintedList,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ModelModeOutcome {
+    model_action: ModelModeAction,
+    mode_action: ModelModeAction,
+}
+
+/// Drives the L84-L87 ACP-discovery flow during `acps init`.
+///
+/// - L84: spawns one provisional ACP session via `fetch_session_config`
+///   when the configured agent supports model or mode setup, so the
+///   advertised lists come straight from the installed harness instead
+///   of a stale registry snapshot.
+/// - L85: reads `model` and `mode` `session/new` config_options before
+///   accepting or printing any choice.
+/// - L86: explicit `--model`/`--mode` values are validated against the
+///   advertised list before being written to canonical config.
+/// - L87: non-interactive runs without `--model`/`--mode` print the
+///   advertised values and return `PrintedList` so the caller does NOT
+///   mutate that field; init continues with the existing config so
+///   downstream steps stay usable.
+fn configure_model_and_mode_for_init(
+    args: &InitArgs,
+    home: &Path,
+    registry: &RegistryCatalog,
+    config: &mut Config,
+    config_path: &Path,
+) -> Result<ModelModeOutcome> {
+    let Some(entry) = registry.lookup(&config.agent.id) else {
+        return Ok(ModelModeOutcome::default());
+    };
+
+    // Capability gate, evaluated before any side effects. Reject
+    // explicit --model/--mode for agents whose registry entry says the
+    // category is not supported — surfacing this here means the operator
+    // gets a precise capability error instead of a downstream "binary
+    // not on PATH" / "no advertised values" / silent no-op (audit P1
+    // for --model, P2 for --mode).
+    if args.model.is_some() && !entry.set_model {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} does not support model configuration through `acps init`",
+                entry.name,
+            ),
+        });
+    }
+    // For provider-backed agents the model belongs inside
+    // `[agent.provider]`. Allowing `--model` without `--provider` would
+    // either silently write to the root `agent.model` slot (which the
+    // headless provisioners and `acps agent set` deliberately avoid for
+    // these agents) or pair the new model with a stale provider block.
+    // Require the operator to pair them explicitly; for model-only
+    // agents (set_provider=false) a bare `--model` is still fine.
+    if args.model.is_some()
+        && entry.set_provider
+        && args.provider.is_none()
+        && config.agent.provider.is_none()
+    {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!(
+                "{} stores the model inside [agent.provider]; pass --provider <id> together with --model, or run `acps agent set` after init",
+                entry.name,
+            ),
+        });
+    }
+    if args.mode.is_some() && !entry.set_mode {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} does not support mode configuration through `acps init`",
+                entry.name,
+            ),
+        });
+    }
+    if !entry.set_model && !entry.set_mode {
+        return Ok(ModelModeOutcome::default());
+    }
+    // Custom-provider flow already wrote a literal model id into the
+    // provider config and that id is not an ACP-advertised value, so
+    // the MODEL lane is skipped for custom-provider runs. The MODE
+    // lane is independent of provider choice (the agent advertises the
+    // same set of modes regardless), so mode discovery still runs to
+    // honor an explicit `--mode` or interactive picker.
+    let skip_model_lane = args.custom_provider;
+
+    let interactive = io::stdin().is_terminal();
+    let provider_set_this_run = args.provider.is_some();
+    // For provider-backed agents, the model belongs inside
+    // `[agent.provider]`. If no provider is configured (neither set
+    // this run nor pre-existing in the loaded config), suppress the
+    // interactive model picker — otherwise it would write into root
+    // `agent.model`, which the supervisor prefers and which the
+    // provider-backed model-ownership contract explicitly forbids
+    // for these agents.
+    let provider_present =
+        provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
+    // Each lane is active independently. Discovery runs when at least
+    // one lane needs the advertised list — either to validate an
+    // explicit value (L86), to drive an interactive picker (L84), or
+    // to surface the L87 print-and-skip behavior after a provider was
+    // just set non-interactively.
+    let model_lane_active = entry.set_model
+        && !skip_model_lane
+        && provider_present
+        && (args.model.is_some() || interactive || provider_set_this_run);
+    let mode_lane_active =
+        entry.set_mode && (args.mode.is_some() || interactive || provider_set_this_run);
+    if !model_lane_active && !mode_lane_active {
+        return Ok(ModelModeOutcome::default());
+    }
+    // `explicit` gates the failure path of the preflight checks below:
+    // an explicit `--model` (when the model lane is active, i.e. not
+    // custom-provider) or `--mode` must error out rather than silently
+    // skip if the binary or cwd is missing.
+    let explicit = (args.model.is_some() && model_lane_active) || args.mode.is_some();
+
+    // Two preconditions must hold before we spawn the agent for
+    // session/new:
+    //   1. The agent binary must resolve on PATH so the spawn won't
+    //      hit ENOENT at the exec syscall. `resolve_command_path` is
+    //      run with the same cwd `fetch_session_config` will use so
+    //      relative commands resolve consistently.
+    //   2. The spawn cwd directory must exist because the bridge's
+    //      `current_dir(&cwd)` setup fails with ENOENT otherwise.
+    //      `fetch_session_config` prefers `config.agent.cwd` over
+    //      `workspace.root`, so we must mirror that selection or the
+    //      preflight can pass on a directory the spawn never visits
+    //      (audit P2).
+    // When either is missing on a non-explicit call we skip the L84-L87
+    // dance with a printed note — the operator gets a working partial
+    // config they can finish off with a follow-up `acps init --model`.
+    // For explicit `--model`/`--mode` we fail loudly so they're never
+    // silently accepted without validation.
+    let spawn_cwd: PathBuf = config
+        .agent
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
+    let binary_missing =
+        crate::runtime::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
+            .is_none();
+    let cwd_missing = !spawn_cwd.is_dir();
+    if binary_missing || cwd_missing {
+        if explicit {
+            let reason = match (binary_missing, cwd_missing) {
+                (true, true) => format!(
+                    "agent command `{}` is not on PATH and spawn cwd `{}` does not exist",
+                    config.agent.command,
+                    spawn_cwd.display(),
+                ),
+                (true, false) => {
+                    format!("agent command `{}` is not on PATH", config.agent.command,)
+                }
+                (false, true) => format!(
+                    "spawn cwd `{}` does not exist; create it or run workspace materialize first",
+                    spawn_cwd.display(),
+                ),
+                (false, false) => unreachable!(),
+            };
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "cannot validate --model/--mode for {}: {reason}",
+                    entry.name
+                ),
+            });
+        }
+        if binary_missing {
+            println!(
+                "model/mode discovery skipped: agent command `{}` not found on PATH",
+                config.agent.command,
+            );
+        } else {
+            println!(
+                "model/mode discovery skipped: spawn cwd `{}` is not yet provisioned",
+                spawn_cwd.display(),
+            );
+        }
+        return Ok(ModelModeOutcome::default());
+    }
+
+    // Provision the agent's headless config so the spawned harness
+    // sees the NEW provider rather than whatever was on disk before.
+    // For codex/pi/goose the advertised model list can vary by
+    // configured provider, so discovering against a stale headless
+    // config would surface the wrong options.
+    //
+    // To keep the "rejection writes nothing" guarantee, snapshot every
+    // candidate file's PRIOR contents (or None for "did not exist")
+    // BEFORE provisioning runs. The provisioners are per-agent and
+    // map to known paths; we walk those candidates up-front so a
+    // post-provision restore can roll back to true prior state on
+    // discovery/validation failure. On success the provision stays;
+    // step 5 (agent_headless_config) will re-provision with the final
+    // post-discovery model/mode shape.
+    //
+    // Known narrow caveat: Codex provisioners (`provision_codex_openai_config`
+    // and the OpenRouter branch) short-circuit with `Ok(None)` when no
+    // model is configured yet, so the L87 "print advertised models"
+    // path for codex+provider-only discovers against whatever
+    // ~/.codex/config.toml looked like before this run. The advertised
+    // list itself comes from Codex's built-in catalog rather than the
+    // configured provider, so the practical impact is limited to
+    // first-run codex when the operator switches providers without
+    // also passing --model.
+    let candidate_paths = headless_config_candidate_paths(&config.agent.id, home);
+    let snapshots = capture_path_snapshots(&candidate_paths)?;
+    // Also record directory listings so rollback can remove side files
+    // the provisioner created out-of-band:
+    //   - codex OpenAI writes `~/.codex/config.<provider>.toml`
+    //     backup files alongside the primary config.
+    //   - Goose custom provider writes
+    //     `~/.config/goose/custom_providers/<operator-id>.json`,
+    //     whose name is operator-supplied so it can't be enumerated
+    //     via candidate_paths.
+    let mut dir_scan = candidate_paths
+        .iter()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    dir_scan.extend(headless_config_side_dirs(&config.agent.id, home));
+    let dir_listings = capture_dir_listings_for(&dir_scan)?;
+    let discovery_outcome = (|| {
+        crate::runtime::agent_headless_config::provision_agent_headless_config(config, home)?;
+        let response = fetch_session_config(home, config)?;
+        let mut outcome = ModelModeOutcome::default();
+        // Honor the per-lane gates rather than `entry.set_*` alone:
+        // when only one lane is active (e.g. `--mode plan` for an
+        // agent that advertises both model and mode), running the
+        // other lane would print an advertised list the operator
+        // never asked for or error out on a category they explicitly
+        // omitted.
+        if model_lane_active {
+            outcome.model_action =
+                configure_model_for_init(args, config, config_path, &response, &entry.name)?;
+        }
+        if mode_lane_active {
+            outcome.mode_action =
+                configure_mode_for_init(args, config, config_path, &response, &entry.name)?;
+        }
+        Ok::<ModelModeOutcome, StackError>(outcome)
+    })();
+
+    match discovery_outcome {
+        Ok(outcome) => Ok(outcome),
+        Err(err) => {
+            restore_headless_snapshots(snapshots);
+            remove_new_files_in_dirs(dir_listings);
+            Err(err)
+        }
+    }
+}
+
+/// Per-agent list of headless-config files that
+/// `provision_agent_headless_config` may write into. Kept in sync
+/// with the per-agent provisioners in `agent_headless_config.rs`.
+/// Used to snapshot prior contents BEFORE provisioning runs so a
+/// failed discovery/validation can roll back to true prior state
+/// (a snapshot taken AFTER provision would capture the just-written
+/// bytes and "restore" them on rejection, leaking state).
+///
+/// Custom-provider variants additionally write a side file —
+/// `~/.config/goose/custom_providers/<id>.json` for Goose,
+/// `~/.pi/agent/models.json` for Pi — so the candidate list covers
+/// those too when a custom provider is configured. Without this, a
+/// failed `--mode` validation on a custom-provider init could leave
+/// the side file behind even though `acp-stack.toml` was never
+/// written.
+fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Vec<PathBuf> {
+    match agent_id {
+        "goose" => vec![home.join(".config").join("goose").join("config.yaml")],
+        "opencode" => vec![home.join(".config").join("opencode").join("opencode.json")],
+        "codex" => vec![home.join(".codex").join("config.toml")],
+        "pi" => vec![
+            home.join(".pi").join("agent").join("settings.json"),
+            home.join(".pi").join("agent").join("models.json"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Per-agent extra directories whose new files should be rolled back
+/// on discovery/validation rejection. Today this covers Goose's
+/// `custom_providers/` sidecar dir — its file names are operator-
+/// supplied (`<provider_id>.json`) so they can't be enumerated up
+/// front the way the primary headless-config files can.
+fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<PathBuf> {
+    match agent_id {
+        "goose" => vec![home.join(".config").join("goose").join("custom_providers")],
+        _ => Vec::new(),
+    }
+}
+
+/// Capture the existing file names in each given directory before
+/// provisioning runs. On rejection, anything new in those directories
+/// matching a known provisioner side-effect pattern is removed —
+/// covers codex backup files (`~/.codex/config.<provider>.toml`) and
+/// Goose custom-provider sidecars
+/// (`~/.config/goose/custom_providers/<id>.json`) that the per-agent
+/// provisioner writes without exposing the paths through its return
+/// value.
+fn capture_dir_listings_for(
+    dirs: &[PathBuf],
+) -> Result<Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>> {
+    use std::collections::HashSet;
+    let mut listings = Vec::new();
+    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
+    for dir in dirs {
+        let dir = dir.clone();
+        if !seen_dirs.insert(dir.clone()) {
+            continue;
+        }
+        let mut names: HashSet<std::ffi::OsString> = HashSet::new();
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(&dir).map_err(|source| StackError::ConfigRead {
+                path: dir.clone(),
+                source,
+            })? {
+                let entry = entry.map_err(|source| StackError::ConfigRead {
+                    path: dir.clone(),
+                    source,
+                })?;
+                names.insert(entry.file_name());
+            }
+        }
+        listings.push((dir, names));
+    }
+    Ok(listings)
+}
+
+fn remove_new_files_in_dirs(
+    listings: Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>,
+) {
+    for (dir, prior_names) in listings {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if prior_names.contains(&name) {
+                continue;
+            }
+            let path = entry.path();
+            // Only remove regular files matching a known side-effect
+            // pattern (today: `config.<provider>.toml` backups codex
+            // writes alongside the primary config). Skip anything
+            // else so a legitimate sibling file written during the
+            // short discovery window (logs, lockfiles, the agent's
+            // own ephemeral state) is preserved.
+            if path.is_file()
+                && is_known_provisioner_side_artifact(&dir, &name)
+                && let Err(error) = std::fs::remove_file(&path)
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to remove headless-config side artifact after discovery rejection",
+                );
+            }
+        }
+    }
+}
+
+fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    // Codex OpenAI backup files: `config.<provider>.toml` or
+    // `config.<provider>-<n>.toml`. See `unique_codex_backup_path` in
+    // `runtime/agent_headless_config.rs`.
+    if name.starts_with("config.") && name.ends_with(".toml") && name != "config.toml" {
+        return true;
+    }
+    // Goose custom-provider sidecar: any `<provider_id>.json` written
+    // under `~/.config/goose/custom_providers/`. The operator-supplied
+    // provider id can't be enumerated up front, so we match by parent
+    // dir name + .json suffix instead.
+    if dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "custom_providers")
+        && name.ends_with(".json")
+    {
+        return true;
+    }
+    false
+}
+
+fn capture_path_snapshots(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
+    let mut snapshots = Vec::with_capacity(paths.len());
+    for path in paths {
+        let prior = if path.exists() {
+            Some(
+                std::fs::read(path).map_err(|source| StackError::ConfigRead {
+                    path: path.clone(),
+                    source,
+                })?,
+            )
+        } else {
+            None
+        };
+        snapshots.push((path.clone(), prior));
+    }
+    Ok(snapshots)
+}
+
+/// Best-effort restore: write each prior content back, or delete the
+/// file we created. A restore failure is logged but does not mask the
+/// real discovery/validation error — the operator still sees the root
+/// cause and can correct it on the next run.
+fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option<Vec<u8>>)>) {
+    for (path, prior) in snapshots {
+        match prior {
+            Some(bytes) => {
+                if let Err(error) = std::fs::write(&path, &bytes) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to restore prior headless config after discovery rejection",
+                    );
+                }
+            }
+            None => {
+                if path.exists()
+                    && let Err(error) = std::fs::remove_file(&path)
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to remove headless config provisioned for discovery",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn configure_model_for_init(
+    args: &InitArgs,
+    config: &mut Config,
+    config_path: &Path,
+    response: &agent_client_protocol::schema::NewSessionResponse,
+    agent_name: &str,
+) -> Result<ModelModeAction> {
+    if let Some(explicit) = args.model.as_deref() {
+        validate_advertised_value(response, AgentSessionConfigCategory::Model, explicit).map_err(
+            |err| {
+                let advertised =
+                    advertised_values_for_category(response, AgentSessionConfigCategory::Model)
+                        .unwrap_or_default();
+                StackError::AgentConfigProvision {
+                    path: config_path.to_path_buf(),
+                    reason: format!("{err}; advertised models: [{}]", advertised.join(", "),),
+                }
+            },
+        )?;
+        write_model_into_config(config, explicit.to_owned());
+        return Ok(ModelModeAction::Set);
+    }
+
+    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Model)?;
+    if !io::stdin().is_terminal() {
+        // L87: non-interactive run, no explicit choice. Print the
+        // advertised values so the operator can rerun with one, and
+        // do NOT mutate config — provider stays set, model stays at
+        // whatever it was (most commonly unset, so the agent picks
+        // its own default on session/new).
+        println!("advertised models for {agent_name}:");
+        for value in &values {
+            println!("  {value}");
+        }
+        println!("rerun with `acps init --model <value>` to write a model into config");
+        return Ok(ModelModeAction::PrintedList);
+    }
+
+    let Some(selected) =
+        prompt_session_config_selection(&values, AgentSessionConfigCategory::Model)?
+    else {
+        return Ok(ModelModeAction::Skipped);
+    };
+    validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
+    write_model_into_config(config, selected);
+    Ok(ModelModeAction::Set)
+}
+
+fn configure_mode_for_init(
+    args: &InitArgs,
+    config: &mut Config,
+    config_path: &Path,
+    response: &agent_client_protocol::schema::NewSessionResponse,
+    agent_name: &str,
+) -> Result<ModelModeAction> {
+    if let Some(explicit) = args.mode.as_deref() {
+        validate_advertised_value(response, AgentSessionConfigCategory::Mode, explicit).map_err(
+            |err| {
+                let advertised =
+                    advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
+                        .unwrap_or_default();
+                StackError::AgentConfigProvision {
+                    path: config_path.to_path_buf(),
+                    reason: format!("{err}; advertised modes: [{}]", advertised.join(", "),),
+                }
+            },
+        )?;
+        config.agent.mode = Some(explicit.to_owned());
+        return Ok(ModelModeAction::Set);
+    }
+
+    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
+        .unwrap_or_default();
+    if values.is_empty() {
+        // Agent supports `set_mode` per registry but did not surface
+        // a `mode` config option this session. Treat as skipped rather
+        // than erroring so init still completes.
+        return Ok(ModelModeAction::Skipped);
+    }
+    if !io::stdin().is_terminal() {
+        println!("advertised modes for {agent_name}:");
+        for value in &values {
+            println!("  {value}");
+        }
+        println!("rerun with `acps init --mode <value>` to write a mode into config");
+        return Ok(ModelModeAction::PrintedList);
+    }
+    let Some(selected) =
+        prompt_session_config_selection(&values, AgentSessionConfigCategory::Mode)?
+    else {
+        return Ok(ModelModeAction::Skipped);
+    };
+    validate_advertised_value(response, AgentSessionConfigCategory::Mode, &selected)?;
+    config.agent.mode = Some(selected);
+    Ok(ModelModeAction::Set)
+}
+
+/// Write the chosen model into whichever config slot the agent uses.
+/// Provider-backed agents (`set_provider = true`) store the model under
+/// `[agent.provider]` so it travels with provider+api_key_ref as one
+/// atomic group; provider-less agents (e.g. set_provider=false) store
+/// it at the agent root. Matches what `acps agent set` does.
+///
+/// When writing into the provider slot, also clear any stray root
+/// `agent.model` that a prior model-only flow may have left behind —
+/// runtime selection in supervisor.rs prefers the root slot, so a
+/// leftover value there would silently override the newly chosen
+/// provider model.
+fn write_model_into_config(config: &mut Config, model: String) {
+    if let Some(provider) = config.agent.provider.as_mut() {
+        provider.model = Some(model);
+        config.agent.model = None;
+    } else {
+        config.agent.model = Some(model);
+    }
+}
+
+fn prompt_session_config_selection(
+    values: &[String],
+    category: AgentSessionConfigCategory,
+) -> Result<Option<String>> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    println!("available {} values:", category.id());
+    for (index, value) in values.iter().enumerate() {
+        println!("  {}. {value}", index + 1);
+    }
+    print!(
+        "select {} [number or value, blank to skip]: ",
+        category.id()
+    );
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: PathBuf::from("stdout"),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: PathBuf::from("stdin"),
+            source,
+        })?;
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(index) = answer.parse::<usize>() {
+        // Reject `0` explicitly: `saturating_sub(1)` would map it to
+        // the first entry, but the menu is 1-indexed and accepting 0
+        // would let the operator confidently pick "0" expecting an
+        // out-of-range error and instead silently get the first item.
+        if index == 0 {
+            return Err(StackError::InvalidParam {
+                field: "selection",
+                reason: format!(
+                    "{} selection `{answer}` is out of range (expected 1..={})",
+                    category.id(),
+                    values.len()
+                ),
+            });
+        }
+        let Some(value) = values.get(index - 1) else {
+            return Err(StackError::InvalidParam {
+                field: "selection",
+                reason: format!(
+                    "{} selection `{answer}` is out of range (expected 1..={})",
+                    category.id(),
+                    values.len()
+                ),
+            });
+        };
+        return Ok(Some(value.clone()));
+    }
+    Ok(Some(answer.to_owned()))
+}
+
 fn select_provider_for_init(
     args: &InitArgs,
     registry: &RegistryCatalog,
@@ -1090,7 +1817,26 @@ fn select_provider_for_init(
         return Ok(None);
     }
 
-    print!("provider id [blank to skip]: ");
+    // Offline-curated picker. The compatibility list is the same source
+    // `GET /v1/providers` uses, so the operator sees exactly the
+    // providers that any other surface (CLI/API/UI) would offer for the
+    // selected agent. Free-form id entry is still accepted at the
+    // prompt so an operator can target a provider the embedded mapping
+    // pre-dates without round-tripping through `acps agent set`.
+    let providers = providers_for_agent(&config.agent.id);
+    if providers.is_empty() {
+        println!(
+            "no providers in data/providers.toml advertise compatibility with agent `{}`; \
+             pass --provider <id> to skip the picker",
+            config.agent.id
+        );
+        return Ok(None);
+    }
+    println!("providers for {}:", config.agent.id);
+    for (index, summary) in providers.iter().enumerate() {
+        println!("  {}. {} ({})", index + 1, summary.name, summary.id);
+    }
+    print!("select provider [number or id, blank to skip]: ");
     io::stdout()
         .flush()
         .map_err(|source| StackError::ConfigWrite {
@@ -1106,10 +1852,32 @@ fn select_provider_for_init(
         })?;
     let answer = answer.trim();
     if answer.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(answer.to_owned()))
+        return Ok(None);
     }
+    if let Ok(index) = answer.parse::<usize>() {
+        // 1-indexed picker; explicitly reject `0` so `saturating_sub`
+        // can't silently fold it to the first entry.
+        if index == 0 {
+            return Err(StackError::InvalidParam {
+                field: "provider",
+                reason: format!(
+                    "provider selection `{answer}` is out of range (expected 1..={})",
+                    providers.len()
+                ),
+            });
+        }
+        let Some(summary) = providers.get(index - 1) else {
+            return Err(StackError::InvalidParam {
+                field: "provider",
+                reason: format!(
+                    "provider selection `{answer}` is out of range (expected 1..={})",
+                    providers.len()
+                ),
+            });
+        };
+        return Ok(Some(summary.id.to_owned()));
+    }
+    Ok(Some(answer.to_owned()))
 }
 
 fn apply_provider_to_config(
@@ -1134,6 +1902,13 @@ fn apply_provider_to_config(
             ),
         });
     }
+    // Drop any stray root-level `agent.model` left over from a prior
+    // `acps agent set --model` for a model-only agent before we switch
+    // to a provider-based flow. Runtime selection prefers
+    // `agent.model` over `agent.provider.model` (supervisor.rs), so
+    // leaving the old root value in place would silently override the
+    // new `--model` chosen during this init run.
+    config.agent.model = None;
     if args.custom_provider {
         if !entry.allow_custom_provider {
             return Err(StackError::AgentConfigProvision {
@@ -1176,9 +1951,17 @@ fn apply_provider_to_config(
                 reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
             });
         }
+        // Mirror the preserve-on-same-provider semantics from the
+        // generic branch — re-confirming codex+openai must not silently
+        // drop a previously pinned model just because --model was
+        // omitted on this rerun.
+        let preserved_model = match config.agent.provider.as_ref() {
+            Some(existing) if existing.id == provider_id => existing.model.clone(),
+            _ => None,
+        };
         config.agent.provider = Some(AgentProviderConfig {
             id: provider_id,
-            model: None,
+            model: preserved_model,
             api_key_ref: None,
             custom: None,
         });
@@ -1224,9 +2007,20 @@ fn apply_provider_to_config(
             config.agent.env.push(env_ref.clone());
         }
     }
+    // Preserve the existing provider model only when the operator is
+    // re-confirming the SAME provider id (e.g. re-running `acps init
+    // --provider X` to refresh secrets or run resume). Switching to a
+    // different provider implies the old model probably belongs to a
+    // different catalog, so clear it; the subsequent model lane in
+    // configure_model_and_mode_for_init will either write a validated
+    // new value or follow L87 print-and-skip semantics.
+    let preserved_model = match config.agent.provider.as_ref() {
+        Some(existing) if existing.id == provider_id => existing.model.clone(),
+        _ => None,
+    };
     config.agent.provider = Some(AgentProviderConfig {
         id: provider_id,
-        model: None,
+        model: preserved_model,
         api_key_ref: Some(api_key_ref),
         custom: None,
     });

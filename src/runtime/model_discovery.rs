@@ -24,8 +24,8 @@ use agent_client_protocol::schema::{NewSessionResponse, SessionConfigOption};
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_values,
-    session_model_values,
+    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
+    session_config_values, session_model_selection_for_value, session_model_values,
 };
 use crate::secrets::SecretStore;
 
@@ -137,6 +137,30 @@ pub fn advertised_values_for_category(
         AgentSessionConfigCategory::Model => session_model_values(response),
         AgentSessionConfigCategory::Mode => {
             session_config_values(response.config_options.as_deref(), category)
+        }
+    }
+}
+
+/// Validate that `value` matches one of the agent's ACP-advertised
+/// values for the given category. Returns `Ok(())` if accepted, or
+/// `StackError::AgentConfigProvision` describing the rejection.
+///
+/// Both `acps agent set` and `acps init` use this before writing
+/// `agent.provider.model`, `agent.model`, or `agent.mode` to disk so
+/// the canonical config never disagrees with what the harness itself
+/// will accept on `session/new`.
+pub fn validate_advertised_value(
+    response: &NewSessionResponse,
+    category: AgentSessionConfigCategory,
+    value: &str,
+) -> Result<()> {
+    match category {
+        AgentSessionConfigCategory::Model => {
+            session_model_selection_for_value(response, value).map(|_| ())
+        }
+        AgentSessionConfigCategory::Mode => {
+            session_config_id_for_value(response.config_options.as_deref(), category, value)
+                .map(|_| ())
         }
     }
 }

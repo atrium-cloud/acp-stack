@@ -142,6 +142,20 @@ fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf
     for (key, value) in values {
         root.insert(YamlValue::String(key.to_owned()), value);
     }
+    // Mirror the canonical config: if no provider model is configured,
+    // drop any stale `GOOSE_MODEL` from a prior run so the launched
+    // Goose process doesn't keep using it under the new provider.
+    match configured_provider_model(config) {
+        Some(model) => {
+            root.insert(
+                YamlValue::String("GOOSE_MODEL".to_owned()),
+                YamlValue::String(model.to_owned()),
+            );
+        }
+        None => {
+            root.remove(YamlValue::String("GOOSE_MODEL".to_owned()));
+        }
+    }
 
     write_yaml_mapping(&path, root)?;
     Ok(Some(path))
@@ -204,8 +218,18 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
         json!("https://opencode.ai/config.json"),
         &path,
     )?;
-    if let Some(model) = configured_provider_model(config) {
-        root.insert("model".to_owned(), json!(model));
+    // Mirror the canonical config: if no provider model is configured,
+    // also clear any stale `model` key in opencode.json. Otherwise an
+    // earlier `acps agent set --model X` would silently override a
+    // subsequent provider switch where the operator deliberately did
+    // not pick a new model.
+    match configured_provider_model(config) {
+        Some(model) => {
+            root.insert("model".to_owned(), json!(model));
+        }
+        None => {
+            root.remove("model");
+        }
     }
 
     let provider = ensure_object_field(&mut root, "provider", &path)?;
@@ -230,6 +254,18 @@ fn provision_pi_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> 
         write_pi_custom_models_json(&models_path, provider, custom, api_key_ref)?;
     }
     let Some(model) = configured_provider_model(config) else {
+        // No provider model in canonical config — clear any stale
+        // `enabledModels` so the launched Pi process doesn't keep
+        // using a prior selection under the new provider lane. When
+        // there's no existing file, there's nothing to do.
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut root = read_json_object(&path)?;
+        if root.remove("enabledModels").is_some() {
+            write_json_object(&path, root)?;
+            return Ok(Some(path));
+        }
         return Ok(None);
     };
     let mut root = read_json_object(&path)?;
@@ -344,9 +380,7 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
             ),
         });
     }
-    let Some(model) = configured_provider_model(config) else {
-        return Ok(None);
-    };
+    let model_opt = configured_provider_model(config).map(str::to_owned);
     let api_key_ref = require_agent_env_for_provider(config, CODEX_OPENROUTER_PROVIDER_ID, &path)?;
     let Some(native_ref) =
         env_var_for_agent_provider_id(&config.agent.id, CODEX_OPENROUTER_PROVIDER_ID)
@@ -367,7 +401,21 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
     }
 
     let mut root = read_toml_table(&path)?;
-    root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
+    // Always settle the OpenRouter provider table even when no model
+    // is selected yet — the L87 provider-only init path relies on
+    // ~/.codex/config.toml advertising the new provider so the
+    // provisional discovery spawn picks it up; a half-written
+    // `model_provider = "openrouter"` with no matching provider
+    // table would otherwise leave the launched harness unable to
+    // resolve auth.
+    match model_opt.as_deref() {
+        Some(model) => {
+            root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
+        }
+        None => {
+            root.remove("model");
+        }
+    }
     root.insert(
         "model_provider".to_owned(),
         TomlValue::String(CODEX_OPENROUTER_PROVIDER_ID.to_owned()),
@@ -403,6 +451,33 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
 
 fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<PathBuf>> {
     let Some(model) = configured_provider_model(config) else {
+        // Provider switched to openai without a model selection. If a
+        // prior run wrote a model into ~/.codex/config.toml, clear it
+        // so the launched harness does not silently keep using the
+        // stale model under the new provider lane. When there's no
+        // existing file we simply have nothing to do.
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut root = read_toml_table(path)?;
+        let removed_model = root.remove("model").is_some();
+        let prior_provider = root
+            .get("model_provider")
+            .and_then(TomlValue::as_str)
+            .map(str::to_owned);
+        let provider_changed = prior_provider
+            .as_deref()
+            .is_some_and(|prior| prior != "openai");
+        if provider_changed {
+            root.insert(
+                "model_provider".to_owned(),
+                TomlValue::String("openai".to_owned()),
+            );
+        }
+        if removed_model || provider_changed {
+            write_toml_table(path, root)?;
+            return Ok(Some(path.to_path_buf()));
+        }
         return Ok(None);
     };
     let mut root = read_toml_table(path)?;
@@ -824,7 +899,7 @@ restart = "on-crash"
         )
         .expect("goose config yaml parses");
         assert_eq!(value["GOOSE_PROVIDER"], "openrouter");
-        assert_eq!(value["GOOSE_MODEL"], serde_yaml::Value::Null);
+        assert_eq!(value["GOOSE_MODEL"], "deepseek/deepseek-v4-flash");
         assert_eq!(value["GOOSE_MODE"], "auto");
         assert_eq!(value["GOOSE_CONTEXT_STRATEGY"], "summarize");
         assert_eq!(value["GOOSE_DISABLE_SESSION_NAMING"], true);
@@ -859,8 +934,47 @@ restart = "on-crash"
         )
         .expect("goose config yaml parses");
         assert_eq!(value["GOOSE_PROVIDER"], "cerebras");
-        assert_eq!(value["GOOSE_MODEL"], "old/model");
+        assert_eq!(value["GOOSE_MODEL"], "llama3.1-8b");
         assert_eq!(value["CUSTOM_SETTING"], "keep");
+    }
+
+    #[test]
+    fn goose_provider_switch_without_model_clears_stale_goose_model() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("config.yaml");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            "GOOSE_PROVIDER: openrouter\nGOOSE_MODEL: anthropic/claude-stale\nKEEP_ME: yes\n",
+        )
+        .expect("write existing config");
+        let mut config = config_with_agent("goose", &["CEREBRAS_API_KEY"]);
+        // New provider, NO model selected — mirrors the L87 init path
+        // where the operator picks a provider but skips model setup.
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "cerebras".to_owned(),
+            model: None,
+            api_key_ref: Some("CEREBRAS_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).expect("goose readable"))
+                .expect("goose yaml parses");
+        assert_eq!(value["GOOSE_PROVIDER"], "cerebras");
+        assert!(
+            value.as_mapping().is_some_and(|map| {
+                !map.contains_key(serde_yaml::Value::String("GOOSE_MODEL".to_owned()))
+            }),
+            "GOOSE_MODEL must be removed when no provider model is configured",
+        );
+        assert_eq!(value["KEEP_ME"], "yes");
     }
 
     #[test]
