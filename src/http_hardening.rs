@@ -118,27 +118,25 @@ pub fn client_ip(headers: &HeaderMap, peer: IpAddr, sec: &SecurityHttpConfig) ->
     if !trusted_proxy_peer(peer, sec) {
         return peer;
     }
-    if let Some(value) = headers.get("x-forwarded-for") {
-        if let Ok(text) = value.to_str() {
-            if let Some(first) = text.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return ip;
-                }
-            }
-        }
+    if let Some(value) = headers.get("x-forwarded-for")
+        && let Ok(text) = value.to_str()
+        && let Some(first) = text.split(',').next()
+        && let Ok(ip) = first.trim().parse::<IpAddr>()
+    {
+        return ip;
     }
-    if let Some(value) = headers.get("forwarded") {
-        if let Ok(text) = value.to_str() {
-            // Match a single `for=<ip>` segment. Real RFC 7239 parsing is more
-            // permissive (quoted, with port, multiple segments); the leftmost
-            // unquoted host is sufficient for the common case.
-            for part in text.split(';') {
-                let part = part.trim();
-                if let Some(rest) = part.strip_prefix("for=") {
-                    let rest = rest.trim().trim_matches('"');
-                    if let Ok(ip) = rest.parse::<IpAddr>() {
-                        return ip;
-                    }
+    if let Some(value) = headers.get("forwarded")
+        && let Ok(text) = value.to_str()
+    {
+        // Match a single `for=<ip>` segment. Real RFC 7239 parsing is more
+        // permissive (quoted, with port, multiple segments); the leftmost
+        // unquoted host is sufficient for the common case.
+        for part in text.split(';') {
+            let part = part.trim();
+            if let Some(rest) = part.strip_prefix("for=") {
+                let rest = rest.trim().trim_matches('"');
+                if let Ok(ip) = rest.parse::<IpAddr>() {
+                    return ip;
                 }
             }
         }
@@ -303,12 +301,12 @@ impl AuthFailureBlocker {
         // A stale blocked_until that already elapsed must not gate the
         // re-trip logic below. Clear it here so the brute-force-after-cooldown
         // attacker gets blocked again instead of getting a permanent pass.
-        if let Some(until) = entry.blocked_until {
-            if until <= now {
-                entry.blocked_until = None;
-                entry.window_start = now;
-                entry.count = 0;
-            }
+        if let Some(until) = entry.blocked_until
+            && until <= now
+        {
+            entry.blocked_until = None;
+            entry.window_start = now;
+            entry.count = 0;
         }
         if now.saturating_duration_since(entry.window_start) >= Duration::from_secs(60) {
             entry.window_start = now;
