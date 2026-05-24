@@ -969,6 +969,7 @@ fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config) -> Result<
             name: "cloudflared".to_owned(),
             required: true,
             feature: Some("cloudflare-tunnel".to_owned()),
+            install: None,
         });
     }
     Ok(true)

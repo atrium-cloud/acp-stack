@@ -1,41 +1,221 @@
+use std::io::{self, IsTerminal, Write};
+
+use clap::{Args, Subcommand};
+
 use crate::config::Config;
-use crate::error::Result;
-use clap::Subcommand;
+use crate::error::{Result, StackError};
+use crate::fs_util::home_dir;
+use crate::runtime::deps_apply::{
+    DepApplyOutcome, apply_dependencies, candidate_summary_line, candidates_for,
+    summarize_candidates,
+};
+use crate::state::{StateStore, default_state_path};
 
 #[derive(Debug, Subcommand)]
 pub enum DepsCommand {
     /// Print declared dependency status.
     Check,
+    /// Run the declared install action for missing dependencies.
+    Apply(DepsApplyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DepsApplyArgs {
+    /// Skip the confirmation prompt. Required for non-interactive
+    /// runs that have any actionable dep.
+    #[arg(long)]
+    yes: bool,
+    /// Apply only deps whose `feature` matches this string.
+    #[arg(long, value_name = "FEATURE")]
+    feature: Option<String>,
 }
 
 pub(super) fn run_deps_command(command: DepsCommand) -> Result<()> {
     match command {
-        DepsCommand::Check => {
-            let config = Config::load_from_default_path()?;
-            let report = crate::deps::check_dependencies(&config);
-            if report.dependencies.is_empty() {
-                println!("no dependencies declared in [dependencies]");
-                return Ok(());
+        DepsCommand::Check => run_check(),
+        DepsCommand::Apply(args) => run_apply(args),
+    }
+}
+
+fn run_check() -> Result<()> {
+    let config = Config::load_from_default_path()?;
+    let report = crate::deps::check_dependencies(&config);
+    if report.dependencies.is_empty() {
+        println!("no dependencies declared in [dependencies]");
+        return Ok(());
+    }
+    for entry in &report.dependencies {
+        let status = if entry.available {
+            if let Some(path) = &entry.path {
+                format!("OK  {path}")
+            } else {
+                "OK".to_owned()
             }
-            for entry in &report.dependencies {
-                let status = if entry.available {
-                    if let Some(path) = &entry.path {
-                        format!("OK  {path}")
-                    } else {
-                        "OK".to_owned()
-                    }
-                } else {
-                    let reason = entry.reason.as_deref().unwrap_or("unavailable");
-                    format!("MISS {reason}")
-                };
-                let required = if entry.required { "*" } else { " " };
-                println!(
-                    "{required}{kind:<8} {name:<24} {status}",
-                    kind = format!("{:?}", entry.kind).to_lowercase(),
-                    name = entry.name,
-                );
+        } else {
+            let reason = entry.reason.as_deref().unwrap_or("unavailable");
+            format!("MISS {reason}")
+        };
+        let required = if entry.required { "*" } else { " " };
+        println!(
+            "{required}{kind:<8} {name:<24} {status}",
+            kind = format!("{:?}", entry.kind).to_lowercase(),
+            name = entry.name,
+        );
+    }
+    Ok(())
+}
+
+fn run_apply(args: DepsApplyArgs) -> Result<()> {
+    let config = Config::load_from_default_path()?;
+    let candidates = candidates_for(&config, args.feature.as_deref());
+    if candidates.is_empty() {
+        if args.feature.is_some() {
+            println!(
+                "no actionable dependencies match --feature {filter:?}",
+                filter = args.feature.as_deref().unwrap_or(""),
+            );
+        } else {
+            println!(
+                "no dependencies declare an [install] block — declare one to make a dep actionable"
+            );
+        }
+        return Ok(());
+    }
+
+    let (count, any_system) = summarize_candidates(&candidates);
+    println!("`acps deps apply` will run {count} install action(s):");
+    for candidate in &candidates {
+        println!("  - {}", candidate_summary_line(candidate));
+    }
+    if any_system {
+        println!("WARNING: one or more actions declare scope=system; they require root privilege.");
+    }
+
+    if !confirm(args.yes)? {
+        println!("aborted (no confirmation)");
+        return Ok(());
+    }
+
+    let home = home_dir()?;
+    let state_path = default_state_path(&home);
+    if !state_path.exists() {
+        // The runner runs operator install scripts and persists per-
+        // action `installer_runs` rows for audit. Silently downgrading
+        // to "audit off" when the state DB is missing would let
+        // side-effectful installs run without a trail; fail fast with
+        // a clear pointer to `acps init` instead.
+        return Err(StackError::InvalidParam {
+            field: "state",
+            reason: format!(
+                "state DB missing at `{}`; run `acps init` first so `acps deps apply` can record per-action audit rows",
+                state_path.display(),
+            ),
+        });
+    }
+    let store = StateStore::open(&state_path)?;
+    // Migrate before any install snippet runs. If the on-disk schema
+    // is older than the binary's, the first `append_installer_run`
+    // would fail mid-apply — by then a side-effectful install would
+    // already have executed without an audit row. Failing fast here
+    // keeps "no audit row recorded" from coexisting with "side
+    // effects committed".
+    store.migrate()?;
+    let shell = &config.workspace.default_shell;
+    let report = apply_dependencies(&config, args.feature.as_deref(), Some(&store), shell)?;
+
+    println!("---");
+    print_apply_status_section("before", &report.before);
+    println!("---");
+    println!("results:");
+    for result in &report.results {
+        let line = match &result.outcome {
+            DepApplyOutcome::Installed => format!("installed   {}", result.name),
+            DepApplyOutcome::AlreadyPresent => format!("already     {}", result.name),
+            DepApplyOutcome::PrivilegeRequired { uid } => {
+                format!("privreq     {} (uid={uid}; needs root)", result.name)
             }
-            Ok(())
+            DepApplyOutcome::Failed {
+                exit_code,
+                stderr_tail,
+            } => {
+                let code = exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".to_owned());
+                format!(
+                    "failed      {} (exit={code}, stderr_tail={tail:?})",
+                    result.name,
+                    tail = stderr_tail,
+                )
+            }
+        };
+        println!("  {line}");
+    }
+    println!("---");
+    print_apply_status_section("after", &report.after);
+
+    // Surface any non-success as a non-zero exit so automation can
+    // gate on it. Without this, `acps deps apply --yes` in a CI
+    // script would report success even when a required install
+    // failed or was blocked on privilege. Use the worst-case across
+    // every result.
+    let mut bad: Vec<String> = Vec::new();
+    for result in &report.results {
+        match &result.outcome {
+            DepApplyOutcome::Failed { exit_code, .. } => {
+                let code = exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into());
+                bad.push(format!("{} failed (exit={code})", result.name));
+            }
+            DepApplyOutcome::PrivilegeRequired { uid } => {
+                bad.push(format!("{} needs root privilege (uid={uid})", result.name,));
+            }
+            DepApplyOutcome::Installed | DepApplyOutcome::AlreadyPresent => {}
         }
     }
+    if !bad.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "deps",
+            reason: format!(
+                "deps apply produced non-success outcomes: {}",
+                bad.join("; ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn print_apply_status_section(label: &str, entries: &[crate::deps::DepStatus]) {
+    println!("{label}:");
+    for entry in entries {
+        let status = if entry.available { "OK  " } else { "MISS" };
+        println!("  {status} {}", entry.name);
+    }
+}
+
+fn confirm(yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        return Err(StackError::InvalidParam {
+            field: "yes",
+            reason: "non-interactive run; pass --yes to confirm".to_owned(),
+        });
+    }
+    print!("apply these dependency actions now? [y/N]: ");
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: std::path::PathBuf::from("stdout"),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: std::path::PathBuf::from("stdin"),
+            source,
+        })?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
