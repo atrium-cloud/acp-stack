@@ -342,24 +342,24 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--assert-env-absent" => {
-                if let Some(name) = iter.next() {
-                    if std::env::var_os(name).is_some() {
-                        env_assertions.push(format!("env leaked: {name}"));
-                    }
+                if let Some(name) = iter.next()
+                    && std::env::var_os(name).is_some()
+                {
+                    env_assertions.push(format!("env leaked: {name}"));
                 }
             }
             "--assert-env-present" => {
-                if let Some(name) = iter.next() {
-                    if std::env::var_os(name).is_none() {
-                        env_assertions.push(format!("env missing: {name}"));
-                    }
+                if let Some(name) = iter.next()
+                    && std::env::var_os(name).is_none()
+                {
+                    env_assertions.push(format!("env missing: {name}"));
                 }
             }
             "--assert-env-not-equals" => {
-                if let (Some(name), Some(value)) = (iter.next(), iter.next()) {
-                    if std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new(value)) {
-                        env_assertions.push(format!("env override: {name}"));
-                    }
+                if let (Some(name), Some(value)) = (iter.next(), iter.next())
+                    && std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new(value))
+                {
+                    env_assertions.push(format!("env override: {name}"));
                 }
             }
             "--no-cap-load-session" => {

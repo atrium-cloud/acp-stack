@@ -265,25 +265,25 @@ fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_j
 }
 
 fn locate_usage_object(value: &serde_json::Value) -> Option<&serde_json::Value> {
-    if let Some(obj) = value.get("usage") {
-        if obj.is_object() {
-            return Some(obj);
-        }
+    if let Some(obj) = value.get("usage")
+        && obj.is_object()
+    {
+        return Some(obj);
     }
-    if let Some(update) = value.get("update").and_then(|v| v.get("usage")) {
-        if update.is_object() {
-            return Some(update);
-        }
+    if let Some(update) = value.get("update").and_then(|v| v.get("usage"))
+        && update.is_object()
+    {
+        return Some(update);
     }
-    if let Some(prompt_response) = value.get("prompt_response").and_then(|v| v.get("usage")) {
-        if prompt_response.is_object() {
-            return Some(prompt_response);
-        }
+    if let Some(prompt_response) = value.get("prompt_response").and_then(|v| v.get("usage"))
+        && prompt_response.is_object()
+    {
+        return Some(prompt_response);
     }
-    if let Some(meta_usage) = value.get("meta").and_then(|v| v.get("usage")) {
-        if meta_usage.is_object() {
-            return Some(meta_usage);
-        }
+    if let Some(meta_usage) = value.get("meta").and_then(|v| v.get("usage"))
+        && meta_usage.is_object()
+    {
+        return Some(meta_usage);
     }
     None
 }
@@ -333,23 +333,21 @@ impl StateStoreSessionSink {
                         // event when we recognize the shape; ignore otherwise.
                         if let Some(usage) =
                             extract_usage_payload(&row.session_id, &row.payload_json)
+                            && let Ok(usage_text) = serde_json::to_string(&usage)
+                            && let Err(err) = guard.append_session_event_with_source(
+                                &row.session_id,
+                                "info",
+                                "usage.reported",
+                                crate::state::EVENT_SOURCE_ACP,
+                                "agent usage reported",
+                                &usage_text,
+                            )
                         {
-                            if let Ok(usage_text) = serde_json::to_string(&usage) {
-                                if let Err(err) = guard.append_session_event_with_source(
-                                    &row.session_id,
-                                    "info",
-                                    "usage.reported",
-                                    crate::state::EVENT_SOURCE_ACP,
-                                    "agent usage reported",
-                                    &usage_text,
-                                ) {
-                                    tracing::warn!(
-                                        error = %err,
-                                        session_id = %row.session_id,
-                                        "failed to persist usage.reported event"
-                                    );
-                                }
-                            }
+                            tracing::warn!(
+                                error = %err,
+                                session_id = %row.session_id,
+                                "failed to persist usage.reported event"
+                            );
                         }
                     }
                     Err(err) => {
@@ -416,13 +414,13 @@ impl SessionEventSink for StateStoreSessionSink {
                 *guard = None;
             }
             let writer = self.writer.lock().await.take();
-            if let Some(task) = writer {
-                if let Err(err) = task.await {
-                    tracing::warn!(
-                        error = ?err,
-                        "session event writer task did not exit cleanly"
-                    );
-                }
+            if let Some(task) = writer
+                && let Err(err) = task.await
+            {
+                tracing::warn!(
+                    error = ?err,
+                    "session event writer task did not exit cleanly"
+                );
             }
         })
     }
