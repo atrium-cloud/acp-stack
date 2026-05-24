@@ -77,6 +77,7 @@ References:
     - Appropriate tests must be added for every new logical unit of code created, in the same initial feature commit.
     - When a feature is updated, relevant tests must be updated accordingly after functional code changes.
     - When a bug fix is implemented or refactoring is performed, tests must be run promptly to check for regressions.
+    - Using real LLMs for testing: default to use `deepseek-v4-flash` (model released in Apr 2026). Default to use OpenCode Go as provider where supported, otherwise OpenRouter. For other cases, agent must consult human for specific guidance. As an LLM your intenal knowledge of what models exist is woefully outdated.
 - Security
     - Please refrain from probing into developer secrets like `.env.*` files.
     - If you have accidentally read a secret, report to the human immediately and ask them to rotate it.
