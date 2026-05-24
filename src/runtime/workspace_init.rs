@@ -934,20 +934,19 @@ fn materialize_local(
         });
     }
 
-    if let Some(existing) = sentinel_if_present(dest)? {
-        if let SentinelBody::Local {
+    if let Some(existing) = sentinel_if_present(dest)?
+        && let SentinelBody::Local {
             path: existing_path,
             ..
         } = &existing.body
-            && existing_path == &canonical_src.display().to_string()
-        {
-            return Ok(SourceReport {
-                name: name.to_owned(),
-                destination: dest.to_path_buf(),
-                outcome: MaterializeOutcome::Verified,
-                log_dir: None,
-            });
-        }
+        && existing_path == &canonical_src.display().to_string()
+    {
+        return Ok(SourceReport {
+            name: name.to_owned(),
+            destination: dest.to_path_buf(),
+            outcome: MaterializeOutcome::Verified,
+            log_dir: None,
+        });
     }
     ensure_dest_or_fail(dest)?;
     std::fs::create_dir_all(dest).map_err(|source_err| StackError::WorkspaceMaterializeFailed {

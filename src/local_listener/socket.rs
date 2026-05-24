@@ -52,10 +52,10 @@ impl Drop for SocketGuard {
             );
             return;
         }
-        if let Err(err) = std::fs::remove_file(&self.path) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(error = %err, path = %self.path.display(), "failed to unlink acpctl socket");
-            }
+        if let Err(err) = std::fs::remove_file(&self.path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %err, path = %self.path.display(), "failed to unlink acpctl socket");
         }
     }
 }

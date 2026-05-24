@@ -277,15 +277,15 @@ impl CommandGateway {
         // on perm_rx will resolve as Canceled and finalize the command row
         // without ever spawning a child.
         let perm_id = self.awaiting_permission.lock().await.remove(id);
-        if let Some(perm_id) = perm_id {
-            if let Err(error) = self.permissions.cancel(&perm_id, "command-canceled").await {
-                tracing::warn!(
-                    error = %error,
-                    command_id = %id,
-                    permission_id = %perm_id,
-                    "failed to cancel pending permission alongside command cancel",
-                );
-            }
+        if let Some(perm_id) = perm_id
+            && let Err(error) = self.permissions.cancel(&perm_id, "command-canceled").await
+        {
+            tracing::warn!(
+                error = %error,
+                command_id = %id,
+                permission_id = %perm_id,
+                "failed to cancel pending permission alongside command cancel",
+            );
         }
         let sender = {
             let running = self.running.lock().await;

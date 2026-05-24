@@ -281,17 +281,12 @@ pub struct AgentCustomProviderConfig {
     pub output_max_tokens: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CustomProviderApi {
+    #[default]
     ChatCompletions,
     Responses,
-}
-
-impl Default for CustomProviderApi {
-    fn default() -> Self {
-        Self::ChatCompletions
-    }
 }
 
 impl CustomProviderApi {
@@ -1728,10 +1723,10 @@ fn strip_archive_extension(name: &str) -> &str {
     for ext in [
         ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz",
     ] {
-        if let Some(stripped) = name.strip_suffix(ext) {
-            if !stripped.is_empty() {
-                return stripped;
-            }
+        if let Some(stripped) = name.strip_suffix(ext)
+            && !stripped.is_empty()
+        {
+            return stripped;
         }
     }
     // Only strip a trailing extension when the prefix is non-empty;
@@ -1939,10 +1934,10 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
     }
     check(&config.auth.session_key_ref, "auth.session_key_ref")?;
     check(&config.auth.admin_key_ref, "auth.admin_key_ref")?;
-    if let Some(provider) = &config.agent.provider {
-        if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
-            check(api_key_ref, "agent.provider.api_key_ref")?;
-        }
+    if let Some(provider) = &config.agent.provider
+        && let Some(api_key_ref) = provider.api_key_ref.as_deref()
+    {
+        check(api_key_ref, "agent.provider.api_key_ref")?;
     }
     Ok(())
 }

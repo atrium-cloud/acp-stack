@@ -399,13 +399,13 @@ async fn publish_workspace_mutation(
     size: Option<u64>,
 ) -> std::result::Result<(), StackError> {
     let mut data = serde_json::json!({ "path": path });
-    if let Some(size) = size {
-        if let Some(obj) = data.as_object_mut() {
-            obj.insert(
-                "size".to_owned(),
-                serde_json::Value::Number(serde_json::Number::from(size)),
-            );
-        }
+    if let Some(size) = size
+        && let Some(obj) = data.as_object_mut()
+    {
+        obj.insert(
+            "size".to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(size)),
+        );
     }
     let payload_json = serde_json::to_string(&data).map_err(|_| StackError::WorkspaceIo {
         requested: path.to_owned(),

@@ -116,26 +116,26 @@ pub fn download_to_file(url: &str, dest: &Path, opts: &DownloadOpts) -> Result<D
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_owned());
 
-    if let Some(content_length) = response.content_length() {
-        if content_length > opts.max_bytes {
-            return Err(StackError::SafeDownloadTooLarge {
-                limit: opts.max_bytes,
-            });
-        }
+    if let Some(content_length) = response.content_length()
+        && content_length > opts.max_bytes
+    {
+        return Err(StackError::SafeDownloadTooLarge {
+            limit: opts.max_bytes,
+        });
     }
 
     // Stream the body through a size-capped, hashing writer.
     let outcome = write_streaming(response, dest, opts);
     match outcome {
         Ok((bytes_written, sha256)) => {
-            if let Some(expected) = opts.expected_sha256.as_deref() {
-                if !sha_eq(expected, &sha256) {
-                    cleanup_partial(dest);
-                    return Err(StackError::SafeDownloadChecksumMismatch {
-                        expected: expected.to_owned(),
-                        actual: sha256,
-                    });
-                }
+            if let Some(expected) = opts.expected_sha256.as_deref()
+                && !sha_eq(expected, &sha256)
+            {
+                cleanup_partial(dest);
+                return Err(StackError::SafeDownloadChecksumMismatch {
+                    expected: expected.to_owned(),
+                    actual: sha256,
+                });
             }
             Ok(DownloadReport {
                 bytes_written,

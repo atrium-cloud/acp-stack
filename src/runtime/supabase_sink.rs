@@ -94,12 +94,11 @@ impl SupabaseSink {
         // inside its select!, so a signal raised between iterations would be
         // dropped by notify_waiters (which leaves no permit behind).
         self.shutdown.notify_one();
-        if let Some(handle) = self.handle.take() {
-            if let Err(err) = handle.await {
-                if !err.is_cancelled() {
-                    tracing::warn!(error = %err, "supabase sink worker panicked during shutdown");
-                }
-            }
+        if let Some(handle) = self.handle.take()
+            && let Err(err) = handle.await
+            && !err.is_cancelled()
+        {
+            tracing::warn!(error = %err, "supabase sink worker panicked during shutdown");
         }
     }
 }

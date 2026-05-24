@@ -157,12 +157,12 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
             // Refuse to overwrite an existing symlink. `symlink_metadata` does
             // not follow the link, so we see the link itself rather than its
             // target.
-            if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
-                if metadata.file_type().is_symlink() {
-                    return Err(StackError::WorkspaceSymlinkEscape {
-                        requested: requested.to_owned(),
-                    });
-                }
+            if let Ok(metadata) = std::fs::symlink_metadata(&resolved)
+                && metadata.file_type().is_symlink()
+            {
+                return Err(StackError::WorkspaceSymlinkEscape {
+                    requested: requested.to_owned(),
+                });
             }
             Ok(resolved)
         }
@@ -347,13 +347,13 @@ pub fn read_file(absolute_path: &Path, max_bytes: u64) -> Result<FileRead> {
 /// when the target is an existing directory — that's a 400-shaped client
 /// error rather than the 500 that atomic-write would produce on the rename.
 pub fn write_file_atomic(absolute_path: &Path, content: &[u8]) -> Result<FileMetadata> {
-    if let Ok(metadata) = std::fs::symlink_metadata(absolute_path) {
-        if metadata.file_type().is_dir() {
-            return Err(StackError::WorkspacePathInvalid {
-                reason: "target is a directory; refusing to write".to_owned(),
-                requested: display_relative(absolute_path),
-            });
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(absolute_path)
+        && metadata.file_type().is_dir()
+    {
+        return Err(StackError::WorkspacePathInvalid {
+            reason: "target is a directory; refusing to write".to_owned(),
+            requested: display_relative(absolute_path),
+        });
     }
     atomic_write_owner_only(absolute_path, content).map_err(translate_atomic_write_error)?;
     let metadata = std::fs::metadata(absolute_path).map_err(|source| StackError::WorkspaceIo {

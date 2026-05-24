@@ -381,37 +381,35 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
     // The weakness checks only fire when the empty check didn't already
     // catch the key — an empty key is already a `critical` finding, and
     // reporting both for the same key would be noise.
-    if !inputs.session_key_empty {
-        if let Some(value) = inputs.session_key_value {
-            if key_is_weak(value) {
-                findings.push(
-                    SecurityFinding::warning(
-                        "auth.session_key_weak",
-                        "session API key is too short or matches a known weak placeholder",
-                    )
-                    .with_remediation(
-                        "Run `acps auth regenerate-session-key` to replace the key \
+    if !inputs.session_key_empty
+        && let Some(value) = inputs.session_key_value
+        && key_is_weak(value)
+    {
+        findings.push(
+            SecurityFinding::warning(
+                "auth.session_key_weak",
+                "session API key is too short or matches a known weak placeholder",
+            )
+            .with_remediation(
+                "Run `acps auth regenerate-session-key` to replace the key \
                          with a 32-byte random value.",
-                    ),
-                );
-            }
-        }
+            ),
+        );
     }
-    if !inputs.admin_key_empty {
-        if let Some(value) = inputs.admin_key_value {
-            if key_is_weak(value) {
-                findings.push(
-                    SecurityFinding::warning(
-                        "auth.admin_key_weak",
-                        "admin API key is too short or matches a known weak placeholder",
-                    )
-                    .with_remediation(
-                        "Run `acps reset --yes` and re-run `acps init` to provision a \
+    if !inputs.admin_key_empty
+        && let Some(value) = inputs.admin_key_value
+        && key_is_weak(value)
+    {
+        findings.push(
+            SecurityFinding::warning(
+                "auth.admin_key_weak",
+                "admin API key is too short or matches a known weak placeholder",
+            )
+            .with_remediation(
+                "Run `acps reset --yes` and re-run `acps init` to provision a \
                          new admin key; the admin key cannot be rotated in place.",
-                    ),
-                );
-            }
-        }
+            ),
+        );
     }
 
     for posture in inputs.path_postures {
@@ -460,44 +458,44 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
                 )),
             );
         }
-        if let Some(expected_mode) = posture.kind.expected_mode() {
-            if posture.mode != expected_mode {
-                // Linux `chmod` follows symlinks and has no `-h` equivalent
-                // for permissions, so the usual remediation would mutate the
-                // wrong target. The runtime never installs symlinks at
-                // managed paths (`fs_util::create_dir_owner_only` refuses);
-                // an operator hitting this case is recovering from external
-                // tampering and needs to remove the link, not chmod through
-                // it. Emit a distinct remediation that says so.
-                let remediation = if posture.is_symlink {
-                    format!(
-                        "{label} at {path_quoted} is a symlink; \
+        if let Some(expected_mode) = posture.kind.expected_mode()
+            && posture.mode != expected_mode
+        {
+            // Linux `chmod` follows symlinks and has no `-h` equivalent
+            // for permissions, so the usual remediation would mutate the
+            // wrong target. The runtime never installs symlinks at
+            // managed paths (`fs_util::create_dir_owner_only` refuses);
+            // an operator hitting this case is recovering from external
+            // tampering and needs to remove the link, not chmod through
+            // it. Emit a distinct remediation that says so.
+            let remediation = if posture.is_symlink {
+                format!(
+                    "{label} at {path_quoted} is a symlink; \
                          `chmod` would follow it and mutate the wrong \
                          target. Remove the symlink and recreate the \
                          managed path as an owner-only \
                          file/directory.",
-                        label = posture.kind.label(),
-                    )
-                } else {
-                    format!(
-                        "Run `chmod 0{expected_mode:o} -- {path_quoted}` to \
+                    label = posture.kind.label(),
+                )
+            } else {
+                format!(
+                    "Run `chmod 0{expected_mode:o} -- {path_quoted}` to \
                          restore owner-only permissions."
-                    )
-                };
-                findings.push(
-                    SecurityFinding::critical(
-                        "runtime.path_mode_loose",
-                        &format!(
-                            "{label} at {path} has mode 0o{actual:o}, expected 0o{expected:o}",
-                            label = posture.kind.label(),
-                            path = posture.path.display(),
-                            actual = posture.mode,
-                            expected = expected_mode,
-                        ),
-                    )
-                    .with_remediation(remediation),
-                );
-            }
+                )
+            };
+            findings.push(
+                SecurityFinding::critical(
+                    "runtime.path_mode_loose",
+                    &format!(
+                        "{label} at {path} has mode 0o{actual:o}, expected 0o{expected:o}",
+                        label = posture.kind.label(),
+                        path = posture.path.display(),
+                        actual = posture.mode,
+                        expected = expected_mode,
+                    ),
+                )
+                .with_remediation(remediation),
+            );
         }
     }
 

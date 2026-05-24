@@ -99,13 +99,13 @@ pub(super) fn run_logs_command(command: LogsCommand) -> Result<()> {
                     event.created_at, event.level, event.source, event.kind, event.message
                 );
             }
-            if (events.len() as u32) == args.limit {
-                if let Some(last) = events.last() {
-                    eprintln!(
-                        "-- more rows available; pass --after {} to continue",
-                        last.id
-                    );
-                }
+            if (events.len() as u32) == args.limit
+                && let Some(last) = events.last()
+            {
+                eprintln!(
+                    "-- more rows available; pass --after {} to continue",
+                    last.id
+                );
             }
 
             Ok(())
