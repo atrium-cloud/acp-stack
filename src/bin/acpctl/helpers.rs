@@ -14,12 +14,11 @@ use acp_stack::time_util::parse_duration_suffix;
 /// Config-read failures are non-fatal: they fall through to the default path
 /// so `acpctl` keeps working when the config is absent or being edited.
 pub(crate) fn resolve_socket_path() -> Option<PathBuf> {
-    if let Ok(path) = acp_stack::config::default_config_path() {
-        if let Ok(config) = acp_stack::config::Config::load_from_path(&path) {
-            if let Some(socket) = config.acpctl.socket_path.as_deref() {
-                return Some(PathBuf::from(socket));
-            }
-        }
+    if let Ok(path) = acp_stack::config::default_config_path()
+        && let Ok(config) = acp_stack::config::Config::load_from_path(&path)
+        && let Some(socket) = config.acpctl.socket_path.as_deref()
+    {
+        return Some(PathBuf::from(socket));
     }
     default_socket_path()
 }

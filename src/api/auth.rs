@@ -37,47 +37,47 @@ pub(super) async fn authenticate(
 
     // Short-circuit blocked IPs before bearer comparison. The blocker entry
     // is reset on successful authenticate via record_success below.
-    if let Some(ip) = resolved_ip {
-        if let Some(until) = state.auth_failure_blocker.check(ip) {
-            let until_secs = until
-                .saturating_duration_since(std::time::Instant::now())
-                .as_secs();
-            persist_security_event(
-                &state,
-                crate::state::EVENT_SOURCE_API,
-                "warn",
-                "security.ip_block_active",
-                "blocked IP attempted auth",
-                payload_with_origin(
-                    serde_json::json!({
-                        "ip": ip.to_string(),
-                        "remaining_seconds": until_secs,
-                        "route": route,
-                    }),
-                    &origin,
-                ),
-            )
-            .await;
-            return reject(
-                StatusCode::TOO_MANY_REQUESTS,
-                "auth.ip_blocked",
-                "IP temporarily blocked due to repeated auth failures",
-            );
-        }
+    if let Some(ip) = resolved_ip
+        && let Some(until) = state.auth_failure_blocker.check(ip)
+    {
+        let until_secs = until
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs();
+        persist_security_event(
+            &state,
+            crate::state::EVENT_SOURCE_API,
+            "warn",
+            "security.ip_block_active",
+            "blocked IP attempted auth",
+            payload_with_origin(
+                serde_json::json!({
+                    "ip": ip.to_string(),
+                    "remaining_seconds": until_secs,
+                    "route": route,
+                }),
+                &origin,
+            ),
+        )
+        .await;
+        return reject(
+            StatusCode::TOO_MANY_REQUESTS,
+            "auth.ip_blocked",
+            "IP temporarily blocked due to repeated auth failures",
+        );
     }
 
     // Per-IP rate limit ticks on every request before bearer parsing. This is
     // the always-on cap; bursts that exceed it cost the attacker zero local
     // CPU since we reject before constant-time compare runs.
-    if let Some(ip) = resolved_ip {
-        if let Err(scope) = state.rate_limiter.check_per_ip(ip) {
-            persist_rate_limit_event(&state, &route, ip, scope, None, &origin).await;
-            return reject(
-                StatusCode::TOO_MANY_REQUESTS,
-                "auth.rate_limited",
-                "rate limit exceeded",
-            );
-        }
+    if let Some(ip) = resolved_ip
+        && let Err(scope) = state.rate_limiter.check_per_ip(ip)
+    {
+        persist_rate_limit_event(&state, &route, ip, scope, None, &origin).await;
+        return reject(
+            StatusCode::TOO_MANY_REQUESTS,
+            "auth.rate_limited",
+            "rate limit exceeded",
+        );
     }
 
     // Spec hardening (`docs/specs/security.md`): reject duplicate or malformed
@@ -678,28 +678,27 @@ async fn log_failure(
     // Tick the in-memory blocker. If this failure just tripped the threshold,
     // emit a security.ip_block_applied event so operators see the block via
     // GET /v1/logs/security.
-    if let Some(ip_str) = client_ip {
-        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-            if state.auth_failure_blocker.record_failure(ip) {
-                let block_secs = state.auth_failure_blocker.block_duration().as_secs();
-                persist_security_event(
-                    state,
-                    crate::state::EVENT_SOURCE_API,
-                    "warn",
-                    "security.ip_block_applied",
-                    "IP blocked due to repeated auth failures",
-                    payload_with_origin(
-                        serde_json::json!({
-                            "ip": ip_str,
-                            "block_duration_seconds": block_secs,
-                            "route": route,
-                        }),
-                        origin,
-                    ),
-                )
-                .await;
-            }
-        }
+    if let Some(ip_str) = client_ip
+        && let Ok(ip) = ip_str.parse::<std::net::IpAddr>()
+        && state.auth_failure_blocker.record_failure(ip)
+    {
+        let block_secs = state.auth_failure_blocker.block_duration().as_secs();
+        persist_security_event(
+            state,
+            crate::state::EVENT_SOURCE_API,
+            "warn",
+            "security.ip_block_applied",
+            "IP blocked due to repeated auth failures",
+            payload_with_origin(
+                serde_json::json!({
+                    "ip": ip_str,
+                    "block_duration_seconds": block_secs,
+                    "route": route,
+                }),
+                origin,
+            ),
+        )
+        .await;
     }
     Ok(())
 }

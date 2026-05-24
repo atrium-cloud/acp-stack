@@ -215,10 +215,10 @@ fn parse_response(raw: &[u8]) -> LocalResponse {
         .expect("status code numeric");
     let mut content_length = None;
     for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse::<usize>().ok();
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse::<usize>().ok();
         }
     }
     let body_start = header_end + 4;

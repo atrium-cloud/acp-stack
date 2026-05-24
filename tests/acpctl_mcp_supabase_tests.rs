@@ -93,10 +93,10 @@ async fn handle_one_request(mut stream: TcpStream) -> Option<CapturedRequest> {
     let path = parts.next()?.to_owned();
     let mut content_length = 0usize;
     for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
-            }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse().unwrap_or(0);
         }
     }
     let body_start = header_end + 4;

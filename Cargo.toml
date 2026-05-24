@@ -5,7 +5,7 @@ edition = "2024"
 description = "Self-hostable Linux runtime for ACP-compatible agents."
 license = "Apache-2.0"
 readme = "README.md"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [lib]
 path = "src/lib.rs"

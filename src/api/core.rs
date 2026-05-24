@@ -193,10 +193,10 @@ impl AppState {
         // the same value. Failures here are non-fatal: an agent whose id is
         // unknown to the registry simply has no adapter metadata, which is
         // the correct outcome for native agents and operator escape hatches.
-        if config.agent.adapter.is_none() {
-            if let Ok(registry) = load_active_registry() {
-                populate_agent_adapter_from_registry(&mut config, &registry);
-            }
+        if config.agent.adapter.is_none()
+            && let Ok(registry) = load_active_registry()
+        {
+            populate_agent_adapter_from_registry(&mut config, &registry);
         }
         let api_cap = config.api.max_request_bytes;
         let security_cap = config.security.http.max_request_bytes;
@@ -273,24 +273,19 @@ fn populate_agent_adapter_from_registry(
     config: &mut Config,
     registry: &crate::agent_registry::RegistryCatalog,
 ) {
-    if let Some(entry) = registry.lookup(&config.agent.id) {
-        if matches!(entry.kind, crate::agent_registry::RegistryKind::Adapter) {
-            if let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter) {
-                config.agent.adapter = Some(crate::config::AgentAdapterConfig {
-                    id: adapter.id.clone(),
-                    name: entry.name.clone(),
-                    upstream_agent: harness.id.clone(),
-                    source_url: adapter.github.as_deref().and_then(|github| {
-                        crate::agent_registry::github_url_from_value(
-                            &entry.id,
-                            "adapter.github",
-                            github,
-                        )
-                        .ok()
-                    }),
-                });
-            }
-        }
+    if let Some(entry) = registry.lookup(&config.agent.id)
+        && matches!(entry.kind, crate::agent_registry::RegistryKind::Adapter)
+        && let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter)
+    {
+        config.agent.adapter = Some(crate::config::AgentAdapterConfig {
+            id: adapter.id.clone(),
+            name: entry.name.clone(),
+            upstream_agent: harness.id.clone(),
+            source_url: adapter.github.as_deref().and_then(|github| {
+                crate::agent_registry::github_url_from_value(&entry.id, "adapter.github", github)
+                    .ok()
+            }),
+        });
     }
 }
 

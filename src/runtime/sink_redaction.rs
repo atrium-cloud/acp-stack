@@ -67,12 +67,11 @@ fn redact_sessions_row(row: &mut Map<String, Value>) -> Result<()> {
     // so an upstream regression that stuffs secrets into metadata cannot leak.
     if let Some(metadata) = row.get_mut("metadata_json") {
         let mut redacted = Map::new();
-        if let Some(obj) = metadata.as_object() {
-            if let Some(agent_id) = obj.get("agent_id") {
-                if let Some(value) = safe_json_scalar(agent_id) {
-                    redacted.insert("agent_id".to_owned(), value);
-                }
-            }
+        if let Some(obj) = metadata.as_object()
+            && let Some(agent_id) = obj.get("agent_id")
+            && let Some(value) = safe_json_scalar(agent_id)
+        {
+            redacted.insert("agent_id".to_owned(), value);
         }
         *metadata = Value::Object(redacted);
     }
@@ -183,10 +182,10 @@ fn redact_auth_failures_row(row: &mut Map<String, Value>) -> Result<()> {
     // auth reason codes emitted by the runtime; redact anything else. `route`
     // is an unauthenticated request path and can contain path-embedded tokens.
     row.insert("payload_json".to_owned(), Value::Object(Map::new()));
-    if let Some(reason) = row.get_mut("reason") {
-        if let Some(text) = reason.as_str() {
-            *reason = redact_auth_failure_reason(text);
-        }
+    if let Some(reason) = row.get_mut("reason")
+        && let Some(text) = reason.as_str()
+    {
+        *reason = redact_auth_failure_reason(text);
     }
     if row.contains_key("route") {
         row.insert("route".to_owned(), Value::Null);
@@ -209,10 +208,10 @@ fn redact_json_column(row: &mut Map<String, Value>, column: &str, allow: &[&str]
     let mut filtered = Map::new();
     if let Some(Value::Object(obj)) = row.get(column) {
         for key in allow {
-            if let Some(v) = obj.get(*key) {
-                if let Some(value) = safe_json_scalar(v) {
-                    filtered.insert((*key).to_owned(), value);
-                }
+            if let Some(v) = obj.get(*key)
+                && let Some(value) = safe_json_scalar(v)
+            {
+                filtered.insert((*key).to_owned(), value);
             }
         }
     }
@@ -229,10 +228,10 @@ fn safe_json_scalar(value: &Value) -> Option<Value> {
 /// Replace a top-level string column with a length stamp. No-op when the field
 /// is null or absent.
 fn redact_string_field(row: &mut Map<String, Value>, key: &str) {
-    if let Some(v) = row.get_mut(key) {
-        if let Some(text) = v.as_str() {
-            *v = Value::String(format!("[redacted; {} bytes]", text.len()));
-        }
+    if let Some(v) = row.get_mut(key)
+        && let Some(text) = v.as_str()
+    {
+        *v = Value::String(format!("[redacted; {} bytes]", text.len()));
     }
 }
 
