@@ -98,11 +98,40 @@ env_allowlist = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
 max_output_bytes = 1048576
 
 [dependencies]
-# Each entry: { name, required = true, feature = "<optional label>" }
-commands = [{ name = "git" }, { name = "ripgrep", required = false }]
+# Each entry: { name, required = true, feature = "<optional label>",
+#               install = <optional install action, commands only> }
 packages = []
 runtimes = []
 mcp = [{ name = "linear" }]    # cross-references [[mcp.servers]] names
+
+# Use array-of-tables syntax for `commands` so each entry can carry
+# the optional `[install]` block. Mixing inline-array `commands = [..]`
+# with `[[dependencies.commands]]` later in the same file is invalid
+# TOML.
+[[dependencies.commands]]
+name = "git"
+
+[[dependencies.commands]]
+name = "ripgrep"
+required = false
+
+# Optional per-command install action consumed by `acps deps apply`.
+# `install` is rejected on `packages`, `runtimes`, and `mcp` — only
+# `commands` is actionable. The runner runs `shell` through
+# `[workspace].default_shell -c`, captures stdout/stderr/exit, then
+# verifies `creates` (PATH name or absolute path) resolves to an
+# executable file. `scope = "system"` declares the action needs root;
+# the daemon refuses to run it under a non-root uid.
+[[dependencies.commands]]
+name = "cloudflared"
+required = true
+feature = "cloudflare-tunnel"
+
+[dependencies.commands.install]
+shell = "curl -fsSL https://pkg.cloudflare.com/install.sh | sh"
+creates = "cloudflared"
+scope = "user"          # "user" (default) or "system"
+# timeout_secs = 600    # optional override; default 10m
 
 [[mcp.servers]]
 type = "http"
@@ -117,7 +146,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[commands]` controls the Command Gateway runtime. `default_timeout` and `cancel_grace` accept short duration suffixes (`ms`, `s`, `m`, `h`). `env_allowlist` is the closed set of environment variable names the daemon will forward into command children; secrets from the encrypted store are never injected implicitly. `max_output_bytes` caps the total bytes persisted per run; once exceeded the row's `truncated` flag is set and further output is drained but not stored.
 
-`[dependencies]` declares external programs, packages, runtimes, and MCP servers that the operator expects to be available. The runtime reports their satisfaction status via `GET /v1/deps` and `acps deps check` but does not install anything. Today only `commands` are checked (PATH lookup); `packages` and `runtimes` are declarative-only with `<kind>-check-not-implemented` reasons; `mcp` cross-references `[[mcp.servers]]` for declaration presence.
+`[dependencies]` declares external programs, packages, runtimes, and MCP servers that the operator expects to be available. The runtime reports their satisfaction status via `GET /v1/deps` and `acps deps check` and runs declared install actions via `acps deps apply` / `POST /v1/deps/apply`. Only `commands` may declare an `[install]` block (validation rejects `install` on `packages`/`runtimes`/`mcp`); `apply` runs each declared snippet after explicit confirmation, captures stdout/stderr/exit/timestamps into `installer_runs` tagged `agent_id = "deps_apply"` / `step = "deps_apply"`, verifies the `creates` postcheck resolves to an executable file, and prints before/after status. The runtime never derives an apt/brew/yum invocation — every actionable install is operator-declared verbatim. `packages` and `runtimes` are declarative-only with `<kind>-check-not-implemented` reasons; `mcp` cross-references `[[mcp.servers]]` for declaration presence.
 
 `[mcp.servers]` declares MCP servers passed to the agent at session create/load/resume time. Each entry is either `type = "stdio"` (with `command`, optional `args`, and an `env` list of secret-ref names) or `type = "http"` (with `url` and a `headers` list of `{ name, value_ref }`). Stdio env values and HTTP header values are resolved from the encrypted secret store on every session call — they never enter the durable event log or any HTTP response. `mcp.session_attached` events record only the server names attached to a session. See [mcp.md](mcp.md) for the Linear HTTP MCP example with secret setup.
 

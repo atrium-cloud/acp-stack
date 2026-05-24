@@ -230,10 +230,9 @@ Secret values are never returned through API, CLI logs, errors, metrics, or WebS
 
 ### Dependencies API
 
-Session-tier.
-
-- `GET /v1/deps` - returns declared dependencies and satisfaction status.
-- `POST /v1/deps/check` - re-runs validation.
+- `GET /v1/deps` (session-tier) - returns declared dependencies and satisfaction status.
+- `POST /v1/deps/check` (session-tier) - re-runs validation.
+- `POST /v1/deps/apply` (admin-tier) - narrow installer for command deps that declare an `[install]` block. Body `{ confirmation: false }` (or omitted body) returns a structured preview listing every candidate action; `{ confirmation: true }` runs the snippets and returns `{ applied: true, candidates: [...], report: { before, after, results } }`. Optional `feature` field narrows to one declared feature. Per-action outcomes persist as `installer_runs` rows tagged `agent_id = "deps_apply"` / `step = "deps_apply"`. The runner refuses `scope = "system"` actions when the daemon is not root.
 
 Phase 2 reports missing dependencies but does not attempt broad installation by default. Commands are checked via PATH lookup. Packages, runtimes, and MCP cross-references are declarative-only and report `available = false` with a `<kind>-check-not-implemented` reason in this phase (MCP entries cross-reference `[[mcp.servers]]` for declaration presence).
 
