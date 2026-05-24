@@ -50,7 +50,7 @@ use super::routes::config::{
     config_export_handler, config_import_handler, config_validate_handler, secrets_delete_handler,
     secrets_list_handler, secrets_set_handler,
 };
-use super::routes::deps::{deps_check_handler, deps_get_handler};
+use super::routes::deps::{deps_apply_handler, deps_check_handler, deps_get_handler};
 use super::routes::logs::{
     logs_commands_handler, logs_events_handler, logs_permissions_handler, logs_security_handler,
     logs_sessions_handler,
@@ -401,6 +401,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/agent/start", post(agent_start_handler))
         .route("/v1/agent/stop", post(agent_stop_handler))
         .route("/v1/agent/restart", post(agent_restart_handler))
+        .route("/v1/deps/apply", post(deps_apply_handler))
         .route("/v1/config/import", post(config_import_handler))
         .route(
             "/v1/secrets",

@@ -2499,6 +2499,73 @@ fn installer_history_rejects_zero_limit() {
 }
 
 #[test]
+fn deps_apply_prints_before_and_after_status() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+
+    let dependency_name = "deps-apply-before-after-marker";
+    let feature = "deps-apply-before-after";
+    let marker = tempdir.path().join("deps-apply-marker");
+    let shell = format!(
+        "printf '#!/bin/sh\\nexit 0\\n' > {marker} && chmod 755 {marker}",
+        marker = shell_quote_path(&marker),
+    );
+    let config = VALID_CONFIG.replace(
+        "[agent]",
+        &format!(
+            r#"[[dependencies.commands]]
+name = "{dependency_name}"
+required = true
+feature = "{feature}"
+
+[dependencies.commands.install]
+shell = {}
+creates = {}
+
+[agent]"#,
+            toml_string(&shell),
+            toml_string(&marker.to_string_lossy()),
+        ),
+    );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["deps", "apply", "--yes", "--feature", feature])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("stdout should be utf8");
+
+    let before_index = stdout.find("before:\n").expect("before section");
+    let results_index = stdout.find("results:\n").expect("results section");
+    let after_index = stdout.find("after:\n").expect("after section");
+    assert!(
+        before_index < results_index && results_index < after_index,
+        "expected before/results/after ordering, got:\n{stdout}",
+    );
+    assert!(
+        stdout[before_index..results_index].contains(&format!("  MISS {dependency_name}")),
+        "before section must report missing dependency, got:\n{stdout}",
+    );
+    assert!(
+        stdout[after_index..].contains(&format!("  OK   {dependency_name}")),
+        "after section must report available dependency, got:\n{stdout}",
+    );
+}
+
+#[test]
 fn agent_status_surfaces_installed_versions_from_state() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");

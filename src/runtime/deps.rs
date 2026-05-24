@@ -161,6 +161,7 @@ mod tests {
                 name: "sh".to_owned(),
                 required: true,
                 feature: None,
+                install: None,
             }],
             ..Default::default()
         };
@@ -177,6 +178,7 @@ mod tests {
                 name: "definitely-not-installed-12345".to_owned(),
                 required: true,
                 feature: Some("test".to_owned()),
+                install: None,
             }],
             ..Default::default()
         };
@@ -194,6 +196,7 @@ mod tests {
                 name: "slack".to_owned(),
                 required: false,
                 feature: None,
+                install: None,
             }],
             ..Default::default()
         };
@@ -216,6 +219,7 @@ mod tests {
                 name: "linear".to_owned(),
                 required: true,
                 feature: None,
+                install: None,
             }],
             ..Default::default()
         };

@@ -113,7 +113,22 @@ Phase 4 expands init into a resumable orchestration flow:
 - configure declared MCP servers and presets
 - run a real-prompt agent testflight after explicit confirmation
 
-Dependency installation requires explicit install metadata and remains a separate future `deps apply`/`data/deps.toml` surface. `acps init` does not infer OS package-manager actions from declarative dependency checks.
+Dependency installation requires explicit install metadata. `acps init` does not infer OS package-manager actions from declarative dependency checks. The `[dependencies.commands.install]` block is the operator's declared install snippet for that command; `acps deps apply` runs each declared snippet after explicit confirmation and verifies the `creates` postcheck. There is no cross-distro reconciliation, no auto-derived package names, no privileged action without an explicit `scope = "system"` opt-in:
+
+```toml
+[[dependencies.commands]]
+name = "cloudflared"
+required = true
+feature = "cloudflare-tunnel"
+
+[dependencies.commands.install]
+shell = "curl -fsSL https://pkg.cloudflare.com/install.sh | sh"
+creates = "cloudflared"     # PATH or absolute path; verified post-install
+scope = "user"              # or "system"; system actions need uid 0
+# timeout_secs = 600        # optional override (default 10m)
+```
+
+`acps deps apply [--yes] [--feature <name>]` runs every eligible action. Without `--yes` the CLI prompts interactively; in non-interactive mode `--yes` is required. The `--feature` filter narrows to one declared feature so the operator can apply a single subset. Per-action outcomes (`installed`, `already`, `failed`, `privreq`) are persisted as `installer_runs` rows tagged `agent_id = "deps_apply"` / `step = "deps_apply"`, so `acps installer history --agent deps_apply` shows the audit trail.
 
 For supported OpenCode and Pi configs, `acps init` does not infer model config from default API-key refs. Init may select the initial provider, collect the required provider refs, and write `[agent.provider]` without a model. `acps agent set` is the edit path that can later write the model.
 
