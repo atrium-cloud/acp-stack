@@ -51,7 +51,8 @@ pub use permissions::{
 };
 pub use records::{CommandFilter, EventFilter, LogFilter, SessionFilter};
 pub use sessions::{
-    ListedSessionRecord, ListedSessionUpsertCounts, NewPromptRecord, NewSessionRecord,
-    PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, SessionRecord,
+    DEFAULT_SESSION_ACTIVITY_THRESHOLD, ListedSessionRecord, ListedSessionUpsertCounts,
+    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
+    SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
+    SESSION_STATUS_CLOSED, SessionActivityRecord, SessionRecord, SessionUpdateBounds,
 };
