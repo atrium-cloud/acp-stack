@@ -79,6 +79,28 @@ Phase 4 provider/model API:
 
 These map to ACP session methods where supported by the configured agent.
 
+`GET /v1/sessions` returns the durable local session list. Before querying
+SQLite, the daemon attempts ACP `session/list` when the agent is running and
+advertises `sessionCapabilities.list`; each returned `SessionInfo` is upserted
+into `sessions`, preserving local `active` and `closed` rows and inserting newly
+discovered rows as `status = "available"`. `available` means the session is
+known from ACP discovery but is not loaded/active in this runtime.
+`session/list` is discovery only: callers must load or resume an available
+session before prompting it.
+The response includes explicit sync metadata:
+
+```json
+{
+  "sessions": [],
+  "agent_sync": {
+    "attempted": true,
+    "status": "synced|unsupported|not_running",
+    "upserted": 0,
+    "updated": 0
+  }
+}
+```
+
 `POST /v1/sessions/{id}/prompt` is fire-and-forget: it enqueues the prompt on
 a background task and returns `{ prompt_id, status }` immediately. Clients may
 subscribe to `sessions.{id}` on `/v1/ws` for live ACP `session/update` fanout,
