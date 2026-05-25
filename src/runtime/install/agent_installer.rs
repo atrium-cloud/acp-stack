@@ -32,11 +32,11 @@
 //! mirrors the `which` semantics required by `docs/specs/runtime.md` without
 //! a dependency on the `which` crate.
 
+mod step_logs;
+mod step_runners;
+
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
@@ -44,14 +44,15 @@ use sha2::{Digest, Sha256};
 use crate::config::{AgentConfig, AgentInstallConfig};
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{
-    ArchiveKind, GithubInstall, InstallSet, RegistryEntry, RegistryKind, github_repo_from_url,
+    ArchiveKind, InstallSet, RegistryEntry, RegistryKind,
 };
-use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::state::{INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore};
 
-const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub use self::step_logs::persist_step_logs_to_disk;
+
+use self::step_runners::{finalize_shell_step, run_install_step, run_shell_install};
+
 pub const MAX_INSTALLER_STREAM_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
-const STDERR_TAIL_BYTES: usize = 2 * 1024;
 
 // Step labels persisted to `installer_runs.step`. Centralized here so the
 // state-side filter that the future operator UI will use stays consistent
@@ -193,136 +194,6 @@ pub fn run_installer(
         apply_run_id: None,
     })?;
     result.outcome
-}
-
-/// Write the unbounded stdout/stderr for a single installer step to a
-/// per-step directory under `log_base/<agent_id>/<sanitized started_at>/<step>/`
-/// and stamp the path onto the row. Skipped step rows have empty streams,
-/// so we don't bother creating a directory in that case. Persistence is
-/// fail-fast because the full logs are the audit copy; the caller should not
-/// append a history row claiming a completed run when that copy was lost.
-pub fn persist_step_logs_to_disk(
-    row: &mut InstallerRowDraft,
-    agent_id: &str,
-    log_base: Option<&Path>,
-) -> Result<()> {
-    let Some(base) = log_base else {
-        return Ok(());
-    };
-    if row.stdout.is_empty() && row.stderr.is_empty() {
-        return Ok(());
-    }
-    let sanitized_started = sanitize_for_path(&row.started_at);
-    let log_dir = base
-        .join(sanitize_for_path(agent_id))
-        .join(sanitized_started)
-        .join(sanitize_for_path(&row.step));
-    create_dir_tree_synced(&log_dir)?;
-    if !row.stdout.is_empty() {
-        write_synced_log_file(&log_dir.join("stdout"), row.stdout.as_bytes())?;
-    }
-    if !row.stderr.is_empty() {
-        write_synced_log_file(&log_dir.join("stderr"), row.stderr.as_bytes())?;
-    }
-    sync_directory(&log_dir)?;
-    row.log_dir = Some(log_dir.to_string_lossy().into_owned());
-    Ok(())
-}
-
-fn create_dir_tree_synced(path: &Path) -> Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        if current.as_os_str().is_empty() || current == Path::new("/") {
-            continue;
-        }
-        match std::fs::metadata(&current) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(StackError::AgentInstallerLogPersist {
-                    path: current,
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "path exists and is not a directory",
-                    ),
-                });
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|source| {
-                    StackError::AgentInstallerLogPersist {
-                        path: current.clone(),
-                        source,
-                    }
-                })?;
-                sync_parent_directory(&current)?;
-            }
-            Err(source) => {
-                return Err(StackError::AgentInstallerLogPersist {
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_synced_log_file(path: &Path, body: &[u8]) -> Result<()> {
-    let mut file =
-        std::fs::File::create(path).map_err(|source| StackError::AgentInstallerLogPersist {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(body)
-        .map_err(|source| StackError::AgentInstallerLogPersist {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.sync_all()
-        .map_err(|source| StackError::AgentInstallerLogPersist {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-fn sync_parent_directory(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    sync_directory(parent)
-}
-
-fn sync_directory(path: &Path) -> Result<()> {
-    let directory =
-        std::fs::File::open(path).map_err(|source| StackError::AgentInstallerLogPersist {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    directory
-        .sync_all()
-        .map_err(|source| StackError::AgentInstallerLogPersist {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-/// Convert an arbitrary string into a path-safe single segment. Replaces
-/// `/`, `\`, and ASCII control chars with `_`. The `agent_id` and `step`
-/// values are already safe (alphanumeric and `-`), so this is defense in
-/// depth; `started_at` carries `:` which is fine on POSIX but worth keeping
-/// readable.
-fn sanitize_for_path(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '/' | '\\') {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect()
 }
 
 /// Run the escape-hatch installer WITHOUT touching the state store. Returns
@@ -566,9 +437,9 @@ pub fn install_resolved_capture(
 /// every attempt is preserved for audit, not just the winner);
 /// `terminal_error` is `None` when any path succeeded, otherwise the
 /// LAST path's error.
-struct FallbackChain {
-    rows: Vec<InstallerRowDraft>,
-    terminal_error: Option<StackError>,
+pub(super) struct FallbackChain {
+    pub(super) rows: Vec<InstallerRowDraft>,
+    pub(super) terminal_error: Option<StackError>,
 }
 
 /// Try each install path declared on the given field in priority order
@@ -577,7 +448,7 @@ struct FallbackChain {
 /// been exhausted. Each attempt is recorded so the operator can see the
 /// fallback chain after the fact via `acps installer history`.
 #[allow(clippy::too_many_arguments)]
-fn install_one_with_fallback(
+pub(super) fn install_one_with_fallback(
     agent_id: &str,
     field: &str,
     step_label: &'static str,
@@ -592,7 +463,13 @@ fn install_one_with_fallback(
     let mut rows = Vec::new();
     let mut last_error: Option<StackError> = None;
     loop {
-        let spec = match select_install_path(agent_id, field, &remaining, github_url, version_pin) {
+        let spec = match step_runners::select_install_path(
+            agent_id,
+            field,
+            &remaining,
+            github_url,
+            version_pin,
+        ) {
             Ok(spec) => spec,
             Err(err) => {
                 if rows.is_empty() {
@@ -644,7 +521,7 @@ fn install_one_with_fallback(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum InstallPathKind {
+pub(super) enum InstallPathKind {
     Shell,
     Npm,
     Github,
@@ -658,7 +535,7 @@ fn path_kind_of(spec: &ResolvedInstallSpec) -> InstallPathKind {
     }
 }
 
-fn final_verification(
+pub(super) fn final_verification(
     agent: &AgentConfig,
     workspace_root: &Path,
     dest_dir: &Path,
@@ -682,13 +559,13 @@ fn final_verification(
     InstallerSequenceResult { outcome, rows }
 }
 
-struct StepResult {
-    row: InstallerRowDraft,
-    outcome: Result<()>,
+pub(super) struct StepResult {
+    pub(super) row: InstallerRowDraft,
+    pub(super) outcome: Result<()>,
 }
 
 #[derive(Debug, Clone)]
-enum ResolvedInstallSpec {
+pub(super) enum ResolvedInstallSpec {
     Shell {
         script: String,
         creates: String,
@@ -712,740 +589,6 @@ enum ResolvedInstallSpec {
     },
 }
 
-fn select_install_path(
-    agent_id: &str,
-    field: &str,
-    install: &InstallSet,
-    github_url: Option<&str>,
-    version_pin: Option<&str>,
-) -> Result<ResolvedInstallSpec> {
-    if let Some(version) = version_pin {
-        if let Some(github) = &install.github {
-            return resolve_github_install(agent_id, field, github_url, github, Some(version));
-        }
-        if let Some(npm) = &install.npm {
-            return Ok(ResolvedInstallSpec::Npm {
-                package: format!("{}@{version}", npm.package),
-                creates: npm.creates.clone(),
-                version: Some(version.to_owned()),
-            });
-        }
-        return Err(StackError::RegistryLoad {
-            reason: format!(
-                "agent `{agent_id}` {field} cannot honor pinned version `{version}` with shell-only install"
-            ),
-        });
-    }
-
-    if let Some(shell) = &install.shell {
-        return Ok(ResolvedInstallSpec::Shell {
-            script: shell.script.clone(),
-            creates: shell.creates.clone(),
-        });
-    }
-    if let Some(npm) = &install.npm {
-        return Ok(ResolvedInstallSpec::Npm {
-            package: npm.package.clone(),
-            creates: npm.creates.clone(),
-            version: None,
-        });
-    }
-    if let Some(github) = &install.github {
-        return resolve_github_install(agent_id, field, github_url, github, None);
-    }
-
-    Err(StackError::RegistryLoad {
-        reason: format!("agent `{agent_id}` {field} has no install paths"),
-    })
-}
-
-fn resolve_github_install(
-    agent_id: &str,
-    field: &str,
-    github_url: Option<&str>,
-    github: &GithubInstall,
-    version_pin: Option<&str>,
-) -> Result<ResolvedInstallSpec> {
-    let github_url = github_url.ok_or_else(|| StackError::RegistryLoad {
-        reason: format!("agent `{agent_id}` {field}.github requires github URL"),
-    })?;
-    let repo = github_repo_from_url(agent_id, "github", github_url)?;
-    let arch_token = if github.asset_pattern.contains("{arch}")
-        || github
-            .archive_binary_name
-            .as_deref()
-            .is_some_and(|name| name.contains("{arch}"))
-    {
-        let token =
-            github
-                .arch
-                .token_for_host()
-                .ok_or_else(|| StackError::UnsupportedHostArch {
-                    arch: std::env::consts::ARCH,
-                })?;
-        Some(token)
-    } else {
-        None
-    };
-    let asset_pattern = arch_token.map_or_else(
-        || github.asset_pattern.clone(),
-        |token| github.asset_pattern.replace("{arch}", token),
-    );
-    let archive_binary_name = github
-        .archive_binary_name
-        .as_ref()
-        .map(|name| arch_token.map_or_else(|| name.clone(), |token| name.replace("{arch}", token)));
-    Ok(ResolvedInstallSpec::GithubRelease {
-        repo,
-        asset_pattern,
-        archive: github.archive,
-        archive_binary_name,
-        binary_name: github.binary_name.clone(),
-        checksums_asset: github.checksums_asset.clone(),
-        version_pin: version_pin.map(str::to_owned),
-    })
-}
-
-fn run_install_step(
-    step_label: &'static str,
-    spec: ResolvedInstallSpec,
-    agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
-    dest_dir: &Path,
-) -> StepResult {
-    let started_at = current_timestamp();
-    match spec {
-        ResolvedInstallSpec::Shell { script, creates } => {
-            let result = run_shell_install(&script, agent_env, workspace_root, &[dest_dir]);
-            shell_step_with_creates(
-                step_label,
-                started_at,
-                result,
-                &creates,
-                workspace_root,
-                &[dest_dir],
-                None,
-            )
-        }
-        ResolvedInstallSpec::Npm {
-            package,
-            creates,
-            version,
-        } => {
-            let (package, version) = match version {
-                Some(version) => (package, version),
-                None => match resolve_npm_package_version(
-                    step_label,
-                    started_at.clone(),
-                    &package,
-                    agent_env,
-                    workspace_root,
-                    dest_dir,
-                ) {
-                    Ok(version) => (npm_package_with_version(&package, &version), version),
-                    Err(step) => return *step,
-                },
-            };
-            let result = run_npm_install(&package, agent_env, workspace_root, dest_dir);
-            shell_step_with_creates(
-                step_label,
-                started_at,
-                result,
-                &creates,
-                workspace_root,
-                &[dest_dir],
-                Some(version),
-            )
-        }
-        ResolvedInstallSpec::GithubRelease {
-            repo,
-            asset_pattern,
-            archive,
-            archive_binary_name,
-            binary_name,
-            checksums_asset,
-            version_pin,
-        } => {
-            let install = GithubReleaseInstall {
-                repo: &repo,
-                asset_pattern: &asset_pattern,
-                archive,
-                archive_binary_name: archive_binary_name.as_deref(),
-                binary_name: &binary_name,
-                checksums_asset: checksums_asset.as_deref(),
-            };
-            github_release_step(
-                step_label,
-                started_at,
-                install,
-                version_pin.as_deref(),
-                agent_env,
-                dest_dir,
-            )
-        }
-    }
-}
-
-fn shell_step_with_creates(
-    step_label: &'static str,
-    started_at: String,
-    run_result: Result<CapturedOutput>,
-    creates: &str,
-    workspace_root: &Path,
-    extra_path_dirs: &[&Path],
-    version: Option<String>,
-) -> StepResult {
-    let finished_at = current_timestamp();
-    match run_result {
-        Ok(captured) => {
-            let exit_ok = captured.exit_status == Some(0);
-            let mut row = InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: if exit_ok { "ran" } else { "failed" }.into(),
-                stdout: captured.stdout.clone(),
-                stderr: captured.stderr.clone(),
-                exit_status: captured.exit_status,
-                step: step_label.to_owned(),
-                version: version.clone(),
-                log_dir: None,
-            };
-            if !exit_ok {
-                return StepResult {
-                    outcome: Err(StackError::AgentInstallerFailed {
-                        exit: captured.exit_status,
-                        stderr_tail: tail_bytes(&captured.stderr, STDERR_TAIL_BYTES),
-                    }),
-                    row,
-                };
-            }
-            let outcome = resolve_creates(creates, workspace_root, extra_path_dirs)
-                .map(|_| ())
-                .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
-                    name: creates.to_owned(),
-                });
-            if let Err(err) = &outcome {
-                row.status = "failed".to_owned();
-                row.stderr = append_stderr_detail(&row.stderr, err);
-            }
-            StepResult { outcome, row }
-        }
-        Err(StackError::AgentInstallerTimeout) => StepResult {
-            outcome: Err(StackError::AgentInstallerTimeout),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "timeout".into(),
-                stdout: String::new(),
-                stderr: "[installer timed out]".into(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                version: version.clone(),
-                log_dir: None,
-            },
-        },
-        Err(err) => StepResult {
-            outcome: Err(err),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "error".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                version,
-                log_dir: None,
-            },
-        },
-    }
-}
-
-fn github_release_step(
-    step_label: &'static str,
-    started_at: String,
-    install: GithubReleaseInstall<'_>,
-    version_pin: Option<&str>,
-    agent_env: &HashMap<String, String>,
-    dest_dir: &Path,
-) -> StepResult {
-    let result = github_release::install(install, version_pin, dest_dir, agent_env);
-    let finished_at = current_timestamp();
-    match result {
-        Ok(outcome) => StepResult {
-            outcome: Ok(()),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "ran".into(),
-                stdout: outcome.log,
-                stderr: String::new(),
-                exit_status: Some(0),
-                step: step_label.to_owned(),
-                version: Some(outcome.release_tag),
-                log_dir: None,
-            },
-        },
-        Err(err) => {
-            let stderr = err.to_string();
-            StepResult {
-                outcome: Err(err),
-                row: InstallerRowDraft {
-                    started_at,
-                    finished_at: Some(finished_at),
-                    status: "error".into(),
-                    stdout: String::new(),
-                    stderr,
-                    exit_status: None,
-                    step: step_label.to_owned(),
-                    version: version_pin.map(str::to_owned),
-                    log_dir: None,
-                },
-            }
-        }
-    }
-}
-
-fn finalize_shell_step(
-    step_label: &'static str,
-    started_at: String,
-    run_result: Result<CapturedOutput>,
-    creates: &str,
-    expected_sha256: Option<&str>,
-    workspace_root: &Path,
-) -> InstallerResult {
-    let finished_at = current_timestamp();
-    match run_result {
-        Ok(captured) => {
-            let exit_ok = captured.exit_status == Some(0);
-            let mut row = InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: if exit_ok { "ran" } else { "failed" }.into(),
-                stdout: captured.stdout.clone(),
-                stderr: captured.stderr.clone(),
-                exit_status: captured.exit_status,
-                step: step_label.to_owned(),
-                version: None,
-                log_dir: None,
-            };
-            if !exit_ok {
-                return InstallerResult {
-                    outcome: Err(StackError::AgentInstallerFailed {
-                        exit: captured.exit_status,
-                        stderr_tail: tail_bytes(&captured.stderr, STDERR_TAIL_BYTES),
-                    }),
-                    row,
-                };
-            }
-            let outcome = (|| {
-                let resolved = resolve_creates(creates, workspace_root, &[]).ok_or_else(|| {
-                    StackError::AgentInstallerCreatesMissing {
-                        name: creates.to_owned(),
-                    }
-                })?;
-                let sha256 = sha256_of_file(&resolved)?;
-                verify_expected_sha256(expected_sha256, &sha256)?;
-                Ok(InstallerOutcome::Installed {
-                    path: resolved,
-                    sha256,
-                })
-            })();
-            if let Err(err) = &outcome {
-                row.status = "failed".to_owned();
-                row.stderr = append_stderr_detail(&row.stderr, err);
-            }
-            InstallerResult { outcome, row }
-        }
-        Err(StackError::AgentInstallerTimeout) => InstallerResult {
-            outcome: Err(StackError::AgentInstallerTimeout),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "timeout".into(),
-                stdout: String::new(),
-                stderr: "[installer timed out]".into(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                version: None,
-                log_dir: None,
-            },
-        },
-        Err(err) => InstallerResult {
-            outcome: Err(err),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "error".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                version: None,
-                log_dir: None,
-            },
-        },
-    }
-}
-
-fn verify_expected_sha256(expected: Option<&str>, actual: &str) -> Result<()> {
-    match expected {
-        Some(expected) if expected != actual => Err(StackError::AgentSha256Mismatch {
-            expected: expected.to_owned(),
-            actual: actual.to_owned(),
-        }),
-        _ => Ok(()),
-    }
-}
-
-struct CapturedOutput {
-    stdout: String,
-    stderr: String,
-    exit_status: Option<i32>,
-}
-
-fn run_shell_install(
-    shell: &str,
-    agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
-    extra_path_dirs: &[&Path],
-) -> Result<CapturedOutput> {
-    run_program_install(
-        "/bin/sh",
-        &["-c".to_owned(), shell.to_owned()],
-        agent_env,
-        workspace_root,
-        extra_path_dirs,
-    )
-}
-
-fn run_npm_install(
-    package: &str,
-    agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
-    dest_dir: &Path,
-) -> Result<CapturedOutput> {
-    let prefix = dest_dir.parent().ok_or_else(|| StackError::RegistryLoad {
-        reason: format!(
-            "managed bin directory {} has no parent for npm --prefix",
-            dest_dir.display()
-        ),
-    })?;
-    let args = vec![
-        "install".to_owned(),
-        "-g".to_owned(),
-        "--prefix".to_owned(),
-        prefix.to_string_lossy().into_owned(),
-        package.to_owned(),
-    ];
-    run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir])
-}
-
-fn resolve_npm_package_version(
-    step_label: &'static str,
-    started_at: String,
-    package: &str,
-    agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
-    dest_dir: &Path,
-) -> std::result::Result<String, Box<StepResult>> {
-    let args = vec![
-        "view".to_owned(),
-        package.to_owned(),
-        "version".to_owned(),
-        "--json".to_owned(),
-    ];
-    let result = run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir]);
-    match result {
-        Ok(captured) if captured.exit_status == Some(0) => {
-            let parsed = serde_json::from_str::<String>(captured.stdout.trim()).map_err(|err| {
-                format!("npm view {package} version --json returned invalid JSON string: {err}")
-            });
-            match parsed {
-                Ok(version) if !version.trim().is_empty() => Ok(version),
-                Ok(_) => Err(Box::new(npm_version_failure_step(
-                    step_label,
-                    started_at,
-                    captured,
-                    "npm view returned an empty version".to_owned(),
-                ))),
-                Err(reason) => Err(Box::new(npm_version_failure_step(
-                    step_label, started_at, captured, reason,
-                ))),
-            }
-        }
-        Ok(captured) => {
-            let exit = captured.exit_status;
-            let stderr_tail = tail_bytes(&captured.stderr, STDERR_TAIL_BYTES);
-            Err(Box::new(StepResult {
-                outcome: Err(StackError::AgentInstallerFailed { exit, stderr_tail }),
-                row: InstallerRowDraft {
-                    started_at,
-                    finished_at: Some(current_timestamp()),
-                    status: "failed".into(),
-                    stdout: captured.stdout,
-                    stderr: captured.stderr,
-                    exit_status: captured.exit_status,
-                    step: step_label.to_owned(),
-                    version: None,
-                    log_dir: None,
-                },
-            }))
-        }
-        Err(err) => Err(Box::new(StepResult {
-            outcome: Err(err),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(current_timestamp()),
-                status: "failed".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                version: None,
-                log_dir: None,
-            },
-        })),
-    }
-}
-
-fn npm_version_failure_step(
-    step_label: &'static str,
-    started_at: String,
-    captured: CapturedOutput,
-    reason: String,
-) -> StepResult {
-    StepResult {
-        outcome: Err(StackError::AgentInitializeFailed {
-            reason: reason.clone(),
-        }),
-        row: InstallerRowDraft {
-            started_at,
-            finished_at: Some(current_timestamp()),
-            status: "failed".into(),
-            stdout: captured.stdout,
-            stderr: append_stderr_detail(&captured.stderr, &reason),
-            exit_status: captured.exit_status,
-            step: step_label.to_owned(),
-            version: None,
-            log_dir: None,
-        },
-    }
-}
-
-fn npm_package_with_version(package: &str, version: &str) -> String {
-    format!("{package}@{version}")
-}
-
-fn append_stderr_detail(stderr: &str, detail: impl std::fmt::Display) -> String {
-    if stderr.is_empty() {
-        detail.to_string()
-    } else {
-        format!("{stderr}\n{detail}")
-    }
-}
-
-fn run_program_install(
-    program: &str,
-    args: &[String],
-    agent_env: &HashMap<String, String>,
-    workspace_root: &Path,
-    extra_path_dirs: &[&Path],
-) -> Result<CapturedOutput> {
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear();
-
-    // Minimal env so the installer is no wider a door than the agent itself.
-    // PATH is required so `creates` lookups resolve. HOME lets installers
-    // place dotfiles in the operator's home if they need to. LANG keeps
-    // tools that read locale from producing mojibake.
-    if let Some(path) = path_env_with_extra_dirs(extra_path_dirs) {
-        command.env("PATH", path);
-    }
-    forward_host_env(&mut command, "HOME");
-    forward_host_env(&mut command, "LANG");
-    // Inject `[agent].env` values, but refuse to let them override
-    // PATH/HOME/LANG. The same security argument applies as in the bridge:
-    // the daemon's environment is the source of truth for where to find
-    // binaries and the operator's home, not values reachable through the
-    // secret store.
-    for (name, value) in agent_env {
-        if matches!(name.as_str(), "PATH" | "HOME" | "LANG") {
-            tracing::warn!(
-                name = %name,
-                "refusing to inject `{name}` from `[agent].env` into installer: reserved",
-            );
-            continue;
-        }
-        command.env(name, value);
-    }
-
-    // Detach into a fresh process group so the timeout-induced SIGKILL also
-    // reaches whatever grandchildren the shell forks.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|source| StackError::AgentSpawnFailed { source })?;
-
-    // Read stdout/stderr concurrently in dedicated threads with a hard cap
-    // per stream. Without dedicated drainers, a chatty installer can fill
-    // the pipe buffer and wedge the shell once it tries to write more.
-    let stdout_handle = child.stdout.take().map(spawn_capped_reader);
-    let stderr_handle = child.stderr.take().map(spawn_capped_reader);
-
-    let deadline = Instant::now() + INSTALLER_TIMEOUT;
-    let exit = wait_with_timeout(&mut child, deadline);
-
-    match exit {
-        Ok(Some(status)) => {
-            // Kill any grandchildren that inherited stdout/stderr from the
-            // shell. Without this, a `(slow-process &)` in the installer
-            // leaves the pipes open and the reader threads block forever
-            // on EOF — exactly the bypass the spec hardening guards against.
-            kill_process_group(&mut child);
-            let stdout = stdout_handle.map(join_reader_bounded).unwrap_or_default();
-            let stderr = stderr_handle.map(join_reader_bounded).unwrap_or_default();
-            Ok(CapturedOutput {
-                stdout,
-                stderr,
-                exit_status: status.code(),
-            })
-        }
-        Ok(None) => {
-            // Timeout: kill the whole process group, then drain readers.
-            kill_process_group(&mut child);
-            // Best-effort: ensure the kernel reaps the child.
-            let _ = child.wait();
-            // Threads will exit once the pipes close from the kill.
-            let _ = stdout_handle.map(join_reader_bounded);
-            let _ = stderr_handle.map(join_reader_bounded);
-            Err(StackError::AgentInstallerTimeout)
-        }
-        Err(source) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(StackError::AgentSpawnFailed { source })
-        }
-    }
-}
-
-/// Reader-thread cleanup window. After we've killed the process group, the
-/// pipes should close almost immediately; this just bounds the worst case
-/// so we never wedge `POST /v1/agent/install` on a stuck reader thread.
-const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
-
-fn join_reader_bounded(handle: std::thread::JoinHandle<String>) -> String {
-    // Poll for the join to complete. Threads can't be cancelled, but after
-    // kill_process_group the pipes are closed so the reader returns
-    // immediately in practice. The poll guards against a kernel-level edge
-    // case where the close is delayed.
-    let deadline = Instant::now() + READER_JOIN_GRACE;
-    while !handle.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if handle.is_finished() {
-        handle.join().unwrap_or_default()
-    } else {
-        // Abandon the thread. The OS will reap it when the process exits.
-        String::new()
-    }
-}
-
-fn spawn_capped_reader<R>(mut reader: R) -> std::thread::JoinHandle<String>
-where
-    R: Read + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let mut buf = Vec::with_capacity(8 * 1024);
-        let mut chunk = [0u8; 4 * 1024];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if buf.len() >= MAX_INSTALLER_STREAM_BYTES {
-                        // Drain the rest to keep the pipe from blocking the
-                        // child, but discard. Without this the shell hangs on
-                        // a chatty installer once the OS pipe buffer fills.
-                        continue;
-                    }
-                    let remaining = MAX_INSTALLER_STREAM_BYTES - buf.len();
-                    let take = n.min(remaining);
-                    buf.extend_from_slice(&chunk[..take]);
-                }
-                Err(_) => break,
-            }
-        }
-        // Lossy decode: an installer that writes non-UTF-8 bytes still gets a
-        // readable row in installer_runs; we'd rather show replacement chars
-        // than reject the run.
-        String::from_utf8_lossy(&buf).into_owned()
-    })
-}
-
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    deadline: Instant,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(Some(status)),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    return Ok(None);
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-#[cfg(unix)]
-fn kill_process_group(child: &mut std::process::Child) {
-    // SAFETY: libc::kill is async-signal-safe and we're operating on a pid
-    // we own (the process group leader is the child itself because we used
-    // process_group(0)). Negative pid addresses the whole process group, so
-    // grandchildren forked by the shell also receive the signal.
-    unsafe {
-        let pid = child.id() as i32;
-        libc::kill(-pid, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
-}
-
-fn forward_host_env(command: &mut Command, name: &str) {
-    if let Some(value) = std::env::var_os(name) {
-        command.env(name, value);
-    }
-}
-
-fn path_env_with_extra_dirs(extra_path_dirs: &[&Path]) -> Option<std::ffi::OsString> {
-    let existing = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = Vec::new();
-    for dir in extra_path_dirs {
-        if !dir.as_os_str().is_empty() {
-            paths.push((*dir).to_path_buf());
-        }
-    }
-    paths.extend(std::env::split_paths(&existing));
-    std::env::join_paths(paths).ok()
-}
-
 /// Public verifier used by `acps init --resume` for `agent_install`.
 /// It intentionally delegates to the same resolver used by the installer:
 /// absolute paths are checked directly, slash-containing paths are resolved
@@ -1464,7 +607,7 @@ pub fn resolve_creates_for_init_resume(
 /// containing `/` resolved relative to `workspace_root` so an installer can
 /// declare `creates = "bin/agent"` without depending on operator cwd; bare
 /// names looked up in caller-provided extra directories and then `PATH`.
-fn resolve_creates(
+pub(super) fn resolve_creates(
     name: &str,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
@@ -1504,31 +647,30 @@ fn resolve_creates(
     None
 }
 
-fn sha256_of_file(path: &Path) -> Result<String> {
+pub(super) fn sha256_of_file(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path).map_err(|source| StackError::AgentSpawnFailed { source })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn current_timestamp() -> String {
+pub(super) fn current_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
-fn tail_bytes(input: &str, max_bytes: usize) -> String {
-    if input.len() <= max_bytes {
-        return input.to_owned();
+pub(super) fn verify_expected_sha256(expected: Option<&str>, actual: &str) -> Result<()> {
+    match expected {
+        Some(expected) if expected != actual => Err(StackError::AgentSha256Mismatch {
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        }),
+        _ => Ok(()),
     }
-    let start = input.len() - max_bytes;
-    let mut cutoff = start;
-    while cutoff < input.len() && !input.is_char_boundary(cutoff) {
-        cutoff += 1;
-    }
-    input[cutoff..].to_owned()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::step_runners::select_install_path;
     use super::*;
     use crate::runtime::install::agent_registry::{AdapterSpec, HarnessSpec, ShellInstall};
     use crate::state::StateStore;
