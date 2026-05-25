@@ -1,6 +1,6 @@
 //! `acps installer` subcommands: operator-facing view of `installer_runs`.
 //!
-//! The installer module (`src/runtime/agent_installer.rs`) writes one row per
+//! The installer module (`src/runtime/install/agent_installer.rs`) writes one row per
 //! step into SQLite each time an install runs. Until now the only consumers
 //! were the durable-event log and the HTTP `POST /v1/agent/install` response.
 //! `acps installer history` surfaces those rows to the operator without going

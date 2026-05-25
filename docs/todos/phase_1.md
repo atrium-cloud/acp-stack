@@ -97,9 +97,9 @@
 The original installer landed without a curated embedded registry or a model that can represent adapter-backed agents later. The work below is a Phase 1 gap-fill, not a rework: the items above are still correct for native ACP agents; the items below replace runtime upstream-registry fetches with a narrow embedded catalog, starting with OpenCode, Cursor CLI, Amp, and Pi as verified headless targets.
 
 - [x] Hand-curate `data/agents.toml` with `kind = "native" | "adapter"` per entry, starting with OpenCode, Cursor CLI, Amp, and Pi.
-- [x] Add `src/runtime/agent_registry.rs` with `include_str!`-loaded embedded catalog and optional override at `~/.config/acp-stack/agents.toml`.
-- [x] Add `src/runtime/github_release.rs` with API client, asset glob matching (`{arch}` substitution), `tar.gz` / `zip` / raw extraction, optional `checksums.txt` verification, and `GITHUB_TOKEN` passthrough.
-- [x] Remove upstream registry fetch from `src/runtime/agent_installer.rs`; resolve installs from the embedded catalog.
+- [x] Add `src/runtime/install/agent_registry.rs` with `include_str!`-loaded embedded catalog and optional override at `~/.config/acp-stack/agents.toml`.
+- [x] Add `src/runtime/install/github_release.rs` with API client, asset glob matching (`{arch}` substitution), `tar.gz` / `zip` / raw extraction, optional `checksums.txt` verification, and `GITHUB_TOKEN` passthrough.
+- [x] Remove upstream registry fetch from `src/runtime/install/agent_installer.rs`; resolve installs from the embedded catalog.
 - [x] Refactor `agent_installer` to dispatch on `kind` and orchestrate two install steps (harness then adapter) for adapter-backed entries.
 - [x] Add `step` column to `installer_runs` (migration 009) and thread it through `InstallerRunInput` / persistence.
 - [x] Update `[agent]` config: drop operator-written `[agent.adapter]` (now runtime-populated and rejected via `skip_deserializing`), make `[agent.install]` optional (escape hatch only), add `harness_version` for GitHub Release tag pinning.

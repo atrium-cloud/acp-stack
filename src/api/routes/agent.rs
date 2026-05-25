@@ -3,18 +3,18 @@ use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
 use super::super::core::AppState;
-use crate::acp_bridge::AgentCapabilitiesDto;
-use crate::agent_installer::{
-    InstallerSequenceResult, install_resolved_capture, run_installer_capture,
-};
-use crate::agent_registry::RegistryCatalog;
 use crate::config::{AgentAdapterConfig, Config};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
+use crate::runtime::agent::acp_bridge::AgentCapabilitiesDto;
+use crate::runtime::agent::supervisor::AgentSnapshot;
+use crate::runtime::install::agent_installer::{
+    InstallerSequenceResult, install_resolved_capture, run_installer_capture,
+};
+use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::InstallerRunInput;
-use crate::supervisor::AgentSnapshot;
 
 #[derive(Serialize)]
 pub(crate) struct AgentInstallResponse {
@@ -42,7 +42,7 @@ pub(crate) async fn agent_install_handler(
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
-        crate::runtime::agent_installer::persist_step_logs_to_disk(
+        crate::runtime::install::agent_installer::persist_step_logs_to_disk(
             &mut result.row,
             &state.config.agent.id,
             Some(&log_base),
@@ -89,7 +89,7 @@ pub(crate) async fn agent_install_handler(
             reason: format!("installer thread join failed: {err}"),
         })?;
         for row in result.rows.iter_mut() {
-            crate::runtime::agent_installer::persist_step_logs_to_disk(
+            crate::runtime::install::agent_installer::persist_step_logs_to_disk(
                 row,
                 &state.config.agent.id,
                 Some(&log_base),
@@ -151,7 +151,7 @@ pub(super) fn open_mcp_servers(
     }
     let home = home_dir()?;
     let store = SecretStore::open(&home)?;
-    crate::mcp::resolve_mcp_servers(&config.mcp, &store)
+    crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &store)
 }
 
 #[derive(Serialize)]

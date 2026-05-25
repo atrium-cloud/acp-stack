@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use crate::config::{Config, DependencyEntry, DependencyInstallScope};
 use crate::error::{Result, StackError};
-use crate::runtime::deps::{DepStatus, check_dependencies};
+use crate::runtime::dependencies::deps::{DepStatus, check_dependencies};
 use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
 };
@@ -350,7 +350,7 @@ fn check_one(entry: &DependencyEntry) -> DepStatus {
     match resolve_command(&creates) {
         Some(path) => DepStatus {
             name: entry.name.clone(),
-            kind: crate::runtime::deps::DepKind::Command,
+            kind: crate::runtime::dependencies::deps::DepKind::Command,
             required: entry.required,
             available: true,
             path: Some(path.to_string_lossy().into_owned()),
@@ -359,7 +359,7 @@ fn check_one(entry: &DependencyEntry) -> DepStatus {
         },
         None => DepStatus {
             name: entry.name.clone(),
-            kind: crate::runtime::deps::DepKind::Command,
+            kind: crate::runtime::dependencies::deps::DepKind::Command,
             required: entry.required,
             available: false,
             path: None,
@@ -664,7 +664,7 @@ mod tests {
     use crate::config::{DependenciesConfig, DependencyEntry, DependencyInstallAction};
 
     fn config_with_dep(entry: DependencyEntry) -> Config {
-        let toml_text = include_str!("../../tests/fixtures/valid-acp-stack.toml");
+        let toml_text = include_str!("../../../tests/fixtures/valid-acp-stack.toml");
         let mut config = crate::config::load_config_from_str(toml_text).expect("config");
         config.dependencies = DependenciesConfig {
             commands: vec![entry],

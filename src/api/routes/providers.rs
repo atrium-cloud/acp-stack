@@ -19,12 +19,12 @@ use serde::Serialize;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::fs_util::home_dir;
-use crate::runtime::acp_bridge::AgentSessionConfigCategory;
-use crate::runtime::model_discovery::{
+use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
+use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
     fetch_session_config_with_timeout,
 };
-use crate::runtime::provider_keys::{AgentProviderSummary, providers_for_agent};
+use crate::runtime::agent::provider_keys::{AgentProviderSummary, providers_for_agent};
 
 use super::super::core::AppState;
 

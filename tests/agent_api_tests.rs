@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 
 use acp_stack::api::{self, AppState};
 use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
-use acp_stack::runtime::model_discovery::fetch_session_config_with_timeout;
+use acp_stack::runtime::agent::model_discovery::fetch_session_config_with_timeout;
 use acp_stack::state::StateStore;
 use reqwest::StatusCode;
 use serde_json::Value;
