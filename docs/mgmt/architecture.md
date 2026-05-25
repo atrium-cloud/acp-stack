@@ -87,23 +87,47 @@ src/
   cli.rs                          re-exports Cli, run
   cli/
     core.rs                       top-level Cli enum + run() dispatch + shared helpers
-    init.rs, serve.rs, status.rs, reset.rs, agent.rs, sessions.rs, logs.rs,
-    auth.rs, secrets.rs, config.rs, deps.rs, metrics.rs   per-subcommand handlers
+    init.rs                       `acps init` orchestrator + InitArgs + clap enums + STARTER_* constants
+    init/
+      registry_apply.rs           apply registry entry + edge profile + agent picker
+      provider.rs                 provider selection + curated/custom provider config
+      model_mode.rs               L84-L87 ACP-discovery flow + model/mode pickers
+      headless_snapshot.rs        snapshot + restore primitives for agent headless config rollback
+      resume.rs                   init run resume helpers, secrets init, postcondition probes
+      testflight.rs               testflight credit-gate decision + prompts
+      install.rs                  install gating + run installer + env resolution
+      starter_config.rs           starter TOML builder + code/data source classifier
+    agent.rs                      `acps agent` dispatcher + AgentCommand + shared args + DEFAULT_* constants + tests
+    agent/
+      set.rs                      `acps agent set` provider/model/mode + custom-provider flow
+      test.rs                     `acps agent test` + run_init_testflight + session sinks
+      install.rs                  daemon-post wrappers + install command
+      check.rs                    version compare + `acps agent check` + LatestVersionResolver trait
+      status.rs                   `acps agent status` param table
+    serve.rs, status.rs, reset.rs, sessions.rs, logs.rs, auth.rs, secrets.rs,
+    config.rs, deps.rs, metrics.rs, security.rs, ws.rs, installer.rs   per-subcommand handlers
   runtime.rs                      grouped runtime module declarations
   runtime/
     init_runner.rs                init step orchestrator (record_step + verifier resume)
     health.rs                     unified daemon health report (SQLite, workspace, agent, sink, deps) for `/v1/health/*` and `acps status`
+    process_runner.rs             shared spawn/kill/cap/forward primitives used by installer, deps_apply, and ACP bridge
     agent.rs                      agent runtime facade
     agent/
-      acp_bridge.rs               ACP client wrapping agent-client-protocol SDK
-      agent_headless_config.rs     generated config for supported headless agents
+      acp_bridge.rs               ACP client wrapping agent-client-protocol SDK; spawn + initialize + per-method calls
+      acp_codec.rs                free codec helpers: session config/model value codecs, permission resolution, notification enqueue
+      session_sink.rs             SessionEventSink trait + StateStoreSessionSink + usage-payload extraction
+      agent_headless_config.rs    generated config for supported headless agents
+      config_io.rs                JSON/YAML/TOML read/write/merge helpers shared by per-agent provisioners
       mcp.rs                      MCP server resolution from config + secrets
       model_discovery.rs          session-config and model discovery
       provider_keys.rs            API-key env var to provider-id mapping
       supervisor.rs               agent process supervisor + prompt registry
     install.rs                    install/runtime catalog facade
     install/
-      agent_installer.rs          shell + registry-resolved installer
+      agent_installer.rs          shell + registry-resolved installer orchestration + public surface
+      agent_installer/
+        step_runners.rs           per-step runners (shell/npm/github_release) + process capture
+        step_logs.rs              persist step logs to disk (owner-only) + fsync + sanitize
       agent_registry.rs           embedded data/agents.toml loader + lookup
       github_release.rs           GitHub Release-driven binary installer
       npm_registry.rs             npm registry lookup helper
@@ -113,11 +137,22 @@ src/
       deps_apply.rs               `acps deps apply` runner (narrow declared shell snippets)
     mediation.rs                  mediated operation facade
     mediation/
-      commands.rs                 command gateway (policy + spawn + stream)
+      commands.rs                 command gateway (SubmitRequest + CommandGateway) + tests
+      commands/
+        supervisor.rs             SupervisorTask + run loop + spawn/handle/persist
+        policy.rs                 PolicyDecision + evaluate_policy + glob_match + cwd resolution
+        output.rs                 OutputChunk/OutputCounter + byte-cap constants + UTF-8 boundary helpers
+        process.rs                send_terminate + kill_process_group_pid + PendingHandle
       permissions.rs              permission lifecycle service + waiter map
     workspace_sources.rs          workspace source materialization facade
     workspace_sources/
-      workspace_init.rs           Phase 4 `[[workspace.code_sources]]` + `[[workspace.data_sources]]` materializer
+      workspace_init.rs           workspace materialization dispatcher + public report types + tests
+      workspace_init/
+        common.rs                 capture file pair + sentinel handling + destination/lane safety
+        code_git.rs               git lane (clone + rev-parse + askpass helper)
+        local.rs                  local FS source (copy-tree)
+        https.rs                  https source (download + extract)
+        s3.rs                     S3 source (SigV4 download)
       safe_download.rs            streaming HTTPS downloader with redirect, size, and scheme caps
       safe_extract.rs             tar/tar.gz/zip extractor with traversal, symlink, size guards
       s3_client.rs                minimal SigV4-aware S3 client (ListObjectsV2 + GetObject) for workspace ingest
@@ -143,16 +178,37 @@ src/
       server.rs                   rmcp ServerHandler + stdio transport entry
       transport_uds.rs            streamable-HTTP MCP transport bound on UDS
   auth.rs                         KeyKind + constant-time compare + failure recording
-  config.rs                       TOML schema, load/validate/canonicalize
+  config.rs                       config root: Config aggregator, constants, load_config_from_str, RawConfig shim
+  config/
+    schema.rs                     nested TOML schema types + Default impls
+    validate.rs                   top-level orchestrator + cross-cutting secret-ref/supabase walkers
+    validate/
+      agent.rs                    agent provider/custom/install/restart validators
+      commands.rs                 commands (default_timeout, cancel_grace, env_allowlist) validation
+      deps.rs                     dependencies + Phase 4 [install] action constraints
+      edge.rs                     Cloudflare tunnel/edge validation
+      mcp.rs                      MCP server validation (stdio/http, dedup)
+      permissions.rs              permissions mode + trusted proxy validation
+      primitives.rs               duration/socket/path/sha256/secret-ref primitives
+      sources.rs                  code/data source validators + derive_*_name helpers
   envelope.rs                     ApiSuccess / ApiError + IntoResponse for StackError
-  error.rs                        StackError + Result type
+  error.rs                        StackError enum (flat) + Result type + 3-line dispatcher impls
+  error/                          per-domain Option-returning helpers for error_code/public_message/http_status
+    agent_install.rs, agent_runtime.rs, archive.rs, auth_http.rs, command.rs,
+    config.rs, download.rs, edge.rs, permission.rs, secrets.rs, serve.rs,
+    session.rs, state.rs, supabase.rs, workspace.rs, workspace_source.rs
   events.rs                       in-process broadcast hub + live event envelope
   fs_util.rs                      owner-only fs helpers
   http_hardening.rs               IP block + rate limit + CORS + origin allowlist + origin metadata
   edge.rs                         Cloudflare Tunnel artifact generation
   ownership.rs                    path posture + getpwnam_r + workspace writability
   secrets.rs                      age-encrypted secret store
-  security.rs                     runtime security self-check
+  security.rs                     runtime security self-check orchestrator + SecurityCheckInputs + tests
+  security/
+    findings.rs                   SecurityFinding + PathInspectionIssue + constructors
+    rules.rs                      rule module declarations + per-rule re-exports
+    rules/
+      bind.rs, cors.rs, proxy.rs, cloudflare.rs, keys.rs, paths.rs, runtime_user.rs   one finding cluster each
   time_util.rs                    duration-suffix parsing
   tracing_init.rs                 structured tracing setup
   workspace.rs                    workspace path resolver + file operations
