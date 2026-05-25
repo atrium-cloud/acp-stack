@@ -1,9 +1,11 @@
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::load_config_from_str;
 use acp_stack::secrets::SecretStore;
-use acp_stack::state::{InstallerRunInput, StateStore, default_state_path};
+use acp_stack::state::{EVENT_SOURCE_CLI, InstallerRunInput, StateStore, default_state_path};
 use assert_cmd::Command;
+use axum::{Json, Router, routing::get};
 use base64::Engine;
+use http::StatusCode;
 use predicates::prelude::PredicateBooleanExt as _;
 use serde_json::Value;
 use std::fs;
@@ -21,6 +23,33 @@ struct AgentCliHarness {
     base_url: String,
     join: JoinHandle<acp_stack::error::Result<()>>,
     _tempdir: TempDir,
+}
+
+struct HealthProbeHarness {
+    base_url: String,
+    join: JoinHandle<std::io::Result<()>>,
+}
+
+impl HealthProbeHarness {
+    async fn spawn(status: StatusCode, body: Value) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("local"));
+        let app = Router::new().route(
+            "/v1/health/ready",
+            get(move || {
+                let body = body.clone();
+                async move { (status, Json(body)) }
+            }),
+        );
+        let join = tokio::spawn(async move { axum::serve(listener, app).await });
+        Self { base_url, join }
+    }
+}
+
+impl Drop for HealthProbeHarness {
+    fn drop(&mut self) {
+        self.join.abort();
+    }
 }
 
 impl AgentCliHarness {
@@ -2850,26 +2879,162 @@ fn init_fails_when_existing_config_is_invalid() {
 }
 
 #[test]
-fn status_reports_config_state_schema_and_latest_event() {
+fn status_reports_config_state_workspace_agent_sink_and_deps() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    // Use a tempdir workspace so the test is deterministic across hosts.
+    // Without this, `acps init` would pick the production default
+    // `/workspace`, which is writable inside Docker dev images and the
+    // Railway runtime but absent on the maintainer's macOS host. Pinning
+    // workspace.root to a controlled tempdir keeps the assertion below
+    // valid in both environments.
+    let workspace_dir = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir should be created");
+    let uploads_dir = workspace_dir.join("uploads");
+    std::fs::create_dir_all(&uploads_dir).expect("uploads dir should be created");
 
     Command::cargo_bin("acps")
         .expect("binary should build")
         .env("HOME", tempdir.path())
         .arg("init")
+        .arg("--workspace-root")
+        .arg(&workspace_dir)
+        .arg("--workspace-uploads")
+        .arg(&uploads_dir)
         .assert()
         .success();
 
+    let workspace_str = workspace_dir.display().to_string();
     let mut command = Command::cargo_bin("acps").expect("binary should build");
     command
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
         .success()
-        .stdout(predicates::str::contains("config: ok"))
-        .stdout(predicates::str::contains("state: ok"))
-        .stdout(predicates::str::contains("schema_version: 12"))
-        .stdout(predicates::str::contains("latest_event:"));
+        .stdout(predicates::str::contains("config:    ok ("))
+        .stdout(predicates::str::contains("state:     ok ("))
+        .stdout(predicates::str::contains("schema=13"))
+        .stdout(predicates::str::contains("latest_event="))
+        .stdout(predicates::str::contains(format!(
+            "workspace: ok ({workspace_str})"
+        )))
+        .stdout(predicates::str::contains("agent:"))
+        .stdout(predicates::str::contains("sink:      supabase disabled"))
+        .stdout(predicates::str::contains("deps:      no apply runs"))
+        .stdout(predicates::str::contains("daemon:   unavailable"));
+}
+
+#[test]
+fn status_reports_sink_open_failures_when_supabase_configured() {
+    use chrono::{SecondsFormat, Utc};
+
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG.replace("enabled = false", "enabled = true");
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let mut store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store.set_external_logging_enabled(true);
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    store
+        .append_event_with_source(
+            "info",
+            "test.seed",
+            EVENT_SOURCE_CLI,
+            "seed sink_outbox row",
+            "{}",
+        )
+        .expect("append seed event");
+    let batch = store
+        .next_sink_outbox_batch(10, &now)
+        .expect("read outbox batch");
+    let ids: Vec<String> = batch.iter().map(|row| row.id.clone()).collect();
+    assert!(
+        !ids.is_empty(),
+        "seed event should have enqueued an outbox row"
+    );
+    store
+        .mark_sink_outbox_failure(&ids, "boom", &now, &now)
+        .expect("mark outbox failure");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "sink:      1 open failures (supabase",
+        ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_ready_daemon_when_health_probe_is_healthy() {
+    let probe = HealthProbeHarness::spawn(
+        StatusCode::OK,
+        serde_json::json!({
+            "ok": true,
+            "data": {
+                "ok": true,
+                "failing": []
+            }
+        }),
+    )
+    .await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &probe.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("daemon:   ready"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_degraded_daemon_without_failing_command() {
+    let probe = HealthProbeHarness::spawn(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "ok": false,
+            "data": {
+                "ok": false,
+                "failing": ["sink", "deps"]
+            }
+        }),
+    )
+    .await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &probe.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("daemon:   degraded (sink, deps)"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_unavailable_daemon_without_failing_command() {
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("daemon:   unavailable"));
 }
 
 #[test]
@@ -2914,6 +3079,7 @@ fn agent_check_reports_missing_adapter_step() {
             step: "harness",
             version: None,
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("seed harness row");
     drop(store);
@@ -2976,6 +3142,7 @@ fn installer_history_renders_rows_with_filter() {
             step: "harness",
             version: Some("v1.0.0"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("seed harness row");
     store
@@ -2990,6 +3157,7 @@ fn installer_history_renders_rows_with_filter() {
             step: "adapter",
             version: None,
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("seed adapter row");
     drop(store);
@@ -3047,6 +3215,7 @@ fn installer_history_renders_log_dir_continuation_line() {
             step: "harness",
             version: Some("v1.0.0"),
             log_dir: Some("/tmp/installer-logs/opencode/2026-05-22T01:00:00.000000000Z/harness"),
+            apply_run_id: None,
         })
         .expect("seed row with log_dir");
     drop(store);
@@ -3150,6 +3319,89 @@ creates = {}
 }
 
 #[test]
+fn deps_apply_persists_one_apply_run_id_for_all_rows() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+
+    let installed_marker = tempdir.path().join("deps-apply-installed-marker");
+    let skipped_marker = tempdir.path().join("deps-apply-skipped-marker");
+    fs::write(&skipped_marker, "#!/bin/sh\nexit 0\n").expect("skipped marker should be written");
+    #[cfg(unix)]
+    fs::set_permissions(&skipped_marker, fs::Permissions::from_mode(0o755))
+        .expect("skipped marker should be executable");
+    let shell = format!(
+        "printf '#!/bin/sh\\nexit 0\\n' > {marker} && chmod 755 {marker}",
+        marker = shell_quote_path(&installed_marker),
+    );
+    let config = VALID_CONFIG.replace(
+        "[agent]",
+        &format!(
+            r#"[[dependencies.commands]]
+name = "deps-apply-installed"
+required = true
+
+[dependencies.commands.install]
+shell = {}
+creates = {}
+
+[[dependencies.commands]]
+name = "deps-apply-skipped"
+required = true
+
+[dependencies.commands.install]
+shell = "exit 99"
+creates = {}
+
+[agent]"#,
+            toml_string(&shell),
+            toml_string(&installed_marker.to_string_lossy()),
+            toml_string(&skipped_marker.to_string_lossy()),
+        ),
+    );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["deps", "apply", "--yes"])
+        .assert()
+        .success();
+
+    let store = StateStore::open(&state_path).expect("state should open");
+    let rows = store
+        .query_installer_runs_filtered(Some("deps_apply"), 10)
+        .expect("deps rows should query");
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected one row per declared install action"
+    );
+    let apply_run_id = rows[0]
+        .apply_run_id
+        .as_deref()
+        .expect("apply_run_id should be present");
+    assert!(
+        apply_run_id.starts_with("dap_"),
+        "apply_run_id should use the deps apply prefix, got {apply_run_id}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.apply_run_id.as_deref() == Some(apply_run_id)),
+        "all rows from one invocation must share apply_run_id, got {rows:?}"
+    );
+    assert!(rows.iter().any(|row| row.status == "installed"));
+    assert!(rows.iter().any(|row| row.status == "skipped"));
+}
+
+#[test]
 fn agent_status_surfaces_installed_versions_from_state() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -3183,6 +3435,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
             step: "install",
             version: Some("1.15.10"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("install row should append");
     store
@@ -3197,6 +3450,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
             step: "harness",
             version: Some("v1.2.3"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("harness row should append");
     store
@@ -3211,6 +3465,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
             step: "adapter",
             version: None,
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("adapter row should append");
     drop(store);

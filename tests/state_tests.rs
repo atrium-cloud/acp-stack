@@ -34,7 +34,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        12
+        13
     );
 }
 
@@ -113,6 +113,7 @@ fn installer_runs_round_trip_records_and_returns_version() {
             step: "harness",
             version: Some("v1.2.3"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("harness row should append");
     store
@@ -127,6 +128,7 @@ fn installer_runs_round_trip_records_and_returns_version() {
             step: "adapter",
             version: None,
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("adapter row should append");
 
@@ -176,6 +178,7 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             step: "harness",
             version: Some("v1.0.0"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("first agent row should append");
     store
@@ -190,6 +193,7 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             step: "harness",
             version: Some("v9.9.9"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("second agent row should append");
 
@@ -220,6 +224,7 @@ fn installer_runs_round_trip_records_log_dir() {
             step: "harness",
             version: Some("v1.0.0"),
             log_dir: Some("/var/lib/acp-stack/installer-logs/test-agent/2026-05-22T10:00:00.000000000Z/harness"),
+            apply_run_id: Some("dap_test"),
         })
         .expect("row with log_dir should append");
 
@@ -229,6 +234,7 @@ fn installer_runs_round_trip_records_log_dir() {
         history[0].log_dir.as_deref(),
         Some("/var/lib/acp-stack/installer-logs/test-agent/2026-05-22T10:00:00.000000000Z/harness")
     );
+    assert_eq!(history[0].apply_run_id.as_deref(), Some("dap_test"));
 }
 
 #[test]
@@ -250,6 +256,7 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             step: "install",
             version: Some("v1.0.0"),
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("first ran row should append");
     store
@@ -264,6 +271,7 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             step: "install",
             version: None,
             log_dir: None,
+            apply_run_id: None,
         })
         .expect("second failed row should append");
 
@@ -321,7 +329,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 12")
+            .contains("state schema version 99 is newer than supported version 13")
     );
 }
 

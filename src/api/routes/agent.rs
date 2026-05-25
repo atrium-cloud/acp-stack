@@ -60,6 +60,7 @@ pub(crate) async fn agent_install_handler(
                 step: &result.row.step,
                 version: result.row.version.as_deref(),
                 log_dir: result.row.log_dir.as_deref(),
+                apply_run_id: None,
             })?;
         }
         result.outcome?
@@ -108,6 +109,7 @@ pub(crate) async fn agent_install_handler(
                     step: &row.step,
                     version: row.version.as_deref(),
                     log_dir: row.log_dir.as_deref(),
+                    apply_run_id: None,
                 })?;
             }
         }

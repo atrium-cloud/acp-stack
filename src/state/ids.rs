@@ -12,6 +12,7 @@ static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUTH_FAILURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AGENT_LIFECYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INSTALLER_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static DEPS_APPLY_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static COMMAND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -55,6 +56,13 @@ pub(super) fn next_installer_run_id() -> String {
     let sequence = INSTALLER_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("ins_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+pub fn next_deps_apply_run_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = DEPS_APPLY_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("dap_{nanos:020}_{sequence:010}_{pid:010}")
 }
 
 pub fn next_session_id() -> String {

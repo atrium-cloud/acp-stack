@@ -67,7 +67,10 @@ use super::routes::sessions::{
     sessions_events_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
     sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
 };
-use super::routes::status::{status_agent_handler, status_connections_handler, status_handler};
+use super::routes::status::{
+    health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
+    status_handler,
+};
 use super::routes::workspace::{
     files_content_get_handler, files_content_put_handler, files_delete_handler,
     files_download_handler, files_list_handler, files_upload_handler, workspace_metadata_handler,
@@ -312,6 +315,8 @@ pub fn build_router(state: AppState) -> Router {
         // (`/v1/agent/status`).
         .route("/v1/agent/status", get(status_agent_handler))
         .route("/v1/status/connections", get(status_connections_handler))
+        .route("/v1/health/live", get(health_live_handler))
+        .route("/v1/health/ready", get(health_ready_handler))
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
