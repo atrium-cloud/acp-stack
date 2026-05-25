@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 
 pub use self::schema::{
     AcpctlConfig, AgentAdapterConfig, AgentConfig, AgentCustomProviderConfig, AgentInstallConfig,
-    AgentProviderConfig, ApiConfig, AuthConfig, CloudflareEdgeConfig, CodeSourceConfig,
-    CommandsConfig, CustomProviderApi, DEFAULT_CUSTOM_MODEL_CONTEXT,
+    AgentProviderConfig, AgentSubagentConfig, ApiConfig, AuthConfig, CloudflareEdgeConfig,
+    CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_CUSTOM_MODEL_CONTEXT,
     DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
     DEFAULT_PERMISSION_TIMEOUT_ACTION, DataSourceConfig, DependenciesConfig, DependencyEntry,
     DependencyInstallAction, DependencyInstallScope, EdgeConfig, HttpHeaderRef, LoggingConfig,

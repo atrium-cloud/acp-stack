@@ -739,6 +739,7 @@ mod tests {
             harness_version: None,
             adapter: None,
             provider: None,
+            subagent: None,
             install: None,
         }
     }
@@ -782,6 +783,8 @@ mod tests {
             set_provider: false,
             set_model: false,
             set_mode: false,
+            subagents: false,
+            subagent_alias: None,
             allow_custom_provider: false,
             allow_custom_model: false,
             stdio_framing: Default::default(),
@@ -810,6 +813,8 @@ mod tests {
             set_provider: false,
             set_model: false,
             set_mode: false,
+            subagents: false,
+            subagent_alias: None,
             allow_custom_provider: false,
             allow_custom_model: false,
             stdio_framing: Default::default(),

@@ -134,6 +134,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
             harness_version: None,
             adapter: None,
             provider: None,
+            subagent: None,
             install: Some(AgentInstallConfig {
                 install_type: STARTER_AGENT_INSTALL_TYPE.to_owned(),
                 creates: STARTER_AGENT_INSTALL_CREATES.to_owned(),

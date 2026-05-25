@@ -88,6 +88,63 @@ fn parses_custom_provider_defaults() {
 }
 
 #[test]
+fn parses_subagent_provider_config() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.subagent.provider]\n\
+         id = \"opencode-go\"\n\
+         model = \"opencode-go/deepseek-v4-flash\"\n\
+         api_key_ref = \"OPENCODE_API_KEY\"\n"
+    );
+
+    let config = load_config_from_str(&config_text).expect("subagent provider config should parse");
+    let provider = config
+        .agent
+        .subagent
+        .as_ref()
+        .and_then(|subagent| subagent.provider.as_ref())
+        .expect("subagent provider should load");
+
+    assert_eq!(provider.id, "opencode-go");
+    assert_eq!(
+        provider.model.as_deref(),
+        Some("opencode-go/deepseek-v4-flash")
+    );
+    assert_eq!(provider.api_key_ref.as_deref(), Some("OPENCODE_API_KEY"));
+}
+
+#[test]
+fn parses_subagent_custom_provider_config() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.subagent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.subagent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n"
+    );
+
+    let config =
+        load_config_from_str(&config_text).expect("subagent custom provider config should parse");
+    let custom = config
+        .agent
+        .subagent
+        .as_ref()
+        .and_then(|subagent| subagent.provider.as_ref())
+        .and_then(|provider| provider.custom.as_ref())
+        .expect("subagent custom provider should load");
+
+    assert_eq!(custom.api, CustomProviderApi::ChatCompletions);
+    assert_eq!(custom.context, DEFAULT_CUSTOM_MODEL_CONTEXT);
+    assert_eq!(
+        custom.output_max_tokens,
+        DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS
+    );
+}
+
+#[test]
 fn rejects_custom_provider_without_api_key_ref() {
     let config_text = format!(
         "{VALID_CONFIG}\n\

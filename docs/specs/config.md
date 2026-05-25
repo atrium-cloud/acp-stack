@@ -213,9 +213,16 @@ api = "chat-completions"
 model_name = "<model-display-name>"
 context = 200000
 output_max_tokens = 65536
+
+[agent.subagent.provider]
+id = "<provider-id>"
+model = "<provider-id>/<model-id>"
+api_key_ref = "<provider-api-key-ref>"
 ```
 
-`[agent].model` is optional and used for model-only agents such as Cursor CLI. `[agent.provider]` is optional and used for agents whose provider setup is explicit. `id` is the configured provider id, `model` is the optional agent-specific model id, and `api_key_ref` is the secret ref that should be present in `[agent].env` and referenced from generated agent-owned config. `[agent.provider.custom]` is optional custom provider metadata; when present, `model` and `api_key_ref` are required. `acps init --provider <provider-id>` can create the initial mapped provider block without a model, while custom provider init requires provider name, base URL, API-key ref, and model id. `acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]` edits mapped providers only for registry entries that declare `set_provider = true`. `acps agent set --custom-provider ...` writes custom provider metadata for agents that declare custom-provider and custom-model support. Codex `openai` stores a provider/model selection without `api_key_ref`; Codex `openrouter` stores `OPENROUTER_API_KEY` and writes the OpenRouter Responses provider table; Codex custom providers are Responses-only. `acps agent set --model <model>` writes `[agent].model` only for model-only entries that declare `set_model = true` and `set_provider = false`. Mapped provider/model paths validate model values against ACP session config options, regenerate supported agent config before writing the main config, and write `acp-stack.toml` only after generated config provisioning succeeds. Custom provider setup writes the requested config without guaranteeing that the underlying agent supports that endpoint. If provider-backed `--model` is omitted, interactive terminals prompt from the ACP `model` config option; non-interactive runs list advertised model values and exit without mutating config.
+`[agent].model` is for model-only agents. `[agent.provider]` is for main provider-backed agents. `[agent.subagent.provider]` is OpenCode-only and maps to `opencode.json` `small_model`.
+
+OpenCode init defaults `small_model` to the main model unless the operator declines. `acps subagent disable` stores `invalid/model`; an empty string still triggers OpenCode's implicit fallback.
 
 Do not pass browser OAuth sessions or account cookies through `acp-stack` config or secrets.
 

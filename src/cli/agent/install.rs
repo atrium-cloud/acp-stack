@@ -123,7 +123,7 @@ pub(super) fn run_agent_install() -> Result<()> {
     Ok(())
 }
 
-pub(super) fn operator_registry_override(home: &Path) -> PathBuf {
+pub(in crate::cli) fn operator_registry_override(home: &Path) -> PathBuf {
     home.join(".config").join("acp-stack").join("agents.toml")
 }
 

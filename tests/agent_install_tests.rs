@@ -207,6 +207,8 @@ fn adapter_kind_entry() -> RegistryEntry {
         allow_custom_provider: false,
         allow_custom_model: false,
         set_mode: false,
+        subagents: false,
+        subagent_alias: None,
         stdio_framing: RegistryStdioFraming::JsonLines,
         website: None,
         github: Some(format!("https://github.com/{HARNESS_REPO}")),
@@ -268,6 +270,7 @@ fn agent_config(command: &str) -> AgentConfig {
         harness_version: None,
         adapter: None,
         provider: None,
+        subagent: None,
         install: None,
     }
 }

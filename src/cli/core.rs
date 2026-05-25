@@ -19,6 +19,7 @@ use super::secrets::SecretsCommand;
 use super::security::SecurityCommand;
 use super::serve::ServeArgs;
 use super::sessions::SessionsCommand;
+use super::subagent::SubagentCommand;
 use super::ws::WsCommand;
 
 #[derive(Debug, Parser)]
@@ -59,6 +60,10 @@ enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    Subagent {
+        #[command(subcommand)]
+        command: SubagentCommand,
     },
     /// Inspect persisted installer step history.
     Installer {
@@ -130,6 +135,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Config { command } => super::config::run_config_command(command),
         Command::Logs { command } => super::logs::run_logs_command(command),
         Command::Agent { command } => super::agent::run_agent_command(command),
+        Command::Subagent { command } => super::subagent::run_subagent_command(command),
         Command::Installer { command } => super::installer::run_installer_command(command),
         Command::Sessions { command } => super::sessions::run_sessions_command(command),
         Command::Deps { command } => super::deps::run_deps_command(command),

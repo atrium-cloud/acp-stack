@@ -22,7 +22,10 @@ use crate::config::Config;
 use crate::config::schema::{McpServerConfig, SupabaseLoggingConfig};
 use crate::error::{Result, StackError};
 
-use self::agent::{validate_agent_install, validate_agent_provider, validate_agent_restart};
+use self::agent::{
+    validate_agent_install, validate_agent_provider, validate_agent_restart,
+    validate_agent_subagent,
+};
 use self::commands::validate_commands;
 use self::deps::validate_dependencies;
 use self::edge::validate_edge;
@@ -113,6 +116,9 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     }
     if let Some(provider) = &config.agent.provider {
         validate_agent_provider(provider)?;
+    }
+    if let Some(subagent) = &config.agent.subagent {
+        validate_agent_subagent(subagent)?;
     }
     if let Some(mode) = config.agent.mode.as_deref()
         && (mode.trim().is_empty() || mode.len() != mode.trim().len())

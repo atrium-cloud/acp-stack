@@ -7,16 +7,18 @@ mod resume;
 mod starter_config;
 mod testflight;
 
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
-use crate::config::{self, Config};
+use crate::config::{self, AgentSubagentConfig, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_file, write_new_file_owner_only,
 };
+use crate::runtime::agent::agent_headless_config::OPENCODE_AGENT_ID;
 use crate::runtime::init_runner::{StepDisposition, StepOutcome, record_step, step_kind};
 use crate::runtime::install::agent_installer::InstallerOutcome;
 use crate::runtime::install::agent_registry::RegistryCatalog;
@@ -198,6 +200,54 @@ pub(super) const STARTER_AGENT_RESTART: &str = "never";
 pub(super) const STARTER_AGENT_INSTALL_CREATES: &str = "acp-agent";
 pub(super) const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
 pub(super) const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
+
+fn configure_subagent_inherit_for_init(
+    registry: &RegistryCatalog,
+    config: &mut Config,
+) -> Result<bool> {
+    if config.agent.subagent.is_some() {
+        return Ok(false);
+    }
+    let Some(entry) = registry.lookup(&config.agent.id) else {
+        return Ok(false);
+    };
+    if entry.id != OPENCODE_AGENT_ID || entry.subagent_alias.as_deref() != Some("small_model") {
+        return Ok(false);
+    }
+    let Some(provider) = config.agent.provider.as_ref() else {
+        return Ok(false);
+    };
+    if provider
+        .model
+        .as_deref()
+        .is_none_or(|model| model.trim().is_empty())
+    {
+        return Ok(false);
+    }
+    if io::stdin().is_terminal() {
+        print!(
+            "use main agent provider/model for {}? [Y/n]: ",
+            entry.subagent_alias.as_deref().unwrap_or("subagent")
+        );
+        io::stdout()
+            .flush()
+            .map_err(|source| StackError::ServeIo { source })?;
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(|source| StackError::ServeIo { source })?;
+        let answer = answer.trim();
+        if answer.eq_ignore_ascii_case("n") || answer.eq_ignore_ascii_case("no") {
+            println!("subagent provider/model left unset; run `acps subagent set` to configure it");
+            return Ok(false);
+        }
+    }
+    config.agent.subagent = Some(AgentSubagentConfig {
+        disabled: false,
+        provider: Some(provider.clone()),
+    });
+    Ok(true)
+}
 
 pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     let home = home_dir()?;
@@ -474,17 +524,19 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             let model_mode_changed =
                 matches!(model_mode_outcome.model_action, ModelModeAction::Set)
                     || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
+            let subagent_configured = configure_subagent_inherit_for_init(&registry, &mut config)?;
             if selected_agent.is_some()
                 || provider_configured
                 || edge_requested
                 || model_mode_changed
+                || subagent_configured
             {
                 let canonical = config.to_canonical_toml()?;
                 config = config::load_config_from_str(&canonical)?;
                 atomic_write_owner_only(&config_path, canonical.as_bytes())?;
             }
             Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}"}}"#,
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
                 model_mode_outcome.model_action, model_mode_outcome.mode_action,
             )))
         },

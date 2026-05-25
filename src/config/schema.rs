@@ -223,8 +223,19 @@ pub struct AgentConfig {
     pub adapter: Option<AgentAdapterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<AgentProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<AgentSubagentConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<AgentInstallConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSubagentConfig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<AgentProviderConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,6 +295,10 @@ fn default_custom_model_context() -> u64 {
 
 fn default_custom_model_output_max_tokens() -> u64 {
     DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

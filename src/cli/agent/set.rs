@@ -368,7 +368,10 @@ fn run_agent_custom_provider_set(
     Ok(())
 }
 
-fn required_custom_arg(field: &'static str, value: Option<String>) -> Result<String> {
+pub(in crate::cli) fn required_custom_arg(
+    field: &'static str,
+    value: Option<String>,
+) -> Result<String> {
     value
         .filter(|value| !value.trim().is_empty() && value.trim().len() == value.len())
         .ok_or_else(|| StackError::InvalidParam {
@@ -377,7 +380,7 @@ fn required_custom_arg(field: &'static str, value: Option<String>) -> Result<Str
         })
 }
 
-fn default_custom_provider_api(agent_id: &str) -> CustomProviderApi {
+pub(in crate::cli) fn default_custom_provider_api(agent_id: &str) -> CustomProviderApi {
     if agent_id == "codex" {
         CustomProviderApi::Responses
     } else {
@@ -385,7 +388,7 @@ fn default_custom_provider_api(agent_id: &str) -> CustomProviderApi {
     }
 }
 
-fn parse_custom_provider_api(
+pub(in crate::cli) fn parse_custom_provider_api(
     value: Option<&str>,
     default: CustomProviderApi,
 ) -> Result<CustomProviderApi> {
@@ -400,7 +403,11 @@ fn parse_custom_provider_api(
     }
 }
 
-fn parse_custom_token_limit(field: &'static str, value: Option<&str>, default: u64) -> Result<u64> {
+pub(in crate::cli) fn parse_custom_token_limit(
+    field: &'static str,
+    value: Option<&str>,
+    default: u64,
+) -> Result<u64> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -565,7 +572,7 @@ fn print_agent_set_agent(config: &Config) {
 /// `agent_id` is provided we surface the correct guidance; passing
 /// `None` keeps the generic "new sessions" message for paths where the
 /// agent id is not known to the caller.
-fn print_agent_set_effective_notice_for(agent_id: Option<&str>) {
+pub(in crate::cli) fn print_agent_set_effective_notice_for(agent_id: Option<&str>) {
     match agent_id {
         Some("goose") => {
             println!(
@@ -583,7 +590,7 @@ fn print_agent_set_effective_notice_for(agent_id: Option<&str>) {
     }
 }
 
-pub(super) fn default_api_key_ref_for_agent_provider(
+pub(in crate::cli) fn default_api_key_ref_for_agent_provider(
     agent_id: &str,
     provider_id: &str,
 ) -> Option<String> {
@@ -593,7 +600,7 @@ pub(super) fn default_api_key_ref_for_agent_provider(
     env_var_for_agent_provider_id(agent_id, provider_id).map(str::to_owned)
 }
 
-fn resolve_agent_model_value(
+pub(in crate::cli) fn resolve_agent_model_value(
     home: &Path,
     config: &Config,
     provider_id: Option<&str>,
@@ -684,7 +691,7 @@ fn select_agent_session_config_value(
         })
 }
 
-fn validate_agent_session_config_value(
+pub(in crate::cli) fn validate_agent_session_config_value(
     home: &Path,
     config: &Config,
     category: AgentSessionConfigCategory,
