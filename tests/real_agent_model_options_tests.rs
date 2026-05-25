@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp_stack::acp_bridge::{
+use acp_stack::config::AgentConfig;
+use acp_stack::runtime::agent::acp_bridge::{
     AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_values,
     session_model_selection_for_value, session_model_values,
 };
-use acp_stack::config::AgentConfig;
 use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
 
 struct NoopSessionEventSink;

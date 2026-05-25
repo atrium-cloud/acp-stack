@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
-use crate::runtime::deps_apply::{
+use crate::runtime::dependencies::deps_apply::{
     DepApplyOutcome, apply_dependencies, candidate_summary_line, candidates_for,
     summarize_candidates,
 };
@@ -39,7 +39,7 @@ pub(super) fn run_deps_command(command: DepsCommand) -> Result<()> {
 
 fn run_check() -> Result<()> {
     let config = Config::load_from_default_path()?;
-    let report = crate::deps::check_dependencies(&config);
+    let report = crate::runtime::dependencies::deps::check_dependencies(&config);
     if report.dependencies.is_empty() {
         println!("no dependencies declared in [dependencies]");
         return Ok(());
@@ -185,7 +185,10 @@ fn run_apply(args: DepsApplyArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_apply_status_section(label: &str, entries: &[crate::deps::DepStatus]) {
+fn print_apply_status_section(
+    label: &str,
+    entries: &[crate::runtime::dependencies::deps::DepStatus],
+) {
     println!("{label}:");
     for entry in entries {
         let status = if entry.available { "OK  " } else { "MISS" };

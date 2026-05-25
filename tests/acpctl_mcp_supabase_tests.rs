@@ -18,7 +18,7 @@ use acp_stack::api::AppState;
 use acp_stack::config::{Config, SupabaseLoggingConfig, load_config_from_str};
 use acp_stack::events::EventHub;
 use acp_stack::local_listener;
-use acp_stack::runtime::supabase_sink::SupabaseSink;
+use acp_stack::runtime::logging::supabase_sink::SupabaseSink;
 use acp_stack::state::{EventFilter, StateStore};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RunningService, ServiceExt};

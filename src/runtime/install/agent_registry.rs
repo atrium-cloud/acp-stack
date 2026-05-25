@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use crate::error::{Result, StackError};
 
-const EMBEDDED_REGISTRY: &str = include_str!("../../data/agents.toml");
+const EMBEDDED_REGISTRY: &str = include_str!("../../../data/agents.toml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryCatalog {

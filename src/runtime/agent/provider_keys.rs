@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::error::{Result, StackError};
 
-const EMBEDDED_ENV_VARS: &str = include_str!("../../data/env_vars.toml");
-const EMBEDDED_PROVIDERS: &str = include_str!("../../data/providers.toml");
+const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
+const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
     ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)

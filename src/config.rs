@@ -733,8 +733,8 @@ impl Config {
         let root = Path::new(&self.workspace.root);
         let uploads = Path::new(&self.workspace.uploads);
         for lane in [
-            crate::runtime::workspace_init::CODE_LANE_DIR,
-            crate::runtime::workspace_init::DATA_LANE_DIR,
+            crate::runtime::workspace_sources::workspace_init::CODE_LANE_DIR,
+            crate::runtime::workspace_sources::workspace_init::DATA_LANE_DIR,
         ] {
             let lane_root = root.join(lane);
             if uploads.starts_with(&lane_root) || lane_root.starts_with(uploads) {

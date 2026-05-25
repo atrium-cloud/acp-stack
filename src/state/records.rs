@@ -12,7 +12,7 @@
 ///
 /// The `command_id` and `permission_id` filters rely on `json_extract` against
 /// the payload JSON (`$.command_id`, `$.permission_id`). The permission
-/// publisher in `src/runtime/permissions.rs` writes a `permission_id` field
+/// publisher in `src/runtime/mediation/permissions.rs` writes a `permission_id` field
 /// alongside the legacy `id` field so this filter keeps working.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogFilter<'a> {

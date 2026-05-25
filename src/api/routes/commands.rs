@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::super::core::AppState;
 use super::logs::{LogsLimitParams, MAX_LOGS_LIMIT};
-use crate::commands::SubmitRequest;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
+use crate::runtime::mediation::commands::SubmitRequest;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CommandSubmitRequest {
