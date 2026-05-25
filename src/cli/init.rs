@@ -1,165 +1,174 @@
-use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+mod headless_snapshot;
+mod install;
+mod model_mode;
+mod provider;
+mod registry_apply;
+mod resume;
+mod starter_config;
+mod testflight;
+
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
-use crate::auth::generate_api_key;
-use crate::config::{
-    self, AgentConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
-    ApiConfig, AuthConfig, CloudflareEdgeConfig, CodeSourceConfig, Config, CustomProviderApi,
-    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DataSourceConfig,
-    DependencyEntry, EdgeConfig, LoggingConfig, SecurityConfig, SecurityHttpConfig,
-    SupabaseLoggingConfig, WorkspaceConfig,
-};
+use crate::config::{self, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_file, write_new_file_owner_only,
 };
-use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
-use crate::runtime::agent::model_discovery::{
-    advertised_values_for_category, fetch_session_config, validate_advertised_value,
-};
-use crate::runtime::agent::provider_keys::{
-    env_refs_for_agent_id, env_var_for_agent_provider_id, provider_id_is_known,
-    provider_id_supports_agent, providers_for_agent, required_env_refs_for_provider_id,
-};
-use crate::runtime::init_runner::{
-    self, StepDisposition, StepOutcome, begin_run, finalize_run, find_resumable_run, record_step,
-    step_kind,
-};
-use crate::runtime::install::agent_installer::{InstallerOutcome, install_resolved, run_installer};
-use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
+use crate::runtime::init_runner::{StepDisposition, StepOutcome, record_step, step_kind};
+use crate::runtime::install::agent_installer::InstallerOutcome;
+use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::{SecretStore, age_key_path, secret_store_path};
 use crate::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
-    InitRunRecord, InitStepRecord, StateStore, default_state_path,
+    StateStore, default_state_path,
 };
+
+use self::headless_snapshot::{
+    capture_dir_listings_for, capture_path_snapshots, headless_config_candidate_paths,
+    headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
+};
+use self::install::{
+    install_configured_agent, local_bin_dir, operator_registry_override, should_install_agent,
+};
+use self::model_mode::{ModelModeAction, configure_model_and_mode_for_init};
+use self::provider::configure_provider_for_init;
+use self::registry_apply::{
+    apply_edge_profile_to_config, apply_registry_entry_to_config, select_agent_for_init,
+};
+use self::resume::{
+    finalize_with_error, init_complete_event_already_recorded, installer_postcondition_holds,
+    perform_secrets_init, recorded_init_args, resolve_init_run, step_needs_resume,
+    workspace_postcondition_holds,
+};
+use self::starter_config::{starter_config, validate_deployment_overrides_match_existing};
+use self::testflight::{TestflightDecision, resolve_testflight_decision};
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Select the configured agent non-interactively from the registry.
     #[arg(long)]
-    agent: Option<String>,
+    pub(super) agent: Option<String>,
     /// Select the initial provider id for agents that support provider setup.
     #[arg(long)]
-    provider: Option<String>,
+    pub(super) provider: Option<String>,
     /// Secret ref to inject for the selected initial provider.
     #[arg(long, requires = "provider")]
-    api_key_ref: Option<String>,
+    pub(super) api_key_ref: Option<String>,
     /// Configure the selected provider as a custom provider.
     #[arg(long, requires = "provider")]
-    custom_provider: bool,
+    pub(super) custom_provider: bool,
     /// Display name for a custom provider.
     #[arg(long = "provider-name", requires = "custom_provider")]
-    provider_name: Option<String>,
+    pub(super) provider_name: Option<String>,
     /// Base URL for a custom provider.
     #[arg(long = "base-url", requires = "custom_provider")]
-    base_url: Option<String>,
+    pub(super) base_url: Option<String>,
     /// API family for a custom provider: chat-completions or responses.
     #[arg(long = "provider-api", requires = "custom_provider")]
-    provider_api: Option<String>,
+    pub(super) provider_api: Option<String>,
     /// Initial model id. With `--custom-provider`, taken verbatim as the
     /// custom model id. Otherwise validated against the agent's
     /// ACP-advertised `model` values discovered via a provisional
     /// session.
     #[arg(long)]
-    model: Option<String>,
+    pub(super) model: Option<String>,
     /// Initial mode value. Validated against the agent's ACP-advertised
     /// `mode` values discovered via the same provisional session.
     #[arg(long)]
-    mode: Option<String>,
+    pub(super) mode: Option<String>,
     /// Display name for a custom model.
     #[arg(long = "model-name", requires = "custom_provider")]
-    model_name: Option<String>,
+    pub(super) model_name: Option<String>,
     /// Context window in tokens for a custom model.
     #[arg(long, requires = "custom_provider")]
-    context: Option<String>,
+    pub(super) context: Option<String>,
     /// Maximum output tokens for a custom model.
     #[arg(long = "output-max-tokens", requires = "custom_provider")]
-    output_max_tokens: Option<String>,
+    pub(super) output_max_tokens: Option<String>,
     /// Install the selected or already configured agent during init.
     #[arg(long, conflicts_with = "no_install_agent")]
-    install_agent: bool,
+    pub(super) install_agent: bool,
     /// Skip the install prompt in interactive runs.
     #[arg(long)]
-    no_install_agent: bool,
+    pub(super) no_install_agent: bool,
     /// Configure a public edge profile during init.
     #[arg(long, value_enum)]
-    edge: Option<EdgeProviderArg>,
+    pub(super) edge: Option<EdgeProviderArg>,
     /// Public exposure model for the selected edge provider.
     #[arg(long, value_enum, requires = "edge")]
-    exposure: Option<EdgeExposureArg>,
+    pub(super) exposure: Option<EdgeExposureArg>,
     /// Public hostname for the edge profile, for example agent.example.com.
     #[arg(long, requires = "edge")]
-    hostname: Option<String>,
+    pub(super) hostname: Option<String>,
     /// How cloudflared is expected to run for generated Cloudflare artifacts.
     #[arg(long, value_enum, default_value_t = CloudflaredDeploymentArg::Host)]
-    cloudflared_deployment: CloudflaredDeploymentArg,
+    pub(super) cloudflared_deployment: CloudflaredDeploymentArg,
     /// Workspace root to write into a newly-created starter config.
     #[arg(long)]
-    workspace_root: Option<String>,
+    pub(super) workspace_root: Option<String>,
     /// Workspace uploads path to write into a newly-created starter config.
     #[arg(long)]
-    workspace_uploads: Option<String>,
+    pub(super) workspace_uploads: Option<String>,
     /// Runtime user to write into a newly-created starter config.
     #[arg(long)]
-    runtime_user: Option<String>,
+    pub(super) runtime_user: Option<String>,
     /// Pre-seed `[[workspace.code_sources]]` with one or more git
     /// repositories. Repeatable. Accepts an `https://...`, `git@host:repo`,
     /// or other supported repo URL. Only applied when the starter config is
     /// being created.
     #[arg(long = "code-from", value_name = "URL")]
-    code_from: Vec<String>,
+    pub(super) code_from: Vec<String>,
     /// Pre-seed `[[workspace.data_sources]]` with a local path or an
     /// `https://...` archive URL. Repeatable. Only applied when the starter
     /// config is being created.
     #[arg(long = "data-from", value_name = "PATH_OR_URL")]
-    data_from: Vec<String>,
+    pub(super) data_from: Vec<String>,
     /// Skip the workspace materializer; useful for tests and dev loops that
     /// do not need actual content fetched/cloned.
     #[arg(long)]
-    skip_workspace_init: bool,
+    pub(super) skip_workspace_init: bool,
     /// Run the real-prompt agent testflight at the end of init. Warns about
     /// provider credit consumption. Mutually exclusive with `--skip-testflight`.
     #[arg(long, conflicts_with = "skip_testflight")]
-    testflight: bool,
+    pub(super) testflight: bool,
     /// Suppress the end-of-init testflight even in interactive runs.
     #[arg(long)]
-    skip_testflight: bool,
+    pub(super) skip_testflight: bool,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
-    resume: bool,
+    pub(super) resume: bool,
     /// Force a brand-new init run even if a prior run was incomplete.
     /// Conflicts with `--resume`.
     #[arg(long)]
-    fresh: bool,
+    pub(super) fresh: bool,
     /// Target a specific init run id when resuming. Implies `--resume`.
     #[arg(long, value_name = "ID", requires = "resume")]
-    run_id: Option<String>,
+    pub(super) run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum EdgeProviderArg {
+pub(super) enum EdgeProviderArg {
     Cloudflare,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum EdgeExposureArg {
+pub(super) enum EdgeExposureArg {
     Tunnel,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum CloudflaredDeploymentArg {
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub(super) enum CloudflaredDeploymentArg {
     Host,
     Docker,
     External,
 }
 
 impl CloudflaredDeploymentArg {
-    fn as_config_value(self) -> &'static str {
+    pub(super) fn as_config_value(self) -> &'static str {
         match self {
             Self::Host => "host",
             Self::Docker => "docker",
@@ -168,27 +177,27 @@ impl CloudflaredDeploymentArg {
     }
 }
 
-const STARTER_MAX_REQUEST_BYTES: u64 = 104_857_600;
-const STARTER_RATE_LIMIT_PER_MINUTE: u64 = 120;
-const STARTER_RATE_LIMIT_BURST: u64 = 30;
-const STARTER_AUTH_FAILURES_PER_MINUTE: u64 = 5;
-const STARTER_AUTH_BLOCK_DURATION: &str = "15m";
-const STARTER_SESSION_KEY_REF: &str = "ACP_STACK_SESSION_KEY";
-const STARTER_ADMIN_KEY_REF: &str = "ACP_STACK_ADMIN_KEY";
-const STARTER_DEFAULT_SHELL: &str = "/bin/bash";
-const STARTER_WORKSPACE_MAX_FILE_BYTES: u64 = 8_388_608;
-const STARTER_LOCAL_RETENTION_DAYS: u64 = 30;
-const STARTER_LOG_LEVEL: &str = "info";
-const STARTER_SUPABASE_URL: &str = "https://example.supabase.co";
-const STARTER_SUPABASE_SERVICE_ROLE_KEY_REF: &str = "SUPABASE_SERVICE_ROLE_KEY";
-const STARTER_SUPABASE_SCHEMA: &str = "acp_stack";
-const STARTER_AGENT_ID: &str = "placeholder";
-const STARTER_AGENT_NAME: &str = "Placeholder Agent";
-const STARTER_AGENT_COMMAND: &str = "acp-agent";
-const STARTER_AGENT_RESTART: &str = "never";
-const STARTER_AGENT_INSTALL_CREATES: &str = "acp-agent";
-const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
-const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
+pub(super) const STARTER_MAX_REQUEST_BYTES: u64 = 104_857_600;
+pub(super) const STARTER_RATE_LIMIT_PER_MINUTE: u64 = 120;
+pub(super) const STARTER_RATE_LIMIT_BURST: u64 = 30;
+pub(super) const STARTER_AUTH_FAILURES_PER_MINUTE: u64 = 5;
+pub(super) const STARTER_AUTH_BLOCK_DURATION: &str = "15m";
+pub(super) const STARTER_SESSION_KEY_REF: &str = "ACP_STACK_SESSION_KEY";
+pub(super) const STARTER_ADMIN_KEY_REF: &str = "ACP_STACK_ADMIN_KEY";
+pub(super) const STARTER_DEFAULT_SHELL: &str = "/bin/bash";
+pub(super) const STARTER_WORKSPACE_MAX_FILE_BYTES: u64 = 8_388_608;
+pub(super) const STARTER_LOCAL_RETENTION_DAYS: u64 = 30;
+pub(super) const STARTER_LOG_LEVEL: &str = "info";
+pub(super) const STARTER_SUPABASE_URL: &str = "https://example.supabase.co";
+pub(super) const STARTER_SUPABASE_SERVICE_ROLE_KEY_REF: &str = "SUPABASE_SERVICE_ROLE_KEY";
+pub(super) const STARTER_SUPABASE_SCHEMA: &str = "acp_stack";
+pub(super) const STARTER_AGENT_ID: &str = "placeholder";
+pub(super) const STARTER_AGENT_NAME: &str = "Placeholder Agent";
+pub(super) const STARTER_AGENT_COMMAND: &str = "acp-agent";
+pub(super) const STARTER_AGENT_RESTART: &str = "never";
+pub(super) const STARTER_AGENT_INSTALL_CREATES: &str = "acp-agent";
+pub(super) const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
+pub(super) const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
 
 pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     let home = home_dir()?;
@@ -684,7 +693,7 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             &init_run,
             8,
             step_kind::TESTFLIGHT,
-            || Ok(matches!(decision, TestflightDecision::Run).not()),
+            || Ok(!matches!(decision, TestflightDecision::Run)),
             || {
                 match decision {
                     TestflightDecision::Run => {
@@ -738,7 +747,7 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         .map(|s| s.kind.as_str())
         .collect();
     if !unsettled.is_empty() {
-        finalize_run(&store, &init_run.id, INIT_RUN_FAILED)?;
+        crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_FAILED)?;
         return Err(StackError::InitRunCorrupted {
             reason: format!(
                 "init run {} has unsettled steps {unsettled:?}; re-run with the original flags to drive them to completion",
@@ -746,1846 +755,6 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             ),
         });
     }
-    finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
-    Ok(())
-}
-
-/// Pick the run row for this invocation. `--resume [--run-id <id>]` resumes
-/// an existing row; `--fresh` always begins a new one; without either flag
-/// the orchestrator begins fresh too — auto-resume would otherwise change
-/// the meaning of unrelated `acps init` calls without warning.
-fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<InitRunRecord> {
-    let args_json = serde_json::json!({
-        "agent": args.agent,
-        "provider": args.provider,
-        "model": args.model,
-        "mode": args.mode,
-        "testflight": args.testflight,
-        "skip_testflight": args.skip_testflight,
-        "fresh": args.fresh,
-        "resume": args.resume,
-    })
-    .to_string();
-
-    if args.resume {
-        let existing = if let Some(id) = args.run_id.as_deref() {
-            init_runner::lookup_run(store, id)?.ok_or_else(|| StackError::InitRunCorrupted {
-                reason: format!("no init run with id `{id}`"),
-            })?
-        } else {
-            find_resumable_run(store)?.ok_or_else(|| StackError::InitRunCorrupted {
-                reason: "no resumable init run found; re-run without --resume".to_owned(),
-            })?
-        };
-        return Ok(existing);
-    }
-
-    begin_run(store, None, args.agent.as_deref(), &args_json)
-}
-
-#[derive(Default, serde::Deserialize)]
-struct RecordedInitArgs {
-    provider: Option<String>,
-    model: Option<String>,
-    mode: Option<String>,
-}
-
-fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
-    serde_json::from_str(&run.args_json).map_err(|source| StackError::InitRunCorrupted {
-        reason: format!("init run {} has invalid args_json: {source}", run.id),
-    })
-}
-
-fn step_needs_resume(steps: &[InitStepRecord], kind: &str) -> bool {
-    steps.iter().any(|step| {
-        step.kind == kind
-            && matches!(
-                step.status.as_str(),
-                INIT_STEP_PENDING | INIT_STEP_RUNNING | INIT_STEP_FAILED
-            )
-    })
-}
-
-fn finalize_with_error(store: &StateStore, run: &InitRunRecord, error: StackError) -> Result<()> {
-    finalize_run(store, &run.id, INIT_RUN_FAILED)?;
-    Err(error)
-}
-
-struct SecretsInitOutcome {
-    status: &'static str,
-}
-
-fn perform_secrets_init(
-    store_existed: bool,
-    session_ref: &str,
-    admin_ref: &str,
-    secret_store: &mut SecretStore,
-    store: &StateStore,
-) -> Result<SecretsInitOutcome> {
-    let session_present = secret_store.contains(session_ref);
-    let admin_present = secret_store.contains(admin_ref);
-    if store_existed {
-        if !admin_present {
-            return Err(StackError::MissingAdminKey {
-                name: admin_ref.to_owned(),
-            });
-        }
-        if !session_present {
-            return Err(StackError::MissingSessionKey {
-                name: session_ref.to_owned(),
-            });
-        }
-        return Ok(SecretsInitOutcome {
-            status: "preserved existing API keys",
-        });
-    }
-    let session_value = generate_api_key();
-    let admin_value = generate_api_key();
-    println!("---");
-    println!("session key ({session_ref}): {session_value}");
-    println!("admin key ({admin_ref}): {admin_value}");
-    println!(
-        "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
-    );
-    println!("---");
-    secret_store.set_many([
-        (session_ref, session_value.as_str()),
-        (admin_ref, admin_value.as_str()),
-    ])?;
-    store.append_event_with_source(
-        "info",
-        "auth.keys_generated",
-        crate::state::EVENT_SOURCE_CLI,
-        "generated session and admin API keys",
-        &serde_json::json!({
-            "session_key_ref": session_ref,
-            "admin_key_ref": admin_ref,
-        })
-        .to_string(),
-    )?;
-    Ok(SecretsInitOutcome {
-        status: "generated session and admin API keys",
-    })
-}
-
-fn installer_postcondition_holds(
-    config: &Config,
-    workspace_root: &Path,
-    local_bin_dir: &Path,
-) -> bool {
-    let (target, extra_path_dirs): (&str, Vec<&Path>) =
-        if let Some(install) = config.agent.install.as_ref() {
-            (install.creates.as_str(), Vec::new())
-        } else {
-            (config.agent.command.as_str(), vec![local_bin_dir])
-        };
-    crate::runtime::install::agent_installer::resolve_creates_for_init_resume(
-        target,
-        workspace_root,
-        &extra_path_dirs,
-    )
-    .is_some()
-}
-
-fn workspace_postcondition_holds(workspace: &crate::config::WorkspaceConfig) -> bool {
-    crate::runtime::workspace_sources::workspace_init::all_sources_have_sentinel(workspace)
-        .unwrap_or(false)
-}
-
-fn init_complete_event_already_recorded(store: &StateStore, run_id: &str) -> bool {
-    let Ok(events) = store.query_events(crate::state::EventFilter {
-        limit: 64,
-        kind: Some("init.completed"),
-        ..crate::state::EventFilter::default()
-    }) else {
-        return false;
-    };
-    events
-        .iter()
-        .any(|event| event.payload_json.contains(run_id))
-}
-
-/// Tiny inverter so a `match` arm doesn't need its own helper.
-trait BoolNot {
-    fn not(self) -> bool;
-}
-
-impl BoolNot for bool {
-    fn not(self) -> bool {
-        !self
-    }
-}
-
-/// What `acps init` should do with the post-init testflight phase. Resolved
-/// from the operator's flags + TTY state + agent registry support so the
-/// outer flow can render a clear log line for every path, and the test suite
-/// can assert each case without exercising the real ACP bridge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TestflightDecision {
-    /// All preconditions met and the operator opted in (explicit flag or
-    /// interactive yes).
-    Run,
-    /// Operator passed `--skip-testflight`.
-    SkipExplicit,
-    /// Non-interactive run and `--testflight` was not passed.
-    SkipNonInteractive,
-    /// Interactive run and the operator answered no at the credit-warning
-    /// prompt.
-    SkipDeclined,
-    /// Selected agent isn't headless-compatible; the testflight would fail
-    /// at spawn. Surface the skip so the operator isn't surprised.
-    SkipUnsupported,
-}
-
-fn resolve_testflight_decision(
-    args: &InitArgs,
-    config: &Config,
-    registry: &RegistryCatalog,
-) -> Result<Option<TestflightDecision>> {
-    if args.skip_testflight {
-        return Ok(Some(TestflightDecision::SkipExplicit));
-    }
-    let Some(entry) = registry.lookup(&config.agent.id) else {
-        // Operator's `[agent].id` doesn't match the registry (e.g., escape
-        // hatch). No registry entry means we don't know the testflight
-        // capabilities, so don't auto-run. Surface as a separate state only
-        // if the operator explicitly asked.
-        if args.testflight {
-            return Err(StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            });
-        }
-        return Ok(None);
-    };
-    if !entry.headless_compatible {
-        if args.testflight {
-            return Err(StackError::AgentUnsupported {
-                name: entry.name.clone(),
-            });
-        }
-        return Ok(Some(TestflightDecision::SkipUnsupported));
-    }
-    if args.testflight {
-        print_testflight_credit_warning(entry);
-        return Ok(Some(TestflightDecision::Run));
-    }
-    if !io::stdin().is_terminal() {
-        return Ok(Some(TestflightDecision::SkipNonInteractive));
-    }
-    if confirm_testflight_credit_warning(entry)? {
-        Ok(Some(TestflightDecision::Run))
-    } else {
-        Ok(Some(TestflightDecision::SkipDeclined))
-    }
-}
-
-fn confirm_testflight_credit_warning(entry: &RegistryEntry) -> Result<bool> {
-    print_testflight_credit_warning(entry);
-    print!("run testflight now? [y/N]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
-}
-
-fn print_testflight_credit_warning(entry: &RegistryEntry) {
-    println!("---");
-    println!(
-        "init testflight will start `{}` and send a real prompt to the configured provider.",
-        entry.name
-    );
-    println!("this may consume provider credits.");
-}
-
-fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config) -> Result<bool> {
-    let Some(edge) = args.edge else {
-        return Ok(false);
-    };
-    match edge {
-        EdgeProviderArg::Cloudflare => {}
-    }
-    if !matches!(args.exposure, Some(EdgeExposureArg::Tunnel)) {
-        return Err(StackError::MissingField {
-            field: "--exposure tunnel",
-        });
-    }
-    let hostname = args
-        .hostname
-        .as_ref()
-        .ok_or(StackError::MissingField {
-            field: "--hostname",
-        })?
-        .trim()
-        .to_owned();
-    let public_url = format!("https://{hostname}");
-    config.api.bind = "127.0.0.1:7700".to_owned();
-    config.api.public_url = Some(public_url.clone());
-    config.security.http.allowed_origins = vec![public_url];
-    config.security.http.trust_proxy_headers = true;
-    config.security.http.trusted_proxies = vec!["127.0.0.1".to_owned(), "::1".to_owned()];
-    config.edge = EdgeConfig {
-        cloudflare: Some(CloudflareEdgeConfig {
-            enabled: true,
-            mode: "generated".to_owned(),
-            exposure: "tunnel".to_owned(),
-            hostname,
-            tunnel_name: Some("acp-stack".to_owned()),
-            tunnel_id: None,
-            cloudflared_deployment: args.cloudflared_deployment.as_config_value().to_owned(),
-        }),
-    };
-    if matches!(args.cloudflared_deployment, CloudflaredDeploymentArg::Host)
-        && !config
-            .dependencies
-            .commands
-            .iter()
-            .any(|entry| entry.name == "cloudflared")
-    {
-        config.dependencies.commands.push(DependencyEntry {
-            name: "cloudflared".to_owned(),
-            required: true,
-            feature: Some("cloudflare-tunnel".to_owned()),
-            install: None,
-        });
-    }
-    Ok(true)
-}
-
-fn select_agent_for_init<'a>(
-    args: &InitArgs,
-    registry: &'a RegistryCatalog,
-) -> Result<Option<&'a RegistryEntry>> {
-    if let Some(id) = &args.agent {
-        return registry
-            .lookup(id)
-            .ok_or_else(|| StackError::AgentRegistryMissing { id: id.clone() })
-            .map(Some);
-    }
-    if !io::stdin().is_terminal() {
-        return Ok(None);
-    }
-    let entries = registry.entries();
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    println!("Select an agent to configure:");
-    for (index, entry) in entries.iter().enumerate() {
-        println!("  {}. {} ({})", index + 1, entry.name, entry.id);
-    }
-    print!("agent [1-{}, blank to keep current]: ", entries.len());
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    let index = answer
-        .parse::<usize>()
-        .map_err(|_| StackError::InvalidParam {
-            field: "agent",
-            reason: format!("invalid selection `{answer}`"),
-        })?;
-    if index == 0 {
-        return Err(StackError::InvalidParam {
-            field: "agent",
-            reason: format!("selection `{answer}` is out of range"),
-        });
-    }
-    entries
-        .get(index - 1)
-        .ok_or_else(|| StackError::InvalidParam {
-            field: "agent",
-            reason: format!("selection `{answer}` is out of range"),
-        })
-        .map(Some)
-}
-
-fn apply_registry_entry_to_config(config: &mut Config, entry: &RegistryEntry) {
-    // When the operator re-confirms the SAME agent (e.g. `acps init
-    // --agent X` again to refresh secrets or pick up registry changes
-    // for the launch command), preserve provider/model/mode/env so a
-    // bare re-run doesn't quietly drop a previously pinned model or
-    // mode. When switching to a DIFFERENT agent, clear the agent
-    // block so leftover provider/model/mode from the prior agent
-    // can't poison the new launch context.
-    let agent_changed = config.agent.id != entry.id;
-    config.agent.id = entry.id.clone();
-    config.agent.name = entry.name.clone();
-    config.agent.cwd = Some(config.workspace.root.clone());
-    if agent_changed {
-        config.agent.env = default_agent_env_refs(&entry.id);
-        config.agent.mode = None;
-        config.agent.model = None;
-        config.agent.provider = None;
-    }
-    config.agent.expected_sha256 = None;
-    config.agent.restart = "on-crash".to_owned();
-    config.agent.harness_version = None;
-    config.agent.adapter = None;
-    config.agent.install = None;
-
-    match entry.kind {
-        RegistryKind::Native => {
-            let harness = entry.harness.as_ref().expect("validated registry harness");
-            config.agent.command = harness.id.clone();
-            config.agent.args = vec!["acp".to_owned()];
-        }
-        RegistryKind::Adapter => {
-            let adapter = entry.adapter.as_ref().expect("validated registry adapter");
-            config.agent.command = adapter.id.clone();
-            config.agent.args = Vec::new();
-        }
-    }
-}
-
-fn configure_provider_for_init(
-    args: &InitArgs,
-    registry: &RegistryCatalog,
-    config: &mut Config,
-    config_path: &Path,
-    secret_store: &mut SecretStore,
-) -> Result<bool> {
-    let Some(provider_id) = select_provider_for_init(args, registry, config)? else {
-        return Ok(false);
-    };
-    let required_refs = apply_provider_to_config(args, registry, config, config_path, provider_id)?;
-    collect_missing_provider_refs(secret_store, &required_refs)?;
-    Ok(true)
-}
-
-/// Outcome of a single category (model or mode) selection step.
-/// `Skipped` covers both "agent doesn't support this category" and
-/// "no flag, no resume, no interactive prompt"; `PrintedList` is the
-/// L87 path where non-interactive init prints advertised values but
-/// declines to mutate config; `Set` triggers a canonical re-write.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum ModelModeAction {
-    #[default]
-    Skipped,
-    Set,
-    PrintedList,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct ModelModeOutcome {
-    model_action: ModelModeAction,
-    mode_action: ModelModeAction,
-}
-
-/// Drives the L84-L87 ACP-discovery flow during `acps init`.
-///
-/// - L84: spawns one provisional ACP session via `fetch_session_config`
-///   when the configured agent supports model or mode setup, so the
-///   advertised lists come straight from the installed harness instead
-///   of a stale registry snapshot.
-/// - L85: reads `model` and `mode` `session/new` config_options before
-///   accepting or printing any choice.
-/// - L86: explicit `--model`/`--mode` values are validated against the
-///   advertised list before being written to canonical config.
-/// - L87: non-interactive runs without `--model`/`--mode` print the
-///   advertised values and return `PrintedList` so the caller does NOT
-///   mutate that field; init continues with the existing config so
-///   downstream steps stay usable.
-fn configure_model_and_mode_for_init(
-    args: &InitArgs,
-    home: &Path,
-    registry: &RegistryCatalog,
-    config: &mut Config,
-    config_path: &Path,
-) -> Result<ModelModeOutcome> {
-    let Some(entry) = registry.lookup(&config.agent.id) else {
-        return Ok(ModelModeOutcome::default());
-    };
-
-    // Capability gate, evaluated before any side effects. Reject
-    // explicit --model/--mode for agents whose registry entry says the
-    // category is not supported — surfacing this here means the operator
-    // gets a precise capability error instead of a downstream "binary
-    // not on PATH" / "no advertised values" / silent no-op (audit P1
-    // for --model, P2 for --mode).
-    if args.model.is_some() && !entry.set_model {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: format!(
-                "{} does not support model configuration through `acps init`",
-                entry.name,
-            ),
-        });
-    }
-    // For provider-backed agents the model belongs inside
-    // `[agent.provider]`. Allowing `--model` without `--provider` would
-    // either silently write to the root `agent.model` slot (which the
-    // headless provisioners and `acps agent set` deliberately avoid for
-    // these agents) or pair the new model with a stale provider block.
-    // Require the operator to pair them explicitly; for model-only
-    // agents (set_provider=false) a bare `--model` is still fine.
-    if args.model.is_some()
-        && entry.set_provider
-        && args.provider.is_none()
-        && config.agent.provider.is_none()
-    {
-        return Err(StackError::InvalidParam {
-            field: "model",
-            reason: format!(
-                "{} stores the model inside [agent.provider]; pass --provider <id> together with --model, or run `acps agent set` after init",
-                entry.name,
-            ),
-        });
-    }
-    if args.mode.is_some() && !entry.set_mode {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: format!(
-                "{} does not support mode configuration through `acps init`",
-                entry.name,
-            ),
-        });
-    }
-    if !entry.set_model && !entry.set_mode {
-        return Ok(ModelModeOutcome::default());
-    }
-    // Custom-provider flow already wrote a literal model id into the
-    // provider config and that id is not an ACP-advertised value, so
-    // the MODEL lane is skipped for custom-provider runs. The MODE
-    // lane is independent of provider choice (the agent advertises the
-    // same set of modes regardless), so mode discovery still runs to
-    // honor an explicit `--mode` or interactive picker.
-    let skip_model_lane = args.custom_provider;
-
-    let interactive = io::stdin().is_terminal();
-    let provider_set_this_run = args.provider.is_some();
-    // For provider-backed agents, the model belongs inside
-    // `[agent.provider]`. If no provider is configured (neither set
-    // this run nor pre-existing in the loaded config), suppress the
-    // interactive model picker — otherwise it would write into root
-    // `agent.model`, which the supervisor prefers and which the
-    // provider-backed model-ownership contract explicitly forbids
-    // for these agents.
-    let provider_present =
-        provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
-    // Each lane is active independently. Discovery runs when at least
-    // one lane needs the advertised list — either to validate an
-    // explicit value (L86), to drive an interactive picker (L84), or
-    // to surface the L87 print-and-skip behavior after a provider was
-    // just set non-interactively.
-    let model_lane_active = entry.set_model
-        && !skip_model_lane
-        && provider_present
-        && (args.model.is_some() || interactive || provider_set_this_run);
-    let mode_lane_active =
-        entry.set_mode && (args.mode.is_some() || interactive || provider_set_this_run);
-    if !model_lane_active && !mode_lane_active {
-        return Ok(ModelModeOutcome::default());
-    }
-    // `explicit` gates the failure path of the preflight checks below:
-    // an explicit `--model` (when the model lane is active, i.e. not
-    // custom-provider) or `--mode` must error out rather than silently
-    // skip if the binary or cwd is missing.
-    let explicit = (args.model.is_some() && model_lane_active) || args.mode.is_some();
-
-    // Two preconditions must hold before we spawn the agent for
-    // session/new:
-    //   1. The agent binary must resolve on PATH so the spawn won't
-    //      hit ENOENT at the exec syscall. `resolve_command_path` is
-    //      run with the same cwd `fetch_session_config` will use so
-    //      relative commands resolve consistently.
-    //   2. The spawn cwd directory must exist because the bridge's
-    //      `current_dir(&cwd)` setup fails with ENOENT otherwise.
-    //      `fetch_session_config` prefers `config.agent.cwd` over
-    //      `workspace.root`, so we must mirror that selection or the
-    //      preflight can pass on a directory the spawn never visits
-    //      (audit P2).
-    // When either is missing on a non-explicit call we skip the L84-L87
-    // dance with a printed note — the operator gets a working partial
-    // config they can finish off with a follow-up `acps init --model`.
-    // For explicit `--model`/`--mode` we fail loudly so they're never
-    // silently accepted without validation.
-    let spawn_cwd: PathBuf = config
-        .agent
-        .cwd
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
-    let binary_missing =
-        crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
-            .is_none();
-    let cwd_missing = !spawn_cwd.is_dir();
-    if binary_missing || cwd_missing {
-        if explicit {
-            let reason = match (binary_missing, cwd_missing) {
-                (true, true) => format!(
-                    "agent command `{}` is not on PATH and spawn cwd `{}` does not exist",
-                    config.agent.command,
-                    spawn_cwd.display(),
-                ),
-                (true, false) => {
-                    format!("agent command `{}` is not on PATH", config.agent.command,)
-                }
-                (false, true) => format!(
-                    "spawn cwd `{}` does not exist; create it or run workspace materialize first",
-                    spawn_cwd.display(),
-                ),
-                (false, false) => unreachable!(),
-            };
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!(
-                    "cannot validate --model/--mode for {}: {reason}",
-                    entry.name
-                ),
-            });
-        }
-        if binary_missing {
-            println!(
-                "model/mode discovery skipped: agent command `{}` not found on PATH",
-                config.agent.command,
-            );
-        } else {
-            println!(
-                "model/mode discovery skipped: spawn cwd `{}` is not yet provisioned",
-                spawn_cwd.display(),
-            );
-        }
-        return Ok(ModelModeOutcome::default());
-    }
-
-    // Provision the agent's headless config so the spawned harness
-    // sees the NEW provider rather than whatever was on disk before.
-    // For codex/pi/goose the advertised model list can vary by
-    // configured provider, so discovering against a stale headless
-    // config would surface the wrong options.
-    //
-    // To keep the "rejection writes nothing" guarantee, snapshot every
-    // candidate file's PRIOR contents (or None for "did not exist")
-    // BEFORE provisioning runs. The provisioners are per-agent and
-    // map to known paths; we walk those candidates up-front so a
-    // post-provision restore can roll back to true prior state on
-    // discovery/validation failure. On success the provision stays;
-    // step 5 (agent_headless_config) will re-provision with the final
-    // post-discovery model/mode shape.
-    //
-    // Known narrow caveat: Codex provisioners (`provision_codex_openai_config`
-    // and the OpenRouter branch) short-circuit with `Ok(None)` when no
-    // model is configured yet, so the L87 "print advertised models"
-    // path for codex+provider-only discovers against whatever
-    // ~/.codex/config.toml looked like before this run. The advertised
-    // list itself comes from Codex's built-in catalog rather than the
-    // configured provider, so the practical impact is limited to
-    // first-run codex when the operator switches providers without
-    // also passing --model.
-    let candidate_paths = headless_config_candidate_paths(&config.agent.id, home);
-    let snapshots = capture_path_snapshots(&candidate_paths)?;
-    // Also record directory listings so rollback can remove side files
-    // the provisioner created out-of-band:
-    //   - codex OpenAI writes `~/.codex/config.<provider>.toml`
-    //     backup files alongside the primary config.
-    //   - Goose custom provider writes
-    //     `~/.config/goose/custom_providers/<operator-id>.json`,
-    //     whose name is operator-supplied so it can't be enumerated
-    //     via candidate_paths.
-    let mut dir_scan = candidate_paths
-        .iter()
-        .filter_map(|path| path.parent().map(Path::to_path_buf))
-        .collect::<Vec<_>>();
-    dir_scan.extend(headless_config_side_dirs(&config.agent.id, home));
-    let dir_listings = capture_dir_listings_for(&dir_scan)?;
-    let discovery_outcome = (|| {
-        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
-            config, home,
-        )?;
-        let response = fetch_session_config(home, config)?;
-        let mut outcome = ModelModeOutcome::default();
-        // Honor the per-lane gates rather than `entry.set_*` alone:
-        // when only one lane is active (e.g. `--mode plan` for an
-        // agent that advertises both model and mode), running the
-        // other lane would print an advertised list the operator
-        // never asked for or error out on a category they explicitly
-        // omitted.
-        if model_lane_active {
-            outcome.model_action =
-                configure_model_for_init(args, config, config_path, &response, &entry.name)?;
-        }
-        if mode_lane_active {
-            outcome.mode_action =
-                configure_mode_for_init(args, config, config_path, &response, &entry.name)?;
-        }
-        Ok::<ModelModeOutcome, StackError>(outcome)
-    })();
-
-    match discovery_outcome {
-        Ok(outcome) => Ok(outcome),
-        Err(err) => {
-            restore_headless_snapshots(snapshots);
-            remove_new_files_in_dirs(dir_listings);
-            Err(err)
-        }
-    }
-}
-
-/// Per-agent list of headless-config files that
-/// `provision_agent_headless_config` may write into. Kept in sync
-/// with the per-agent provisioners in `agent_headless_config.rs`.
-/// Used to snapshot prior contents BEFORE provisioning runs so a
-/// failed discovery/validation can roll back to true prior state
-/// (a snapshot taken AFTER provision would capture the just-written
-/// bytes and "restore" them on rejection, leaking state).
-///
-/// Custom-provider variants additionally write a side file —
-/// `~/.config/goose/custom_providers/<id>.json` for Goose,
-/// `~/.pi/agent/models.json` for Pi — so the candidate list covers
-/// those too when a custom provider is configured. Without this, a
-/// failed `--mode` validation on a custom-provider init could leave
-/// the side file behind even though `acp-stack.toml` was never
-/// written.
-fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Vec<PathBuf> {
-    match agent_id {
-        "goose" => vec![home.join(".config").join("goose").join("config.yaml")],
-        "opencode" => vec![home.join(".config").join("opencode").join("opencode.json")],
-        "codex" => vec![home.join(".codex").join("config.toml")],
-        "pi" => vec![
-            home.join(".pi").join("agent").join("settings.json"),
-            home.join(".pi").join("agent").join("models.json"),
-        ],
-        _ => Vec::new(),
-    }
-}
-
-/// Per-agent extra directories whose new files should be rolled back
-/// on discovery/validation rejection. Today this covers Goose's
-/// `custom_providers/` sidecar dir — its file names are operator-
-/// supplied (`<provider_id>.json`) so they can't be enumerated up
-/// front the way the primary headless-config files can.
-fn headless_config_side_dirs(agent_id: &str, home: &Path) -> Vec<PathBuf> {
-    match agent_id {
-        "goose" => vec![home.join(".config").join("goose").join("custom_providers")],
-        _ => Vec::new(),
-    }
-}
-
-/// Capture the existing file names in each given directory before
-/// provisioning runs. On rejection, anything new in those directories
-/// matching a known provisioner side-effect pattern is removed —
-/// covers codex backup files (`~/.codex/config.<provider>.toml`) and
-/// Goose custom-provider sidecars
-/// (`~/.config/goose/custom_providers/<id>.json`) that the per-agent
-/// provisioner writes without exposing the paths through its return
-/// value.
-fn capture_dir_listings_for(
-    dirs: &[PathBuf],
-) -> Result<Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>> {
-    use std::collections::HashSet;
-    let mut listings = Vec::new();
-    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
-    for dir in dirs {
-        let dir = dir.clone();
-        if !seen_dirs.insert(dir.clone()) {
-            continue;
-        }
-        let mut names: HashSet<std::ffi::OsString> = HashSet::new();
-        if dir.is_dir() {
-            for entry in std::fs::read_dir(&dir).map_err(|source| StackError::ConfigRead {
-                path: dir.clone(),
-                source,
-            })? {
-                let entry = entry.map_err(|source| StackError::ConfigRead {
-                    path: dir.clone(),
-                    source,
-                })?;
-                names.insert(entry.file_name());
-            }
-        }
-        listings.push((dir, names));
-    }
-    Ok(listings)
-}
-
-fn remove_new_files_in_dirs(
-    listings: Vec<(PathBuf, std::collections::HashSet<std::ffi::OsString>)>,
-) {
-    for (dir, prior_names) in listings {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if prior_names.contains(&name) {
-                continue;
-            }
-            let path = entry.path();
-            // Only remove regular files matching a known side-effect
-            // pattern (today: `config.<provider>.toml` backups codex
-            // writes alongside the primary config). Skip anything
-            // else so a legitimate sibling file written during the
-            // short discovery window (logs, lockfiles, the agent's
-            // own ephemeral state) is preserved.
-            if path.is_file()
-                && is_known_provisioner_side_artifact(&dir, &name)
-                && let Err(error) = std::fs::remove_file(&path)
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "failed to remove headless-config side artifact after discovery rejection",
-                );
-            }
-        }
-    }
-}
-
-fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    // Codex OpenAI backup files: `config.<provider>.toml` or
-    // `config.<provider>-<n>.toml`. See `unique_codex_backup_path` in
-    // `runtime/agent/agent_headless_config.rs`.
-    if name.starts_with("config.") && name.ends_with(".toml") && name != "config.toml" {
-        return true;
-    }
-    // Goose custom-provider sidecar: any `<provider_id>.json` written
-    // under `~/.config/goose/custom_providers/`. The operator-supplied
-    // provider id can't be enumerated up front, so we match by parent
-    // dir name + .json suffix instead.
-    if dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == "custom_providers")
-        && name.ends_with(".json")
-    {
-        return true;
-    }
-    false
-}
-
-fn capture_path_snapshots(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
-    let mut snapshots = Vec::with_capacity(paths.len());
-    for path in paths {
-        let prior = if path.exists() {
-            Some(
-                std::fs::read(path).map_err(|source| StackError::ConfigRead {
-                    path: path.clone(),
-                    source,
-                })?,
-            )
-        } else {
-            None
-        };
-        snapshots.push((path.clone(), prior));
-    }
-    Ok(snapshots)
-}
-
-/// Best-effort restore: write each prior content back, or delete the
-/// file we created. A restore failure is logged but does not mask the
-/// real discovery/validation error — the operator still sees the root
-/// cause and can correct it on the next run.
-fn restore_headless_snapshots(snapshots: Vec<(PathBuf, Option<Vec<u8>>)>) {
-    for (path, prior) in snapshots {
-        match prior {
-            Some(bytes) => {
-                if let Err(error) = std::fs::write(&path, &bytes) {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %error,
-                        "failed to restore prior headless config after discovery rejection",
-                    );
-                }
-            }
-            None => {
-                if path.exists()
-                    && let Err(error) = std::fs::remove_file(&path)
-                {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %error,
-                        "failed to remove headless config provisioned for discovery",
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn configure_model_for_init(
-    args: &InitArgs,
-    config: &mut Config,
-    config_path: &Path,
-    response: &agent_client_protocol::schema::NewSessionResponse,
-    agent_name: &str,
-) -> Result<ModelModeAction> {
-    if let Some(explicit) = args.model.as_deref() {
-        validate_advertised_value(response, AgentSessionConfigCategory::Model, explicit).map_err(
-            |err| {
-                let advertised =
-                    advertised_values_for_category(response, AgentSessionConfigCategory::Model)
-                        .unwrap_or_default();
-                StackError::AgentConfigProvision {
-                    path: config_path.to_path_buf(),
-                    reason: format!("{err}; advertised models: [{}]", advertised.join(", "),),
-                }
-            },
-        )?;
-        write_model_into_config(config, explicit.to_owned());
-        return Ok(ModelModeAction::Set);
-    }
-
-    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Model)?;
-    if !io::stdin().is_terminal() {
-        // L87: non-interactive run, no explicit choice. Print the
-        // advertised values so the operator can rerun with one, and
-        // do NOT mutate config — provider stays set, model stays at
-        // whatever it was (most commonly unset, so the agent picks
-        // its own default on session/new).
-        println!("advertised models for {agent_name}:");
-        for value in &values {
-            println!("  {value}");
-        }
-        println!("rerun with `acps init --model <value>` to write a model into config");
-        return Ok(ModelModeAction::PrintedList);
-    }
-
-    let Some(selected) =
-        prompt_session_config_selection(&values, AgentSessionConfigCategory::Model)?
-    else {
-        return Ok(ModelModeAction::Skipped);
-    };
-    validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
-    write_model_into_config(config, selected);
-    Ok(ModelModeAction::Set)
-}
-
-fn configure_mode_for_init(
-    args: &InitArgs,
-    config: &mut Config,
-    config_path: &Path,
-    response: &agent_client_protocol::schema::NewSessionResponse,
-    agent_name: &str,
-) -> Result<ModelModeAction> {
-    if let Some(explicit) = args.mode.as_deref() {
-        validate_advertised_value(response, AgentSessionConfigCategory::Mode, explicit).map_err(
-            |err| {
-                let advertised =
-                    advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
-                        .unwrap_or_default();
-                StackError::AgentConfigProvision {
-                    path: config_path.to_path_buf(),
-                    reason: format!("{err}; advertised modes: [{}]", advertised.join(", "),),
-                }
-            },
-        )?;
-        config.agent.mode = Some(explicit.to_owned());
-        return Ok(ModelModeAction::Set);
-    }
-
-    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
-        .unwrap_or_default();
-    if values.is_empty() {
-        // Agent supports `set_mode` per registry but did not surface
-        // a `mode` config option this session. Treat as skipped rather
-        // than erroring so init still completes.
-        return Ok(ModelModeAction::Skipped);
-    }
-    if !io::stdin().is_terminal() {
-        println!("advertised modes for {agent_name}:");
-        for value in &values {
-            println!("  {value}");
-        }
-        println!("rerun with `acps init --mode <value>` to write a mode into config");
-        return Ok(ModelModeAction::PrintedList);
-    }
-    let Some(selected) =
-        prompt_session_config_selection(&values, AgentSessionConfigCategory::Mode)?
-    else {
-        return Ok(ModelModeAction::Skipped);
-    };
-    validate_advertised_value(response, AgentSessionConfigCategory::Mode, &selected)?;
-    config.agent.mode = Some(selected);
-    Ok(ModelModeAction::Set)
-}
-
-/// Write the chosen model into whichever config slot the agent uses.
-/// Provider-backed agents (`set_provider = true`) store the model under
-/// `[agent.provider]` so it travels with provider+api_key_ref as one
-/// atomic group; provider-less agents (e.g. set_provider=false) store
-/// it at the agent root. Matches what `acps agent set` does.
-///
-/// When writing into the provider slot, also clear any stray root
-/// `agent.model` that a prior model-only flow may have left behind —
-/// runtime selection in supervisor.rs prefers the root slot, so a
-/// leftover value there would silently override the newly chosen
-/// provider model.
-fn write_model_into_config(config: &mut Config, model: String) {
-    if let Some(provider) = config.agent.provider.as_mut() {
-        provider.model = Some(model);
-        config.agent.model = None;
-    } else {
-        config.agent.model = Some(model);
-    }
-}
-
-fn prompt_session_config_selection(
-    values: &[String],
-    category: AgentSessionConfigCategory,
-) -> Result<Option<String>> {
-    if values.is_empty() {
-        return Ok(None);
-    }
-    println!("available {} values:", category.id());
-    for (index, value) in values.iter().enumerate() {
-        println!("  {}. {value}", index + 1);
-    }
-    print!(
-        "select {} [number or value, blank to skip]: ",
-        category.id()
-    );
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    if let Ok(index) = answer.parse::<usize>() {
-        // Reject `0` explicitly: `saturating_sub(1)` would map it to
-        // the first entry, but the menu is 1-indexed and accepting 0
-        // would let the operator confidently pick "0" expecting an
-        // out-of-range error and instead silently get the first item.
-        if index == 0 {
-            return Err(StackError::InvalidParam {
-                field: "selection",
-                reason: format!(
-                    "{} selection `{answer}` is out of range (expected 1..={})",
-                    category.id(),
-                    values.len()
-                ),
-            });
-        }
-        let Some(value) = values.get(index - 1) else {
-            return Err(StackError::InvalidParam {
-                field: "selection",
-                reason: format!(
-                    "{} selection `{answer}` is out of range (expected 1..={})",
-                    category.id(),
-                    values.len()
-                ),
-            });
-        };
-        return Ok(Some(value.clone()));
-    }
-    Ok(Some(answer.to_owned()))
-}
-
-fn select_provider_for_init(
-    args: &InitArgs,
-    registry: &RegistryCatalog,
-    config: &Config,
-) -> Result<Option<String>> {
-    if let Some(provider_id) = &args.provider {
-        return Ok(Some(provider_id.clone()));
-    }
-    if !io::stdin().is_terminal() {
-        return Ok(None);
-    }
-    let Some(entry) = registry.lookup(&config.agent.id) else {
-        return Ok(None);
-    };
-    if !entry.set_provider {
-        return Ok(None);
-    }
-
-    // Offline-curated picker. The compatibility list is the same source
-    // `GET /v1/providers` uses, so the operator sees exactly the
-    // providers that any other surface (CLI/API/UI) would offer for the
-    // selected agent. Free-form id entry is still accepted at the
-    // prompt so an operator can target a provider the embedded mapping
-    // pre-dates without round-tripping through `acps agent set`.
-    let providers = providers_for_agent(&config.agent.id);
-    if providers.is_empty() {
-        println!(
-            "no providers in data/providers.toml advertise compatibility with agent `{}`; \
-             pass --provider <id> to skip the picker",
-            config.agent.id
-        );
-        return Ok(None);
-    }
-    println!("providers for {}:", config.agent.id);
-    for (index, summary) in providers.iter().enumerate() {
-        println!("  {}. {} ({})", index + 1, summary.name, summary.id);
-    }
-    print!("select provider [number or id, blank to skip]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    if let Ok(index) = answer.parse::<usize>() {
-        // 1-indexed picker; explicitly reject `0` so `saturating_sub`
-        // can't silently fold it to the first entry.
-        if index == 0 {
-            return Err(StackError::InvalidParam {
-                field: "provider",
-                reason: format!(
-                    "provider selection `{answer}` is out of range (expected 1..={})",
-                    providers.len()
-                ),
-            });
-        }
-        let Some(summary) = providers.get(index - 1) else {
-            return Err(StackError::InvalidParam {
-                field: "provider",
-                reason: format!(
-                    "provider selection `{answer}` is out of range (expected 1..={})",
-                    providers.len()
-                ),
-            });
-        };
-        return Ok(Some(summary.id.to_owned()));
-    }
-    Ok(Some(answer.to_owned()))
-}
-
-fn apply_provider_to_config(
-    args: &InitArgs,
-    registry: &RegistryCatalog,
-    config: &mut Config,
-    config_path: &Path,
-    provider_id: String,
-) -> Result<Vec<String>> {
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
-    if !entry.set_provider {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: format!(
-                "{} does not support provider configuration during init",
-                config.agent.name
-            ),
-        });
-    }
-    // Drop any stray root-level `agent.model` left over from a prior
-    // `acps agent set --model` for a model-only agent before we switch
-    // to a provider-based flow. Runtime selection prefers
-    // `agent.model` over `agent.provider.model` (supervisor.rs), so
-    // leaving the old root value in place would silently override the
-    // new `--model` chosen during this init run.
-    config.agent.model = None;
-    if args.custom_provider {
-        if !entry.allow_custom_provider {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!(
-                    "{} does not support custom provider setup",
-                    config.agent.name
-                ),
-            });
-        }
-        if !entry.allow_custom_model {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!("{} does not support custom model setup", config.agent.name),
-            });
-        }
-        return apply_custom_provider_to_config(args, config, config_path, provider_id);
-    }
-    if !provider_id_is_known(&provider_id) {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!("provider `{provider_id}` is not listed in provider/env mapping"),
-        });
-    }
-    if provider_id_is_known(&provider_id)
-        && !provider_id_supports_agent(&provider_id, &config.agent.id)
-    {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "provider `{provider_id}` is not supported for agent `{}`",
-                config.agent.id
-            ),
-        });
-    }
-    if config.agent.id == "codex" && provider_id == "openai" {
-        if args.api_key_ref.is_some() {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
-            });
-        }
-        // Mirror the preserve-on-same-provider semantics from the
-        // generic branch — re-confirming codex+openai must not silently
-        // drop a previously pinned model just because --model was
-        // omitted on this rerun.
-        let preserved_model = match config.agent.provider.as_ref() {
-            Some(existing) if existing.id == provider_id => existing.model.clone(),
-            _ => None,
-        };
-        config.agent.provider = Some(AgentProviderConfig {
-            id: provider_id,
-            model: preserved_model,
-            api_key_ref: None,
-            custom: None,
-        });
-        return Ok(Vec::new());
-    }
-    let default_api_key_ref = env_var_for_agent_provider_id(&config.agent.id, &provider_id);
-    if default_api_key_ref.is_none() {
-        if !entry.allow_custom_provider {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!(
-                    "{} does not support custom provider setup",
-                    config.agent.name
-                ),
-            });
-        }
-        if !entry.allow_custom_model {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!("{} does not support custom model setup", config.agent.name),
-            });
-        }
-        if !args.custom_provider && !confirm_custom_provider_setup(&provider_id)? {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!(
-                    "provider `{provider_id}` has no API-key env mapping for agent `{}`",
-                    config.agent.id
-                ),
-            });
-        }
-        return apply_custom_provider_to_config(args, config, config_path, provider_id);
-    }
-    let api_key_ref = args
-        .api_key_ref
-        .clone()
-        .or_else(|| default_api_key_ref.map(str::to_owned))
-        .expect("default API-key ref checked");
-
-    let required_refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
-    for env_ref in &required_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
-            config.agent.env.push(env_ref.clone());
-        }
-    }
-    // Preserve the existing provider model only when the operator is
-    // re-confirming the SAME provider id (e.g. re-running `acps init
-    // --provider X` to refresh secrets or run resume). Switching to a
-    // different provider implies the old model probably belongs to a
-    // different catalog, so clear it; the subsequent model lane in
-    // configure_model_and_mode_for_init will either write a validated
-    // new value or follow L87 print-and-skip semantics.
-    let preserved_model = match config.agent.provider.as_ref() {
-        Some(existing) if existing.id == provider_id => existing.model.clone(),
-        _ => None,
-    };
-    config.agent.provider = Some(AgentProviderConfig {
-        id: provider_id,
-        model: preserved_model,
-        api_key_ref: Some(api_key_ref),
-        custom: None,
-    });
-    Ok(required_refs)
-}
-
-fn apply_custom_provider_to_config(
-    args: &InitArgs,
-    config: &mut Config,
-    config_path: &Path,
-    provider_id: String,
-) -> Result<Vec<String>> {
-    let provider_name = required_init_custom_value("provider-name", args.provider_name.clone())?;
-    let base_url = required_init_custom_value("base-url", args.base_url.clone())?;
-    let api_key_ref = required_init_custom_value("api-key-ref", args.api_key_ref.clone())?;
-    let model = required_init_custom_value("model", args.model.clone())?;
-    let model_name = args.model_name.clone().unwrap_or_else(|| model.clone());
-    let api = parse_init_custom_provider_api(
-        args.provider_api.as_deref(),
-        default_init_custom_provider_api(&config.agent.id),
-    )?;
-    if config.agent.id == "codex" && api != CustomProviderApi::Responses {
-        return Err(StackError::InvalidParam {
-            field: "provider-api",
-            reason: "Codex custom providers only support responses".to_owned(),
-        });
-    }
-    let context = parse_init_custom_token_limit(
-        "context",
-        args.context.as_deref(),
-        DEFAULT_CUSTOM_MODEL_CONTEXT,
-    )?;
-    let output_max_tokens = parse_init_custom_token_limit(
-        "output-max-tokens",
-        args.output_max_tokens.as_deref(),
-        DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
-    )?;
-    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
-        config.agent.env.push(api_key_ref.clone());
-    }
-    config.agent.provider = Some(AgentProviderConfig {
-        id: provider_id,
-        model: Some(model),
-        api_key_ref: Some(api_key_ref.clone()),
-        custom: Some(AgentCustomProviderConfig {
-            name: provider_name,
-            base_url,
-            api,
-            model_name: Some(model_name),
-            context,
-            output_max_tokens,
-        }),
-    });
-    let canonical = config.to_canonical_toml()?;
-    let validated = config::load_config_from_str(&canonical)?;
-    *config = validated;
-    if config
-        .agent
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.custom.as_ref())
-        .is_none()
-    {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: "custom provider config was not retained".to_owned(),
-        });
-    }
-    Ok(vec![api_key_ref])
-}
-
-fn confirm_custom_provider_setup(provider_id: &str) -> Result<bool> {
-    if !io::stdin().is_terminal() {
-        return Ok(false);
-    }
-    print!(
-        "provider `{provider_id}` has no default API-key env mapping; configure it as a custom provider? [y/N]: "
-    );
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
-}
-
-fn required_init_custom_value(field: &'static str, value: Option<String>) -> Result<String> {
-    if let Some(value) = value
-        && !value.trim().is_empty()
-        && value.trim().len() == value.len()
-    {
-        return Ok(value);
-    }
-    if !io::stdin().is_terminal() {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: format!("--{field} is required for custom provider init"),
-        });
-    }
-    print!("{field}: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim().to_owned();
-    if answer.is_empty() {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: format!("--{field} is required for custom provider init"),
-        });
-    }
-    Ok(answer)
-}
-
-fn default_init_custom_provider_api(agent_id: &str) -> CustomProviderApi {
-    if agent_id == "codex" {
-        CustomProviderApi::Responses
-    } else {
-        CustomProviderApi::ChatCompletions
-    }
-}
-
-fn parse_init_custom_provider_api(
-    value: Option<&str>,
-    default: CustomProviderApi,
-) -> Result<CustomProviderApi> {
-    match value {
-        None => Ok(default),
-        Some("chat-completions") => Ok(CustomProviderApi::ChatCompletions),
-        Some("responses") => Ok(CustomProviderApi::Responses),
-        Some(_) => Err(StackError::InvalidParam {
-            field: "provider-api",
-            reason: "must be `chat-completions` or `responses`".to_owned(),
-        }),
-    }
-}
-
-fn parse_init_custom_token_limit(
-    field: &'static str,
-    value: Option<&str>,
-    default: u64,
-) -> Result<u64> {
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    if value.contains(',') {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: "must be a plain integer without commas".to_owned(),
-        });
-    }
-    let parsed = value.parse::<u64>().map_err(|_| StackError::InvalidParam {
-        field,
-        reason: "must be a positive integer".to_owned(),
-    })?;
-    if parsed == 0 {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: "must be greater than 0".to_owned(),
-        });
-    }
-    Ok(parsed)
-}
-
-fn collect_missing_provider_refs(
-    secret_store: &mut SecretStore,
-    required_refs: &[String],
-) -> Result<()> {
-    if io::stdin().is_terminal() {
-        let mut collected = Vec::new();
-        for env_ref in required_refs {
-            if secret_store.contains(env_ref) {
-                continue;
-            }
-            print!("{env_ref}: ");
-            io::stdout()
-                .flush()
-                .map_err(|source| StackError::ConfigWrite {
-                    path: PathBuf::from("stdout"),
-                    source,
-                })?;
-            let mut value = String::new();
-            io::stdin()
-                .read_line(&mut value)
-                .map_err(|source| StackError::StdinRead { source })?;
-            let value = value.trim_end_matches(['\n', '\r']).to_owned();
-            if !value.is_empty() {
-                collected.push((env_ref.as_str(), value));
-            }
-        }
-        secret_store.set_many(
-            collected
-                .iter()
-                .map(|(name, value)| (*name, value.as_str())),
-        )?;
-    }
-    for env_ref in required_refs {
-        if !secret_store.contains(env_ref) {
-            return Err(StackError::SecretNotFound {
-                name: env_ref.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn default_agent_env_refs(agent_id: &str) -> Vec<String> {
-    env_refs_for_agent_id(agent_id)
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-}
-
-fn should_install_agent(args: &InitArgs, selected_agent: bool) -> Result<bool> {
-    if args.install_agent {
-        return Ok(true);
-    }
-    if args.no_install_agent || !selected_agent || !io::stdin().is_terminal() {
-        return Ok(false);
-    }
-    print!("Install the selected agent now? [y/N]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
-}
-
-/// Run the installer for the configured agent. The TTY-only "try the next
-/// install path?" prompt that used to live here is gone: `install_resolved`
-/// already walks `shell → npm → github_release` in sequence, and any
-/// remaining failure is captured by the init orchestrator's
-/// `agent_install` step. The operator re-attempts by running
-/// `acps init --resume`, which re-executes the failed step using the
-/// current registry — picking up a newer harness version, a now-reachable
-/// npm registry, or a freshly released GitHub artifact without ever
-/// requiring a TTY.
-fn install_configured_agent(
-    home: &Path,
-    config: &Config,
-    registry: &RegistryCatalog,
-    store: &StateStore,
-) -> Result<InstallerOutcome> {
-    let workspace_root = PathBuf::from(config.workspace.root.clone());
-    let log_base = crate::state::default_installer_log_base(home);
-    if let Some(install) = config.agent.install.as_ref() {
-        let env = resolve_agent_env(home, config)?;
-        return run_installer(
-            &config.agent.id,
-            install,
-            config.agent.expected_sha256.as_deref(),
-            env,
-            &workspace_root,
-            store,
-            Some(&log_base),
-        );
-    }
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
-    install_resolved(
-        &config.agent,
-        entry,
-        Default::default(),
-        &workspace_root,
-        &local_bin_dir(home),
-        store,
-        Some(&log_base),
-    )
-}
-
-fn resolve_agent_env(home: &Path, config: &Config) -> Result<HashMap<String, String>> {
-    if config.agent.env.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let store = SecretStore::open(home)?;
-    let mut env = HashMap::with_capacity(config.agent.env.len());
-    for name in &config.agent.env {
-        let value = store.get(name)?;
-        env.insert(name.clone(), value.to_owned());
-    }
-    Ok(env)
-}
-
-fn operator_registry_override(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("agents.toml")
-}
-
-fn local_bin_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("bin")
-}
-
-fn validate_deployment_overrides_match_existing(args: &InitArgs, config: &Config) -> Result<()> {
-    reject_conflicting_deployment_override(
-        "--workspace-root",
-        args.workspace_root.as_deref(),
-        &config.workspace.root,
-    )?;
-    reject_conflicting_deployment_override(
-        "--workspace-uploads",
-        args.workspace_uploads.as_deref(),
-        &config.workspace.uploads,
-    )?;
-    reject_conflicting_deployment_override(
-        "--runtime-user",
-        args.runtime_user.as_deref(),
-        &config.workspace.runtime_user,
-    )
-}
-
-fn reject_conflicting_deployment_override(
-    field: &'static str,
-    requested: Option<&str>,
-    existing: &str,
-) -> Result<()> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    if requested == existing {
-        return Ok(());
-    }
-    Err(StackError::InvalidParam {
-        field,
-        reason: format!(
-            "deployment override applies only when creating a starter config; existing config has `{existing}`. Edit the config first or re-run with the existing value."
-        ),
-    })
-}
-
-fn starter_config(args: &InitArgs) -> Result<String> {
-    let workspace_root = args
-        .workspace_root
-        .clone()
-        .unwrap_or_else(|| config::DEFAULT_WORKSPACE_ROOT.to_owned());
-    let workspace_uploads = args.workspace_uploads.clone().unwrap_or_else(|| {
-        if args.workspace_root.is_some() {
-            Path::new(&workspace_root)
-                .join("uploads")
-                .display()
-                .to_string()
-        } else {
-            config::DEFAULT_WORKSPACE_UPLOADS.to_owned()
-        }
-    });
-    let runtime_user = args
-        .runtime_user
-        .clone()
-        .unwrap_or_else(|| config::DEFAULT_RUNTIME_USER.to_owned());
-
-    let starter = Config {
-        config_version: config::SUPPORTED_CONFIG_VERSION,
-        api: ApiConfig {
-            bind: config::DEFAULT_API_BIND.to_owned(),
-            public_url: Some(format!("http://{}", config::DEFAULT_API_BIND)),
-            max_request_bytes: STARTER_MAX_REQUEST_BYTES,
-        },
-        auth: AuthConfig {
-            session_key_ref: STARTER_SESSION_KEY_REF.to_owned(),
-            admin_key_ref: STARTER_ADMIN_KEY_REF.to_owned(),
-        },
-        security: SecurityConfig {
-            http: SecurityHttpConfig {
-                max_request_bytes: STARTER_MAX_REQUEST_BYTES,
-                rate_limit_per_minute: STARTER_RATE_LIMIT_PER_MINUTE,
-                burst: STARTER_RATE_LIMIT_BURST,
-                auth_failures_per_minute: STARTER_AUTH_FAILURES_PER_MINUTE,
-                auth_block_duration: STARTER_AUTH_BLOCK_DURATION.to_owned(),
-                allowed_origins: Vec::new(),
-                trust_proxy_headers: false,
-                trusted_proxies: Vec::new(),
-            },
-        },
-        edge: EdgeConfig::default(),
-        workspace: WorkspaceConfig {
-            root: workspace_root.clone(),
-            uploads: workspace_uploads,
-            default_shell: STARTER_DEFAULT_SHELL.to_owned(),
-            runtime_user,
-            max_file_bytes: STARTER_WORKSPACE_MAX_FILE_BYTES,
-            code_sources: code_sources_from_args(args),
-            data_sources: data_sources_from_args(args)?,
-        },
-        logging: LoggingConfig {
-            level: STARTER_LOG_LEVEL.to_owned(),
-            local_retention_days: STARTER_LOCAL_RETENTION_DAYS,
-            supabase: Some(SupabaseLoggingConfig {
-                enabled: false,
-                url: STARTER_SUPABASE_URL.to_owned(),
-                service_role_key_ref: STARTER_SUPABASE_SERVICE_ROLE_KEY_REF.to_owned(),
-                schema: STARTER_SUPABASE_SCHEMA.to_owned(),
-            }),
-        },
-        agent: AgentConfig {
-            id: STARTER_AGENT_ID.to_owned(),
-            name: STARTER_AGENT_NAME.to_owned(),
-            command: STARTER_AGENT_COMMAND.to_owned(),
-            args: Vec::new(),
-            cwd: Some(workspace_root),
-            env: Vec::new(),
-            expected_sha256: None,
-            restart: STARTER_AGENT_RESTART.to_owned(),
-            mode: None,
-            model: None,
-            harness_version: None,
-            adapter: None,
-            provider: None,
-            install: Some(AgentInstallConfig {
-                install_type: STARTER_AGENT_INSTALL_TYPE.to_owned(),
-                creates: STARTER_AGENT_INSTALL_CREATES.to_owned(),
-                shell: Some(STARTER_AGENT_INSTALL_COMMAND.to_owned()),
-            }),
-        },
-        permissions: Default::default(),
-        commands: Default::default(),
-        dependencies: Default::default(),
-        mcp: Default::default(),
-        acpctl: Default::default(),
-    };
-
-    let canonical = starter.to_canonical_toml()?;
-    config::load_config_from_str(&canonical)?;
-    Ok(canonical)
-}
-
-fn code_sources_from_args(args: &InitArgs) -> Vec<CodeSourceConfig> {
-    args.code_from
-        .iter()
-        .map(|repo| CodeSourceConfig {
-            source_type: "git".to_owned(),
-            repo: Some(repo.clone()),
-            branch: None,
-            credential_ref: None,
-            name: None,
-        })
-        .collect()
-}
-
-fn data_sources_from_args(args: &InitArgs) -> Result<Vec<DataSourceConfig>> {
-    args.data_from
-        .iter()
-        .map(|value| classify_data_from(value))
-        .collect()
-}
-
-fn classify_data_from(value: &str) -> Result<DataSourceConfig> {
-    if value.strip_prefix("https://").is_some() {
-        reject_unsupported_https_data_source(value)?;
-        return Ok(DataSourceConfig {
-            source_type: "https".to_owned(),
-            name: None,
-            path: None,
-            url: Some(value.to_owned()),
-            expected_sha256: None,
-            max_download_bytes: None,
-            max_extracted_bytes: None,
-            bucket: None,
-            prefix: None,
-            region: None,
-            access_key_ref: None,
-            secret_key_ref: None,
-        });
-    }
-    if value.starts_with("http://") {
-        return Err(StackError::InvalidParam {
-            field: "data-from",
-            reason: format!("`{value}` must use https:// (http is not allowed)"),
-        });
-    }
-    if !value.starts_with('/') {
-        return Err(StackError::InvalidParam {
-            field: "data-from",
-            reason: format!("`{value}` must be an absolute path or an https:// URL"),
-        });
-    }
-    Ok(DataSourceConfig {
-        source_type: "local".to_owned(),
-        name: None,
-        path: Some(value.to_owned()),
-        url: None,
-        expected_sha256: None,
-        max_download_bytes: None,
-        max_extracted_bytes: None,
-        bucket: None,
-        prefix: None,
-        region: None,
-        access_key_ref: None,
-        secret_key_ref: None,
-    })
-}
-
-/// Reject HTTPS data sources that the materializer cannot satisfy headlessly.
-/// Catches three known failure modes BEFORE init writes any state, so the
-/// operator gets a clear error pointing at the actual URL rather than a vague
-/// download/extract failure halfway through materialization.
-///
-/// Patterns rejected:
-/// - `drive.google.com/file/d/.../view` (private file view link; needs the
-///   `uc?export=download&id=` form to expose a usable HTTPS download)
-/// - `drive.google.com/drive/folders/...` (folder, not an archive; the
-///   materializer downloads single files)
-/// - `dropbox.com/.../?dl=0` or no `dl` param (preview link; needs `?dl=1`)
-fn reject_unsupported_https_data_source(value: &str) -> Result<()> {
-    let lower = value.to_ascii_lowercase();
-    if lower.contains("drive.google.com/file/d/")
-        && !lower.contains("uc?export=download")
-        && !lower.contains("uc?id=")
-    {
-        return Err(StackError::InvalidParam {
-            field: "data-from",
-            reason: format!(
-                "`{value}` is a private Drive file viewer link; pass the `https://drive.google.com/uc?export=download&id=<ID>` form instead"
-            ),
-        });
-    }
-    if lower.contains("drive.google.com/drive/folders/") {
-        return Err(StackError::InvalidParam {
-            field: "data-from",
-            reason: format!(
-                "`{value}` is a Drive folder; init only supports single-archive downloads. Export the folder as an archive and link to the archive."
-            ),
-        });
-    }
-    if lower.contains("dropbox.com/") && !lower.contains("dl=1") && !lower.contains("raw=1") {
-        return Err(StackError::InvalidParam {
-            field: "data-from",
-            reason: format!(
-                "`{value}` is a Dropbox preview link; append `?dl=1` so the materializer receives the file bytes"
-            ),
-        });
-    }
+    crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
     Ok(())
 }
