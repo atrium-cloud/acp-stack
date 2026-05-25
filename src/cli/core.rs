@@ -244,6 +244,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/ws/sessions/disconnect"
     } else if bare == "/v1/sessions" {
         "/v1/sessions"
+    } else if bare == "/v1/sessions/-/status" {
+        "/v1/sessions/-/status"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/prompt") {
         "/v1/sessions/{id}/prompt"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/cancel") {

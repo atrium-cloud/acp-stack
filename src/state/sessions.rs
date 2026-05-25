@@ -1,10 +1,11 @@
 //! Sessions, prompts, and session-scoped event persistence.
 
 use crate::error::{Result, StackError};
+use chrono::{SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
-use super::events::{EVENT_SOURCE_SYSTEM, Event, row_to_event};
+use super::events::{EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, Event, row_to_event};
 use super::ids::{current_timestamp, next_event_id};
 use super::records::SessionFilter;
 use super::rows::validate_json_payload;
@@ -12,6 +13,11 @@ use super::rows::validate_json_payload;
 pub const SESSION_STATUS_ACTIVE: &str = "active";
 pub const SESSION_STATUS_AVAILABLE: &str = "available";
 pub const SESSION_STATUS_CLOSED: &str = "closed";
+/// Operator-facing activity threshold used by the compact session status view.
+pub const DEFAULT_SESSION_ACTIVITY_THRESHOLD: &str = "15m";
+/// Operator-view actor labels; these are not ACP protocol values.
+pub const SESSION_ACTIVITY_ACTOR_AGENT: &str = "agent";
+pub const SESSION_ACTIVITY_ACTOR_USER: &str = "user";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -23,6 +29,26 @@ pub struct SessionRecord {
     pub cwd: String,
     pub title: Option<String>,
     pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionActivityRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub agent_id: String,
+    pub cwd: String,
+    pub title: Option<String>,
+    pub last_activity_at: String,
+    pub last_activity_from: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionUpdateBounds {
+    pub first_updated_at: String,
+    pub latest_updated_at: String,
+    pub latest_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +192,127 @@ impl StateStore {
             .optional()?)
     }
 
+    pub fn session_update_bounds(&self) -> Result<Option<SessionUpdateBounds>> {
+        let first = self
+            .connection()
+            .query_row(
+                r#"
+                SELECT updated_at
+                FROM sessions
+                ORDER BY updated_at ASC, id ASC
+                LIMIT 1
+                "#,
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(first_updated_at) = first else {
+            return Ok(None);
+        };
+        let (latest_updated_at, latest_status) = self.connection().query_row(
+            r#"
+            SELECT updated_at, status
+            FROM sessions
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            "#,
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        Ok(Some(SessionUpdateBounds {
+            first_updated_at,
+            latest_updated_at,
+            latest_status,
+        }))
+    }
+
+    pub fn query_active_session_activity(&self, limit: u32) -> Result<Vec<SessionActivityRecord>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            WITH active_sessions AS (
+                SELECT id, created_at, updated_at, status, agent_id, cwd, title
+                FROM sessions
+                WHERE status = ?1
+            ),
+            activity AS (
+                SELECT e.session_id,
+                       e.created_at AS activity_at,
+                       CASE WHEN e.source = ?2 THEN ?3 ELSE ?4 END AS actor,
+                       3 AS priority
+                FROM events e
+                JOIN active_sessions s ON s.id = e.session_id
+                UNION ALL
+                SELECT p.session_id,
+                       p.created_at AS activity_at,
+                       ?4 AS actor,
+                       1 AS priority
+                FROM prompts p
+                JOIN active_sessions s ON s.id = p.session_id
+                UNION ALL
+                SELECT p.session_id,
+                       p.updated_at AS activity_at,
+                       ?3 AS actor,
+                       2 AS priority
+                FROM prompts p
+                JOIN active_sessions s ON s.id = p.session_id
+                WHERE p.status <> 'pending'
+                UNION ALL
+                SELECT s.id,
+                       s.updated_at AS activity_at,
+                       ?4 AS actor,
+                       0 AS priority
+                FROM active_sessions s
+            ),
+            ranked_activity AS (
+                SELECT session_id,
+                       activity_at,
+                       actor,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY activity_at DESC, priority DESC
+                       ) AS row_number
+                FROM activity
+            )
+            SELECT s.id,
+                   s.created_at,
+                   s.updated_at,
+                   s.status,
+                   s.agent_id,
+                   s.cwd,
+                   s.title,
+                   r.activity_at,
+                   r.actor
+            FROM active_sessions s
+            JOIN ranked_activity r ON r.session_id = s.id AND r.row_number = 1
+            ORDER BY r.activity_at DESC, s.id DESC
+            LIMIT ?5
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                SESSION_STATUS_ACTIVE,
+                EVENT_SOURCE_ACP,
+                SESSION_ACTIVITY_ACTOR_AGENT,
+                SESSION_ACTIVITY_ACTOR_USER,
+                i64::from(limit),
+            ],
+            |row| {
+                Ok(SessionActivityRecord {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    status: row.get(3)?,
+                    agent_id: row.get(4)?,
+                    cwd: row.get(5)?,
+                    title: row.get(6)?,
+                    last_activity_at: row.get(7)?,
+                    last_activity_from: row.get(8)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn insert_session(&self, record: NewSessionRecord) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
         let now = current_timestamp();
@@ -210,7 +357,12 @@ impl StateStore {
         for record in records {
             let existing = self.get_session(&record.id)?;
             validate_json_payload(self.connection(), &record.metadata_json)?;
-            let updated_at = record.updated_at.unwrap_or_else(current_timestamp);
+            let updated_at = record
+                .updated_at
+                .as_deref()
+                .map(normalize_listed_session_timestamp)
+                .transpose()?
+                .unwrap_or_else(current_timestamp);
             match existing {
                 Some(_) => {
                     self.persist_with_outbox("sessions", &record.id, &updated_at, |conn| {
@@ -555,4 +707,15 @@ impl StateStore {
         let rows = statement.query_map(params![session_id], row_to_prompt)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+fn normalize_listed_session_timestamp(raw: &str) -> Result<String> {
+    let parsed =
+        chrono::DateTime::parse_from_rfc3339(raw).map_err(|err| StackError::InvalidParam {
+            field: "updated_at",
+            reason: format!("listed session timestamp is not valid RFC3339: {err}"),
+        })?;
+    Ok(parsed
+        .with_timezone(&Utc)
+        .to_rfc3339_opts(SecondsFormat::Nanos, true))
 }

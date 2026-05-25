@@ -4312,6 +4312,63 @@ async fn sessions_new_list_prompt_close_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sessions_status_reports_no_active_session() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No active session.\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_status_renders_recent_active_session() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .success();
+
+    let new_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "new"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(new_output).expect("utf8");
+    let session_id = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("session: "))
+        .expect("session: <id> line")
+        .trim()
+        .to_owned();
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("recent "))
+        .stdout(predicates::str::contains("last_activity="))
+        .stdout(predicates::str::contains("from=user"))
+        .stdout(predicates::str::contains(session_id.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sessions_prompt_no_wait_returns_immediately() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");

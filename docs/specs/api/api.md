@@ -68,6 +68,7 @@ Phase 4 provider/model API:
 
 - `POST /v1/sessions`
 - `GET /v1/sessions`
+- `GET /v1/sessions/-/status`
 - `GET /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/load`
 - `POST /v1/sessions/{id}/resume`
@@ -98,6 +99,47 @@ The response includes explicit sync metadata:
     "upserted": 0,
     "updated": 0
   }
+}
+```
+
+`GET /v1/sessions` accepts optional `since`, `until`, `range`, and
+`resolve_bounds` query parameters that filter by `sessions.updated_at`. `range`
+accepts `day`, `week`, `month`, `year`, `all`, or a duration suffix such as
+`30m`, `12h`, `60d`, `8w`, `6mo`, or `1y`, interpreted relative to the request
+time. `since` and `until` accept either an RFC3339 timestamp or the same
+duration suffixes, also interpreted relative to the request time. `limit` still
+caps the newest-first result set. When `resolve_bounds=true`, omitted `since`
+defaults to the first stored session update time and omitted `until` defaults to
+the latest stored session update time, or to request time when the latest
+session is active.
+
+`GET /v1/sessions/-/status` returns a compact active-session view without full
+session metadata or event history. Query params: `threshold` (duration suffix,
+default `15m`) and `limit` (default/cap 1000). Active sessions are `recent`
+when their latest derived activity is within the threshold; otherwise they are
+returned as idle (`recent: false`) rather than hidden. Last activity is derived
+from the newest relevant session-scoped ACP event, prompt row, or session-row
+fallback. ACP events and prompt status updates report `last_activity_from: "agent"`;
+prompt submissions and operator/API/local/CLI session actions report `"user"`.
+
+```json
+{
+  "generated_at": "2026-05-25T00:00:00.000000000Z",
+  "threshold": "15m",
+  "active_count": 1,
+  "truncated": false,
+  "sessions": [
+    {
+      "id": "sess_123",
+      "status": "active",
+      "agent_id": "opencode",
+      "cwd": "/workspace",
+      "title": "work",
+      "last_activity_at": "2026-05-25T00:00:00.000000000Z",
+      "last_activity_from": "agent",
+      "recent": true
+    }
+  ]
 }
 ```
 
