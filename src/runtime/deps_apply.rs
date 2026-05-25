@@ -30,7 +30,16 @@ use serde::Serialize;
 use crate::config::{Config, DependencyEntry, DependencyInstallScope};
 use crate::error::{Result, StackError};
 use crate::runtime::deps::{DepStatus, check_dependencies};
-use crate::state::{INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore};
+use crate::state::{
+    INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
+};
+
+/// Canonical `installer_runs.agent_id` and `installer_runs.step` value the
+/// deps-apply runner stamps onto every audit row. Centralized so the health
+/// report and CLI status that pivot on this label cannot drift from the
+/// writer.
+pub const DEPS_APPLY_AGENT_ID: &str = "deps_apply";
+pub const DEPS_APPLY_STEP: &str = "deps_apply";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STDERR_TAIL_BYTES: usize = 2 * 1024;
@@ -140,6 +149,7 @@ pub fn apply_dependencies(
     // and fall through to the standard checker for everything else.
     let before = compute_before_after_report(config);
     let mut results = Vec::new();
+    let apply_run_id = next_deps_apply_run_id();
     for entry in &config.dependencies.commands {
         let Some(install) = entry.install.as_ref() else {
             continue;
@@ -149,7 +159,13 @@ pub fn apply_dependencies(
         {
             continue;
         }
-        results.push(apply_one(entry, install, state, shell_program)?);
+        results.push(apply_one(
+            entry,
+            install,
+            state,
+            shell_program,
+            &apply_run_id,
+        )?);
     }
     let after = compute_before_after_report(config);
     Ok(DepsApplyReport {
@@ -181,6 +197,7 @@ fn apply_one(
     install: &crate::config::DependencyInstallAction,
     state: Option<&StateStore>,
     shell_program: &str,
+    apply_run_id: &str,
 ) -> Result<DepApplyResult> {
     let creates = install
         .creates
@@ -197,16 +214,17 @@ fn apply_one(
         let finished_at = current_timestamp();
         if let Some(store) = state {
             store.append_installer_run(InstallerRunInput {
-                agent_id: "deps_apply",
+                agent_id: DEPS_APPLY_AGENT_ID,
                 started_at: &started_at,
                 finished_at: Some(&finished_at),
                 status: "skipped",
                 stdout: "",
                 stderr: "",
                 exit_status: Some(0),
-                step: "deps_apply",
+                step: DEPS_APPLY_STEP,
                 version: None,
                 log_dir: None,
+                apply_run_id: Some(apply_run_id),
             })?;
         }
         let post_status = check_one(entry);
@@ -228,16 +246,17 @@ fn apply_one(
             );
             if let Some(store) = state {
                 store.append_installer_run(InstallerRunInput {
-                    agent_id: "deps_apply",
+                    agent_id: DEPS_APPLY_AGENT_ID,
                     started_at: &started_at,
                     finished_at: Some(&finished_at),
                     status: "privilege_required",
                     stdout: "",
                     stderr: &stderr_message,
                     exit_status: None,
-                    step: "deps_apply",
+                    step: DEPS_APPLY_STEP,
                     version: None,
                     log_dir: None,
+                    apply_run_id: Some(apply_run_id),
                 })?;
             }
             let post_status = check_one(entry);
@@ -296,16 +315,17 @@ fn apply_one(
         // `exit_code: None`. Match the outcome contract instead.
         let persisted_exit = if timed_out { None } else { exit_code };
         store.append_installer_run(InstallerRunInput {
-            agent_id: "deps_apply",
+            agent_id: DEPS_APPLY_AGENT_ID,
             started_at: &started_at,
             finished_at: Some(&finished_at),
             status: status_label,
             stdout: &cap_stream(&stdout),
             stderr: &cap_stream(&stderr),
             exit_status: persisted_exit,
-            step: "deps_apply",
+            step: DEPS_APPLY_STEP,
             version: None,
             log_dir: None,
+            apply_run_id: Some(apply_run_id),
         })?;
     }
     Ok(DepApplyResult {

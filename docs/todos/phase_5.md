@@ -37,7 +37,7 @@
 - [x] Add `acps init --edge cloudflare --exposure tunnel` as the recommended public deployment profile.
 - [x] Add generated Cloudflare Tunnel artifact output for `cloudflared` config and systemd/Docker snippets.
 - [ ] Add optional managed Cloudflare provisioning mode using secret refs for Cloudflare API credentials.
-- [ ] Improve `acps status` with daemon, agent, workspace, dependency, and sink health.
+- [x] Improve `acps status` with daemon, agent, workspace, dependency, and sink health.
 - [ ] Add human-readable and JSON output modes for common commands.
 - [ ] Add consistent `--format text|json` support.
 - [ ] Add clearer command errors with remediation hints.
@@ -92,13 +92,13 @@
 
 ## Operational Health
 
-- [ ] Add basic liveness endpoint.
-- [ ] Add readiness endpoint.
+- [x] Add basic liveness endpoint.
+- [x] Add readiness endpoint.
 - [x] Add Cloudflare Tunnel posture checks when `[edge.cloudflare]` is configured.
-- [ ] Add health checks for agent process state.
-- [ ] Add health checks for SQLite access.
-- [ ] Add health checks for workspace access.
-- [ ] Add health checks for external logging sink when enabled.
+- [x] Add health checks for agent process state.
+- [x] Add health checks for SQLite access.
+- [x] Add health checks for workspace access.
+- [x] Add health checks for external logging sink when enabled.
 - [ ] Add health checks for configured MCP declarations.
 - [ ] Add health checks for orphaned agent/adapter processes.
 - [ ] Add health checks for prompts stuck without progress beyond a configured threshold.

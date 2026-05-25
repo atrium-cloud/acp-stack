@@ -151,6 +151,19 @@ impl AgentStateLabel {
             AgentState::Stopping => Self::Stopping,
         }
     }
+
+    /// Canonical snake_case wire label. Matches the `#[serde(rename_all =
+    /// "snake_case")]` annotation on this enum; carved out as a method so
+    /// status/health handlers don't fall back to `format!("{:?}", ...)`,
+    /// which would silently break for any multi-word variant added later.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+        }
+    }
 }
 
 /// Public snapshot of the supervisor: status handlers read this without

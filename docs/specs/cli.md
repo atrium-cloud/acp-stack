@@ -128,7 +128,7 @@ scope = "user"              # or "system"; system actions need uid 0
 # timeout_secs = 600        # optional override (default 10m)
 ```
 
-`acps deps apply [--yes] [--feature <name>]` runs every eligible action. Without `--yes` the CLI prompts interactively; in non-interactive mode `--yes` is required. The `--feature` filter narrows to one declared feature so the operator can apply a single subset. Per-action outcomes (`installed`, `already`, `failed`, `privreq`) are persisted as `installer_runs` rows tagged `agent_id = "deps_apply"` / `step = "deps_apply"`, so `acps installer history --agent deps_apply` shows the audit trail.
+`acps deps apply [--yes] [--feature <name>]` runs every eligible action. Without `--yes` the CLI prompts interactively; in non-interactive mode `--yes` is required. The `--feature` filter narrows to one declared feature so the operator can apply a single subset. Per-action outcomes (`installed`, `already`, `failed`, `privreq`) are persisted as `installer_runs` rows tagged `agent_id = "deps_apply"` / `step = "deps_apply"` with one shared `apply_run_id` for the invocation, so `acps installer history --agent deps_apply` shows the audit trail and readiness can evaluate the exact latest apply attempt.
 
 For supported OpenCode and Pi configs, `acps init` does not infer model config from default API-key refs. Init may select the initial provider, collect the required provider refs, and write `[agent.provider]` without a model. `acps agent set` is the edit path that can later write the model.
 
@@ -233,7 +233,7 @@ When `[path]` is omitted for validation, the CLI reads `~/.config/acp-stack/acp-
 
 `acps secrets set <name>` reads a single line from stdin and stores it as the named secret. `acps secrets list` prints names only — values are never echoed. `acps secrets delete <name>` removes the named secret and errors when it does not exist.
 
-`acps status` validates the default config, opens or migrates local state, records `status.checked`, and prints config, state, schema version, and latest event status.
+`acps status` validates the default config, opens or migrates local state, records `status.checked`, and prints an aggregate report covering config path, state path with schema version and latest event timestamp, workspace writability, configured agent id, external logging sink status (when Supabase is configured), and the most recent `acps deps apply` run. It then probes the live daemon with the session key at `GET /v1/health/ready`: `200` prints `daemon:   ready`, `503` prints `daemon:   degraded (...)` with failing subsystem names when available, and connection/auth/parse failures print `daemon:   unavailable (...)`. Daemon degraded or unavailable status is diagnostic and does not make the command fail when the local config/state checks succeeded.
 
 `acps logs query` reads durable SQLite events newest-first. `--limit` defaults to `50`. Additional filters: `--level <level>` (exact match); `--kind <kind>` (exact, or dotted prefix when the value ends with `.`); `--source <writer>` (`api`/`acp`/`command`/`permission`/`cli`/`system`); `--session <id>`, `--command <id>`, `--permission <id>` for cross-reference lookups; `--since` and `--until` accept either an RFC3339 timestamp or a duration suffix (`30m`, `1h`, `2d`, `1w` — interpreted as "this much time ago"); `--after <event-id>` continues a keyset-paginated scan past the previous page's last row. Each output line is `<created_at> <level> <source> <kind> <message>`.
 

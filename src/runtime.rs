@@ -6,6 +6,7 @@ pub mod commands;
 pub mod deps;
 pub mod deps_apply;
 pub mod github_release;
+pub mod health;
 pub mod init_runner;
 pub mod mcp;
 pub mod model_discovery;

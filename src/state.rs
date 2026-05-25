@@ -34,8 +34,8 @@ pub use events::{
     EVENT_SOURCE_PERMISSION, EVENT_SOURCE_SYSTEM, Event,
 };
 pub use ids::{
-    next_command_id, next_permission_decision_id, next_permission_request_id, next_prompt_id,
-    next_session_id,
+    next_command_id, next_deps_apply_run_id, next_permission_decision_id,
+    next_permission_request_id, next_prompt_id, next_session_id,
 };
 pub use init::{
     INIT_RUN_FAILED, INIT_RUN_PENDING, INIT_RUN_RUNNING, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
