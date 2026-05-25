@@ -8,6 +8,12 @@ use clap::{Args, Subcommand};
 
 use crate::error::Result;
 
+pub(in crate::cli) use self::install::operator_registry_override;
+pub(in crate::cli) use self::set::{
+    default_api_key_ref_for_agent_provider, default_custom_provider_api, parse_custom_provider_api,
+    parse_custom_token_limit, print_agent_set_effective_notice_for, required_custom_arg,
+    resolve_agent_model_value, validate_agent_session_config_value,
+};
 pub(in crate::cli) use self::test::run_init_testflight;
 
 pub(super) const DEFAULT_AGENT_TEST_PROMPT: &str =

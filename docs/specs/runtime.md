@@ -126,10 +126,10 @@ unrelated invocations is intentionally opt-in.
 
 `acps init` selects the supported agent and may select the initial provider, but it does not infer a model from API-key refs or test-only defaults. Provider-backed generated config is written only after `[agent.provider]` is explicit:
 
-- Goose: writes or merges `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, summarizing context, and session naming disabled. Goose consumes provider-native API-key env vars directly, so the selected `api_key_ref` must match the provider mapping.
-- OpenCode: writes or merges `~/.config/opencode/opencode.json` with a provider `apiKey` reference to the configured API-key ref; when a model is configured, it also writes the selected provider-qualified model.
+- Goose: writes or merges `~/.config/goose/config.yaml` with `GOOSE_PROVIDER`, `GOOSE_MODE = auto`, summarizing context, and session naming disabled. Goose consumes provider-native API-key env vars directly, so the selected `api_key_ref` must match the provider mapping. `acps subagent` does not currently map to Goose planner, fast-model, or delegated-subagent settings.
+- OpenCode: writes or merges `~/.config/opencode/opencode.json` with provider `apiKey` references to the configured main and subagent API-key refs; when a model is configured, it writes the selected provider-qualified `model`, `small_model` from `[agent.subagent.provider].model`, and `enabled_providers` from the union of configured OpenCode provider ids. If no subagent block exists, `small_model` defaults to the main model. OpenCode `subagent disable` writes `small_model = "invalid/model"` because an empty string still falls through to OpenCode's implicit small model.
 - Pi: writes or merges `~/.pi/agent/settings.json` and sets `enabledModels` only when a model is configured.
-- Codex: supports only `openai` and `openrouter`. OpenAI writes `~/.codex/config.toml` with the selected model and `model_provider = "openai"` while leaving auth Codex-native; switching from a generated non-OpenAI provider first backs up the previous config and removes that provider table. OpenRouter writes the Responses provider table and references `OPENROUTER_API_KEY`.
+- Codex: supports only `openai` and `openrouter`. OpenAI writes `~/.codex/config.toml` with the selected model and `model_provider = "openai"` while leaving auth Codex-native; switching from a generated non-OpenAI provider first backs up the previous config and removes that provider table. OpenRouter writes the Responses provider table and references `OPENROUTER_API_KEY`. `acps subagent` does not currently generate Codex role or custom-agent files.
 
 Provider id validation uses the reusable API-key/provider mapping in the runtime.
 

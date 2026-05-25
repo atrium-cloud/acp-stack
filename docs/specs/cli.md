@@ -21,6 +21,11 @@ acps agent start
 acps agent stop
 acps agent status
 acps agent check
+acps subagent status
+acps subagent set --provider <provider-id> --model <model> [--api-key-ref <ref>]
+acps subagent set --custom-provider --provider <id> --provider-name <display-name> --base-url <url> --api-key-ref <ref> --model <model-id> [--provider-api <chat-completions|responses>] [--model-name <display-name>] [--context <tokens>] [--output-max-tokens <tokens>]
+acps subagent free [--provider <openrouter|opencode>] [--api-key-ref <ref>]
+acps subagent disable
 acps installer history [--agent <id>] [--limit <n>]
 
 acps config validate [path]
@@ -106,6 +111,7 @@ Phase 4 expands init into a resumable orchestration flow:
 - create or import config
 - prompt for the agent, provider id, and missing required secret references without echoing values
 - resolve provider selection through the provider/env mapping and validate model/mode values through ACP session config options
+- default OpenCode's supported subagent/lightweight model lane to the main provider/model unless the operator declines in an interactive run
 - update generated OpenCode or Pi provider config and surface the supervised-agent restart step when provider/model settings require process-level reload
 - set up code sources under `/workspace/usr/code/<repo-name>/`
 - set up data sources under `/workspace/usr/data/<data-dir-name>/`
@@ -165,6 +171,10 @@ Bind defaults to `[api].bind` from config (`127.0.0.1:7700`). `--bind <addr>` ov
 `acps agent set --mode <mode>` updates `[agent].mode` for agents whose registry entry declares `set_mode = true` and whose ACP session advertises a `mode` config option. Current real ACP probes advertise OpenCode `build`/`plan`, Cursor `agent`/`ask`/`plan`, Codex `read-only`/`auto`/`full-access`, and `amp-acp v0.1.1` `smart`/`rush`/`deep`; Pi and Goose do not advertise mode values.
 
 Successful `acps agent set` output prints the configured agent id, changed fields, and agent-specific guidance for whether a supervised-agent restart is required.
+
+`acps subagent *` is OpenCode-only and maps to `opencode.json` `small_model`. It supports `status`, `set`, `free`, and `disable`; all other current agents return `Current agent does not support subagent configuration.`
+
+`acps subagent disable` writes `small_model = "invalid/model"` because `small_model = ""` still triggers OpenCode's implicit fallback. `free` selects `openrouter/free` or `opencode/big-pickle`.
 
 `acps agent start` and `acps agent stop` call the running daemon over HTTP using the admin key from the encrypted secret store. The base URL is `[api].public_url` when configured; otherwise it is derived from `[api].bind`, with wildcard binds rewritten to loopback for local CLI calls.
 

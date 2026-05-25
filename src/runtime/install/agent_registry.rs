@@ -180,6 +180,10 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_mode: bool,
     #[serde(default)]
+    pub subagents: bool,
+    #[serde(default)]
+    pub subagent_alias: Option<String>,
+    #[serde(default)]
     pub stdio_framing: RegistryStdioFraming,
     #[serde(default)]
     pub website: Option<String>,
@@ -526,6 +530,8 @@ mod tests {
         assert!(opencode.allow_custom_provider);
         assert!(opencode.allow_custom_model);
         assert!(opencode.set_mode);
+        assert!(opencode.subagents);
+        assert_eq!(opencode.subagent_alias.as_deref(), Some("small_model"));
         assert_eq!(
             opencode.support_doc.as_deref(),
             Some("docs/agents/opencode.md")

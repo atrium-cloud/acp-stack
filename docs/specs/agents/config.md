@@ -1,6 +1,6 @@
 # Agent Provider Config
 
-Last updated: May 22, 2026
+Last updated: May 25, 2026
 
 ## Concept
 
@@ -17,6 +17,15 @@ acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]
 acps agent set --custom-provider --provider <provider-id> --provider-name <display-name> --base-url <url> --api-key-ref <ref> --model <model-id> [--provider-api <chat-completions|responses>] [--model-name <display-name>] [--context <tokens>] [--output-max-tokens <tokens>]
 ```
 
+Auxiliary/subagent model config is changed with:
+
+```sh
+acps subagent set --provider <provider-id> --model <model> [--api-key-ref <ref>]
+acps subagent set --custom-provider --provider <provider-id> --provider-name <display-name> --base-url <url> --api-key-ref <ref> --model <model-id> [--provider-api <chat-completions|responses>] [--model-name <display-name>] [--context <tokens>] [--output-max-tokens <tokens>]
+acps subagent free [--provider <openrouter|opencode>] [--api-key-ref <ref>]
+acps subagent disable
+```
+
 Model-only config is changed with:
 
 ```sh
@@ -26,6 +35,7 @@ acps agent set --model <model>
 Behavior:
 
 - updates `[agent.provider]` for provider-backed agents
+- updates `[agent.subagent.provider]` only for OpenCode `small_model`
 - updates `[agent].model` for model-only agents
 - rejects provider edits unless the embedded registry entry declares `set_provider = true`
 - rejects model edits unless the embedded registry entry declares `set_model = true`
@@ -40,6 +50,8 @@ When `--api-key-ref` is omitted, `acps` uses the default key ref from [api_key.m
 When `--model` is omitted, interactive terminals start a provisional ACP session and prompt from the advertised `model` config option. Non-interactive invocations print the advertised model values and exit without mutating config.
 
 Custom provider setup writes config only; it does not certify that the underlying agent can talk to the endpoint. OpenCode, Pi, and Goose default custom providers to `chat-completions`. Codex defaults custom providers to `responses` and rejects `chat-completions` because Codex-oriented OpenAI models are Responses-only in this support contract. Custom token limits default to `context = 200000` and `output_max_tokens = 65536`; override values must be plain positive integers without commas.
+
+`acps subagent *` is OpenCode-only. It exists because OpenCode can make implicit `small_model` calls; other current harnesses do not expose an equivalent config surface through `acps`.
 
 Mode config is changed with:
 
@@ -67,6 +79,19 @@ api = "chat-completions"
 model_name = "<model-display-name>"
 context = 200000
 output_max_tokens = 65536
+
+[agent.subagent.provider]
+id = "<provider-id>"
+model = "<agent-model-id>"
+api_key_ref = "<provider-api-key-ref>"
+
+[agent.subagent.provider.custom]
+name = "<provider-display-name>"
+base_url = "https://api.example.com/v1"
+api = "chat-completions"
+model_name = "<model-display-name>"
+context = 200000
+output_max_tokens = 65536
 ```
 
 Fields:
@@ -76,6 +101,8 @@ Fields:
 - `[agent.provider].model`: exact agent-advertised model id for mapped provider-backed agents, or the operator-provided custom model id for custom providers. Goose uses provider-native model ids, while OpenCode and Pi commonly use `<provider-id>/<model-id>`.
 - `[agent.provider].api_key_ref`: secret ref that should be present in `[agent].env` and referenced by generated agent-owned config.
 - `[agent.provider.custom]`: optional custom provider metadata. When present, `model` and `api_key_ref` are required.
+- `[agent.subagent.provider]`: OpenCode `small_model` provider metadata with the same shape as `[agent.provider]`.
+- `[agent.subagent.provider.custom]`: optional custom provider metadata for OpenCode `small_model`. When present, `model` and `api_key_ref` are required.
 
 ## Accepted Provider IDs And Model Formats
 
@@ -106,7 +133,9 @@ OpenCode:
 - Provider ids must be listed for OpenCode in the provider metadata.
 - Model ids should be provider-qualified.
 - Mode values are validated against OpenCode's ACP-advertised `mode` option. The current real ACP probe returned `build` and `plan`.
-- `acps` writes `~/.config/opencode/opencode.json` with `model` set to the selected model and `provider.<id>.options.apiKey` set to `{env:<api_key_ref>}`. Custom providers write `npm = "@ai-sdk/openai-compatible"`, `options.baseURL`, `options.apiKey`, and the custom model limits.
+- `acps` writes `model`, `small_model`, `enabled_providers`, and provider API-key config to `~/.config/opencode/opencode.json`. Without `[agent.subagent.provider]`, `small_model` inherits `model`.
+- `enabled_providers` is generated from the union of the configured main and subagent OpenCode provider ids.
+- `acps subagent disable` writes `small_model = "invalid/model"`; `small_model = ""` still triggers OpenCode's implicit fallback.
 - OpenCode can use whatever key the configured provider block references; the provider block must match the chosen provider and key.
 - `cloudflare-ai-gateway` defaults to `CLOUDFLARE_API_TOKEN` for OpenCode because that is the OpenCode/models.dev auth contract. `cloudflare-workers-ai` defaults to `CLOUDFLARE_API_KEY`.
 
@@ -150,7 +179,7 @@ Every supported agent reads its own configuration from a well-known path under t
 | Agent | Generated config file | Written by | Read by agent at | Live model swap | Live mode swap | Relaunch on edit? |
 | ----- | --------------------- | ---------- | ---------------- | --------------- | -------------- | ----------------- |
 | Goose | `~/.config/goose/config.yaml` (+ `~/.config/goose/custom_providers/<id>.yaml` for custom providers) | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider` | process start | ACP `session/set_config_option` with `configId = "model"` on the existing session — no relaunch | not advertised | no for model; n/a for mode |
-| OpenCode | `~/.config/opencode/opencode.json` | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider` | process start | new session only — current sessions keep the previous model | new session only | yes for model and mode |
+| OpenCode | `~/.config/opencode/opencode.json` | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider`, `acps subagent set` | process start | new session only — current sessions keep the previous model | new session only | yes for model, subagent model, and mode |
 | Pi | `~/.pi/agent/settings.json` (+ `~/.pi/agent/models.json` for custom providers) | `acps init`, `acps agent set --provider`, `acps agent set --model`, `acps agent set --custom-provider` | process start | new session only | not advertised | yes for model |
 | Codex | `~/.codex/config.toml` (provider switches back up the previous file as `config.<provider>.toml`) | `acps init`, `acps agent set --provider openai`, `acps agent set --provider openrouter`, `acps agent set --custom-provider` | process start | new session only | ACP `session/set_config_option` with `configId = "mode"` on the existing session — no relaunch | yes for model; no for mode |
 | Amp Code | none (Amp reads `AMP_API_KEY` from process env) | n/a | n/a | not supported through `acps` | ACP `session/set_config_option` with `configId = "mode"` on the existing session — no relaunch | n/a for model; no for mode |
