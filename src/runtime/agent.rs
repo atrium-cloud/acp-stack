@@ -1,6 +1,9 @@
 pub mod acp_bridge;
+pub mod acp_codec;
 pub mod agent_headless_config;
+pub mod config_io;
 pub mod mcp;
 pub mod model_discovery;
 pub mod provider_keys;
+pub mod session_sink;
 pub mod supervisor;

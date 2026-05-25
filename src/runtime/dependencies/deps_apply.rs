@@ -30,6 +30,9 @@ use serde::Serialize;
 use crate::config::{Config, DependencyEntry, DependencyInstallScope};
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::{DepStatus, check_dependencies};
+use crate::runtime::process_runner::{
+    STDERR_TAIL_BYTES, join_reader_bounded, kill_process_group, read_to_cap, read_to_cap_with_tail,
+};
 use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
 };
@@ -42,18 +45,10 @@ pub const DEPS_APPLY_AGENT_ID: &str = "deps_apply";
 pub const DEPS_APPLY_STEP: &str = "deps_apply";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const STDERR_TAIL_BYTES: usize = 2 * 1024;
 /// Per-stream cap on captured output before we start dropping bytes.
 /// Reuses the state-layer constant so a future bump in installer_runs
 /// row size automatically applies to deps_apply too.
 const STREAM_CAP_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
-/// Hard cap on how long we wait for the stdout/stderr reader threads
-/// to drain AFTER the install shell has exited (or been killed). A
-/// well-behaved install snippet closes its descendants when it exits;
-/// a misbehaving one that double-forks a daemon outside the process
-/// group would keep the pipes open and hang the unbounded join
-/// indefinitely. Same value as the agent installer.
-const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
 
 /// One declared command dep filtered through the apply runner. Used to
 /// drive the confirmation prompt + per-row outcome reporting.
@@ -404,8 +399,10 @@ fn run_shell(
     let stdout_handle = child.stdout.take().expect("piped stdout");
     let stderr_handle = child.stderr.take().expect("piped stderr");
 
-    let stdout_thread = std::thread::spawn(move || read_to_cap(stdout_handle));
-    let stderr_thread = std::thread::spawn(move || read_to_cap_with_tail(stderr_handle));
+    let stdout_thread = std::thread::spawn(move || read_to_cap(stdout_handle, STREAM_CAP_BYTES));
+    let stderr_thread = std::thread::spawn(move || {
+        read_to_cap_with_tail(stderr_handle, STREAM_CAP_BYTES, STDERR_TAIL_BYTES)
+    });
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
@@ -445,108 +442,6 @@ fn run_shell(
         join_reader_bounded(stderr_thread).unwrap_or((String::new(), String::new()));
     let exit_code = status.code();
     Ok((exit_code, stdout, stderr, timed_out, stderr_tail))
-}
-
-fn join_reader_bounded<T>(handle: std::thread::JoinHandle<T>) -> Option<T> {
-    let deadline = Instant::now() + READER_JOIN_GRACE;
-    while !handle.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if handle.is_finished() {
-        handle.join().ok()
-    } else {
-        None
-    }
-}
-
-#[cfg(unix)]
-fn kill_process_group(child: &mut std::process::Child) {
-    // SAFETY: libc::kill is async-signal-safe and we operate on a pid
-    // we own (the process group leader is the child itself because we
-    // used process_group(0)). Negative pid addresses the whole group,
-    // so grandchildren forked by the shell also receive SIGKILL.
-    unsafe {
-        let pid = child.id() as i32;
-        libc::kill(-pid, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
-}
-
-fn read_to_cap<R: std::io::Read>(mut reader: R) -> String {
-    let mut buf = Vec::with_capacity(4096);
-    let mut chunk = [0u8; 4096];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                if buf.len() + n > STREAM_CAP_BYTES {
-                    let remaining = STREAM_CAP_BYTES.saturating_sub(buf.len());
-                    buf.extend_from_slice(&chunk[..remaining]);
-                    // Drain the rest without storing — we cap on
-                    // ingest so a chatty installer can't bloat
-                    // installer_runs.
-                    let mut sink = std::io::sink();
-                    let _ = std::io::copy(&mut reader, &mut sink);
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-            Err(_) => break,
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-/// Same cap as `read_to_cap`, but also maintains a rolling buffer of
-/// the LAST `STDERR_TAIL_BYTES` bytes ever seen on the stream. For a
-/// failed install whose stderr blew past the 64 KiB cap, the truncated
-/// prefix is rarely useful — the actual diagnostic that caused the
-/// exit-1 lives at the very end. The rolling tail captures that
-/// without bloating `installer_runs.stderr`.
-fn read_to_cap_with_tail<R: std::io::Read>(mut reader: R) -> (String, String) {
-    let mut prefix = Vec::with_capacity(4096);
-    let mut tail = std::collections::VecDeque::with_capacity(STDERR_TAIL_BYTES);
-    let mut prefix_full = false;
-    let mut chunk = [0u8; 4096];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                let bytes = &chunk[..n];
-                if !prefix_full {
-                    let remaining = STREAM_CAP_BYTES.saturating_sub(prefix.len());
-                    let take = n.min(remaining);
-                    prefix.extend_from_slice(&bytes[..take]);
-                    if prefix.len() >= STREAM_CAP_BYTES {
-                        prefix_full = true;
-                    }
-                }
-                // Always keep updating the rolling tail, even after
-                // the prefix cap fills.
-                for byte in bytes {
-                    if tail.len() == STDERR_TAIL_BYTES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(*byte);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    let prefix_string = String::from_utf8_lossy(&prefix).into_owned();
-    let tail_bytes: Vec<u8> = tail.into_iter().collect();
-    // The tail may start mid-UTF-8-character if we truncated on a
-    // boundary; nudge forward until we find a leading byte.
-    let mut start = 0;
-    while start < tail_bytes.len() && (tail_bytes[start] & 0xC0) == 0x80 {
-        start += 1;
-    }
-    let tail_string = String::from_utf8_lossy(&tail_bytes[start..]).into_owned();
-    (prefix_string, tail_string)
 }
 
 fn cap_stream(value: &str) -> String {

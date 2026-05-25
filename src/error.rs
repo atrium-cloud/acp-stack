@@ -1,8 +1,26 @@
 use http::StatusCode;
 use std::path::PathBuf;
 
+mod agent_install;
+mod agent_runtime;
+mod archive;
+mod auth_http;
+mod command;
+mod config;
+mod download;
+mod edge;
+mod permission;
+mod secrets;
+mod serve;
+mod session;
+mod state;
+mod supabase;
+mod workspace;
+mod workspace_source;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StackError {
+    // === config / io / import ===
     #[error("HOME is not set; cannot resolve default config path")]
     HomeNotSet,
 
@@ -78,6 +96,7 @@ pub enum StackError {
     #[error("failed to serialize canonical config TOML: {0}")]
     ConfigSerialize(#[from] toml::ser::Error),
 
+    // === state / migrations ===
     #[error("state database error: {0}")]
     State(#[from] rusqlite::Error),
 
@@ -112,6 +131,7 @@ pub enum StackError {
     #[error("auth failure payload must be valid JSON text")]
     InvalidAuthFailurePayload,
 
+    // === secrets / age key store ===
     #[error("failed to read age key at {path}: {source}")]
     AgeKeyRead {
         path: PathBuf,
@@ -175,6 +195,7 @@ pub enum StackError {
     )]
     MissingSupabaseApiKey { name: String },
 
+    // === supabase logging sink ===
     #[error(
         "[logging.supabase].url must start with `https://` when external logging is enabled; got `{url}`"
     )]
@@ -185,6 +206,7 @@ pub enum StackError {
     )]
     InvalidSupabaseSchema { schema: String },
 
+    // === edge (cloudflare) ===
     #[error("edge.cloudflare.mode = \"managed\" is not implemented yet; use mode = \"generated\"")]
     CloudflareManagedNotImplemented,
 
@@ -212,12 +234,14 @@ pub enum StackError {
     #[error("edge.cloudflare.tunnel_id must be a Cloudflare tunnel UUID; got `{tunnel_id}`")]
     InvalidCloudflareTunnelId { tunnel_id: String },
 
+    // === supabase sink runtime ===
     #[error("Supabase sink rejected upload: {status} {body}")]
     SupabaseSinkHttp { status: u16, body: String },
 
     #[error("Supabase sink received a row for unknown source table `{table}`; refusing to upload")]
     SupabaseSinkUnknownTable { table: String },
 
+    // === stdin / generic config ===
     #[error("failed to read stdin: {source}")]
     StdinRead { source: std::io::Error },
 
@@ -227,6 +251,7 @@ pub enum StackError {
     #[error("{field} is required")]
     MissingField { field: &'static str },
 
+    // === workspace_source (init-time materialization) ===
     #[error("workspace.code_sources[{index}]: {reason}")]
     WorkspaceCodeSourceInvalid { index: usize, reason: String },
 
@@ -251,6 +276,7 @@ pub enum StackError {
         stderr_tail: String,
     },
 
+    // === download (https fetch) ===
     #[error("download exceeded the {limit}-byte size limit")]
     SafeDownloadTooLarge { limit: u64 },
 
@@ -266,6 +292,7 @@ pub enum StackError {
     #[error("downloaded content sha256 mismatch: expected {expected}, got {actual}")]
     SafeDownloadChecksumMismatch { expected: String, actual: String },
 
+    // === archive (tar/zip extraction) ===
     #[error("archive contained an unsafe {kind}: `{name}`")]
     ArchiveUnsafeEntry { kind: &'static str, name: String },
 
@@ -278,6 +305,7 @@ pub enum StackError {
     #[error("archive read failed: {reason}")]
     ArchiveReadFailed { reason: String },
 
+    // === config: generic shape validators ===
     #[error("{field} is not valid when {type_field} is {type_value}")]
     InvalidConfigFieldForType {
         field: &'static str,
@@ -331,6 +359,7 @@ pub enum StackError {
         incoming: String,
     },
 
+    // === serve (http listener) ===
     #[error("failed to bind {bind}: {source}")]
     ServeBind {
         bind: String,
@@ -353,6 +382,7 @@ pub enum StackError {
     )]
     ServeRootRequiresAdminKey,
 
+    // === agent install / registry / release assets ===
     #[error(
         "agent is not configured; declare `[agent].id` matching a registry entry, or provide a `[agent.install] type = \"shell\"` recipe"
     )]
@@ -442,6 +472,7 @@ pub enum StackError {
     #[error("agent binary sha256 mismatch: expected {expected}, got {actual}")]
     AgentSha256Mismatch { expected: String, actual: String },
 
+    // === agent runtime / lifecycle ===
     #[error("failed to spawn agent subprocess: {source}")]
     AgentSpawnFailed {
         #[source]
@@ -486,6 +517,7 @@ pub enum StackError {
     #[error("agent test failed at {stage}: {reason}")]
     AgentTestFailed { stage: String, reason: String },
 
+    // === session / prompt ===
     #[error("session `{id}` was not found")]
     SessionNotFound { id: String },
 
@@ -507,6 +539,7 @@ pub enum StackError {
     #[error("prompt body is not valid ACP content: {0}")]
     PromptBodyInvalid(String),
 
+    // === workspace (runtime path access) ===
     #[error("workspace path `{requested}` is invalid: {reason}")]
     WorkspacePathInvalid { reason: String, requested: String },
 
@@ -535,6 +568,7 @@ pub enum StackError {
     #[error("workspace.uploads must be inside workspace.root")]
     WorkspaceUploadsNotUnderRoot,
 
+    // === permissions / mcp / dependencies config ===
     #[error("permissions.mode must be one of auto, supervised, locked")]
     InvalidPermissionsMode,
 
@@ -544,6 +578,7 @@ pub enum StackError {
     #[error("env variable name `{name}` is not a valid POSIX identifier")]
     InvalidEnvName { name: String },
 
+    // === command gateway ===
     #[error("command `{id}` was not found")]
     CommandNotFound { id: String },
 
@@ -565,6 +600,7 @@ pub enum StackError {
     #[error("command timed out before the subprocess produced an exit status")]
     CommandTimeout,
 
+    // === secrets: ref-shape validation ===
     #[error(
         "secret ref `{ref_name}` (referenced from {kind}) collides with the configured auth key ref; rename the secret"
     )]
@@ -579,6 +615,7 @@ pub enum StackError {
     #[error("secret ref name `{name}` is declared more than once across the config")]
     DuplicateSecretRef { name: String },
 
+    // === permission / mcp / dependencies runtime + config ===
     #[error("permissions.timeout_action must be one of deny, approve")]
     InvalidTimeoutAction,
 
@@ -612,9 +649,11 @@ pub enum StackError {
         to: &'static str,
     },
 
+    // === state-layer JSON corruption ===
     #[error("durable JSON corruption in `{field}`: {reason}")]
     StateInvalidJson { field: &'static str, reason: String },
 
+    // === auth_http (HTTP-edge auth) ===
     #[error("rate limit exceeded; retry later")]
     RateLimited,
 
@@ -624,6 +663,7 @@ pub enum StackError {
     #[error("Origin `{origin}` is not in the configured allowlist")]
     OriginNotAllowed { origin: String },
 
+    // === config import shape ===
     #[error("config import exceeds {limit}-byte size limit ({actual} bytes)")]
     ImportTooLarge { limit: usize, actual: usize },
 
@@ -645,166 +685,26 @@ fn workspace_command_failed_message(command: &str, exit: Option<i32>, stderr_tai
 
 impl StackError {
     /// Dotted-namespace code suitable for the HTTP error envelope at
-    /// `docs/specs/api/api.md:20-42`. The set is intentionally coarse: it
-    /// identifies the failed subsystem and broad failure mode, not every
-    /// variant.
+    /// `docs/specs/api/api.md:20-42`. Delegates to per-domain helpers so the
+    /// variant-to-code table lives next to the matching domain.
     pub fn error_code(&self) -> &'static str {
-        use StackError::*;
-        match self {
-            HomeNotSet => "config.home_missing",
-            ConfigRead { .. } => "config.read_failed",
-            ConfigWrite { .. } => "config.write_failed",
-            AgentConfigProvision { .. } => "agent.config_provision_failed",
-            ConfigInitialize { .. } => "config.initialize_failed",
-            ConfigExists { .. } => "config.exists",
-            ConfigToml(_) | ConfigSerialize(_) => "config.invalid",
-            ImportBase64Decode { .. } => "import.base64_invalid",
-            ImportUtf8 { .. } => "import.utf8_invalid",
-            DirectoryCreate { .. } => "io.directory_create_failed",
-            FileCreate { .. } => "io.file_create_failed",
-            FileRemove { .. } => "io.file_remove_failed",
-            PermissionSet { .. } => "io.permission_set_failed",
-            MissingParentDir { .. } => "io.missing_parent_dir",
-            ResetNotConfirmed => "reset.not_confirmed",
-            State(_) => "state.error",
-            IncompatibleStateSchema { .. } => "state.incompatible_schema",
-            UnmanagedStateTable { .. } => "state.unmanaged_table",
-            MigrationManifestParse(_) => "state.migration_manifest_invalid",
-            InvalidManifestOrder { .. } => "state.invalid_manifest_order",
-            ManifestRegistryMismatch { .. } => "state.manifest_registry_mismatch",
-            MissingMigratedTable { .. } => "state.missing_migrated_table",
-            InvalidEventPayload => "state.invalid_event_payload",
-            InvalidAuthFailurePayload => "state.invalid_auth_failure_payload",
-            AgeKeyRead { .. } | SecretStoreRead { .. } => "secrets.read_failed",
-            AgeKeyWrite { .. } | SecretStoreWrite { .. } => "secrets.write_failed",
-            AgeKeyParse { .. } => "secrets.age_key_invalid",
-            SecretStoreEncrypt(_) => "secrets.encrypt_failed",
-            SecretStoreDecrypt(_) => "secrets.decrypt_failed",
-            SecretStorePlaintextParse(_)
-            | SecretStorePlaintextSerialize(_)
-            | SecretStorePlaintextNotUtf8 { .. } => "secrets.plaintext_invalid",
-            SecretNotFound { .. } => "secrets.not_found",
-            MissingSessionKey { .. } => "auth.missing_session_key",
-            MissingAdminKey { .. } => "auth.missing_admin_key",
-            MissingSupabaseApiKey { .. } => "logging.supabase.missing_api_key",
-            InvalidSupabaseUrl { .. } => "logging.supabase.invalid_url",
-            InvalidSupabaseSchema { .. } => "logging.supabase.invalid_schema",
-            CloudflareManagedNotImplemented => "edge.cloudflare.managed_not_implemented",
-            InvalidCloudflareMode { .. } => "edge.cloudflare.invalid_mode",
-            InvalidCloudflareExposure { .. } => "edge.cloudflare.invalid_exposure",
-            InvalidCloudflaredDeployment { .. } => "edge.cloudflare.invalid_deployment",
-            InvalidCloudflareHostname { .. } => "edge.cloudflare.invalid_hostname",
-            InvalidCloudflareTunnelName { .. } => "edge.cloudflare.invalid_tunnel_name",
-            InvalidCloudflareTunnelId { .. } => "edge.cloudflare.invalid_tunnel_id",
-            SupabaseSinkHttp { .. } => "logging.supabase.http_error",
-            SupabaseSinkUnknownTable { .. } => "logging.supabase.unknown_table",
-            StdinRead { .. } => "io.stdin_read_failed",
-            MissingSection { .. }
-            | MissingField { .. }
-            | WorkspaceCodeSourceInvalid { .. }
-            | WorkspaceDataSourceInvalid { .. }
-            | InvalidConfigFieldForType { .. }
-            | InvalidSocketAddress { .. }
-            | NonZeroRequired { .. }
-            | PathMustBeAbsolute { .. }
-            | PathContainsParentDir { .. }
-            | InvalidAgentRestart
-            | InvalidExpectedSha256
-            | InvalidAgentInstallType
-            | UrlMustBeHttp { .. }
-            | UrlMustBeHttps { .. }
-            | AuthRefsNotDistinct
-            | InvalidPermissionsMode
-            | InvalidDurationField { .. }
-            | InvalidEnvName { .. } => "config.invalid",
-            SecretReservedForAuth { .. } => "secrets.reserved_for_auth",
-            ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
-            ServeBind { .. } => "serve.bind_failed",
-            ServeIo { .. } => "serve.io_error",
-            ServeRefusedAsRoot => "serve.refused_as_root",
-            ServeRootRequiresAdminKey => "serve.root_requires_admin_key",
-            AgentNotConfigured => "agent.not_configured",
-            AgentInstallerFailed { .. } => "agent.installer_failed",
-            AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
-            AgentInstallerTimeout => "agent.installer_timeout",
-            AgentInstallerLogPersist { .. } => "agent.installer_log_persist_failed",
-            AgentRegistryMissing { .. } => "agent.registry_missing",
-            InitRunCorrupted { .. } => "init.run_corrupted",
-            AgentUnsupported { .. } => "agent.unsupported",
-            AgentCheckStale => "agent.check_stale",
-            RegistryLoad { .. } => "agent.registry_load_failed",
-            GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
-            NpmRegistryFetch { .. } => "agent.npm_registry_fetch_failed",
-            NpmRegistryEmptyVersion { .. } => "agent.npm_registry_empty_version",
-            GithubReleaseAssetNotFound { .. } => "agent.github_release_asset_not_found",
-            GithubReleaseAssetAmbiguous { .. } => "agent.github_release_asset_ambiguous",
-            GithubReleaseArchiveExtract { .. } => "agent.github_release_archive_extract_failed",
-            GithubReleaseChecksumMismatch { .. } => "agent.github_release_checksum_mismatch",
-            UnsupportedHostArch { .. } => "agent.unsupported_host_arch",
-            AgentSha256Mismatch { .. } => "agent.sha256_mismatch",
-            AgentSpawnFailed { .. } => "agent.spawn_failed",
-            AgentAlreadyRunning => "agent.already_running",
-            AgentNotRunning => "agent.not_running",
-            AgentInitializeFailed { .. } => "agent.initialize_failed",
-            AgentNotInitialized => "agent.not_initialized",
-            AgentUnsupportedCapability { .. } => "agent.unsupported_capability",
-            AgentApiRequest { .. } => "agent.api_request_failed",
-            AgentApiStatus { .. } => "agent.api_status_failed",
-            AgentRequestFailed { .. } => "agent.request_failed",
-            AgentTestFailed { .. } => "agent.test_failed",
-            SessionNotFound { .. } => "session.not_found",
-            SessionClosed { .. } => "session.closed",
-            PromptNotFound { .. } => "prompt.not_found",
-            PromptSessionMismatch { .. } => "prompt.session_mismatch",
-            PromptBodyEmpty => "prompt.body_empty",
-            PromptBodyInvalid(_) => "prompt.body_invalid",
-            WorkspacePathInvalid { .. } => "workspace.path_invalid",
-            WorkspaceSymlinkEscape { .. } => "workspace.symlink_escape",
-            WorkspaceNotFound { .. } => "workspace.not_found",
-            WorkspaceTooLarge { .. } => "workspace.too_large",
-            WorkspaceUploadInvalid { .. } => "workspace.upload_invalid",
-            WorkspaceIo { .. } => "workspace.io_failed",
-            WorkspaceEncodingInvalid { .. } => "workspace.encoding_invalid",
-            WorkspaceUploadsNotUnderRoot => "config.invalid",
-            WorkspaceDestinationNotEmpty { .. } => "workspace.destination_not_empty",
-            WorkspaceDestinationOutsideRoot { .. } => "workspace.destination_outside_root",
-            WorkspaceMaterializeFailed { .. } => "workspace.materialize_failed",
-            WorkspaceCommandFailed { .. } => "workspace.command_failed",
-            SafeDownloadTooLarge { .. } => "download.too_large",
-            SafeDownloadInsecureRedirect { .. } => "download.insecure_redirect",
-            SafeDownloadHttpStatus { .. } => "download.http_status",
-            SafeDownloadFailed { .. } => "download.failed",
-            SafeDownloadChecksumMismatch { .. } => "download.checksum_mismatch",
-            ArchiveUnsafeEntry { .. } => "archive.unsafe_entry",
-            ArchiveUnsupportedFormat => "archive.unsupported_format",
-            ArchiveTooLarge { .. } => "archive.too_large",
-            ArchiveReadFailed { .. } => "archive.read_failed",
-            CommandNotFound { .. } => "command.not_found",
-            CommandDenied { .. } => "command.denied",
-            CommandCwdOutsideWorkspace { .. } => "command.cwd_outside_workspace",
-            CommandEnvNotAllowed { .. } => "command.env_not_allowed",
-            CommandSpawnFailed { .. } => "command.spawn_failed",
-            CommandTimeout => "command.timeout",
-            SecretRefReservedForAuth { .. } => "secrets.reserved_for_auth",
-            InvalidSecretRefName { .. }
-            | DuplicateSecretRef { .. }
-            | InvalidTimeoutAction
-            | InvalidTrustedProxy { .. }
-            | InvalidMcpServer { .. }
-            | DuplicateMcpServer { .. }
-            | DependencyMissingName { .. }
-            | DuplicateDependency { .. } => "config.invalid",
-            PermissionNotFound { .. } => "permission.not_found",
-            InvalidPermissionTransition { .. } => "permission.invalid_transition",
-            StateInvalidJson { .. } => "state.invalid_json",
-            RateLimited => "auth.rate_limited",
-            IpBlocked { .. } => "auth.ip_blocked",
-            OriginNotAllowed { .. } => "auth.origin_not_allowed",
-            InvalidParam { .. } => "request.invalid_param",
-            ImportTooLarge { .. } => "import.too_large",
-            UnsupportedConfigVersion { .. } => "config.unsupported_version",
-            SecretRefLooksLikeValue { .. } => "config.invalid",
-        }
+        config::error_code(self)
+            .or_else(|| state::error_code(self))
+            .or_else(|| secrets::error_code(self))
+            .or_else(|| supabase::error_code(self))
+            .or_else(|| edge::error_code(self))
+            .or_else(|| workspace_source::error_code(self))
+            .or_else(|| download::error_code(self))
+            .or_else(|| archive::error_code(self))
+            .or_else(|| serve::error_code(self))
+            .or_else(|| agent_install::error_code(self))
+            .or_else(|| agent_runtime::error_code(self))
+            .or_else(|| session::error_code(self))
+            .or_else(|| workspace::error_code(self))
+            .or_else(|| command::error_code(self))
+            .or_else(|| permission::error_code(self))
+            .or_else(|| auth_http::error_code(self))
+            .expect("StackError variant should be claimed by exactly one error domain")
     }
 
     /// Human-readable message safe to expose through the public HTTP API.
@@ -812,522 +712,46 @@ impl StackError {
     /// logs; this method avoids leaking local filesystem paths, OS errors, or
     /// secret-store metadata to remote clients.
     pub fn public_message(&self) -> String {
-        use StackError::*;
-        match self {
-            HomeNotSet => "HOME is not set".to_owned(),
-            ConfigRead { .. } => "failed to read config".to_owned(),
-            ConfigWrite { .. } => "failed to write config".to_owned(),
-            ConfigInitialize { .. } => "failed to initialize config".to_owned(),
-            ConfigExists { .. } => "config already exists".to_owned(),
-            ConfigToml(_) => "config TOML is invalid".to_owned(),
-            ConfigSerialize(_) => "failed to serialize config".to_owned(),
-            ImportBase64Decode { .. } => "import data was not valid base64".to_owned(),
-            ImportUtf8 { .. } => "imported config was not valid UTF-8".to_owned(),
-            DirectoryCreate { .. } => "failed to create directory".to_owned(),
-            FileCreate { .. } => "failed to create file".to_owned(),
-            AgentConfigProvision { .. } => "failed to provision agent config".to_owned(),
-            FileRemove { .. } => "failed to remove file".to_owned(),
-            PermissionSet { .. } => "failed to set owner-only permissions".to_owned(),
-            MissingParentDir { .. } => "path has no parent directory".to_owned(),
-            ResetNotConfirmed => "reset requires --yes".to_owned(),
-            State(_) => "state database error".to_owned(),
-            IncompatibleStateSchema { .. } => {
-                "state schema is newer than this binary supports".to_owned()
-            }
-            UnmanagedStateTable { table } => {
-                format!("existing state table `{table}` is not managed by a recorded migration")
-            }
-            MigrationManifestParse(_) => "migration manifest is invalid".to_owned(),
-            InvalidManifestOrder { .. } => {
-                "migration manifest ids must be strictly increasing positive integers".to_owned()
-            }
-            ManifestRegistryMismatch { .. } => {
-                "migration manifest does not match the compiled registry".to_owned()
-            }
-            MissingMigratedTable { table } => {
-                format!("state database is missing required table `{table}`")
-            }
-            InvalidEventPayload => "event payload must be valid JSON text".to_owned(),
-            InvalidAuthFailurePayload => "auth failure payload must be valid JSON text".to_owned(),
-            AgeKeyRead { .. } | SecretStoreRead { .. } => {
-                "failed to read secret material".to_owned()
-            }
-            AgeKeyWrite { .. } | SecretStoreWrite { .. } => {
-                "failed to write secret material".to_owned()
-            }
-            AgeKeyParse { .. } => "age key is malformed".to_owned(),
-            SecretStoreEncrypt(_) => "failed to encrypt secret store".to_owned(),
-            SecretStoreDecrypt(_) => "failed to decrypt secret store".to_owned(),
-            SecretStorePlaintextParse(_)
-            | SecretStorePlaintextSerialize(_)
-            | SecretStorePlaintextNotUtf8 { .. } => "secret store plaintext is invalid".to_owned(),
-            SecretNotFound { .. } => "secret was not found".to_owned(),
-            MissingSessionKey { .. } => "secret store is missing session key reference".to_owned(),
-            MissingAdminKey { .. } => "secret store is missing admin key reference".to_owned(),
-            MissingSupabaseApiKey { .. } => {
-                "secret store is missing Supabase secret API key reference".to_owned()
-            }
-            InvalidSupabaseUrl { .. } => {
-                "[logging.supabase].url must start with `https://`".to_owned()
-            }
-            InvalidSupabaseSchema { .. } => {
-                "[logging.supabase].schema is not a safe Postgres identifier".to_owned()
-            }
-            CloudflareManagedNotImplemented => {
-                "Cloudflare managed provisioning is not implemented yet; use generated mode"
-                    .to_owned()
-            }
-            InvalidCloudflareMode { .. } => "invalid Cloudflare edge mode".to_owned(),
-            InvalidCloudflareExposure { .. } => "invalid Cloudflare exposure mode".to_owned(),
-            InvalidCloudflaredDeployment { .. } => {
-                "invalid cloudflared deployment mode".to_owned()
-            }
-            InvalidCloudflareHostname { .. } => "invalid Cloudflare hostname".to_owned(),
-            InvalidCloudflareTunnelName { .. } => {
-                "invalid Cloudflare tunnel name".to_owned()
-            }
-            InvalidCloudflareTunnelId { .. } => "invalid Cloudflare tunnel id".to_owned(),
-            SupabaseSinkHttp { status, .. } => {
-                format!("Supabase sink rejected upload with HTTP {status}")
-            }
-            SupabaseSinkUnknownTable { table } => {
-                format!("Supabase sink received a row for unknown source table `{table}`")
-            }
-            StdinRead { .. } => "failed to read stdin".to_owned(),
-            MissingSection { section } => format!("missing required section `{section}`"),
-            MissingField { field } => format!("{field} is required"),
-            WorkspaceCodeSourceInvalid { index, reason } => {
-                format!("workspace.code_sources[{index}]: {reason}")
-            }
-            WorkspaceDataSourceInvalid { index, reason } => {
-                format!("workspace.data_sources[{index}]: {reason}")
-            }
-            InvalidConfigFieldForType {
-                field,
-                type_field,
-                type_value,
-            } => {
-                format!("{field} is not valid when {type_field} is {type_value}")
-            }
-            InvalidSocketAddress { field } => format!("{field} must be a socket address"),
-            NonZeroRequired { field } => format!("{field} must be greater than zero"),
-            PathMustBeAbsolute { field } => format!("{field} must be absolute"),
-            PathContainsParentDir { field } => format!("{field} must not contain `..` segments"),
-            InvalidAgentRestart => "agent.restart must be one of never, on-crash".to_owned(),
-            InvalidExpectedSha256 => {
-                "agent.expected_sha256 must be exactly 64 lowercase hex characters".to_owned()
-            }
-            InvalidAgentInstallType => {
-                "agent.install.type must be `shell` (the only operator-facing install type)".to_owned()
-            }
-            UrlMustBeHttp { field } => format!("{field} must start with http:// or https://"),
-            UrlMustBeHttps { field } => format!("{field} must start with https://"),
-            AuthRefsNotDistinct => {
-                "auth.session_key_ref and auth.admin_key_ref must be different names".to_owned()
-            }
-            SecretReservedForAuth { .. } => "secret is reserved for auth".to_owned(),
-            ImportChangesAuthRef { .. } => {
-                "config import would change auth key references".to_owned()
-            }
-            ServeBind { .. } => "failed to bind HTTP listener".to_owned(),
-            ServeIo { .. } => "HTTP server error".to_owned(),
-            ServeRefusedAsRoot => "refusing to run as root without explicit opt-in".to_owned(),
-            ServeRootRequiresAdminKey => {
-                "running as root requires a non-empty admin API key".to_owned()
-            }
-            AgentNotConfigured => {
-                "agent is not configured; declare [agent].id matching a registry entry, or provide an [agent.install] shell recipe"
-                    .to_owned()
-            }
-            AgentInstallerFailed { exit, .. } => match exit {
-                Some(code) => format!("agent installer exited with status {code}"),
-                None => "agent installer terminated without an exit status".to_owned(),
-            },
-            AgentInstallerCreatesMissing { name } => {
-                format!("agent installer ran but `creates = {name}` did not resolve afterwards")
-            }
-            AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
-            AgentInstallerLogPersist { path, .. } => {
-                format!("failed to persist installer log at {}", path.display())
-            }
-            AgentRegistryMissing { id } => {
-                format!("ACP registry does not contain agent `{id}`")
-            }
-            InitRunCorrupted { reason } => format!("init run state is corrupted: {reason}"),
-            AgentUnsupported { name } => {
-                format!("{name} is not currently supported. Please try a different agent.")
-            }
-            AgentCheckStale => {
-                "one or more managed agent components are stale or missing; re-run `acps agent install` to upgrade".to_owned()
-            }
-            RegistryLoad { reason } => format!("agent registry could not be loaded: {reason}"),
-            GithubReleaseFetch { repo, .. } => {
-                format!("failed to query GitHub Releases for {repo}")
-            }
-            NpmRegistryFetch { package, .. } => {
-                format!("failed to query npm registry for `{package}`")
-            }
-            NpmRegistryEmptyVersion { package } => {
-                format!("npm registry returned an empty version for `{package}`")
-            }
-            GithubReleaseAssetNotFound { repo, pattern } => {
-                format!("no release asset for {repo} matched pattern `{pattern}`")
-            }
-            GithubReleaseAssetAmbiguous {
-                repo,
-                pattern,
-                matches,
-            } => format!(
-                "{matches} release assets for {repo} matched pattern `{pattern}`; expected exactly one"
-            ),
-            GithubReleaseArchiveExtract { repo, reason } => {
-                format!("failed to extract release archive from {repo}: {reason}")
-            }
-            GithubReleaseChecksumMismatch {
-                repo,
-                asset,
-                expected,
-                actual,
-            } => format!(
-                "release asset `{asset}` from {repo} failed sha256 verification: expected {expected}, got {actual}"
-            ),
-            UnsupportedHostArch { arch } => {
-                format!("unsupported host architecture `{arch}` for GitHub Release install")
-            }
-            AgentSha256Mismatch { expected, actual } => {
-                format!("agent binary sha256 mismatch: expected {expected}, got {actual}")
-            }
-            AgentSpawnFailed { .. } => "failed to spawn agent subprocess".to_owned(),
-            AgentAlreadyRunning => "agent is already running".to_owned(),
-            AgentNotRunning => "agent is not running".to_owned(),
-            AgentInitializeFailed { reason } => {
-                format!("agent failed to initialize: {reason}")
-            }
-            AgentNotInitialized => "agent has not been initialized yet".to_owned(),
-            AgentUnsupportedCapability { name } => {
-                format!("agent does not support `{name}`")
-            }
-            AgentApiRequest { path, .. } => {
-                format!("agent API request to {path} failed")
-            }
-            AgentApiStatus { path, status, .. } => {
-                format!("agent API request to {path} failed with status {status}")
-            }
-            AgentRequestFailed { method, .. } => {
-                format!("agent rejected `{method}` request")
-            }
-            AgentTestFailed { stage, reason } => {
-                format!("agent test failed at {stage}: {reason}")
-            }
-            SessionNotFound { id } => format!("session `{id}` was not found"),
-            SessionClosed { id } => format!("session `{id}` is closed"),
-            PromptNotFound { id } => format!("prompt `{id}` was not found"),
-            PromptSessionMismatch {
-                session_id,
-                prompt_id,
-            } => format!("session `{session_id}` does not own prompt `{prompt_id}`"),
-            PromptBodyEmpty => "prompt body must include at least one content block".to_owned(),
-            PromptBodyInvalid(_) => "prompt body is not valid ACP content".to_owned(),
-            WorkspacePathInvalid { reason, .. } => format!("workspace path is invalid: {reason}"),
-            WorkspaceSymlinkEscape { .. } => {
-                "workspace path resolves outside the workspace root".to_owned()
-            }
-            WorkspaceNotFound { requested } => {
-                format!("workspace path `{requested}` was not found")
-            }
-            WorkspaceTooLarge { limit } => {
-                format!("workspace file exceeds the {limit}-byte size limit")
-            }
-            WorkspaceUploadInvalid { reason } => format!("workspace upload is invalid: {reason}"),
-            WorkspaceIo { .. } => "workspace I/O failed".to_owned(),
-            WorkspaceEncodingInvalid { reason } => {
-                format!("workspace file encoding is invalid: {reason}")
-            }
-            WorkspaceUploadsNotUnderRoot => {
-                "workspace.uploads must be inside workspace.root".to_owned()
-            }
-            WorkspaceDestinationNotEmpty { dest } => {
-                format!("workspace destination `{dest}` is not empty")
-            }
-            WorkspaceDestinationOutsideRoot { dest, root } => {
-                format!("workspace destination `{dest}` is outside workspace.root `{root}`")
-            }
-            WorkspaceCommandFailed {
-                command,
-                exit,
-                stderr_tail,
-            } => workspace_command_failed_message(command, *exit, stderr_tail),
-            WorkspaceMaterializeFailed { reason } => {
-                format!("workspace materialization failed: {reason}")
-            }
-            SafeDownloadTooLarge { limit } => {
-                format!("download exceeded the {limit}-byte size limit")
-            }
-            SafeDownloadInsecureRedirect { url } => {
-                format!("download URL `{url}` is not allowed (only https:// is permitted)")
-            }
-            SafeDownloadHttpStatus { url, status } => {
-                format!("download from {url} failed with HTTP status {status}")
-            }
-            SafeDownloadFailed { url, reason } => {
-                format!("download from {url} failed: {reason}")
-            }
-            SafeDownloadChecksumMismatch { expected, actual } => {
-                format!("downloaded content sha256 mismatch: expected {expected}, got {actual}")
-            }
-            ArchiveUnsafeEntry { kind, name } => {
-                format!("archive contained an unsafe {kind}: `{name}`")
-            }
-            ArchiveUnsupportedFormat => "archive format is not supported".to_owned(),
-            ArchiveTooLarge { limit } => {
-                format!("archive extracted output exceeded the {limit}-byte size limit")
-            }
-            ArchiveReadFailed { reason } => format!("archive read failed: {reason}"),
-            InvalidPermissionsMode => {
-                "permissions.mode must be one of auto, supervised, locked".to_owned()
-            }
-            InvalidDurationField { field } => {
-                format!("{field} must be a duration like \"10m\", \"5s\", or \"100ms\"")
-            }
-            InvalidEnvName { name } => {
-                format!("env variable name `{name}` is not a valid POSIX identifier")
-            }
-            CommandNotFound { id } => format!("command `{id}` was not found"),
-            CommandDenied { reason } => format!("command rejected by policy: {reason}"),
-            CommandCwdOutsideWorkspace { requested } => {
-                format!("command cwd `{requested}` resolves outside the workspace root")
-            }
-            CommandEnvNotAllowed { name } => {
-                format!("command env variable `{name}` is not on commands.env_allowlist")
-            }
-            CommandSpawnFailed { .. } => "failed to spawn command subprocess".to_owned(),
-            CommandTimeout => {
-                "command timed out before the subprocess produced an exit status".to_owned()
-            }
-            SecretRefReservedForAuth { ref_name, kind } => {
-                format!("secret ref `{ref_name}` (from {kind}) collides with the auth key ref")
-            }
-            InvalidSecretRefName { name } => format!("secret ref name `{name}` is invalid"),
-            DuplicateSecretRef { name } => {
-                format!("secret ref `{name}` is declared more than once")
-            }
-            InvalidTimeoutAction => {
-                "permissions.timeout_action must be one of deny, approve".to_owned()
-            }
-            InvalidTrustedProxy { value } => {
-                format!("security.http.trusted_proxies entry `{value}` is not a valid IP address")
-            }
-            InvalidMcpServer { name, reason } => {
-                format!("mcp.servers entry `{name}` is invalid: {reason}")
-            }
-            DuplicateMcpServer { name } => {
-                format!("mcp.servers contains duplicate name `{name}`")
-            }
-            DependencyMissingName { category } => {
-                format!("dependencies.{category} entry has empty name")
-            }
-            DuplicateDependency { category, name } => {
-                format!("dependencies.{category} contains duplicate name `{name}`")
-            }
-            PermissionNotFound { id } => format!("permission `{id}` was not found"),
-            InvalidPermissionTransition { id, from, to } => {
-                format!("permission `{id}` cannot transition from `{from}` to `{to}`")
-            }
-            StateInvalidJson { field, .. } => format!("durable JSON corruption in `{field}`"),
-            RateLimited => "rate limit exceeded".to_owned(),
-            IpBlocked { .. } => "client IP is temporarily blocked".to_owned(),
-            OriginNotAllowed { .. } => "origin is not allowed".to_owned(),
-            InvalidParam { field, reason } => format!("invalid parameter `{field}`: {reason}"),
-            ImportTooLarge { limit, .. } => {
-                format!("config import exceeds the {limit}-byte size limit")
-            }
-            UnsupportedConfigVersion { version } => {
-                format!("unsupported config version {version}; this binary only supports version 1")
-            }
-            SecretRefLooksLikeValue { field, .. } => {
-                format!(
-                    "secret ref at `{field}` looks like an inline secret value rather than a reference name"
-                )
-            }
-        }
+        config::public_message(self)
+            .or_else(|| state::public_message(self))
+            .or_else(|| secrets::public_message(self))
+            .or_else(|| supabase::public_message(self))
+            .or_else(|| edge::public_message(self))
+            .or_else(|| workspace_source::public_message(self))
+            .or_else(|| download::public_message(self))
+            .or_else(|| archive::public_message(self))
+            .or_else(|| serve::public_message(self))
+            .or_else(|| agent_install::public_message(self))
+            .or_else(|| agent_runtime::public_message(self))
+            .or_else(|| session::public_message(self))
+            .or_else(|| workspace::public_message(self))
+            .or_else(|| command::public_message(self))
+            .or_else(|| permission::public_message(self))
+            .or_else(|| auth_http::public_message(self))
+            .expect("StackError variant should be claimed by exactly one error domain")
     }
 
     /// HTTP status code for this error when rendered through the API envelope.
     /// Coarse mapping: client-provided invalid input is 4xx; failures the
     /// server hits internally (filesystem, sqlite, age decrypt) are 5xx.
     pub fn http_status(&self) -> StatusCode {
-        use StackError::*;
-        match self {
-            // Client-supplied bad input
-            ConfigToml(_)
-            | ConfigSerialize(_)
-            | ImportBase64Decode { .. }
-            | ImportUtf8 { .. }
-            | ResetNotConfirmed
-            | InvalidEventPayload
-            | InvalidAuthFailurePayload
-            | MissingSection { .. }
-            | MissingField { .. }
-            | WorkspaceCodeSourceInvalid { .. }
-            | WorkspaceDataSourceInvalid { .. }
-            | InvalidConfigFieldForType { .. }
-            | InvalidSocketAddress { .. }
-            | NonZeroRequired { .. }
-            | PathMustBeAbsolute { .. }
-            | PathContainsParentDir { .. }
-            | InvalidAgentRestart
-            | InvalidExpectedSha256
-            | InvalidAgentInstallType
-            | UrlMustBeHttp { .. }
-            | UrlMustBeHttps { .. }
-            | AuthRefsNotDistinct
-            | SecretReservedForAuth { .. }
-            | ImportChangesAuthRef { .. }
-            | CloudflareManagedNotImplemented
-            | InvalidCloudflareMode { .. }
-            | InvalidCloudflareExposure { .. }
-            | InvalidCloudflaredDeployment { .. }
-            | InvalidCloudflareHostname { .. }
-            | InvalidCloudflareTunnelName { .. }
-            | InvalidCloudflareTunnelId { .. }
-            | InvalidPermissionsMode
-            | InvalidDurationField { .. }
-            | InvalidEnvName { .. }
-            | CommandDenied { .. }
-            | CommandCwdOutsideWorkspace { .. }
-            | CommandEnvNotAllowed { .. } => StatusCode::BAD_REQUEST,
-            // Not found / conflict
-            SecretNotFound { .. } => StatusCode::NOT_FOUND,
-            ConfigExists { .. } => StatusCode::CONFLICT,
-            // Everything else is a server-side fault. Includes startup-time
-            // issues (missing keys, unreadable secret store) that can surface
-            // if a handler ever rebuilds state mid-flight.
-            HomeNotSet
-            | ConfigRead { .. }
-            | ConfigWrite { .. }
-            | ConfigInitialize { .. }
-            | AgentConfigProvision { .. }
-            | DirectoryCreate { .. }
-            | FileCreate { .. }
-            | FileRemove { .. }
-            | PermissionSet { .. }
-            | MissingParentDir { .. }
-            | State(_)
-            | IncompatibleStateSchema { .. }
-            | UnmanagedStateTable { .. }
-            | MigrationManifestParse(_)
-            | InvalidManifestOrder { .. }
-            | ManifestRegistryMismatch { .. }
-            | MissingMigratedTable { .. }
-            | AgeKeyRead { .. }
-            | AgeKeyWrite { .. }
-            | AgeKeyParse { .. }
-            | SecretStoreRead { .. }
-            | SecretStoreWrite { .. }
-            | SecretStoreEncrypt(_)
-            | SecretStoreDecrypt(_)
-            | SecretStorePlaintextParse(_)
-            | SecretStorePlaintextSerialize(_)
-            | SecretStorePlaintextNotUtf8 { .. }
-            | MissingSessionKey { .. }
-            | MissingAdminKey { .. }
-            | MissingSupabaseApiKey { .. }
-            | InvalidSupabaseUrl { .. }
-            | InvalidSupabaseSchema { .. }
-            | SupabaseSinkHttp { .. }
-            | SupabaseSinkUnknownTable { .. }
-            | StdinRead { .. }
-            | ServeBind { .. }
-            | ServeIo { .. }
-            | ServeRefusedAsRoot
-            | ServeRootRequiresAdminKey => StatusCode::INTERNAL_SERVER_ERROR,
-            // Agent-related: classify client-facing vs internal vs upstream.
-            AgentNotConfigured => StatusCode::BAD_REQUEST,
-            AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
-            AgentCheckStale => StatusCode::CONFLICT,
-            AgentAlreadyRunning | AgentNotRunning => StatusCode::CONFLICT,
-            AgentNotInitialized => StatusCode::NOT_FOUND,
-            AgentUnsupportedCapability { .. } => StatusCode::NOT_IMPLEMENTED,
-            // The agent is upstream: handshake failures are gateway errors,
-            // not our internal faults.
-            AgentInitializeFailed { .. } => StatusCode::BAD_GATEWAY,
-            AgentInstallerFailed { .. }
-            | AgentInstallerCreatesMissing { .. }
-            | AgentInstallerTimeout
-            | AgentInstallerLogPersist { .. }
-            | AgentRegistryMissing { .. }
-            | InitRunCorrupted { .. }
-            | RegistryLoad { .. }
-            | GithubReleaseFetch { .. }
-            | NpmRegistryFetch { .. }
-            | NpmRegistryEmptyVersion { .. }
-            | GithubReleaseAssetNotFound { .. }
-            | GithubReleaseAssetAmbiguous { .. }
-            | GithubReleaseArchiveExtract { .. }
-            | GithubReleaseChecksumMismatch { .. }
-            | UnsupportedHostArch { .. }
-            | AgentSha256Mismatch { .. }
-            | AgentSpawnFailed { .. }
-            | AgentApiRequest { .. }
-            | AgentApiStatus { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            // Session/prompt errors map to the standard HTTP shapes:
-            // not found, conflict for state, gateway for upstream agent errors,
-            // and bad request for client-provided malformed payloads.
-            SessionNotFound { .. } | PromptNotFound { .. } => StatusCode::NOT_FOUND,
-            SessionClosed { .. } | PromptSessionMismatch { .. } => StatusCode::CONFLICT,
-            PromptBodyEmpty | PromptBodyInvalid(_) => StatusCode::BAD_REQUEST,
-            AgentRequestFailed { .. } | AgentTestFailed { .. } => StatusCode::BAD_GATEWAY,
-            // Workspace: client-supplied path / encoding / upload-shape problems
-            // are 400; missing files are 404; size cap exceeded is 413; the
-            // underlying I/O error is an internal fault (the path itself was
-            // already validated client-side).
-            WorkspacePathInvalid { .. }
-            | WorkspaceSymlinkEscape { .. }
-            | WorkspaceUploadInvalid { .. }
-            | WorkspaceEncodingInvalid { .. } => StatusCode::BAD_REQUEST,
-            WorkspaceNotFound { .. } => StatusCode::NOT_FOUND,
-            WorkspaceTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            WorkspaceIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            WorkspaceUploadsNotUnderRoot => StatusCode::BAD_REQUEST,
-            // Workspace materialization runs only during CLI `acps init`, so
-            // these never reach the HTTP envelope today. Keep the mapping
-            // explicit so future API exposure surfaces them as 4xx (operator
-            // mis-config) rather than as opaque 500s.
-            WorkspaceDestinationNotEmpty { .. } | WorkspaceDestinationOutsideRoot { .. } => {
-                StatusCode::CONFLICT
-            }
-            WorkspaceMaterializeFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            WorkspaceCommandFailed { .. } => StatusCode::BAD_GATEWAY,
-            SafeDownloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            SafeDownloadInsecureRedirect { .. } => StatusCode::BAD_REQUEST,
-            SafeDownloadHttpStatus { .. }
-            | SafeDownloadFailed { .. }
-            | SafeDownloadChecksumMismatch { .. } => StatusCode::BAD_GATEWAY,
-            ArchiveUnsafeEntry { .. } | ArchiveUnsupportedFormat | ArchiveTooLarge { .. } => {
-                StatusCode::BAD_REQUEST
-            }
-            ArchiveReadFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            CommandNotFound { .. } => StatusCode::NOT_FOUND,
-            CommandSpawnFailed { .. } | CommandTimeout => StatusCode::INTERNAL_SERVER_ERROR,
-            SecretRefReservedForAuth { .. }
-            | InvalidSecretRefName { .. }
-            | DuplicateSecretRef { .. }
-            | InvalidTimeoutAction
-            | InvalidTrustedProxy { .. }
-            | InvalidMcpServer { .. }
-            | DuplicateMcpServer { .. }
-            | DependencyMissingName { .. }
-            | DuplicateDependency { .. }
-            | InvalidPermissionTransition { .. } => StatusCode::BAD_REQUEST,
-            PermissionNotFound { .. } => StatusCode::NOT_FOUND,
-            StateInvalidJson { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            RateLimited | IpBlocked { .. } => StatusCode::TOO_MANY_REQUESTS,
-            ImportTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            OriginNotAllowed { .. } => StatusCode::FORBIDDEN,
-            InvalidParam { .. } => StatusCode::BAD_REQUEST,
-            UnsupportedConfigVersion { .. } => StatusCode::BAD_REQUEST,
-            SecretRefLooksLikeValue { .. } => StatusCode::BAD_REQUEST,
-        }
+        config::http_status(self)
+            .or_else(|| state::http_status(self))
+            .or_else(|| secrets::http_status(self))
+            .or_else(|| supabase::http_status(self))
+            .or_else(|| edge::http_status(self))
+            .or_else(|| workspace_source::http_status(self))
+            .or_else(|| download::http_status(self))
+            .or_else(|| archive::http_status(self))
+            .or_else(|| serve::http_status(self))
+            .or_else(|| agent_install::http_status(self))
+            .or_else(|| agent_runtime::http_status(self))
+            .or_else(|| session::http_status(self))
+            .or_else(|| workspace::http_status(self))
+            .or_else(|| command::http_status(self))
+            .or_else(|| permission::http_status(self))
+            .or_else(|| auth_http::http_status(self))
+            .expect("StackError variant should be claimed by exactly one error domain")
     }
 }
 
