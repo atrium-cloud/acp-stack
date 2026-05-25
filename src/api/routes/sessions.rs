@@ -1,5 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::super::core::AppState;
@@ -9,7 +10,10 @@ use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::supervisor::SessionListSyncResult;
 use crate::runtime::agent::supervisor::parse_prompt_blocks;
-use crate::state::{PromptRecord, SessionRecord};
+use crate::state::{
+    DEFAULT_SESSION_ACTIVITY_THRESHOLD, PromptRecord, SESSION_STATUS_ACTIVE, SessionActivityRecord,
+    SessionRecord, SessionUpdateBounds,
+};
 
 #[derive(Serialize)]
 pub(crate) struct SessionResponse {
@@ -67,6 +71,11 @@ impl From<SessionListSyncResult> for SessionsAgentSyncResponse {
 pub(crate) struct SessionsListParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,
+    since: Option<String>,
+    until: Option<String>,
+    range: Option<String>,
+    #[serde(default)]
+    resolve_bounds: bool,
 }
 
 pub(crate) async fn sessions_list_handler(
@@ -74,14 +83,19 @@ pub(crate) async fn sessions_list_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SessionsListResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let now = Utc::now();
     let agent_for_session = state.live_agent_config.lock().await.clone();
     let agent_sync = state
         .agent_supervisor
         .sync_listed_sessions(&agent_for_session, &state.state)
         .await?;
     let store = state.state.lock().await;
+    let bounds = store.session_update_bounds()?;
+    let (since, until) = resolve_session_list_bounds(&params, bounds.as_ref(), now)?;
     let sessions = store.query_sessions(crate::state::SessionFilter {
         limit,
+        since: since.as_deref(),
+        until: until.as_deref(),
         ..Default::default()
     })?;
     drop(store);
@@ -89,6 +103,213 @@ pub(crate) async fn sessions_list_handler(
         sessions: sessions.into_iter().map(SessionResponse::from).collect(),
         agent_sync: agent_sync.into(),
     }))
+}
+
+fn resolve_session_list_bounds(
+    params: &SessionsListParams,
+    bounds: Option<&SessionUpdateBounds>,
+    now: chrono::DateTime<Utc>,
+) -> Result<(Option<String>, Option<String>)> {
+    let until = match params.until.as_deref() {
+        Some(raw) => resolve_time_bound(Some(raw), "until", now)?,
+        None if params.resolve_bounds => default_until_bound(bounds, now)?,
+        None => None,
+    };
+    let since = match params.since.as_deref() {
+        Some(raw) => resolve_time_bound(Some(raw), "since", now)?,
+        None if params.resolve_bounds => bounds.map(|b| b.first_updated_at.clone()),
+        None => params
+            .range
+            .as_deref()
+            .map(|range| resolve_range_start(range, now))
+            .transpose()?
+            .flatten(),
+    };
+    Ok((since, until))
+}
+
+fn default_until_bound(
+    bounds: Option<&SessionUpdateBounds>,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<String>> {
+    let Some(bounds) = bounds else {
+        return Ok(None);
+    };
+    if bounds.latest_status == SESSION_STATUS_ACTIVE {
+        return Ok(Some(now.to_rfc3339_opts(SecondsFormat::Nanos, true)));
+    }
+    let latest = parse_normalized_time_bound(&bounds.latest_updated_at, "latest_updated_at")?;
+    Ok(Some(
+        (latest + chrono::Duration::nanoseconds(1)).to_rfc3339_opts(SecondsFormat::Nanos, true),
+    ))
+}
+
+fn resolve_range_start(raw: &str, now: chrono::DateTime<Utc>) -> Result<Option<String>> {
+    if raw == "all" {
+        return Ok(None);
+    }
+    let duration = session_range_duration(raw).ok_or_else(|| StackError::InvalidParam {
+        field: "range",
+        reason: format!(
+            "expected day, week, month, year, all, or a duration like 30m, 60d, 6mo, or 1y; got {raw}"
+        ),
+    })?;
+    let resolved =
+        crate::time_util::resolve_since_after_unix_epoch(duration, now).ok_or_else(|| {
+            StackError::InvalidParam {
+                field: "range",
+                reason: "duration range must not begin before 1970-01-01T00:00:00Z".to_owned(),
+            }
+        })?;
+    Ok(Some(resolved.to_rfc3339_opts(SecondsFormat::Nanos, true)))
+}
+
+fn session_range_duration(raw: &str) -> Option<chrono::Duration> {
+    match raw {
+        "day" => Some(chrono::Duration::days(1)),
+        "week" => Some(chrono::Duration::weeks(1)),
+        "month" => Some(chrono::Duration::days(30)),
+        "year" => Some(chrono::Duration::days(365)),
+        other => crate::time_util::parse_coarse_duration_suffix(other),
+    }
+}
+
+fn parse_normalized_time_bound(raw: &str, field: &'static str) -> Result<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|err| StackError::InvalidParam {
+            field,
+            reason: format!("not a valid RFC3339 timestamp: {err}"),
+        })
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SessionsStatusParams {
+    #[serde(default = "default_session_status_threshold")]
+    threshold: String,
+    #[serde(default = "default_session_status_limit")]
+    limit: u32,
+}
+
+fn default_session_status_threshold() -> String {
+    DEFAULT_SESSION_ACTIVITY_THRESHOLD.to_owned()
+}
+
+fn default_session_status_limit() -> u32 {
+    MAX_LOGS_LIMIT
+}
+
+#[derive(Serialize)]
+pub(crate) struct SessionsStatusResponse {
+    generated_at: String,
+    threshold: String,
+    active_count: usize,
+    truncated: bool,
+    sessions: Vec<SessionStatusSessionResponse>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SessionStatusSessionResponse {
+    id: String,
+    status: String,
+    agent_id: String,
+    cwd: String,
+    title: Option<String>,
+    last_activity_at: String,
+    last_activity_from: String,
+    recent: bool,
+}
+
+impl SessionStatusSessionResponse {
+    fn from_record(
+        record: SessionActivityRecord,
+        cutoff: chrono::DateTime<Utc>,
+    ) -> std::result::Result<Self, StackError> {
+        let last_activity = chrono::DateTime::parse_from_rfc3339(&record.last_activity_at)
+            .map_err(|err| StackError::InvalidParam {
+                field: "last_activity_at",
+                reason: format!("stored session activity timestamp is invalid: {err}"),
+            })?
+            .with_timezone(&Utc);
+        Ok(Self {
+            id: record.id,
+            status: record.status,
+            agent_id: record.agent_id,
+            cwd: record.cwd,
+            title: record.title,
+            last_activity_at: record.last_activity_at,
+            last_activity_from: record.last_activity_from,
+            recent: last_activity >= cutoff,
+        })
+    }
+}
+
+pub(crate) async fn sessions_status_handler(
+    Query(params): Query<SessionsStatusParams>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<SessionsStatusResponse>, StackError> {
+    let threshold =
+        crate::time_util::parse_duration_suffix(&params.threshold).ok_or_else(|| {
+            StackError::InvalidParam {
+                field: "threshold",
+                reason: format!(
+                    "not a valid duration; expected values like `{}` or `30m`",
+                    DEFAULT_SESSION_ACTIVITY_THRESHOLD
+                ),
+            }
+        })?;
+    let generated_at = Utc::now();
+    let cutoff = generated_at - threshold;
+    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let query_limit = limit.saturating_add(1);
+    let store = state.state.lock().await;
+    let mut rows = store.query_active_session_activity(query_limit)?;
+    drop(store);
+    let truncated = rows.len() > limit as usize;
+    if truncated {
+        rows.truncate(limit as usize);
+    }
+    let sessions = rows
+        .into_iter()
+        .map(|row| SessionStatusSessionResponse::from_record(row, cutoff))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(ApiSuccess::new(SessionsStatusResponse {
+        generated_at: generated_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+        threshold: params.threshold,
+        active_count: sessions.len(),
+        truncated,
+        sessions,
+    }))
+}
+
+fn resolve_time_bound(
+    raw: Option<&str>,
+    field: &'static str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(
+            dt.with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+        ));
+    }
+    let duration = crate::time_util::parse_coarse_duration_suffix(raw).ok_or_else(|| {
+        StackError::InvalidParam {
+            field,
+            reason: format!("not a valid RFC3339 timestamp or duration (m, h, d, w, mo, y): {raw}"),
+        }
+    })?;
+    let resolved =
+        crate::time_util::resolve_since_after_unix_epoch(duration, now).ok_or_else(|| {
+            StackError::InvalidParam {
+                field,
+                reason: "duration range must not begin before 1970-01-01T00:00:00Z".to_owned(),
+            }
+        })?;
+    Ok(Some(resolved.to_rfc3339_opts(SecondsFormat::Nanos, true)))
 }
 
 #[derive(Deserialize, Default)]

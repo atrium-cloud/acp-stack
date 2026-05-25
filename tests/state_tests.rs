@@ -1,9 +1,10 @@
 use acp_stack::state::{
-    AuthFailureFilter, EventFilter, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
-    INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
+    AuthFailureFilter, EVENT_SOURCE_ACP, EventFilter, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED,
+    INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
     InstallerRunInput, ListedSessionRecord, NewInitRun, NewInitStep, NewPermissionRequest,
-    NewSessionRecord, PermissionStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, StateStore, default_state_path,
+    NewPromptRecord, NewSessionRecord, PermissionStatus, PromptStatus,
+    SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
+    SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, StateStore, default_state_path,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -160,6 +161,7 @@ fn upsert_listed_sessions_inserts_available_and_preserves_active() {
         .expect("active lookup")
         .expect("active exists");
     assert_eq!(active.status, SESSION_STATUS_ACTIVE);
+    assert_eq!(active.updated_at, "2026-05-25T00:00:00.000000000Z");
     assert_eq!(active.cwd, "/tmp/active-listed");
     assert_eq!(active.title.as_deref(), Some("active listed"));
     let closed = store
@@ -173,6 +175,210 @@ fn upsert_listed_sessions_inserts_available_and_preserves_active() {
         .expect("available lookup")
         .expect("available exists");
     assert_eq!(available.status, SESSION_STATUS_AVAILABLE);
+}
+
+#[test]
+fn upsert_listed_sessions_normalizes_updated_at_for_range_ordering() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .upsert_listed_sessions(vec![
+            ListedSessionRecord {
+                id: "sess_offset".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/offset".to_owned(),
+                title: None,
+                updated_at: Some("2026-02-01T08:00:00+08:00".to_owned()),
+                metadata_json: "{}".to_owned(),
+            },
+            ListedSessionRecord {
+                id: "sess_fraction".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/fraction".to_owned(),
+                title: None,
+                updated_at: Some("2026-02-01T00:00:00.500Z".to_owned()),
+                metadata_json: "{}".to_owned(),
+            },
+        ])
+        .expect("listed sessions upsert");
+
+    let rows = store
+        .query_sessions(acp_stack::state::SessionFilter {
+            limit: 10,
+            since: Some("2026-02-01T00:00:00.250000000Z"),
+            until: Some("2026-02-01T00:00:01.000000000Z"),
+            ..Default::default()
+        })
+        .expect("sessions query");
+    let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, vec!["sess_fraction"]);
+    assert_eq!(rows[0].updated_at, "2026-02-01T00:00:00.500000000Z");
+
+    let offset = store
+        .get_session("sess_offset")
+        .expect("offset lookup")
+        .expect("offset exists");
+    assert_eq!(offset.updated_at, "2026-02-01T00:00:00.000000000Z");
+}
+
+#[test]
+fn active_session_activity_is_empty_without_active_sessions() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_closed".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/closed".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .update_session_status("sess_closed", SESSION_STATUS_CLOSED)
+        .expect("session closed");
+
+    let rows = store
+        .query_active_session_activity(10)
+        .expect("activity should query");
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn active_session_activity_falls_back_to_session_update() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let session = store
+        .insert_session(NewSessionRecord {
+            id: "sess_active".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/active".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    let rows = store
+        .query_active_session_activity(10)
+        .expect("activity should query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "sess_active");
+    assert_eq!(rows[0].last_activity_at, session.updated_at);
+    assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_USER);
+}
+
+#[test]
+fn active_session_activity_tracks_prompt_submission_as_user() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_active".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/active".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    let prompt = store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_active".to_owned(),
+            session_id: "sess_active".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+
+    let rows = store
+        .query_active_session_activity(10)
+        .expect("activity should query");
+    assert_eq!(rows[0].last_activity_at, prompt.created_at);
+    assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_USER);
+}
+
+#[test]
+fn active_session_activity_tracks_prompt_status_update_as_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_active".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/active".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_active".to_owned(),
+            session_id: "sess_active".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_prompt_status("prm_active", PromptStatus::Running, None, None, None)
+        .expect("prompt status updated");
+    let prompt = store
+        .get_prompt("prm_active")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+
+    let rows = store
+        .query_active_session_activity(10)
+        .expect("activity should query");
+    assert_eq!(rows[0].last_activity_at, prompt.updated_at);
+    assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_AGENT);
+}
+
+#[test]
+fn active_session_activity_tracks_acp_event_as_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_active".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/active".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let event = store
+        .append_session_event_with_source(
+            "sess_active",
+            "info",
+            "session.update",
+            EVENT_SOURCE_ACP,
+            "ACP session update",
+            "{}",
+        )
+        .expect("event appended");
+
+    let rows = store
+        .query_active_session_activity(10)
+        .expect("activity should query");
+    assert_eq!(rows[0].last_activity_at, event.created_at);
+    assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_AGENT);
 }
 
 #[test]

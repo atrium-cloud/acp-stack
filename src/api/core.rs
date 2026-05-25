@@ -66,6 +66,7 @@ use super::routes::sessions::{
     sessions_cancel_handler, sessions_close_handler, sessions_create_handler,
     sessions_events_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
     sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
+    sessions_status_handler,
 };
 use super::routes::status::{
     health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
@@ -342,6 +343,7 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/sessions",
             get(sessions_list_handler).post(sessions_create_handler),
         )
+        .route("/v1/sessions/-/status", get(sessions_status_handler))
         .route(
             "/v1/sessions/{id}",
             get(sessions_get_handler).delete(sessions_close_handler),

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use acp_stack::api::{self, AppState};
 use acp_stack::config::{Config, load_config_from_str};
-use acp_stack::state::StateStore;
+use acp_stack::state::{NewSessionRecord, StateStore};
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -427,6 +427,324 @@ async fn sessions_list_works_when_agent_list_is_unsupported() {
     assert_eq!(body["data"]["agent_sync"]["attempted"], false);
     assert_eq!(body["data"]["agent_sync"]["status"], "unsupported");
     assert!(body["data"]["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sessions_list_filters_by_since_and_until() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        store
+            .upsert_listed_sessions(vec![
+                acp_stack::state::ListedSessionRecord {
+                    id: "sess_old".to_owned(),
+                    agent_id: "fake".to_owned(),
+                    cwd: "/tmp/old".to_owned(),
+                    title: None,
+                    updated_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                },
+                acp_stack::state::ListedSessionRecord {
+                    id: "sess_mid".to_owned(),
+                    agent_id: "fake".to_owned(),
+                    cwd: "/tmp/mid".to_owned(),
+                    title: None,
+                    updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                },
+                acp_stack::state::ListedSessionRecord {
+                    id: "sess_new".to_owned(),
+                    agent_id: "fake".to_owned(),
+                    cwd: "/tmp/new".to_owned(),
+                    title: None,
+                    updated_at: Some("2026-03-01T00:00:00Z".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                },
+            ])
+            .expect("sessions inserted");
+    }
+    let client = http();
+    let body: Value = client
+        .get(format!(
+            "{}/v1/sessions?since=2026-01-15T00%3A00%3A00Z&until=2026-02-15T00%3A00%3A00Z",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+
+    let ids: Vec<&str> = body["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["sess_mid"]);
+}
+
+#[tokio::test]
+async fn sessions_list_rejects_malformed_bounds() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let response = http()
+        .get(format!("{}/v1/sessions?since=not-a-time", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
+async fn sessions_list_rejects_duration_before_unix_epoch() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions?range=999999999999999999y",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
+async fn sessions_list_resolves_missing_explicit_bound_to_session_span() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        store
+            .upsert_listed_sessions(vec![
+                acp_stack::state::ListedSessionRecord {
+                    id: "sess_first".to_owned(),
+                    agent_id: "fake".to_owned(),
+                    cwd: "/tmp/first".to_owned(),
+                    title: None,
+                    updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                },
+                acp_stack::state::ListedSessionRecord {
+                    id: "sess_latest".to_owned(),
+                    agent_id: "fake".to_owned(),
+                    cwd: "/tmp/latest".to_owned(),
+                    title: None,
+                    updated_at: Some("2026-02-02T00:00:00Z".to_owned()),
+                    metadata_json: "{}".to_owned(),
+                },
+            ])
+            .expect("sessions inserted");
+    }
+
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/sessions?resolve_bounds=true&until=2026-02-01T12%3A00%3A00Z",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+    let ids: Vec<&str> = body["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["sess_first"]);
+
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/sessions?resolve_bounds=true&since=2026-02-01T12%3A00%3A00Z",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+    let ids: Vec<&str> = body["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["sess_latest"]);
+}
+
+#[tokio::test]
+async fn sessions_list_range_counts_from_request_time() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_active".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/active".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+    }
+
+    let body: Value = http()
+        .get(format!("{}/v1/sessions?range=30m", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+
+    let ids: Vec<&str> = body["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["sess_active"]);
+}
+
+#[tokio::test]
+async fn sessions_status_returns_compact_active_summary() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_active".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/active".to_owned(),
+                title: Some("active title".to_owned()),
+                metadata_json: r#"{"secretish":"not returned"}"#.to_owned(),
+            })
+            .expect("session inserted");
+        store
+            .append_session_event_with_source(
+                "sess_active",
+                "info",
+                "session.update",
+                acp_stack::state::EVENT_SOURCE_ACP,
+                "ACP session update",
+                "{}",
+            )
+            .expect("event inserted");
+    }
+
+    let body: Value = http()
+        .get(format!("{}/v1/sessions/-/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+
+    assert_eq!(body["data"]["active_count"], 1);
+    let session = &body["data"]["sessions"][0];
+    assert_eq!(session["id"], "sess_active");
+    assert_eq!(session["last_activity_from"], "agent");
+    assert_eq!(session["recent"], true);
+    assert!(session.get("metadata_json").is_none());
+}
+
+#[tokio::test]
+async fn sessions_status_marks_old_activity_idle() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_active".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/active".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        store
+            .upsert_listed_sessions(vec![acp_stack::state::ListedSessionRecord {
+                id: "sess_active".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/active".to_owned(),
+                title: None,
+                updated_at: Some("2026-01-01T00:00:00Z".to_owned()),
+                metadata_json: "{}".to_owned(),
+            }])
+            .expect("session updated");
+    }
+
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/sessions/-/status?threshold=1s",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+
+    assert_eq!(body["data"]["sessions"][0]["recent"], false);
+}
+
+#[tokio::test]
+async fn sessions_status_rejects_malformed_threshold() {
+    let harness = Harness::spawn().await;
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions/-/status?threshold=not-a-duration",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
 }
 
 #[tokio::test]

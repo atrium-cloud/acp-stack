@@ -40,7 +40,8 @@ acps secrets list
 acps secrets set <name>
 acps secrets delete <name>
 
-acps sessions list
+acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>]
+acps sessions status [--threshold <duration>] [--limit <n>]
 acps sessions new
 acps sessions prompt <session-id>
 acps sessions cancel <session-id>
@@ -53,7 +54,9 @@ acps deps check
 acps deps apply
 ```
 
-`acps sessions list` reads `GET /v1/sessions`, so it shows the reconciled durable list after any supported ACP `session/list` sync. Sessions discovered through ACP but not loaded in the current runtime are printed with status `available`; load or resume one before prompting it.
+`acps sessions list` reads `GET /v1/sessions`, so it shows the reconciled durable list after any supported ACP `session/list` sync. Sessions discovered through ACP but not loaded in the current runtime are printed with status `available`; load or resume one before prompting it. The default range is `month`, meaning sessions updated in the last 30 days, still capped by `--limit` (default 50). When output is capped, the CLI prints `Showing the first <n> results. Use --limit <number> to change session display limit.` `--range` accepts `day`, `week`, `month`, `year`, `all`, or a duration suffix such as `30m`, `12h`, `60d`, `8w`, `6mo`, or `1y`; ranges are interpreted relative to the current request time. `--range-start` and `--range-end` accept RFC3339 timestamps or duration suffixes. When only one explicit bound is provided, the missing start defaults to the first stored session update time and the missing end defaults to the latest stored session update time, or to current time when the latest session is active.
+
+`acps sessions status` reads the compact status endpoint for active sessions only. It prints `No active session.` when there are no `active` rows. Otherwise each active session is printed with recent/idle state, last activity time, last activity actor (`user` or `agent`), session id, and cwd/title when available. The default recent-activity threshold is `15m`; active sessions older than that threshold are still printed as `idle`.
 
 ## Auth Commands
 

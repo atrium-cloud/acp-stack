@@ -1,16 +1,24 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
+use crate::state::DEFAULT_SESSION_ACTIVITY_THRESHOLD;
+use chrono::{SecondsFormat, Utc};
 use clap::{Args, Subcommand};
 
 use super::core::{
     CliKey, CliMethod, daemon_base_url, daemon_request, encode_path_segment, open_cli_key,
 };
 
+const DEFAULT_SESSION_LIST_LIMIT: u32 = 50;
+const DEFAULT_SESSION_STATUS_LIMIT: u32 = 1000;
+const SESSION_LIST_DEFAULT_RANGE: &str = "month";
+
 #[derive(Debug, Subcommand)]
 pub enum SessionsCommand {
     /// List sessions newest-first.
     List(SessionsListArgs),
+    /// Show compact status for active sessions.
+    Status(SessionsStatusArgs),
     /// Create a new session through the running daemon.
     New(SessionsNewArgs),
     /// Send a prompt to a session. Polls until completion unless `--no-wait`.
@@ -23,7 +31,26 @@ pub enum SessionsCommand {
 
 #[derive(Debug, Args)]
 pub struct SessionsListArgs {
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = DEFAULT_SESSION_LIST_LIMIT)]
+    limit: u32,
+    /// Rolling range for sessions by updated time: day, week, month, year,
+    /// all, or a duration like 60d.
+    #[arg(long)]
+    range: Option<String>,
+    /// Explicit lower bound. Accepts RFC3339 or duration suffixes like 30d.
+    #[arg(long)]
+    range_start: Option<String>,
+    /// Explicit upper bound. Accepts RFC3339 or duration suffixes like 30d.
+    #[arg(long)]
+    range_end: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsStatusArgs {
+    /// Recent-activity threshold. Accepts duration suffixes like 15m or 1h.
+    #[arg(long, default_value = DEFAULT_SESSION_ACTIVITY_THRESHOLD)]
+    threshold: String,
+    #[arg(long, default_value_t = DEFAULT_SESSION_STATUS_LIMIT)]
     limit: u32,
 }
 
@@ -66,14 +93,18 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
     runtime.block_on(async move {
         match command {
             SessionsCommand::List(args) => {
-                let path = format!("/v1/sessions?limit={}", args.limit);
+                let path = sessions_list_path(&args, args.limit.saturating_add(1))?;
                 let body =
                     daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
-                let sessions = body["data"]["sessions"]
+                let mut sessions = body["data"]["sessions"]
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
-                if sessions.is_empty() {
+                let truncated = sessions.len() > args.limit as usize;
+                if truncated {
+                    sessions.truncate(args.limit as usize);
+                }
+                if sessions.is_empty() && !truncated {
                     println!("(no sessions)");
                 } else {
                     for session in sessions {
@@ -82,6 +113,49 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
                         let cwd = session["cwd"].as_str().unwrap_or("");
                         let updated = session["updated_at"].as_str().unwrap_or("?");
                         println!("{updated} {status} {id} {cwd}");
+                    }
+                    if truncated {
+                        println!("{}", session_list_limit_hint(args.limit));
+                    }
+                }
+                Ok(())
+            }
+            SessionsCommand::Status(args) => {
+                let path = format!(
+                    "/v1/sessions/-/status?threshold={}&limit={}",
+                    encode_query_value(&args.threshold),
+                    args.limit,
+                );
+                let body =
+                    daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
+                let sessions = body["data"]["sessions"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if sessions.is_empty() {
+                    println!("No active session.");
+                } else {
+                    for session in sessions {
+                        let id = session["id"].as_str().unwrap_or("?");
+                        let state = match session["recent"].as_bool() {
+                            Some(true) => "recent",
+                            Some(false) => "idle",
+                            None => "?",
+                        };
+                        let last = session["last_activity_at"].as_str().unwrap_or("?");
+                        let actor = session["last_activity_from"].as_str().unwrap_or("?");
+                        let cwd = session["cwd"].as_str().unwrap_or("");
+                        if let Some(title) = session["title"].as_str()
+                            && !title.is_empty()
+                        {
+                            println!(
+                                "{state} last_activity={last} from={actor} session={id} title={title} cwd={cwd}"
+                            );
+                            continue;
+                        }
+                        println!(
+                            "{state} last_activity={last} from={actor} session={id} cwd={cwd}"
+                        );
                     }
                 }
                 Ok(())
@@ -130,6 +204,102 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
             }
         }
     })
+}
+
+fn sessions_list_path(args: &SessionsListArgs, query_limit: u32) -> Result<String> {
+    let now = Utc::now();
+    let explicit_bound_mode = args.range_start.is_some() || args.range_end.is_some();
+    let since = match args.range_start.as_deref() {
+        Some(raw) => resolve_time_bound(Some(raw), "range-start", now)?,
+        None => None,
+    };
+    let until = resolve_time_bound(args.range_end.as_deref(), "range-end", now)?;
+    let mut query = format!("limit={query_limit}");
+    let range = args
+        .range
+        .as_deref()
+        .or_else(|| (!explicit_bound_mode).then_some(SESSION_LIST_DEFAULT_RANGE));
+    if let Some(range) = range {
+        validate_session_range(range)?;
+        query.push_str("&range=");
+        query.push_str(&encode_query_value(range));
+    }
+    if explicit_bound_mode && args.range.is_none() {
+        query.push_str("&resolve_bounds=true");
+    }
+    if let Some(since) = since {
+        query.push_str("&since=");
+        query.push_str(&encode_query_value(&since));
+    }
+    if let Some(until) = until {
+        query.push_str("&until=");
+        query.push_str(&encode_query_value(&until));
+    }
+    Ok(format!("/v1/sessions?{query}"))
+}
+
+fn session_list_limit_hint(limit: u32) -> String {
+    format!(
+        "Showing the first {limit} results. Use --limit <number> to change session display limit."
+    )
+}
+
+fn validate_session_range(raw: &str) -> Result<()> {
+    match raw {
+        "all" | "day" | "week" | "month" | "year" => Ok(()),
+        other if crate::time_util::parse_coarse_duration_suffix(other).is_some() => Ok(()),
+        other => Err(StackError::InvalidParam {
+            field: "range",
+            reason: format!(
+                "expected day, week, month, year, all, or a duration like 30m, 60d, 6mo, or 1y; got {other}"
+            ),
+        }),
+    }
+}
+
+fn resolve_time_bound(
+    raw: Option<&str>,
+    field: &'static str,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(
+            dt.with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+        ));
+    }
+    let duration = crate::time_util::parse_coarse_duration_suffix(raw).ok_or_else(|| {
+        StackError::InvalidParam {
+            field,
+            reason: format!("not a valid RFC3339 timestamp or duration (m, h, d, w, mo, y): {raw}"),
+        }
+    })?;
+    let resolved =
+        crate::time_util::resolve_since_after_unix_epoch(duration, now).ok_or_else(|| {
+            StackError::InvalidParam {
+                field,
+                reason: "duration range must not begin before 1970-01-01T00:00:00Z".to_owned(),
+            }
+        })?;
+    Ok(Some(resolved.to_rfc3339_opts(SecondsFormat::Nanos, true)))
+}
+
+fn encode_query_value(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        let safe = matches!(byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 async fn run_sessions_prompt(
@@ -207,5 +377,90 @@ async fn run_sessions_prompt(
                 delay_ms = (delay_ms + 250).min(2000);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_path_defaults_to_month_range() {
+        let path = sessions_list_path(
+            &SessionsListArgs {
+                limit: 50,
+                range: None,
+                range_start: None,
+                range_end: None,
+            },
+            51,
+        )
+        .expect("list path");
+
+        assert_eq!(path, "/v1/sessions?limit=51&range=month");
+    }
+
+    #[test]
+    fn range_accepts_duration_values() {
+        validate_session_range("60d").expect("duration range");
+    }
+
+    #[test]
+    fn range_accepts_month_and_year_duration_values() {
+        validate_session_range("6mo").expect("month duration range");
+        validate_session_range("1y").expect("year duration range");
+    }
+
+    #[test]
+    fn range_accepts_minute_granularity() {
+        validate_session_range("30m").expect("minute duration range");
+    }
+
+    #[test]
+    fn range_all_is_valid() {
+        validate_session_range("all").expect("all range");
+    }
+
+    #[test]
+    fn explicit_bounds_override_range_defaults() {
+        let path = sessions_list_path(
+            &SessionsListArgs {
+                limit: 50,
+                range: Some("year".to_owned()),
+                range_start: Some("2026-05-01T00:00:00Z".to_owned()),
+                range_end: Some("7d".to_owned()),
+            },
+            51,
+        )
+        .expect("list path");
+
+        assert!(path.starts_with("/v1/sessions?limit=51&range=year&since=2026-05-01T00%3A00%3A00"));
+        assert!(path.contains("&until="));
+    }
+
+    #[test]
+    fn explicit_bounds_without_range_request_bound_resolution() {
+        let path = sessions_list_path(
+            &SessionsListArgs {
+                limit: 50,
+                range: None,
+                range_start: Some("2026-05-01T00:00:00Z".to_owned()),
+                range_end: None,
+            },
+            51,
+        )
+        .expect("list path");
+
+        assert!(path.contains("&since=2026-05-01T00%3A00%3A00"));
+        assert!(path.contains("&resolve_bounds=true"));
+        assert!(!path.contains("&range="));
+    }
+
+    #[test]
+    fn list_limit_hint_names_display_limit() {
+        assert_eq!(
+            session_list_limit_hint(100),
+            "Showing the first 100 results. Use --limit <number> to change session display limit."
+        );
     }
 }
