@@ -524,6 +524,9 @@ pub enum StackError {
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },
 
+    #[error("session `{id}` is {status} and must be loaded or resumed before prompting")]
+    SessionNotActive { id: String, status: String },
+
     #[error("prompt `{id}` was not found")]
     PromptNotFound { id: String },
 

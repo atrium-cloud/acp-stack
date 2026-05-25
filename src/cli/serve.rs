@@ -300,9 +300,11 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
 ///
 /// Recognizes:
 /// - `initialize` -> protocolVersion = 1, agentCapabilities with
-///   `loadSession` and `sessionCapabilities.{resume,close}` set unless the
-///   matching `--no-cap-*` flag is supplied, agentInfo set.
+///   `loadSession` and `sessionCapabilities.{list,resume,close}` set unless
+///   the matching `--no-cap-*` flag is supplied, agentInfo set.
 /// - `session/new` -> deterministic `sess_fake_{counter}` id.
+/// - `session/list` -> deterministic discovered sessions, with flags for
+///   pagination and repeated-cursor failure tests.
 /// - `session/load`, `session/resume`, `session/close` -> empty ok.
 /// - `session/prompt` -> emits two `session/update` notifications with agent
 ///   message chunks, then returns `{ stopReason: "end_turn" }`. With
@@ -325,6 +327,7 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     use std::io::{BufRead, Write};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     let mut title = "acps fake agent".to_owned();
+    let mut list_session_cap = true;
     let mut load_session_cap = true;
     let mut resume_session_cap = true;
     let mut close_session_cap = true;
@@ -334,6 +337,8 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let mut session_new_stalls = false;
     let mut prompt_fails = false;
     let mut prompt_stalls_after_update = false;
+    let mut session_list_paginated = false;
+    let mut session_list_repeated_cursor = false;
     let mut model_config_option: Option<String> = None;
     let mut expected_model_config: Option<String> = None;
     let mut pid_path: Option<String> = None;
@@ -365,6 +370,9 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             "--no-cap-load-session" => {
                 load_session_cap = false;
             }
+            "--no-cap-list-session" => {
+                list_session_cap = false;
+            }
             "--no-cap-resume-session" => {
                 resume_session_cap = false;
             }
@@ -388,6 +396,12 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             }
             "--prompt-stall-after-update" => {
                 prompt_stalls_after_update = true;
+            }
+            "--session-list-paginated" => {
+                session_list_paginated = true;
+            }
+            "--session-list-repeated-cursor" => {
+                session_list_repeated_cursor = true;
             }
             "--model-config-option" => {
                 if let Some(value) = iter.next() {
@@ -425,6 +439,7 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let session_counter = AtomicU64::new(0);
     let cancel_requested = AtomicBool::new(false);
     let model_configured = AtomicBool::new(false);
+    let mut created_sessions: Vec<(String, String)> = Vec::new();
     let mut buf = String::new();
     loop {
         buf.clear();
@@ -470,6 +485,9 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                         serde_json::Value::Bool(load_session_cap),
                     );
                     let mut session_caps = serde_json::Map::new();
+                    if list_session_cap {
+                        session_caps.insert("list".to_owned(), serde_json::json!({}));
+                    }
                     if resume_session_cap {
                         session_caps.insert("resume".to_owned(), serde_json::json!({}));
                     }
@@ -513,8 +531,16 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                     }
                 } else {
                     let counter = session_counter.fetch_add(1, Ordering::SeqCst);
+                    let session_id = format!("sess_fake_{counter}");
+                    let cwd = value
+                        .get("params")
+                        .and_then(|params| params.get("cwd"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("/tmp")
+                        .to_owned();
+                    created_sessions.push((session_id.clone(), cwd));
                     let mut result = serde_json::json!({
-                        "sessionId": format!("sess_fake_{counter}")
+                        "sessionId": session_id
                     });
                     if let Some(model) = model_config_option.as_deref() {
                         result["configOptions"] = serde_json::json!([
@@ -534,6 +560,78 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": result
+                    })
+                }
+            }
+            Some("session/list") => {
+                let cursor = value
+                    .get("params")
+                    .and_then(|params| params.get("cursor"))
+                    .and_then(serde_json::Value::as_str);
+                if session_list_repeated_cursor {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessions": [],
+                            "nextCursor": "repeat"
+                        }
+                    })
+                } else if session_list_paginated && cursor.is_none() {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessions": [
+                                {
+                                    "sessionId": "sess_listed_page_1",
+                                    "cwd": "/tmp",
+                                    "title": "listed page 1",
+                                    "updatedAt": "2026-05-25T00:00:00Z",
+                                    "_meta": { "origin": "fake-agent" }
+                                }
+                            ],
+                            "nextCursor": "page-2"
+                        }
+                    })
+                } else if session_list_paginated && cursor == Some("page-2") {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessions": [
+                                {
+                                    "sessionId": "sess_listed_page_2",
+                                    "cwd": "/tmp",
+                                    "title": "listed page 2",
+                                    "updatedAt": "2026-05-25T00:00:01Z",
+                                    "_meta": { "origin": "fake-agent" }
+                                }
+                            ]
+                        }
+                    })
+                } else {
+                    let mut sessions = vec![serde_json::json!({
+                        "sessionId": "sess_listed_0",
+                        "cwd": "/tmp",
+                        "title": "listed session",
+                        "updatedAt": "2026-05-25T00:00:00Z",
+                        "_meta": { "origin": "fake-agent" }
+                    })];
+                    sessions.extend(created_sessions.iter().map(|(session_id, cwd)| {
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "cwd": cwd,
+                            "title": format!("created {session_id}"),
+                            "updatedAt": "2026-05-25T00:00:02Z"
+                        })
+                    }));
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "sessions": sessions
+                        }
                     })
                 }
             }

@@ -352,6 +352,113 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
 }
 
 #[tokio::test]
+async fn sessions_list_syncs_agent_discovered_sessions() {
+    let harness = Harness::spawn().await;
+    let client = http();
+
+    let list: Value = client
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+
+    assert_eq!(list["data"]["agent_sync"]["attempted"], true);
+    assert_eq!(list["data"]["agent_sync"]["status"], "synced");
+    assert_eq!(list["data"]["agent_sync"]["upserted"], 1);
+    let listed = list["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == "sess_listed_0")
+        .expect("listed session present");
+    assert_eq!(listed["status"], "available");
+    assert_eq!(listed["title"], "listed session");
+    let metadata: Value =
+        serde_json::from_str(listed["metadata_json"].as_str().unwrap()).expect("metadata json");
+    assert_eq!(metadata["agent_meta"]["origin"], "fake-agent");
+}
+
+#[tokio::test]
+async fn sessions_list_preserves_active_local_sessions() {
+    let harness = Harness::spawn().await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    let list: Value = client
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+
+    let active = list["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"].as_str() == Some(session_id.as_str()))
+        .expect("created session present");
+    assert_eq!(active["status"], "active");
+    assert_eq!(list["data"]["agent_sync"]["updated"], 1);
+}
+
+#[tokio::test]
+async fn sessions_list_works_when_agent_list_is_unsupported() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let client = http();
+
+    let response = client
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("list json");
+    assert_eq!(body["data"]["agent_sync"]["attempted"], false);
+    assert_eq!(body["data"]["agent_sync"]["status"], "unsupported");
+    assert!(body["data"]["sessions"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn available_session_must_be_loaded_before_prompting() {
+    let harness = Harness::spawn().await;
+    let client = http();
+    let _: Value = client
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+
+    let response = client
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, "sess_listed_0"
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "hello agent" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.expect("prompt json");
+    assert_eq!(body["error"]["code"], "session.not_active");
+}
+
+#[tokio::test]
 async fn unsupported_capability_load_returns_501() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.push("--no-cap-load-session".into());

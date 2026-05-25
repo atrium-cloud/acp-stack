@@ -71,6 +71,7 @@
 
 - [ ] Persist prompt lifecycle states with explicit `pending|running|completed|errored|cancelled|stalled` or equivalent states.
 - [ ] Add stale-prompt detection for sessions that stop emitting ACP updates before terminal state.
+- [x] Sync ACP `session/list` discovery into durable session history and expose discovered sessions as `available`.
 - [ ] Ensure clients can reconnect and recover current prompt/session state from HTTP without relying on live WebSocket history.
 - [ ] Document behavior for ACP `session/resume`, `session/load`, and unsupported resume paths per supported agent.
 - [ ] Classify prompt failures caused by model/inference endpoint HTTP 5xx responses separately from VM, daemon, and agent runtime failures.
