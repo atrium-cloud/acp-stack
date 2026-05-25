@@ -18,7 +18,7 @@ use acp_stack::api::AppState;
 use acp_stack::config::{Config, SupabaseLoggingConfig, load_config_from_str};
 use acp_stack::events::EventHub;
 use acp_stack::local_listener;
-use acp_stack::runtime::supabase_sink::SupabaseSink;
+use acp_stack::runtime::logging::supabase_sink::SupabaseSink;
 use acp_stack::state::{EventFilter, StateStore};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RunningService, ServiceExt};
@@ -329,7 +329,7 @@ async fn mcp_sqlite_remains_source_of_truth_when_supabase_is_enabled() {
     );
 
     // Assertion 2 — Supabase received the mirrored row. We deliberately do
-    // NOT assert payload.path here: `runtime::sink_redaction::EVENTS_PAYLOAD_KEEP`
+    // NOT assert payload.path here: `runtime::logging::sink_redaction::EVENTS_PAYLOAD_KEEP`
     // strips `path` from the outbox row to prevent route-shape leakage.
     // That redaction *is* a Phase 3 requirement; this assertion confirms it
     // by inspecting `payload_json` directly below.

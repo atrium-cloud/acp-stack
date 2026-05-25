@@ -31,8 +31,8 @@ use crate::config::{
 };
 use crate::error::{Result, StackError};
 use crate::fs_util::atomic_write_owner_only;
-use crate::runtime::safe_download::{DownloadOpts, download_to_file};
-use crate::runtime::safe_extract::{ExtractOpts, extract_archive};
+use crate::runtime::workspace_sources::safe_download::{DownloadOpts, download_to_file};
+use crate::runtime::workspace_sources::safe_extract::{ExtractOpts, extract_archive};
 use crate::secrets::SecretStore;
 
 /// Sentinel filename written into each materialized destination so reruns
@@ -1307,7 +1307,7 @@ fn materialize_s3(
     secrets: &SecretStore,
     log_dir: Option<&Path>,
 ) -> Result<SourceReport> {
-    use crate::runtime::s3_client::{Credentials, S3Client};
+    use crate::runtime::workspace_sources::s3_client::{Credentials, S3Client};
 
     let bucket =
         source
@@ -1344,7 +1344,7 @@ fn materialize_s3(
     let prefix = source.prefix.clone();
     let max_total_bytes = source
         .max_download_bytes
-        .unwrap_or(crate::runtime::safe_download::DEFAULT_MAX_DOWNLOAD_BYTES);
+        .unwrap_or(crate::runtime::workspace_sources::safe_download::DEFAULT_MAX_DOWNLOAD_BYTES);
 
     ensure_destination_not_symlink(dest)?;
     if let Some(existing) = sentinel_if_present(dest)?
@@ -1432,7 +1432,7 @@ fn materialize_s3(
 }
 
 fn download_s3_objects(
-    client: &crate::runtime::s3_client::S3Client,
+    client: &crate::runtime::workspace_sources::s3_client::S3Client,
     bucket: &str,
     prefix: Option<&str>,
     dest: &Path,
