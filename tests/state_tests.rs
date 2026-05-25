@@ -1,8 +1,9 @@
 use acp_stack::state::{
     AuthFailureFilter, EventFilter, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
     INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
-    InstallerRunInput, NewInitRun, NewInitStep, NewPermissionRequest, PermissionStatus, StateStore,
-    default_state_path,
+    InstallerRunInput, ListedSessionRecord, NewInitRun, NewInitStep, NewPermissionRequest,
+    NewSessionRecord, PermissionStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
+    SESSION_STATUS_CLOSED, StateStore, default_state_path,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -92,6 +93,86 @@ fn appends_and_queries_events_newest_first() {
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].level, "error");
     assert_eq!(errors[0].message, "failed");
+}
+
+#[test]
+fn upsert_listed_sessions_inserts_available_and_preserves_active() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_active".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/active".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("active session inserted");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_closed".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/closed".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("closed session inserted");
+    store
+        .update_session_status("sess_closed", SESSION_STATUS_CLOSED)
+        .expect("session closed");
+
+    let counts = store
+        .upsert_listed_sessions(vec![
+            ListedSessionRecord {
+                id: "sess_active".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/active-listed".to_owned(),
+                title: Some("active listed".to_owned()),
+                updated_at: Some("2026-05-25T00:00:00Z".to_owned()),
+                metadata_json: r#"{"source":"agent_list"}"#.to_owned(),
+            },
+            ListedSessionRecord {
+                id: "sess_closed".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/closed-listed".to_owned(),
+                title: Some("closed listed".to_owned()),
+                updated_at: Some("2026-05-25T00:00:02Z".to_owned()),
+                metadata_json: r#"{"source":"agent_list"}"#.to_owned(),
+            },
+            ListedSessionRecord {
+                id: "sess_available".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/available".to_owned(),
+                title: Some("available listed".to_owned()),
+                updated_at: Some("2026-05-25T00:00:01Z".to_owned()),
+                metadata_json: r#"{"source":"agent_list"}"#.to_owned(),
+            },
+        ])
+        .expect("listed sessions upsert");
+
+    assert_eq!(counts.upserted, 1);
+    assert_eq!(counts.updated, 2);
+    let active = store
+        .get_session("sess_active")
+        .expect("active lookup")
+        .expect("active exists");
+    assert_eq!(active.status, SESSION_STATUS_ACTIVE);
+    assert_eq!(active.cwd, "/tmp/active-listed");
+    assert_eq!(active.title.as_deref(), Some("active listed"));
+    let closed = store
+        .get_session("sess_closed")
+        .expect("closed lookup")
+        .expect("closed exists");
+    assert_eq!(closed.status, SESSION_STATUS_CLOSED);
+    assert_eq!(closed.cwd, "/tmp/closed-listed");
+    let available = store
+        .get_session("sess_available")
+        .expect("available lookup")
+        .expect("available exists");
+    assert_eq!(available.status, SESSION_STATUS_AVAILABLE);
 }
 
 #[test]

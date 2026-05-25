@@ -53,6 +53,8 @@ acps deps check
 acps deps apply
 ```
 
+`acps sessions list` reads `GET /v1/sessions`, so it shows the reconciled durable list after any supported ACP `session/list` sync. Sessions discovered through ACP but not loaded in the current runtime are printed with status `available`; load or resume one before prompting it.
+
 ## Auth Commands
 
 `acps init` generates both API keys on first run and stores them in the age-encrypted secret store under the names declared by `[auth].session_key_ref` and `[auth].admin_key_ref`. Both values are printed once on stdout during that first run; subsequent `acps init` invocations preserve the existing keys and do not reveal them again.

@@ -7,6 +7,7 @@ use super::agent::open_mcp_servers;
 use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
+use crate::runtime::agent::supervisor::SessionListSyncResult;
 use crate::runtime::agent::supervisor::parse_prompt_blocks;
 use crate::state::{PromptRecord, SessionRecord};
 
@@ -40,6 +41,26 @@ impl From<SessionRecord> for SessionResponse {
 #[derive(Serialize)]
 pub(crate) struct SessionsListResponse {
     sessions: Vec<SessionResponse>,
+    agent_sync: SessionsAgentSyncResponse,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SessionsAgentSyncResponse {
+    attempted: bool,
+    status: String,
+    upserted: u32,
+    updated: u32,
+}
+
+impl From<SessionListSyncResult> for SessionsAgentSyncResponse {
+    fn from(result: SessionListSyncResult) -> Self {
+        Self {
+            attempted: result.attempted,
+            status: result.status.as_str().to_owned(),
+            upserted: result.upserted,
+            updated: result.updated,
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -53,6 +74,11 @@ pub(crate) async fn sessions_list_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SessionsListResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let agent_for_session = state.live_agent_config.lock().await.clone();
+    let agent_sync = state
+        .agent_supervisor
+        .sync_listed_sessions(&agent_for_session, &state.state)
+        .await?;
     let store = state.state.lock().await;
     let sessions = store.query_sessions(crate::state::SessionFilter {
         limit,
@@ -61,6 +87,7 @@ pub(crate) async fn sessions_list_handler(
     drop(store);
     Ok(ApiSuccess::new(SessionsListResponse {
         sessions: sessions.into_iter().map(SessionResponse::from).collect(),
+        agent_sync: agent_sync.into(),
     }))
 }
 
