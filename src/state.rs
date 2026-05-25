@@ -50,4 +50,8 @@ pub use permissions::{
     NewPermissionRequest, PermissionDecisionRecord, PermissionRequestRecord, PermissionStatus,
 };
 pub use records::{CommandFilter, EventFilter, LogFilter, SessionFilter};
-pub use sessions::{NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SessionRecord};
+pub use sessions::{
+    ListedSessionRecord, ListedSessionUpsertCounts, NewPromptRecord, NewSessionRecord,
+    PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
+    SESSION_STATUS_CLOSED, SessionRecord,
+};

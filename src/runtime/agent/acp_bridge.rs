@@ -18,7 +18,7 @@
 //! - keeps the connection running in a dedicated task until `shutdown` is
 //!   called or the supervisor is dropped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,9 +26,10 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     AgentNotification, CancelNotification, CloseSessionRequest, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionConfigOptionCategory, SessionId,
+    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
+    NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SessionConfigOptionCategory, SessionId, SessionInfo,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModelRequest,
     SetSessionModelResponse, StopReason,
 };
@@ -129,6 +130,10 @@ impl AgentCapabilitiesDto {
             .get("loadSession")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    }
+
+    pub fn supports_list_sessions(&self) -> bool {
+        self.supports_session_capability("list")
     }
 
     pub fn supports_resume_session(&self) -> bool {
@@ -503,6 +508,41 @@ impl AcpBridge {
                 })?;
         }
         Ok(response)
+    }
+
+    /// `session/list`. Requires the `sessionCapabilities.list` capability.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        if !self.capabilities.supports_list_sessions() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/list",
+            });
+        }
+        let connection = self.connection().await?;
+        let mut sessions = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let request = ListSessionsRequest::new().cursor(cursor.clone());
+            let response: ListSessionsResponse = connection
+                .send_request(request)
+                .block_task()
+                .await
+                .map_err(|err| StackError::AgentRequestFailed {
+                    method: "session/list",
+                    message: err.to_string(),
+                })?;
+            sessions.extend(response.sessions);
+            let Some(next_cursor) = response.next_cursor else {
+                return Ok(sessions);
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(StackError::AgentRequestFailed {
+                    method: "session/list",
+                    message: format!("agent returned repeated pagination cursor `{next_cursor}`"),
+                });
+            }
+            cursor = Some(next_cursor);
+        }
     }
 
     pub async fn set_session_config_option(

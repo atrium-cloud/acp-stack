@@ -9,6 +9,10 @@ use super::ids::{current_timestamp, next_event_id};
 use super::records::SessionFilter;
 use super::rows::validate_json_payload;
 
+pub const SESSION_STATUS_ACTIVE: &str = "active";
+pub const SESSION_STATUS_AVAILABLE: &str = "available";
+pub const SESSION_STATUS_CLOSED: &str = "closed";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub id: String,
@@ -28,6 +32,22 @@ pub struct NewSessionRecord {
     pub cwd: String,
     pub title: Option<String>,
     pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSessionRecord {
+    pub id: String,
+    pub agent_id: String,
+    pub cwd: String,
+    pub title: Option<String>,
+    pub updated_at: Option<String>,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListedSessionUpsertCounts {
+    pub upserted: u32,
+    pub updated: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +173,7 @@ impl StateStore {
             id: record.id,
             created_at: now.clone(),
             updated_at: now,
-            status: "active".to_owned(),
+            status: SESSION_STATUS_ACTIVE.to_owned(),
             agent_id: record.agent_id,
             cwd: record.cwd,
             title: record.title,
@@ -180,6 +200,77 @@ impl StateStore {
             Ok(())
         })?;
         Ok(row)
+    }
+
+    pub fn upsert_listed_sessions(
+        &self,
+        records: Vec<ListedSessionRecord>,
+    ) -> Result<ListedSessionUpsertCounts> {
+        let mut counts = ListedSessionUpsertCounts::default();
+        for record in records {
+            let existing = self.get_session(&record.id)?;
+            validate_json_payload(self.connection(), &record.metadata_json)?;
+            let updated_at = record.updated_at.unwrap_or_else(current_timestamp);
+            match existing {
+                Some(_) => {
+                    self.persist_with_outbox("sessions", &record.id, &updated_at, |conn| {
+                        conn.execute(
+                            r#"
+                            UPDATE sessions
+                            SET updated_at = ?1,
+                                status = CASE
+                                    WHEN status IN (?2, ?3) THEN status
+                                    ELSE ?4
+                                END,
+                                agent_id = ?5,
+                                cwd = ?6,
+                                title = ?7,
+                                metadata_json = ?8
+                            WHERE id = ?9
+                            "#,
+                            params![
+                                updated_at,
+                                SESSION_STATUS_ACTIVE,
+                                SESSION_STATUS_CLOSED,
+                                SESSION_STATUS_AVAILABLE,
+                                record.agent_id,
+                                record.cwd,
+                                record.title,
+                                record.metadata_json,
+                                record.id,
+                            ],
+                        )?;
+                        Ok(())
+                    })?;
+                    counts.updated += 1;
+                }
+                None => {
+                    let created_at = current_timestamp();
+                    self.persist_with_outbox("sessions", &record.id, &updated_at, |conn| {
+                        conn.execute(
+                            r#"
+                            INSERT INTO sessions
+                                (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                            "#,
+                            params![
+                                record.id,
+                                created_at,
+                                updated_at,
+                                SESSION_STATUS_AVAILABLE,
+                                record.agent_id,
+                                record.cwd,
+                                record.title,
+                                record.metadata_json,
+                            ],
+                        )?;
+                        Ok(())
+                    })?;
+                    counts.upserted += 1;
+                }
+            }
+        }
+        Ok(counts)
     }
 
     pub fn update_session_status(&self, id: &str, status: &str) -> Result<()> {

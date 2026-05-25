@@ -60,8 +60,8 @@ use crate::runtime::agent::acp_bridge::{
 };
 use crate::secrets::SecretStore;
 use crate::state::{
-    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SessionRecord, StateStore,
-    next_prompt_id,
+    ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id,
 };
 
 pub struct ServerLifecycle {
@@ -173,6 +173,31 @@ pub struct AgentSnapshot {
     pub state: AgentStateLabel,
     pub latest_capabilities: Option<AgentCapabilitiesDto>,
     pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionListSyncStatus {
+    Synced,
+    Unsupported,
+    NotRunning,
+}
+
+impl SessionListSyncStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::Unsupported => "unsupported",
+            Self::NotRunning => "not_running",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionListSyncResult {
+    pub attempted: bool,
+    pub status: SessionListSyncStatus,
+    pub upserted: u32,
+    pub updated: u32,
 }
 
 /// Per-prompt cancellation + join handle. We keep both so a `session/cancel`
@@ -520,6 +545,81 @@ impl AgentSupervisor {
         matches!(*self.state.lock().await, AgentState::Running(_))
     }
 
+    /// Sync sessions discoverable via ACP `session/list` into durable local
+    /// state. This is discovery only: newly learned sessions are marked
+    /// `available` until a caller explicitly loads or resumes them.
+    pub async fn sync_listed_sessions(
+        &self,
+        agent: &AgentConfig,
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<SessionListSyncResult> {
+        let bridge = {
+            let guard = self.state.lock().await;
+            match &*guard {
+                AgentState::Running(bridge) => Arc::clone(bridge),
+                AgentState::Stopped | AgentState::Starting | AgentState::Stopping => {
+                    return Ok(SessionListSyncResult {
+                        attempted: false,
+                        status: SessionListSyncStatus::NotRunning,
+                        upserted: 0,
+                        updated: 0,
+                    });
+                }
+            }
+        };
+        if !bridge.capabilities().supports_list_sessions() {
+            return Ok(SessionListSyncResult {
+                attempted: false,
+                status: SessionListSyncStatus::Unsupported,
+                upserted: 0,
+                updated: 0,
+            });
+        }
+        let sessions = bridge.list_sessions().await?;
+        let records = sessions
+            .into_iter()
+            .map(|session| {
+                let session_id = session.session_id.0.to_string();
+                let cwd = session.cwd.to_string_lossy().into_owned();
+                let updated_at = session.updated_at.clone();
+                let metadata_json = serde_json::json!({
+                    "source": "agent_list",
+                    "agent_updated_at": updated_at,
+                    "agent_meta": session.meta,
+                })
+                .to_string();
+                ListedSessionRecord {
+                    id: session_id,
+                    agent_id: agent.id.clone(),
+                    cwd,
+                    title: session.title,
+                    updated_at: session.updated_at,
+                    metadata_json,
+                }
+            })
+            .collect::<Vec<_>>();
+        let guard = state.lock().await;
+        let counts = guard.upsert_listed_sessions(records)?;
+        let payload = serde_json::json!({
+            "agent_id": agent.id,
+            "upserted": counts.upserted,
+            "updated": counts.updated,
+        })
+        .to_string();
+        guard.append_event(
+            "info",
+            "session.list_synced",
+            "ACP session list synced",
+            &payload,
+        )?;
+        Ok(SessionListSyncResult {
+            attempted: true,
+            status: SessionListSyncStatus::Synced,
+            upserted: counts.upserted,
+            updated: counts.updated,
+        })
+    }
+
     /// `POST /v1/sessions`. Dispatches ACP `session/new`, persists a new
     /// `sessions` row, and returns it. `cwd` defaults to `workspace.root`
     /// when the client omits it.
@@ -620,7 +720,7 @@ impl AgentSupervisor {
             )
             .await?;
         let guard = state.lock().await;
-        guard.update_session_status(session_id, "active")?;
+        guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
         guard.append_session_event(session_id, "info", "session.loaded", "session loaded", "{}")?;
         guard
             .get_session(session_id)?
@@ -663,7 +763,7 @@ impl AgentSupervisor {
             )
             .await?;
         let guard = state.lock().await;
-        guard.update_session_status(session_id, "active")?;
+        guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
         guard.append_session_event(
             session_id,
             "info",
@@ -705,7 +805,7 @@ impl AgentSupervisor {
         // Bridge confirmed the close — now it's safe to settle local state.
         self.cancel_prompts_for_session(session_id).await;
         let guard = state.lock().await;
-        guard.update_session_status(session_id, "closed")?;
+        guard.update_session_status(session_id, SESSION_STATUS_CLOSED)?;
         guard.append_session_event(session_id, "info", "session.closed", "session closed", "{}")?;
         guard
             .get_session(session_id)?
@@ -735,9 +835,15 @@ impl AgentSupervisor {
                     .ok_or_else(|| StackError::SessionNotFound {
                         id: session_id.to_owned(),
                     })?;
-            if session.status == "closed" {
+            if session.status == SESSION_STATUS_CLOSED {
                 return Err(StackError::SessionClosed {
                     id: session_id.to_owned(),
+                });
+            }
+            if session.status != SESSION_STATUS_ACTIVE {
+                return Err(StackError::SessionNotActive {
+                    id: session_id.to_owned(),
+                    status: session.status,
                 });
             }
         }

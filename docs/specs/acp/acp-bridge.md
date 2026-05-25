@@ -31,6 +31,7 @@ On agent start:
 
 Session API calls map to ACP session methods:
 
+- list -> `session/list`
 - create -> `session/new`
 - load -> `session/load`
 - resume -> `session/resume`
@@ -39,6 +40,8 @@ Session API calls map to ACP session methods:
 - cancel -> `session/cancel`
 
 If the agent lacks a capability, `acp-stack` returns a typed API error instead of emulating behavior poorly.
+
+`session/list` is discovery only. When supported, the runtime may use it to learn sessions already known to the agent and mirror them into local durable state as `available`; clients must still call `session/load` or `session/resume` before sending prompts to a discovered session.
 
 ### Streaming
 
