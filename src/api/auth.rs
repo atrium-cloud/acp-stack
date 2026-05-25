@@ -394,11 +394,20 @@ pub(crate) async fn log_api_request(
 }
 
 /// Returns true when the path should not produce an `api.request` row.
-/// `/v1/ws` and `/v1/status*` are excluded — the first generates its own
-/// `ws.client_connected` / `ws.client_disconnected` pair, the second is a
-/// frequent poll surface whose cardinality would dwarf real traffic.
+/// `/v1/ws`, `/v1/status*`, and the two `/v1/health/*` endpoints are
+/// excluded — the first generates its own `ws.client_connected` /
+/// `ws.client_disconnected` pair; `/v1/status*` is a frequent poll surface
+/// whose cardinality would dwarf real traffic; `/v1/health/live` is
+/// contracted to be a state-store-free liveness signal, so writing an audit
+/// row would defeat the purpose and stall the endpoint behind any
+/// state-store contention; `/v1/health/ready` is the canonical orchestrator
+/// poll surface (load balancers, k8s probes, Cloudflare health checks) and
+/// has the same cardinality concern as `/v1/status*`.
 fn should_skip_api_request_log(path: &str) -> bool {
-    path == "/v1/ws" || path.starts_with("/v1/status")
+    path == "/v1/ws"
+        || path == "/v1/health/live"
+        || path == "/v1/health/ready"
+        || path.starts_with("/v1/status")
 }
 
 struct ActiveRequestGuard {

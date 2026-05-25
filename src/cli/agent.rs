@@ -2015,6 +2015,7 @@ mod tests {
             step: step.to_owned(),
             version: version.map(str::to_owned),
             log_dir: None,
+            apply_run_id: None,
         }
     }
 
