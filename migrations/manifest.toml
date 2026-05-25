@@ -69,3 +69,9 @@ id = 12
 name = "init_runs"
 sqlite_file = "012_init_runs.sqlite.sql"
 postgres_file = "012_init_runs.postgres.sql"
+
+[[migration]]
+id = 13
+name = "installer_runs_apply_run_id"
+sqlite_file = "013_installer_runs_apply_run_id.sqlite.sql"
+postgres_file = "013_installer_runs_apply_run_id.postgres.sql"

@@ -33,7 +33,6 @@ impl ServerHarness {
 
     async fn spawn_with_config(mut config: Config) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let path = tempdir.path().join("state.sqlite");
         // Repoint workspace.root at the tempdir so the security-check route's
         // workspace-writability probe (Phase 4: runtime.workspace_not_writable)
         // sees a real, writable directory rather than the fixture's
@@ -46,6 +45,20 @@ impl ServerHarness {
             .to_string_lossy()
             .into_owned();
         std::fs::create_dir_all(workspace_root.join("uploads")).expect("create uploads");
+        Self::spawn_with_prepared_config(config, tempdir).await
+    }
+
+    /// Like `spawn_with_config` but does not rewrite `workspace.root`. Use this
+    /// when a test deliberately needs the workspace path to come from the
+    /// passed-in `Config` — e.g. exercising the "workspace not writable" path
+    /// in `/v1/health/ready`.
+    async fn spawn_with_unmodified_workspace(config: Config) -> Self {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        Self::spawn_with_prepared_config(config, tempdir).await
+    }
+
+    async fn spawn_with_prepared_config(config: Config, tempdir: TempDir) -> Self {
+        let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(tempdir.path(), &path);
@@ -627,6 +640,233 @@ async fn status_connections_reports_active_requests() {
         body["data"]["active_requests"].as_u64().unwrap() >= 1,
         "status request itself should be counted as active"
     );
+}
+
+#[tokio::test]
+async fn health_live_returns_200_with_server_version() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/live", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["ok"], Value::Bool(true));
+    assert!(body["data"]["server"]["version"].is_string());
+}
+
+#[tokio::test]
+async fn health_live_requires_session_tier_auth() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/live", harness.base_url))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn health_ready_returns_200_when_subsystems_are_healthy() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["failing"], serde_json::json!([]));
+    assert_eq!(body["data"]["sqlite"]["reachable"], Value::Bool(true));
+    assert_eq!(body["data"]["workspace"]["writable"], Value::Bool(true));
+    assert_eq!(body["data"]["agent"]["id"], "opencode");
+    // Default fixture has Supabase disabled; sink subsystem should still report
+    // but with `enabled=false`.
+    assert_eq!(body["data"]["sink"]["enabled"], Value::Bool(false));
+}
+
+#[tokio::test]
+async fn health_ready_returns_503_when_workspace_is_not_writable() {
+    let mut config = test_config();
+    // Point workspace at a tempdir child that we deliberately never create.
+    // The parent tempdir keeps the path host-agnostic, and skipping the
+    // mkdir forces the workspace probe into the failing branch without
+    // touching filesystem permissions.
+    let missing_workspace = tempfile::tempdir().expect("tempdir for missing workspace");
+    let missing_root = missing_workspace.path().join("never-created");
+    config.workspace.root = missing_root.to_string_lossy().into_owned();
+    config.workspace.uploads = missing_root.join("uploads").to_string_lossy().into_owned();
+    let harness = ServerHarness::spawn_with_unmodified_workspace(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("json");
+    // 503 envelope follows the api.md convention: top-level `ok` is false
+    // for failing readiness, matching the HTTP status code.
+    assert_eq!(body["ok"], Value::Bool(false));
+    assert_eq!(body["data"]["ok"], Value::Bool(false));
+    let failing = body["data"]["failing"].as_array().expect("failing array");
+    assert!(failing.iter().any(|v| v == "workspace"));
+    assert_eq!(body["data"]["workspace"]["writable"], Value::Bool(false));
+}
+
+#[tokio::test]
+async fn health_live_does_not_persist_api_request_row() {
+    // `/v1/health/live` is contracted to skip the state-store touch that
+    // every other route gets through `log_api_request`. Regression test for
+    // the Codex-audit finding that the original implementation logged each
+    // liveness probe as an `api.request` row.
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/live", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let guard = harness.state.lock().await;
+    let events = guard
+        .query_events(EventFilter {
+            limit: 100,
+            kind: Some("api.request"),
+            ..EventFilter::default()
+        })
+        .expect("query api.request events");
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.payload_json.contains("\"/v1/health/live\"")),
+        "`/v1/health/live` should not produce api.request rows, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn health_ready_does_not_persist_api_request_row() {
+    // Mirror of `health_live_does_not_persist_api_request_row`. The readiness
+    // endpoint is the canonical orchestrator poll surface (k8s probes, LBs,
+    // Cloudflare health checks), so logging an `api.request` row for each
+    // poll would dwarf real traffic — same cardinality concern as
+    // `/v1/status*`. Regression test guards the entry in the skip list.
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let guard = harness.state.lock().await;
+    let events = guard
+        .query_events(EventFilter {
+            limit: 100,
+            kind: Some("api.request"),
+            ..EventFilter::default()
+        })
+        .expect("query api.request events");
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.payload_json.contains("\"/v1/health/ready\"")),
+        "`/v1/health/ready` should not produce api.request rows, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn health_ready_marks_deps_failing_when_last_apply_failed() {
+    use acp_stack::state::InstallerRunInput;
+
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_installer_run(InstallerRunInput {
+                agent_id: "deps_apply",
+                started_at: "2026-05-25T00:00:00.000000000Z",
+                finished_at: Some("2026-05-25T00:00:01.000000000Z"),
+                status: "failed",
+                stdout: "",
+                stderr: "boom",
+                exit_status: Some(1),
+                step: "deps_apply",
+                version: None,
+                log_dir: None,
+                apply_run_id: Some("dap_api_failed"),
+            })
+            .expect("seed failed deps_apply row");
+    }
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(false));
+    let failing = body["data"]["failing"].as_array().expect("failing array");
+    assert!(failing.iter().any(|v| v == "deps"));
+    assert_eq!(body["data"]["deps"]["last_apply_status"], "failed");
+    assert_eq!(body["data"]["deps"]["last_apply_exit"], Value::from(1));
+    assert_eq!(
+        body["data"]["deps"]["last_apply_run_id"],
+        Value::from("dap_api_failed")
+    );
+}
+
+#[tokio::test]
+async fn health_ready_marks_sink_failing_when_open_failures_exist() {
+    let mut config = test_config();
+    if let Some(supabase) = config.logging.supabase.as_mut() {
+        supabase.enabled = true;
+    }
+    let harness = ServerHarness::spawn_with_config(config).await;
+    {
+        let mut guard = harness.state.lock().await;
+        guard.set_external_logging_enabled(true);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        guard
+            .append_event_with_source(
+                "info",
+                "test.seed",
+                acp_stack::state::EVENT_SOURCE_CLI,
+                "seed sink_outbox row",
+                "{}",
+            )
+            .expect("append seed event");
+        let batch = guard
+            .next_sink_outbox_batch(10, &now)
+            .expect("read outbox batch");
+        let ids: Vec<String> = batch.iter().map(|row| row.id.clone()).collect();
+        assert!(!ids.is_empty(), "seed event should enqueue an outbox row");
+        guard
+            .mark_sink_outbox_failure(&ids, "boom", &now, &now)
+            .expect("mark outbox failure");
+    }
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["ok"], Value::Bool(false));
+    let failing = body["data"]["failing"].as_array().expect("failing array");
+    assert!(failing.iter().any(|v| v == "sink"));
+    assert_eq!(body["data"]["sink"]["enabled"], Value::Bool(true));
+    assert_eq!(body["data"]["sink"]["open_failure_count"], Value::from(1));
 }
 
 #[tokio::test]
