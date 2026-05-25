@@ -58,6 +58,7 @@ fn fake_agent_config() -> AgentConfig {
         harness_version: None,
         adapter: None,
         provider: None,
+        subagent: None,
         install: Some(AgentInstallConfig {
             install_type: "shell".into(),
             creates: "true".into(),

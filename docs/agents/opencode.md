@@ -55,7 +55,11 @@ OpenCode advertises ACP mode values through `session/new`. `acps agent set --mod
 }
 ```
 
-`acps agent set` is the edit path after init. When a model is supplied, the generated config also sets OpenCode's provider-qualified model value. The provider id matters because a default secret ref is not valid for every provider. Init and provider edits validate the provider id against the provider/env mapping; model values are validated against OpenCode's ACP `model` config option.
+`acps agent set` is the main-model edit path after init. When a model is supplied, the generated config sets OpenCode's provider-qualified `model` value. `acps subagent set` is the auxiliary-model edit path and maps to OpenCode `small_model`. If no subagent config exists and the main OpenCode model exists, `acps` writes `small_model` equal to `model` so OpenCode does not fall back to its own implicit small-model choice. The provider id matters because a default secret ref is not valid for every provider. Init and provider edits validate the provider id against the provider/env mapping; model values are validated against OpenCode's ACP `model` config option.
+
+When main and subagent providers differ, generated `opencode.json` includes provider blocks for both and sets `enabled_providers` to the union of configured OpenCode provider ids.
+
+`acps subagent free` selects a known free `small_model` for OpenRouter (`openrouter/free`) or OpenCode Go/Zen (`opencode/big-pickle`). `acps subagent disable` writes `small_model = "invalid/model"` which in our testing prevents OpenCode from calling Haiku 4.5.
 
 OpenCode provider ids in the provider metadata are sourced from the OpenCode provider docs and `models.dev`.
 

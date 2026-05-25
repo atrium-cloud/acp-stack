@@ -5,13 +5,14 @@
 //! variables. Keep that mapping explicit here so "supported" means a configured
 //! agent can start headlessly after init.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, json};
 use serde_yaml::Value as YamlValue;
 use toml::{Value as TomlValue, map::Map as TomlMap};
 
-use crate::config::{AgentCustomProviderConfig, Config, CustomProviderApi};
+use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi};
 use crate::error::{Result, StackError};
 use crate::fs_util::parent_dir;
 use crate::runtime::agent::config_io::{
@@ -26,6 +27,10 @@ const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
 // completions endpoint most OpenRouter clients configure by default.
 const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1/responses";
+pub(crate) const OPENCODE_AGENT_ID: &str = "opencode";
+// OpenCode treats an empty `small_model` as unset and still falls back to its
+// implicit small model. This invalid id is the verified no-call sentinel.
+pub(crate) const OPENCODE_DISABLED_SMALL_MODEL: &str = "invalid/model";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedAgentConfig {
@@ -38,15 +43,16 @@ pub fn provision_agent_headless_config(
     home: &Path,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
     match config.agent.id.as_str() {
-        "goose" => provision_goose_config(config, home).map(|path| {
-            path.into_iter()
+        "goose" => provision_goose_config(config, home).map(|paths| {
+            paths
+                .into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "Goose config",
                     path,
                 })
                 .collect()
         }),
-        "opencode" => provision_opencode_config(config, home).map(|path| {
+        OPENCODE_AGENT_ID => provision_opencode_config(config, home).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "OpenCode config",
@@ -54,8 +60,9 @@ pub fn provision_agent_headless_config(
                 })
                 .collect()
         }),
-        "codex" => provision_codex_config(config, home).map(|path| {
-            path.into_iter()
+        "codex" => provision_codex_config(config, home).map(|paths| {
+            paths
+                .into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "Codex config",
                     path,
@@ -74,10 +81,11 @@ pub fn provision_agent_headless_config(
     }
 }
 
-fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
+fn provision_goose_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
     let path = home.join(".config").join("goose").join("config.yaml");
+    let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
-        return Ok(None);
+        return Ok(written);
     };
     let provider_id = provider.id.as_str();
     let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
@@ -102,7 +110,9 @@ fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf
             root.insert(YamlValue::String(key.to_owned()), value);
         }
         write_yaml_mapping(&path, root)?;
-        return Ok(Some(custom_provider_path));
+        written.push(path.clone());
+        written.push(custom_provider_path);
+        return Ok(written);
     }
     let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, provider_id)
     else {
@@ -162,7 +172,8 @@ fn provision_goose_config(config: &Config, home: &Path) -> Result<Option<PathBuf
     }
 
     write_yaml_mapping(&path, root)?;
-    Ok(Some(path))
+    written.push(path.clone());
+    Ok(written)
 }
 
 fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
@@ -170,51 +181,8 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
-    let provider_id = provider.id.as_str();
-    let api_key_ref = require_agent_env_for_provider(config, provider_id, &path)?;
-    if let Some(custom) = provider.custom.as_ref() {
-        let mut root = read_json_object(&path)?;
-        insert_if_missing(
-            &mut root,
-            "$schema",
-            json!("https://opencode.ai/config.json"),
-            &path,
-        )?;
-        if let Some(model) = configured_provider_model(config) {
-            root.insert("model".to_owned(), json!(model));
-        }
-        let providers = ensure_object_field(&mut root, "provider", &path)?;
-        let provider_config = ensure_object_field(providers, provider_id, &path)?;
-        provider_config.insert("npm".to_owned(), json!("@ai-sdk/openai-compatible"));
-        provider_config.insert("name".to_owned(), json!(custom.name.clone()));
-        let options = ensure_object_field(provider_config, "options", &path)?;
-        options.insert("baseURL".to_owned(), json!(custom.base_url.clone()));
-        options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
-        let models = ensure_object_field(provider_config, "models", &path)?;
-        if let Some(model) = configured_provider_model(config) {
-            models.insert(
-                model.to_owned(),
-                json!({
-                    "name": custom.model_name.as_deref().unwrap_or(model),
-                    "limit": {
-                        "context": custom.context,
-                        "output": custom.output_max_tokens
-                    }
-                }),
-            );
-        }
-        write_json_object(&path, root)?;
-        return Ok(Some(path));
-    }
-    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, provider_id)
-    else {
-        return Err(StackError::AgentConfigProvision {
-            path: path.clone(),
-            reason: format!(
-                "opencode provider `{provider_id}` has no native provider id in provider/env mapping"
-            ),
-        });
-    };
+    let subagent_disabled = configured_subagent_disabled(config);
+    let subagent_provider = configured_subagent_provider(config);
     let mut root = read_json_object(&path)?;
     insert_if_missing(
         &mut root,
@@ -230,21 +198,100 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
     match configured_provider_model(config) {
         Some(model) => {
             root.insert("model".to_owned(), json!(model));
+            let small_model = if subagent_disabled {
+                OPENCODE_DISABLED_SMALL_MODEL
+            } else {
+                configured_subagent_provider_model(config).unwrap_or(model)
+            };
+            root.insert("small_model".to_owned(), json!(small_model));
         }
         None => {
             root.remove("model");
+            if subagent_disabled {
+                root.insert(
+                    "small_model".to_owned(),
+                    json!(OPENCODE_DISABLED_SMALL_MODEL),
+                );
+            } else {
+                root.remove("small_model");
+            }
         }
     }
 
-    let provider = ensure_object_field(&mut root, "provider", &path)?;
-    let provider_config = ensure_object_field(provider, agent_provider_id, &path)?;
-    insert_if_missing(provider_config, "models", json!({}), &path)?;
-    let options = ensure_object_field(provider_config, "options", &path)?;
-    let api_key_value = json!(format!("{{env:{api_key_ref}}}"));
-    options.insert("apiKey".to_owned(), api_key_value);
+    let mut enabled_providers = BTreeSet::new();
+    let providers = ensure_object_field(&mut root, "provider", &path)?;
+    let provider_key = write_opencode_provider_config(config, providers, provider, &path)?;
+    enabled_providers.insert(provider_key);
+    if !subagent_disabled
+        && let Some(subagent_provider) = subagent_provider
+        && !same_provider_config(provider, subagent_provider)
+    {
+        let provider_key =
+            write_opencode_provider_config(config, providers, subagent_provider, &path)?;
+        enabled_providers.insert(provider_key);
+    }
+    if enabled_providers.is_empty() {
+        root.remove("enabled_providers");
+    } else {
+        root.insert(
+            "enabled_providers".to_owned(),
+            json!(enabled_providers.into_iter().collect::<Vec<_>>()),
+        );
+    }
 
     write_json_object(&path, root)?;
     Ok(Some(path))
+}
+
+fn write_opencode_provider_config(
+    config: &Config,
+    providers: &mut Map<String, serde_json::Value>,
+    provider: &AgentProviderConfig,
+    path: &Path,
+) -> Result<String> {
+    let api_key_ref = require_agent_env_for_provider_config(config, provider, &provider.id, path)?;
+    if let Some(custom) = provider.custom.as_ref() {
+        let provider_config = ensure_object_field(providers, &provider.id, path)?;
+        provider_config.insert("npm".to_owned(), json!("@ai-sdk/openai-compatible"));
+        provider_config.insert("name".to_owned(), json!(custom.name.clone()));
+        let options = ensure_object_field(provider_config, "options", path)?;
+        options.insert("baseURL".to_owned(), json!(custom.base_url.clone()));
+        options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
+        let models = ensure_object_field(provider_config, "models", path)?;
+        if let Some(model) = provider
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            models.insert(
+                model.to_owned(),
+                json!({
+                    "name": custom.model_name.as_deref().unwrap_or(model),
+                    "limit": {
+                        "context": custom.context,
+                        "output": custom.output_max_tokens
+                    }
+                }),
+            );
+        }
+        return Ok(provider.id.clone());
+    }
+
+    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, &provider.id)
+    else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!(
+                "opencode provider `{}` has no native provider id in provider/env mapping",
+                provider.id
+            ),
+        });
+    };
+    let provider_config = ensure_object_field(providers, agent_provider_id, path)?;
+    insert_if_missing(provider_config, "models", json!({}), path)?;
+    let options = ensure_object_field(provider_config, "options", path)?;
+    options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
+    Ok(agent_provider_id.to_owned())
 }
 
 fn provision_pi_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
@@ -332,7 +379,15 @@ fn write_goose_custom_provider(
     Ok(path)
 }
 
-fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
+fn provision_codex_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
+    let mut written = Vec::new();
+    if let Some(path) = provision_codex_main_config(config, home)? {
+        written.push(path);
+    }
+    Ok(written)
+}
+
+fn provision_codex_main_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
     let path = home.join(".codex").join("config.toml");
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
@@ -349,26 +404,14 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
         };
         let api_key_ref = require_agent_env_for_provider(config, &provider.id, &path)?;
         let mut root = read_toml_table(&path)?;
-        root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
-        root.insert(
-            "model_provider".to_owned(),
-            TomlValue::String(provider.id.clone()),
-        );
-        let providers = ensure_toml_table_field(&mut root, "model_providers", &path)?;
-        let custom_provider = ensure_toml_table_field(providers, &provider.id, &path)?;
-        custom_provider.insert("name".to_owned(), TomlValue::String(custom.name.clone()));
-        custom_provider.insert(
-            "base_url".to_owned(),
-            TomlValue::String(custom.base_url.clone()),
-        );
-        custom_provider.insert(
-            "env_key".to_owned(),
-            TomlValue::String(api_key_ref.to_owned()),
-        );
-        custom_provider.insert(
-            "wire_api".to_owned(),
-            TomlValue::String(custom.api.as_codex_wire_api().to_owned()),
-        );
+        write_codex_custom_provider_selection(
+            &mut root,
+            &provider.id,
+            model,
+            custom,
+            api_key_ref,
+            &path,
+        )?;
         write_toml_table(&path, root)?;
         return Ok(Some(path));
     }
@@ -451,6 +494,37 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Option<PathBuf
 
     write_toml_table(&path, root)?;
     Ok(Some(path))
+}
+
+fn write_codex_custom_provider_selection(
+    root: &mut TomlMap<String, TomlValue>,
+    provider_id: &str,
+    model: &str,
+    custom: &AgentCustomProviderConfig,
+    api_key_ref: &str,
+    path: &Path,
+) -> Result<()> {
+    root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
+    root.insert(
+        "model_provider".to_owned(),
+        TomlValue::String(provider_id.to_owned()),
+    );
+    let providers = ensure_toml_table_field(root, "model_providers", path)?;
+    let custom_provider = ensure_toml_table_field(providers, provider_id, path)?;
+    custom_provider.insert("name".to_owned(), TomlValue::String(custom.name.clone()));
+    custom_provider.insert(
+        "base_url".to_owned(),
+        TomlValue::String(custom.base_url.clone()),
+    );
+    custom_provider.insert(
+        "env_key".to_owned(),
+        TomlValue::String(api_key_ref.to_owned()),
+    );
+    custom_provider.insert(
+        "wire_api".to_owned(),
+        TomlValue::String(custom.api.as_codex_wire_api().to_owned()),
+    );
+    Ok(())
 }
 
 fn provision_codex_openai_config(config: &Config, path: &Path) -> Result<Option<PathBuf>> {
@@ -553,17 +627,57 @@ fn configured_provider_model(config: &Config) -> Option<&str> {
         .filter(|model| !model.trim().is_empty())
 }
 
+fn configured_subagent_provider(config: &Config) -> Option<&AgentProviderConfig> {
+    config
+        .agent
+        .subagent
+        .as_ref()
+        .filter(|subagent| !subagent.disabled)
+        .and_then(|subagent| subagent.provider.as_ref())
+}
+
+fn configured_subagent_disabled(config: &Config) -> bool {
+    config
+        .agent
+        .subagent
+        .as_ref()
+        .is_some_and(|subagent| subagent.disabled)
+}
+
+fn configured_subagent_provider_model(config: &Config) -> Option<&str> {
+    configured_subagent_provider(config)
+        .and_then(|provider| provider.model.as_deref())
+        .filter(|model| !model.trim().is_empty())
+}
+
+fn same_provider_config(left: &AgentProviderConfig, right: &AgentProviderConfig) -> bool {
+    left.id == right.id && left.api_key_ref == right.api_key_ref && left.custom == right.custom
+}
+
 fn require_agent_env_for_provider<'a>(
     config: &'a Config,
     provider_id: &str,
     path: &Path,
 ) -> Result<&'a str> {
-    if let Some(api_key_ref) = config
-        .agent
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.api_key_ref.as_deref())
-    {
+    let Some(provider) = config.agent.provider.as_ref() else {
+        return Err(StackError::AgentConfigProvision {
+            path: path.to_path_buf(),
+            reason: format!(
+                "{} provider `{provider_id}` requires [agent.provider].api_key_ref to generate agent config",
+                config.agent.id
+            ),
+        });
+    };
+    require_agent_env_for_provider_config(config, provider, provider_id, path)
+}
+
+fn require_agent_env_for_provider_config<'a>(
+    config: &'a Config,
+    provider: &'a AgentProviderConfig,
+    provider_id: &str,
+    path: &Path,
+) -> Result<&'a str> {
+    if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
         if config.agent.env.iter().any(|name| name == api_key_ref) {
             return Ok(api_key_ref);
         }
@@ -579,7 +693,7 @@ fn require_agent_env_for_provider<'a>(
     Err(StackError::AgentConfigProvision {
         path: path.to_path_buf(),
         reason: format!(
-            "{} provider `{provider_id}` requires [agent.provider].api_key_ref to generate agent config",
+            "{} provider `{provider_id}` requires api_key_ref to generate agent config",
             config.agent.id
         ),
     })
@@ -1059,11 +1173,57 @@ wire_api = "responses"
         )
         .expect("opencode config json parses");
         assert_eq!(value["model"], "openai/gpt-5.5");
+        assert_eq!(value["small_model"], "openai/gpt-5.5");
+        assert_eq!(value["enabled_providers"], json!(["openai"]));
         assert_eq!(
             value["provider"]["openai"]["options"]["apiKey"],
             "{env:OPENAI_API_KEY}"
         );
         assert_eq!(value["provider"]["openai"]["options"]["timeout"], 600000);
+    }
+
+    #[test]
+    fn opencode_configured_subagent_updates_small_model_and_enabled_providers() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("opencode", &["OPENAI_API_KEY", "OPENCODE_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("openai/gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+        config.agent.subagent = Some(crate::config::AgentSubagentConfig {
+            disabled: false,
+            provider: Some(crate::config::AgentProviderConfig {
+                id: "opencode-go".to_owned(),
+                model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+                api_key_ref: Some("OPENCODE_API_KEY".to_owned()),
+                custom: None,
+            }),
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
+        let value: Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("opencode config should be readable"),
+        )
+        .expect("opencode config json parses");
+        assert_eq!(value["model"], "openai/gpt-5.5");
+        assert_eq!(value["small_model"], "opencode-go/deepseek-v4-flash");
+        assert_eq!(value["enabled_providers"], json!(["openai", "opencode-go"]));
+        assert_eq!(
+            value["provider"]["openai"]["options"]["apiKey"],
+            "{env:OPENAI_API_KEY}"
+        );
+        assert_eq!(
+            value["provider"]["opencode-go"]["options"]["apiKey"],
+            "{env:OPENCODE_API_KEY}"
+        );
     }
 
     #[test]
@@ -1086,6 +1246,8 @@ wire_api = "responses"
         )
         .expect("opencode config json parses");
         assert_eq!(value["model"], "my-model");
+        assert_eq!(value["small_model"], "my-model");
+        assert_eq!(value["enabled_providers"], json!(["myprovider"]));
         assert_eq!(
             value["provider"]["myprovider"]["npm"],
             "@ai-sdk/openai-compatible"

@@ -13,6 +13,7 @@ mod security;
 mod serve;
 mod sessions;
 mod status;
+mod subagent;
 mod ws;
 
 pub use core::{Cli, run};
