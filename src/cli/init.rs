@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
-use crate::agent_installer::{InstallerOutcome, install_resolved, run_installer};
-use crate::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::auth::generate_api_key;
 use crate::config::{
     self, AgentConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
@@ -19,18 +17,20 @@ use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_file, write_new_file_owner_only,
 };
-use crate::runtime::acp_bridge::AgentSessionConfigCategory;
+use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
+use crate::runtime::agent::model_discovery::{
+    advertised_values_for_category, fetch_session_config, validate_advertised_value,
+};
+use crate::runtime::agent::provider_keys::{
+    env_refs_for_agent_id, env_var_for_agent_provider_id, provider_id_is_known,
+    provider_id_supports_agent, providers_for_agent, required_env_refs_for_provider_id,
+};
 use crate::runtime::init_runner::{
     self, StepDisposition, StepOutcome, begin_run, finalize_run, find_resumable_run, record_step,
     step_kind,
 };
-use crate::runtime::model_discovery::{
-    advertised_values_for_category, fetch_session_config, validate_advertised_value,
-};
-use crate::runtime::provider_keys::{
-    env_refs_for_agent_id, env_var_for_agent_provider_id, provider_id_is_known,
-    provider_id_supports_agent, providers_for_agent, required_env_refs_for_provider_id,
-};
+use crate::runtime::install::agent_installer::{InstallerOutcome, install_resolved, run_installer};
+use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::secrets::{SecretStore, age_key_path, secret_store_path};
 use crate::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
@@ -494,10 +494,13 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     if !args.skip_workspace_init
         || step_needs_resume(&prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
     {
-        let log_paths = crate::runtime::workspace_init::WorkspaceLogPaths::for_run(
-            &crate::runtime::workspace_init::default_workspace_init_log_base(&home),
-            &init_run.id,
-        );
+        let log_paths =
+            crate::runtime::workspace_sources::workspace_init::WorkspaceLogPaths::for_run(
+                &crate::runtime::workspace_sources::workspace_init::default_workspace_init_log_base(
+                    &home,
+                ),
+                &init_run.id,
+            );
         create_dir_owner_only(&log_paths.run_dir)?;
         // Pre-compute the log_dir path so a mid-clone failure still
         // records it on the init_steps row — otherwise the operator
@@ -512,11 +515,12 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             Some(&log_dir_str),
             || Ok(workspace_postcondition_holds(&workspace_for_verify)),
             || {
-                let report = crate::runtime::workspace_init::materialize_workspace(
-                    &config.workspace,
-                    &secret_store,
-                    Some(&log_paths),
-                )?;
+                let report =
+                    crate::runtime::workspace_sources::workspace_init::materialize_workspace(
+                        &config.workspace,
+                        &secret_store,
+                        Some(&log_paths),
+                    )?;
                 let step_log_dir = report.log_dir.as_ref().map(|p| p.display().to_string());
                 materialize_report = Some(report);
                 Ok(StepOutcome {
@@ -557,7 +561,7 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             dir_scan.extend(headless_config_side_dirs(&config.agent.id, &home));
             let dir_listings = capture_dir_listings_for(&dir_scan)?;
 
-            match crate::runtime::agent_headless_config::provision_agent_headless_config(
+            match crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
                 &config, &home,
             ) {
                 Ok(paths) => {
@@ -875,7 +879,7 @@ fn installer_postcondition_holds(
         } else {
             (config.agent.command.as_str(), vec![local_bin_dir])
         };
-    crate::runtime::agent_installer::resolve_creates_for_init_resume(
+    crate::runtime::install::agent_installer::resolve_creates_for_init_resume(
         target,
         workspace_root,
         &extra_path_dirs,
@@ -884,7 +888,8 @@ fn installer_postcondition_holds(
 }
 
 fn workspace_postcondition_holds(workspace: &crate::config::WorkspaceConfig) -> bool {
-    crate::runtime::workspace_init::all_sources_have_sentinel(workspace).unwrap_or(false)
+    crate::runtime::workspace_sources::workspace_init::all_sources_have_sentinel(workspace)
+        .unwrap_or(false)
 }
 
 fn init_complete_event_already_recorded(store: &StateStore, run_id: &str) -> bool {
@@ -1323,7 +1328,7 @@ fn configure_model_and_mode_for_init(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
     let binary_missing =
-        crate::runtime::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
+        crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
             .is_none();
     let cwd_missing = !spawn_cwd.is_dir();
     if binary_missing || cwd_missing {
@@ -1406,7 +1411,9 @@ fn configure_model_and_mode_for_init(
     dir_scan.extend(headless_config_side_dirs(&config.agent.id, home));
     let dir_listings = capture_dir_listings_for(&dir_scan)?;
     let discovery_outcome = (|| {
-        crate::runtime::agent_headless_config::provision_agent_headless_config(config, home)?;
+        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
+            config, home,
+        )?;
         let response = fetch_session_config(home, config)?;
         let mut outcome = ModelModeOutcome::default();
         // Honor the per-lane gates rather than `entry.set_*` alone:
@@ -1552,7 +1559,7 @@ fn is_known_provisioner_side_artifact(dir: &Path, name: &std::ffi::OsStr) -> boo
     };
     // Codex OpenAI backup files: `config.<provider>.toml` or
     // `config.<provider>-<n>.toml`. See `unique_codex_backup_path` in
-    // `runtime/agent_headless_config.rs`.
+    // `runtime/agent/agent_headless_config.rs`.
     if name.starts_with("config.") && name.ends_with(".toml") && name != "config.toml" {
         return true;
     }

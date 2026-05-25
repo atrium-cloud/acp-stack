@@ -23,7 +23,7 @@
 use std::path::Path;
 
 use crate::error::{Result, StackError};
-use crate::runtime::agent_installer::persist_step_logs_to_disk;
+use crate::runtime::install::agent_installer::persist_step_logs_to_disk;
 use crate::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_RUNNING, INIT_STEP_SKIPPED,
     INIT_STEP_SUCCEEDED, InitRunRecord, InitStepRecord, NewInitRun, NewInitStep, StateStore,
@@ -243,7 +243,7 @@ pub fn record_step_with_log_dir(
     log_base: Option<&Path>,
     verify: impl FnOnce() -> Result<bool>,
     body: impl FnOnce() -> Result<(
-        crate::runtime::agent_installer::InstallerRowDraft,
+        crate::runtime::install::agent_installer::InstallerRowDraft,
         StepOutcome,
     )>,
 ) -> Result<StepDisposition> {

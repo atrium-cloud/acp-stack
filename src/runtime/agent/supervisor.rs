@@ -50,14 +50,14 @@ use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::acp_bridge::{
+use crate::config::AgentConfig;
+use crate::error::{Result, StackError};
+use crate::events::EventHub;
+use crate::runtime::agent::acp_bridge::{
     AcpBridge, AgentCapabilitiesDto, AgentSessionConfigCategory, AgentSessionModelSelection,
     SessionEventSink, StateStoreSessionSink, resolve_command_path, session_config_id_for_value,
     session_model_selection_for_value,
 };
-use crate::config::AgentConfig;
-use crate::error::{Result, StackError};
-use crate::events::EventHub;
 use crate::secrets::SecretStore;
 use crate::state::{
     NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SessionRecord, StateStore,
@@ -246,7 +246,7 @@ impl AgentSupervisor {
         env: HashMap<String, String>,
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: EventHub,
-        permissions: Option<crate::permissions::PermissionService>,
+        permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     ) -> Result<AgentCapabilitiesDto> {
         // First lock: atomically transition Stopped -> Starting. Refusing
         // any other start under the same lock prevents concurrent spawns.
@@ -298,7 +298,7 @@ impl AgentSupervisor {
         env: HashMap<String, String>,
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: EventHub,
-        permissions: Option<crate::permissions::PermissionService>,
+        permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
         let cwd = resolve_agent_cwd(agent, workspace_root);
 

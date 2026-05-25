@@ -45,7 +45,9 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::permissions::{NewPermission, PermissionOutcome, PermissionService, PermissionSource};
+use crate::runtime::mediation::permissions::{
+    NewPermission, PermissionOutcome, PermissionService, PermissionSource,
+};
 use crate::state::StateStore;
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
@@ -1266,7 +1268,7 @@ fn command_search_paths() -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::config::PermissionTimeoutAction;
-    use crate::permissions::PermissionService;
+    use crate::runtime::mediation::permissions::PermissionService;
     use crate::state::StateStore;
     use agent_client_protocol::schema::{
         PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionRequest,

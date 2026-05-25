@@ -25,8 +25,8 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 
 use acp_stack::config::AgentConfig;
-use acp_stack::runtime::agent_installer::install_resolved_capture;
-use acp_stack::runtime::agent_registry::{
+use acp_stack::runtime::install::agent_installer::install_resolved_capture;
+use acp_stack::runtime::install::agent_registry::{
     AdapterSpec, ArchMap, ArchiveKind, GithubInstall, HarnessSpec, InstallSet, RegistryEntry,
     RegistryKind, RegistryStdioFraming,
 };
@@ -298,8 +298,13 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         .outcome
         .expect("two-step install against the mock should succeed");
     match outcome {
-        acp_stack::runtime::agent_installer::InstallerOutcome::Installed { path, .. }
-        | acp_stack::runtime::agent_installer::InstallerOutcome::AlreadyPresent { path, .. } => {
+        acp_stack::runtime::install::agent_installer::InstallerOutcome::Installed {
+            path, ..
+        }
+        | acp_stack::runtime::install::agent_installer::InstallerOutcome::AlreadyPresent {
+            path,
+            ..
+        } => {
             assert_eq!(
                 path.file_name().and_then(|n| n.to_str()),
                 Some(ADAPTER_BIN),

@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::api::AppState;
 use crate::error::Result;
 use crate::ownership;
-use crate::runtime::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
+use crate::runtime::dependencies::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
 use crate::state::{InstallerRun, StateStore};
 
 // Threshold above which the sink subsystem is reported as failing. The sink
@@ -30,7 +30,7 @@ use crate::state::{InstallerRun, StateStore};
 const SINK_FAILURE_FAIL_THRESHOLD: i64 = 1;
 
 // `installer_runs.status` values written by `acps deps apply` (mirroring
-// `runtime/deps_apply.rs::DepApplyOutcome::status_label`). Rows tagged
+// `runtime/dependencies/deps_apply.rs::DepApplyOutcome::status_label`). Rows tagged
 // `installed` or `skipped` are healthy; `failed` and `privilege_required`
 // mean the last apply attempt did not deliver the dependency. Made `pub`
 // so `cli::status` can apply the same cluster heuristic with identical
@@ -49,7 +49,7 @@ pub const DEPS_RECENT_ROW_LIMIT: u32 = 50;
 // same `acps deps apply` invocation. Used to aggregate per-dep rows into a
 // single "most recent apply session" signal, since the schema does not
 // persist an apply-run id. The window must cover the worst-case per-step
-// runtime: `runtime/deps_apply.rs::DEFAULT_TIMEOUT` is 10 minutes, so a dep
+// runtime: `runtime/dependencies/deps_apply.rs::DEFAULT_TIMEOUT` is 10 minutes, so a dep
 // can plausibly take that long before its successor's row appears. 15
 // minutes leaves slack on top of that without aliasing two distinct
 // operator invocations into a single cluster.
@@ -525,7 +525,7 @@ mod tests {
         // Apply 1 fails at t=0. Operator fixes the dep and re-applies at
         // t=30min — outside the 15-minute cluster window, so the older
         // failed row should not taint the healthy retry. Window covers the
-        // 10-min worst-case per-step timeout in `runtime/deps_apply.rs`.
+        // 10-min worst-case per-step timeout in `runtime/dependencies/deps_apply.rs`.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
         store.migrate().expect("migrate");

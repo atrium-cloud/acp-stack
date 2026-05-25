@@ -23,7 +23,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Result, StackError};
-use crate::runtime::agent_registry::ArchiveKind;
+use crate::runtime::install::agent_registry::ArchiveKind;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);

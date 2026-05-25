@@ -14,7 +14,7 @@ use toml::{Value as TomlValue, map::Map as TomlMap};
 use crate::config::{AgentCustomProviderConfig, Config, CustomProviderApi};
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, create_dir_owner_only, parent_dir};
-use crate::runtime::provider_keys::{
+use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_var_for_agent_provider_id, provider_name_for_provider_id,
 };
 

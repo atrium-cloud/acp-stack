@@ -524,7 +524,7 @@ fn hydrate_agent_lifecycle(conn: &Connection, id: &str) -> Result<Option<Map<Str
 }
 
 /// Public-facing surface for the Supabase sink worker. Keeps `Connection`
-/// out of `runtime::supabase_sink` so the worker depends only on the typed
+/// out of `runtime::logging::supabase_sink` so the worker depends only on the typed
 /// state API.
 impl StateStore {
     pub fn next_sink_outbox_batch(&self, limit: usize, now: &str) -> Result<Vec<OutboxRow>> {

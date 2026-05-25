@@ -30,7 +30,9 @@ use tokio::time::{Instant, sleep, timeout};
 use crate::config::{Config, PermissionsConfig, parse_duration_string};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::permissions::{NewPermission, PermissionOutcome, PermissionService, PermissionSource};
+use crate::runtime::mediation::permissions::{
+    NewPermission, PermissionOutcome, PermissionService, PermissionSource,
+};
 use crate::state::{CommandRecord, CommandStatus, NewCommandRecord, StateStore};
 
 /// Inputs for `CommandGateway::submit`. Mirror the HTTP request body shape

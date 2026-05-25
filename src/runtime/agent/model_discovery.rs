@@ -23,7 +23,7 @@ use agent_client_protocol::schema::{NewSessionResponse, SessionConfigOption};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::runtime::acp_bridge::{
+use crate::runtime::agent::acp_bridge::{
     AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
     session_config_values, session_model_selection_for_value, session_model_values,
 };

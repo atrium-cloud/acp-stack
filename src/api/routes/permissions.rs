@@ -9,7 +9,7 @@ use crate::error::StackError;
 
 #[derive(Serialize)]
 pub(crate) struct PermissionsListResponse {
-    permissions: Vec<crate::permissions::PermissionRequestView>,
+    permissions: Vec<crate::runtime::mediation::permissions::PermissionRequestView>,
 }
 
 #[derive(Deserialize, Default)]
@@ -37,7 +37,10 @@ pub(crate) async fn permissions_pending_handler(
 pub(crate) async fn permissions_get_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
-) -> std::result::Result<ApiSuccess<crate::permissions::PermissionRequestView>, StackError> {
+) -> std::result::Result<
+    ApiSuccess<crate::runtime::mediation::permissions::PermissionRequestView>,
+    StackError,
+> {
     let view = state.permissions.get(&id).await?;
     Ok(ApiSuccess::new(view))
 }
@@ -46,7 +49,10 @@ pub(crate) async fn permissions_approve_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
     body: Option<Json<PermissionApproveBody>>,
-) -> std::result::Result<ApiSuccess<crate::permissions::PermissionDecisionView>, StackError> {
+) -> std::result::Result<
+    ApiSuccess<crate::runtime::mediation::permissions::PermissionDecisionView>,
+    StackError,
+> {
     let Json(body) = body.unwrap_or_default();
     // The deciding principal is the bearer-token tier. These routes are
     // session-tier (per docs/specs/security.md:20); the principal is always
@@ -64,7 +70,10 @@ pub(crate) async fn permissions_deny_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
     body: Option<Json<PermissionDenyBody>>,
-) -> std::result::Result<ApiSuccess<crate::permissions::PermissionDecisionView>, StackError> {
+) -> std::result::Result<
+    ApiSuccess<crate::runtime::mediation::permissions::PermissionDecisionView>,
+    StackError,
+> {
     let Json(body) = body.unwrap_or_default();
     // Hardcoded "session-key" mirrors `permissions_approve_handler`; see the
     // rationale comment there.

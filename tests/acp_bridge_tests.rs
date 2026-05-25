@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use acp_stack::acp_bridge::{AcpBridge, SessionEventSink};
 use acp_stack::config::{AgentConfig, AgentInstallConfig, AgentProviderConfig};
+use acp_stack::runtime::agent::acp_bridge::{AcpBridge, SessionEventSink};
 
 #[derive(Default)]
 struct CapturedEvent {

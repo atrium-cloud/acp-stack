@@ -81,13 +81,13 @@ use super::routes::ws::{
 };
 use super::ws::ws_handler;
 use crate::auth::KeyKind;
-use crate::commands::CommandGateway;
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
-use crate::permissions::PermissionService;
+use crate::runtime::agent::supervisor::AgentSupervisor;
+use crate::runtime::mediation::commands::CommandGateway;
+use crate::runtime::mediation::permissions::PermissionService;
 use crate::state::StateStore;
-use crate::supervisor::AgentSupervisor;
 
 /// Shared handler/middleware state. Cheap to clone (Arc-only inside).
 #[derive(Clone)]
@@ -255,10 +255,12 @@ impl AppState {
     }
 }
 
-fn load_active_registry() -> Result<crate::agent_registry::RegistryCatalog> {
+fn load_active_registry() -> Result<crate::runtime::install::agent_registry::RegistryCatalog> {
     match operator_registry_override_path() {
-        Some(path) => crate::agent_registry::RegistryCatalog::load_with_override(&path),
-        None => crate::agent_registry::RegistryCatalog::load_embedded(),
+        Some(path) => {
+            crate::runtime::install::agent_registry::RegistryCatalog::load_with_override(&path)
+        }
+        None => crate::runtime::install::agent_registry::RegistryCatalog::load_embedded(),
     }
 }
 
@@ -274,10 +276,13 @@ fn registry_override_path(home: &Path) -> PathBuf {
 
 fn populate_agent_adapter_from_registry(
     config: &mut Config,
-    registry: &crate::agent_registry::RegistryCatalog,
+    registry: &crate::runtime::install::agent_registry::RegistryCatalog,
 ) {
     if let Some(entry) = registry.lookup(&config.agent.id)
-        && matches!(entry.kind, crate::agent_registry::RegistryKind::Adapter)
+        && matches!(
+            entry.kind,
+            crate::runtime::install::agent_registry::RegistryKind::Adapter
+        )
         && let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter)
     {
         config.agent.adapter = Some(crate::config::AgentAdapterConfig {
@@ -285,8 +290,12 @@ fn populate_agent_adapter_from_registry(
             name: entry.name.clone(),
             upstream_agent: harness.id.clone(),
             source_url: adapter.github.as_deref().and_then(|github| {
-                crate::agent_registry::github_url_from_value(&entry.id, "adapter.github", github)
-                    .ok()
+                crate::runtime::install::agent_registry::github_url_from_value(
+                    &entry.id,
+                    "adapter.github",
+                    github,
+                )
+                .ok()
             }),
         });
     }
@@ -520,7 +529,7 @@ mod tests {
             "../../tests/fixtures/valid-acp-stack.toml"
         ))
         .expect("fixture parses");
-        let registry = crate::agent_registry::RegistryCatalog::from_toml(
+        let registry = crate::runtime::install::agent_registry::RegistryCatalog::from_toml(
             r#"
 [[agents]]
 id = "opencode"

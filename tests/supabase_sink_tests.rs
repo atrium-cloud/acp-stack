@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use acp_stack::config::SupabaseLoggingConfig;
 use acp_stack::events::EventHub;
-use acp_stack::runtime::supabase_sink::SupabaseSink;
+use acp_stack::runtime::logging::supabase_sink::SupabaseSink;
 use acp_stack::state::{NewSessionRecord, StateStore};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

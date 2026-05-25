@@ -1,7 +1,3 @@
-use crate::agent_installer::{
-    STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, install_resolved, run_installer,
-};
-use crate::agent_registry::RegistryCatalog;
 use crate::config::{
     self, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
@@ -11,18 +7,22 @@ use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
     set_owner_only_file,
 };
-use crate::runtime::acp_bridge::{
+use crate::runtime::agent::acp_bridge::{
     AcpBridge, AgentSessionConfigCategory, AgentSessionModelSelection, SessionEventSink,
     session_config_id_for_value, session_config_values, session_model_selection_for_value,
     session_model_values,
 };
-use crate::runtime::agent_headless_config::provision_agent_headless_config;
-use crate::runtime::agent_registry::{RegistryEntry, RegistryKind};
-use crate::runtime::provider_keys::{
+use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
     optional_env_refs_for_provider_id, provider_id_is_known, provider_id_supports_agent,
     required_env_refs_for_provider_id,
 };
+use crate::runtime::install::agent_installer::{
+    STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, install_resolved, run_installer,
+};
+use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::runtime::install::agent_registry::{RegistryEntry, RegistryKind};
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 use agent_client_protocol::schema::{ContentBlock, PromptRequest, StopReason, TextContent};
@@ -1575,10 +1575,10 @@ struct LiveLatestVersionResolver;
 
 impl LatestVersionResolver for LiveLatestVersionResolver {
     fn npm(&self, package: &str) -> Result<String> {
-        crate::runtime::npm_registry::latest_version(package)
+        crate::runtime::install::npm_registry::latest_version(package)
     }
     fn github(&self, repo: &str) -> Result<String> {
-        crate::runtime::github_release::latest_release_tag(repo)
+        crate::runtime::install::github_release::latest_release_tag(repo)
     }
 }
 
@@ -1616,8 +1616,9 @@ fn resolve_upstream_version_for_step(
         let Some(github_url) = github_url else {
             return Ok(None);
         };
-        let repo =
-            crate::runtime::agent_registry::github_repo_from_url(&entry.id, "github", github_url)?;
+        let repo = crate::runtime::install::agent_registry::github_repo_from_url(
+            &entry.id, "github", github_url,
+        )?;
         return resolver.github(&repo).map(Some);
     }
     // Shell-recipe installs have no machine-checkable upstream; let the caller
@@ -1797,7 +1798,7 @@ fn run_agent_status() -> Result<()> {
     match store.latest_agent_capabilities(&config.agent.id)? {
         Some(record) => {
             if let Ok(capabilities) = serde_json::from_str::<
-                crate::runtime::acp_bridge::AgentCapabilitiesDto,
+                crate::runtime::agent::acp_bridge::AgentCapabilitiesDto,
             >(&record.capabilities_json)
             {
                 println!("ACP version: {}", capabilities.protocol_version);
@@ -2047,7 +2048,7 @@ mod tests {
     }
 
     fn embedded_entry(id: &str) -> RegistryEntry {
-        crate::agent_registry::RegistryCatalog::load_embedded()
+        crate::runtime::install::agent_registry::RegistryCatalog::load_embedded()
             .expect("registry embeds")
             .lookup(id)
             .expect("entry exists")

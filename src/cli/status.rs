@@ -8,7 +8,7 @@ use crate::fs_util::{
     set_owner_only_file,
 };
 use crate::ownership;
-use crate::runtime::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
+use crate::runtime::dependencies::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
 use crate::runtime::health::{
     DEPS_RECENT_ROW_LIMIT, deps_cluster_has_failure_for_latest, deps_status_is_failure,
 };

@@ -7,8 +7,8 @@ use super::agent::open_mcp_servers;
 use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
+use crate::runtime::agent::supervisor::parse_prompt_blocks;
 use crate::state::{PromptRecord, SessionRecord};
-use crate::supervisor::parse_prompt_blocks;
 
 #[derive(Serialize)]
 pub(crate) struct SessionResponse {
@@ -82,7 +82,7 @@ pub(crate) async fn sessions_create_handler(
     let Json(payload) = body.unwrap_or_default();
     let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::mcp::server_names(&mcp_servers);
+    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
     // Read the agent block from the live cache instead of the cached
     // `state.config.agent`. After `POST /v1/agent/restart` updates
     // the cache, this is how subsequent session creates see the new
@@ -134,7 +134,7 @@ pub(crate) async fn sessions_load_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::mcp::server_names(&mcp_servers);
+    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
     let record = state
         .agent_supervisor
         .load_session(
@@ -160,7 +160,7 @@ pub(crate) async fn sessions_resume_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::mcp::server_names(&mcp_servers);
+    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
     let record = state
         .agent_supervisor
         .resume_session(

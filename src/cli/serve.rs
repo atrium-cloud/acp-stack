@@ -5,10 +5,10 @@ use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
     set_owner_only_file,
 };
-use crate::runtime::supabase_sink::SupabaseSink;
+use crate::runtime::agent::supervisor::ServerLifecycle;
+use crate::runtime::logging::supabase_sink::SupabaseSink;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
-use crate::supervisor::ServerLifecycle;
 use clap::Args;
 
 #[derive(Debug, Args)]

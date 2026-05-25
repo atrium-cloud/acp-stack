@@ -43,10 +43,10 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{AgentConfig, AgentInstallConfig};
 use crate::error::{Result, StackError};
-use crate::runtime::agent_registry::{
+use crate::runtime::install::agent_registry::{
     ArchiveKind, GithubInstall, InstallSet, RegistryEntry, RegistryKind, github_repo_from_url,
 };
-use crate::runtime::github_release::{self, GithubReleaseInstall};
+use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::state::{INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore};
 
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -1530,7 +1530,7 @@ fn tail_bytes(input: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_registry::{AdapterSpec, HarnessSpec, ShellInstall};
+    use crate::runtime::install::agent_registry::{AdapterSpec, HarnessSpec, ShellInstall};
     use crate::state::StateStore;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
@@ -1704,7 +1704,7 @@ mod tests {
     #[test]
     fn select_install_path_captures_pinned_npm_version() {
         let install = InstallSet {
-            npm: Some(crate::agent_registry::NpmInstall {
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@scope/agent".to_owned(),
                 creates: "agent".to_owned(),
             }),
@@ -1730,7 +1730,7 @@ mod tests {
     #[test]
     fn select_install_path_unpinned_npm_has_no_version() {
         let install = InstallSet {
-            npm: Some(crate::agent_registry::NpmInstall {
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@scope/agent".to_owned(),
                 creates: "agent".to_owned(),
             }),
@@ -1781,7 +1781,7 @@ exit 99
 "#,
         );
         let install = InstallSet {
-            npm: Some(crate::agent_registry::NpmInstall {
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@scope/agent".to_owned(),
                 creates: "agent".to_owned(),
             }),
@@ -1825,7 +1825,7 @@ exit 99
 "#,
         );
         let install = InstallSet {
-            npm: Some(crate::agent_registry::NpmInstall {
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@scope/agent".to_owned(),
                 creates: "agent".to_owned(),
             }),
@@ -1873,7 +1873,7 @@ exit 99
 "#,
         );
         let install = InstallSet {
-            npm: Some(crate::agent_registry::NpmInstall {
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@scope/agent".to_owned(),
                 creates: "agent".to_owned(),
             }),
@@ -1923,7 +1923,7 @@ exit 99
                 script: "exit 1".to_owned(),
                 creates: "fallback-agent".to_owned(),
             }),
-            npm: Some(crate::runtime::agent_registry::NpmInstall {
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@acp-stack/definitely-not-published".to_owned(),
                 creates: "fallback-agent".to_owned(),
             }),

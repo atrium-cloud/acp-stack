@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use acp_stack::agent_registry::RegistryCatalog;
+use acp_stack::runtime::install::agent_registry::RegistryCatalog;
 
 const UPSTREAM_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

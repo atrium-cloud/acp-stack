@@ -5,24 +5,24 @@ use serde::Deserialize;
 use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::runtime::deps_apply::{
+use crate::runtime::dependencies::deps_apply::{
     DepsApplyReport, apply_dependencies, candidate_summary_line, candidates_for,
 };
 
 pub(crate) async fn deps_get_handler(
     State(state): State<AppState>,
-) -> std::result::Result<ApiSuccess<crate::deps::DepsReport>, StackError> {
-    Ok(ApiSuccess::new(crate::deps::check_dependencies(
-        &state.config,
-    )))
+) -> std::result::Result<ApiSuccess<crate::runtime::dependencies::deps::DepsReport>, StackError> {
+    Ok(ApiSuccess::new(
+        crate::runtime::dependencies::deps::check_dependencies(&state.config),
+    ))
 }
 
 pub(crate) async fn deps_check_handler(
     State(state): State<AppState>,
-) -> std::result::Result<ApiSuccess<crate::deps::DepsReport>, StackError> {
-    Ok(ApiSuccess::new(crate::deps::check_dependencies(
-        &state.config,
-    )))
+) -> std::result::Result<ApiSuccess<crate::runtime::dependencies::deps::DepsReport>, StackError> {
+    Ok(ApiSuccess::new(
+        crate::runtime::dependencies::deps::check_dependencies(&state.config),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
