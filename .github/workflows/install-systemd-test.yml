@@ -1,11 +1,11 @@
-name: install-systemd-smoke
+name: install-systemd-test
 
 on:
   push:
     branches: [main]
     paths:
       - scripts/install-systemd.sh
-      - scripts/install-systemd-smoke.sh
+      - scripts/install-systemd-test.sh
       - packaging/systemd/**
       - Dockerfile
       - Cargo.toml
@@ -15,11 +15,11 @@ on:
       - src/cli/init.rs
       - src/config.rs
       - src/main.rs
-      - .github/workflows/install-systemd-smoke.yml
+      - .github/workflows/install-systemd-test.yml
   pull_request:
     paths:
       - scripts/install-systemd.sh
-      - scripts/install-systemd-smoke.sh
+      - scripts/install-systemd-test.sh
       - packaging/systemd/**
       - Dockerfile
       - Cargo.toml
@@ -29,14 +29,14 @@ on:
       - src/cli/init.rs
       - src/config.rs
       - src/main.rs
-      - .github/workflows/install-systemd-smoke.yml
+      - .github/workflows/install-systemd-test.yml
 
 concurrency:
-  group: install-systemd-smoke-${{ github.ref }}
+  group: install-systemd-test-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  smoke:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -55,25 +55,25 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --bin acps --bin acpctl --locked
 
-      - name: Run install-systemd-smoke.sh
+      - name: Run install-systemd-test.sh
         env:
           ACP_STACK_SKIP_BUILD: '1'
-        run: bash scripts/install-systemd-smoke.sh
+        run: bash scripts/install-systemd-test.sh
 
       - name: Capture journal on failure
         if: failure()
         run: |
-          container="$(docker ps --filter name=acp-stack-systemd-smoke- --format '{{.Names}}' | head -n1)"
+          container="$(docker ps --filter name=acp-stack-systemd-test- --format '{{.Names}}' | head -n1)"
           if [[ -n "${container}" ]]; then
-            mkdir -p smoke-logs
-            docker exec "${container}" systemctl status acp-stack.service --no-pager >smoke-logs/status.txt 2>&1 || true
-            docker exec "${container}" journalctl -u acp-stack.service --no-pager >smoke-logs/journal.txt 2>&1 || true
+            mkdir -p test-logs
+            docker exec "${container}" systemctl status acp-stack.service --no-pager >test-logs/status.txt 2>&1 || true
+            docker exec "${container}" journalctl -u acp-stack.service --no-pager >test-logs/journal.txt 2>&1 || true
           fi
 
       - name: Upload diagnostic logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: install-systemd-smoke-logs
-          path: smoke-logs
+          name: install-systemd-test-logs
+          path: test-logs
           if-no-files-found: ignore
