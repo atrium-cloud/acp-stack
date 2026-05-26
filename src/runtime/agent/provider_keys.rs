@@ -343,6 +343,24 @@ pub fn env_var_for_agent_provider_id(agent_id: &str, provider_id: &str) -> Optio
     })
 }
 
+pub fn api_key_ref_can_migrate_for_provider(
+    provider_id: &str,
+    from_ref: &str,
+    to_ref: &str,
+) -> bool {
+    let mapping = ProviderKeyMapping::load_embedded();
+    let Some(provider) = mapping.provider_mapping(provider_id) else {
+        return false;
+    };
+
+    let mut refs = BTreeSet::new();
+    if let Some(key_mapping) = mapping.mapping_for_provider_id(provider_id) {
+        refs.insert(key_mapping.env_var.as_str());
+    }
+    refs.extend(provider.api_key_env_vars.values().map(String::as_str));
+    refs.contains(from_ref) && refs.contains(to_ref)
+}
+
 pub fn env_refs_for_agent_id(agent_id: &str) -> Vec<&'static str> {
     ProviderKeyMapping::load_embedded()
         .api_keys
