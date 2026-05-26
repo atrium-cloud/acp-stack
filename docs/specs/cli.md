@@ -11,7 +11,7 @@
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
 | Agents         | `acps agent install`, `start`, `stop`, `restart`, `status`, `check`, `test` |
-| Provider/model | `acps agent set`, `acps subagent status/set/free/disable`                   |
+| Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
 | Sessions       | `acps sessions list/status/new/prompt/cancel/close`                         |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `installer history`      |
@@ -79,7 +79,7 @@ acps agent set --mode <mode>
 
 Mapped model and mode values are validated against the configured agent's ACP-advertised options. Custom-provider model ids are accepted as supplied. When a change requires the supervised process to reload agent-owned config, the CLI prints a restart hint.
 
-`acps subagent *` is OpenCode-only and manages the OpenCode small-model lane.
+`acps subagent *` is OpenCode-only and manages the OpenCode small-model lane. `acps subagent match` makes `small_model` follow the main agent model.
 
 `acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information. `acps agent check` reports whether managed install steps are present and current.
 

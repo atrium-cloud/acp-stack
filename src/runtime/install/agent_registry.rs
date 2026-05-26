@@ -183,6 +183,12 @@ pub struct RegistryEntry {
     pub subagents: bool,
     #[serde(default)]
     pub subagent_alias: Option<String>,
+    /// Free auxiliary/subagent models exposed via `acps subagent free`. Order
+    /// is significant for env-fallback resolution: the first entry whose
+    /// canonical env ref is present in `[agent].env` wins when no provider id
+    /// or main api_key_ref directly matches.
+    #[serde(default)]
+    pub subagent_free_models: Vec<SubagentFreeModel>,
     #[serde(default)]
     pub stdio_framing: RegistryStdioFraming,
     #[serde(default)]
@@ -227,6 +233,13 @@ impl RegistryEntry {
 pub enum RegistryKind {
     Native,
     Adapter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentFreeModel {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
