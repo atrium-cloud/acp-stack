@@ -14,10 +14,13 @@ acps agent set --mode <mode>
 OpenCode also supports:
 
 ```sh
-acps subagent set --provider <provider-id> --model <model> [--api-key-ref <ref>]
+acps subagent set --model <model> [--provider <provider-id>] [--api-key-ref <ref>]
+acps subagent match
 acps subagent free
 acps subagent disable
 ```
+
+`acps subagent set` inherits `--provider` (and the matching `--api-key-ref`) from the main agent provider when omitted. `acps subagent free` takes no flags; it routes to `openrouter/free` or `opencode/big-pickle` based on the configured main provider or env, and errors with "Current provider does not support free." otherwise.
 
 ## Config Shape
 
@@ -44,6 +47,8 @@ id = "<provider-id>"
 model = "<agent-model-id>"
 api_key_ref = "<provider-api-key-ref>"
 ```
+
+`acps subagent match` clears any explicit subagent provider/model so OpenCode `small_model` follows the main agent model.
 
 ## Validation
 
