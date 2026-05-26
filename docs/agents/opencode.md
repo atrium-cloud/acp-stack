@@ -1,31 +1,20 @@
-# OpenCode Headless Support
+# OpenCode
 
-OpenCode is a native ACP target for `acp-stack`. This contract documents the non-interactive setup path used when the embedded registry advertises `headless_compatible = true`.
+OpenCode is a native ACP target. `acp-stack` launches `opencode acp`.
 
-## Sources
+## Setup
 
-- OpenCode provider docs: https://opencode.ai/docs/providers/
-- OpenCode config docs: https://opencode.ai/docs/config/
-- OpenCode repository: https://github.com/anomalyco/opencode
+```sh
+acps init --agent opencode
+acps secrets set <provider-api-key-ref>
+acps agent set --provider <provider-id> --model <provider/model-id>
+```
 
-The provider and config docs were checked on 2026-05-17. They document provider configuration through `opencode.json`, environment-variable interpolation with `{env:VARIABLE_NAME}`, and provider `options.apiKey` for direct API-key configuration.
-
-## Install
-
-OpenCode is treated as a native ACP peer. No separate adapter is required for this entry.
-
-The official bootstrap respects `XDG_BIN_DIR`; `acp-stack` sets it to `$HOME/.local/bin` so runtime-managed install verification and later agent launch resolve the same command without relying on shell startup-file PATH edits. The script also passes `--no-modify-path` because the runtime controls launch PATH explicitly.
-
-Install path metadata is maintained in `data/agents.toml`.
-
-## ACP Launch
-
-Recommended `acp-stack` agent config shape:
+Agent config shape:
 
 ```toml
 [agent]
 id = "opencode"
-name = "OpenCode"
 command = "opencode"
 args = ["acp"]
 cwd = "/workspace"
@@ -33,48 +22,40 @@ env = ["<provider-api-key-ref>"]
 restart = "on-crash"
 ```
 
-The runtime launches `opencode acp` with `cwd` set to the configured agent cwd or `workspace.root`. Only variables listed in `[agent].env` are injected from the encrypted `acp-stack` secret store. The env refs must match the selected provider.
+OpenCode reads provider config from `~/.config/opencode/opencode.json`. `acps agent set` writes that file with the selected provider, model, API-key env reference, and enabled provider list.
 
-OpenCode advertises ACP mode values through `session/new`. `acps agent set --mode <mode>` validates against that list; the current real ACP probe returned `build` and `plan`.
+OpenCode mode can be set with:
 
-## Auth And Provider Setup
-
-`acps init` may create or merge `~/.config/opencode/opencode.json` after provider selection. Without a model, the generated config binds the selected provider config to the configured env ref and leaves the model unset:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "<provider>": {
-      "models": {},
-      "options": {
-        "apiKey": "{env:<provider-api-key-ref>}"
-      }
-    }
-  }
-}
+```sh
+acps agent set --mode <build|plan>
 ```
 
-`acps agent set` is the main-model edit path after init. When a model is supplied, the generated config sets OpenCode's provider-qualified `model` value. `acps subagent set` is the auxiliary-model edit path and maps to OpenCode `small_model`. If no subagent config exists and the main OpenCode model exists, `acps` writes `small_model` equal to `model` so OpenCode does not fall back to its own implicit small-model choice. The provider id matters because a default secret ref is not valid for every provider. Init and provider edits validate the provider id against the provider/env mapping; model values are validated against OpenCode's ACP `model` config option.
+### Cloudflare Providers
 
-When main and subagent providers differ, generated `opencode.json` includes provider blocks for both and sets `enabled_providers` to the union of configured OpenCode provider ids.
+Cloudflare providers require companion env refs alongside the main API key. Set each one with `acps secrets set` before running `acps agent set --provider`.
 
-`acps subagent free` selects a known free `small_model` for OpenRouter (`openrouter/free`) or OpenCode Go/Zen (`opencode/big-pickle`). `acps subagent disable` writes `small_model = "invalid/model"` which in our testing prevents OpenCode from calling Haiku 4.5.
+| Provider id             | Required env refs                                                        |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `cloudflare-workers-ai` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`                            |
+| `cloudflare-ai-gateway` | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
 
-OpenCode provider ids in the provider metadata are sourced from the OpenCode provider docs and `models.dev`.
+## Subagent Model
 
-Cloudflare provider setup requires additional env refs from the mapping:
+OpenCode can call a `small_model` for background tasks such as title generation.
+It has been reported that OpenCode can call Anthropic Claude Haiku 4.5 when using `OPENROUTER_API_KEY` for auth even when the main model is not Haiku 4.5.
+- We have reproduced this behavior using an `OPENROUTER_API_KEY`.
+- GitHub issue [Openrouter unwated requests to Claude Haiku 4.5. #4579](https://github.com/anomalyco/opencode/issues/4579) remains open as of May 26, 2026.
+- GitHub PR [fix(provider): treat empty small_model as disabled #21184](https://github.com/anomalyco/opencode/pull/21184) has not been merged as of May 26, 2026.
 
-| Provider id                 | Required env refs                                                        |
-| --------------------------- | ------------------------------------------------------------------------ |
-| `cloudflare-workers-ai`     | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`                            |
-| `cloudflare-ai-gateway`     | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
+To make this more easily configurable, you can run `acps subagent *` commands to configure `small_model` directly or disable it:
 
-## Unsupported Auth Paths
+```sh
+acps subagent status
+acps subagent set --provider <provider-id> --model <provider/model-id>
+acps subagent free
+acps subagent disable
+```
 
-The following are not supported by the `acp-stack` headless contract:
+`acps subagent free` selects `openrouter/free` if using `OPENROUTER_API_KEY` or `opencode/big-pickle` if using `OPENCODE_API_KEY`.
 
-- `/connect` flows that require the OpenCode TUI.
-- Browser OAuth or account-cookie based login.
-- Passing browser session cookies through `acp-stack` secrets.
-- Agents that require interactive model selection before ACP startup.
+When no subagent model is configured, OpenCode configured through `acp-stack` defaults to inheriting the main model for the small model.

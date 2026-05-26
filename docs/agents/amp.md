@@ -1,28 +1,19 @@
-# Amp Code Headless Support
+# Amp Code
 
-Amp Code is an adapter-backed target for `acp-stack`. The upstream harness is the Amp CLI; the ACP-facing process is `amp-acp`.
+Amp Code is adapter-backed. `acp-stack` launches `amp-acp`, which launches the Amp CLI through the adapter.
 
-## Sources
+## Setup
 
-- Amp manual: https://ampcode.com/manual
-- Amp SDK docs: https://ampcode.com/manual/sdk
-- Amp npm package changes: https://ampcode.com/news/npm-package-changes
-- `amp-acp` repository: https://github.com/finn-lyu/amp-acp
+```sh
+acps init --agent amp
+acps secrets set AMP_API_KEY
+```
 
-The Amp docs were checked on 2026-05-20. They document installation with `curl -fsSL https://ampcode.com/install.sh | bash`, API-key auth through `AMP_API_KEY`, and smart/rush/deep as available CLI modes. The current ACP bridge is a fork built on the official `@ampcode/sdk`.
-
-## Install
-
-The harness step installs the official Amp CLI. The adapter step downloads the prebuilt `amp-acp` release binary into the runtime-managed `$HOME/.local/bin` directory that `acps agent install` verifies. Install path metadata is maintained in `data/agents.toml`.
-
-## ACP Launch
-
-Recommended `acp-stack` agent config:
+Agent config shape:
 
 ```toml
 [agent]
 id = "amp"
-name = "Amp Code"
 command = "amp-acp"
 args = []
 cwd = "/workspace"
@@ -30,17 +21,10 @@ env = ["AMP_API_KEY"]
 restart = "on-crash"
 ```
 
-Runtime secret refs are defined by the shared provider/env mapping and summarized in `docs/specs/agents/api_key.md`.
+Amp does not expose raw provider/model selection through the current `acp-stack` contract. Use mode selection instead:
 
-## Model And Mode Selection
+```sh
+acps agent set --mode <smart|rush|deep>
+```
 
-Amp Code does not expose raw provider/model designations through the current `acp-stack` support contract; `acps agent set --provider <provider>` and `acps agent set --model <model>` are not valid for Amp.
-
-Instead, same as using Amp Code via its interactive TUI, select a mode instead. `amp-acp` exposes `smart`, `rush`, and `deep` as `mode` session config values, and `acps agent set --mode <mode>` writes `[agent].mode` after validating against that list. When mode is unset, Amp defaults to Smart per upstream behavior.
-
-## Unsupported Auth Paths
-
-Unsupported for the `acp-stack` headless contract:
-
-- Browser or TUI login through `amp login`.
-- Local account cookies or interactive setup flows.
+Amp Code default mode is Smart. Rush and Deep are also supported.
