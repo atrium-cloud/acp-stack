@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp_stack::api::{self, AppState};
+use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{Config, load_config_from_str};
 use acp_stack::state::{NewSessionRecord, StateStore};
 use futures::{SinkExt, StreamExt};
@@ -42,7 +42,22 @@ impl Harness {
         store.migrate().expect("migrate");
         let mut config = test_config();
         mutate(&mut config);
-        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let config_path = tempdir.path().join("acp-stack.toml");
+        std::fs::write(
+            &config_path,
+            config.to_canonical_toml().expect("canonical test config"),
+        )
+        .expect("test config write");
+        let effective_bind = config.api.bind.clone();
+        let runtime_paths = RuntimePaths::new(config_path, path);
+        let app_state = AppState::with_effective_bind_and_runtime_paths(
+            config,
+            store,
+            SESSION_KEY.to_owned(),
+            ADMIN_KEY.to_owned(),
+            effective_bind,
+            runtime_paths,
+        );
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local"));

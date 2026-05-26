@@ -10,7 +10,7 @@
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
-| Agents         | `acps agent install`, `start`, `stop`, `restart`, `status`, `check`, `test` |
+| Agents         | `acps agent install`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
 | Sessions       | `acps sessions list/status/new/prompt/cancel/close`                         |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
@@ -68,6 +68,14 @@ Export emits canonical TOML with secret references only. Import validates and ca
 
 `acps agent install` installs the configured supported agent from the embedded catalog. Unsupported entries fail before installation.
 
+`acps agent switch <agent>` migrates to another supported harness through the running daemon:
+
+```sh
+acps agent switch <agent> [--provider <provider-id>] [--api-key-ref <ref>] [--admin-key <key>]
+```
+
+The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider secret refs that will be copied if missing, and fields that need input. Switch installs the target harness, reuses the current provider/API-key ref only when compatible, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
+
 `acps agent set` updates provider, model, mode, and custom-provider metadata:
 
 ```sh
@@ -77,7 +85,7 @@ acps agent set --model <model>
 acps agent set --mode <mode>
 ```
 
-Mapped model and mode values are validated against the configured agent's ACP-advertised options. Custom-provider model ids are accepted as supplied. When a change requires the supervised process to reload agent-owned config, the CLI prints a restart hint.
+Mapped model and mode values are validated against the configured agent's ACP-advertised options. Custom-provider model ids are accepted as supplied. For provider-backed agents, `acps agent set --model <model>` uses the existing `[agent.provider]` when present. When a change requires the supervised process to reload agent-owned config, the CLI prints a restart hint.
 
 `acps subagent *` is OpenCode-only and manages the OpenCode small-model lane. `acps subagent match` makes `small_model` follow the main agent model.
 

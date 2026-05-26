@@ -1,14 +1,24 @@
+use axum::Json;
 use axum::extract::State;
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use super::super::core::AppState;
+use super::super::core::{AppState, load_active_registry, populate_agent_adapter_from_registry};
 use crate::config::{AgentAdapterConfig, Config};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
-use crate::runtime::agent::acp_bridge::AgentCapabilitiesDto;
+use crate::runtime::agent::acp_bridge::{AgentCapabilitiesDto, AgentSessionConfigCategory};
+use crate::runtime::agent::agent_headless_config::ProvisionedAgentConfig;
+use crate::runtime::agent::model_discovery::{
+    DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
+    fetch_session_config_with_timeout,
+};
 use crate::runtime::agent::supervisor::AgentSnapshot;
+use crate::runtime::agent::switch::{
+    AgentSwitchRequest as PlannedAgentSwitchRequest, AgentSwitchSecretMigration,
+    adapter_from_registry_entry, plan_agent_switch,
+};
 use crate::runtime::install::agent_installer::{
     InstallerSequenceResult, install_resolved_capture, run_installer_capture,
 };
@@ -26,15 +36,27 @@ pub(crate) struct AgentInstallResponse {
 pub(crate) async fn agent_install_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
-    let workspace_root = std::path::PathBuf::from(state.config.workspace.root.clone());
+    let agent = state.live_agent_config.lock().await.clone();
+    let mut config = (*state.config).clone();
+    config.agent = agent;
+    install_agent_for_config(&state, &config)
+        .await
+        .map(ApiSuccess::new)
+}
+
+async fn install_agent_for_config(
+    state: &AppState,
+    config: &Config,
+) -> Result<AgentInstallResponse> {
+    let workspace_root = std::path::PathBuf::from(config.workspace.root.clone());
     let home = home_dir()?;
     let local_bin = home.join(".local").join("bin");
     let log_base = crate::state::default_installer_log_base(&home);
 
-    let outcome = if let Some(install) = state.config.agent.install.clone() {
+    let outcome = if let Some(install) = config.agent.install.clone() {
         // Escape-hatch shell recipe. One row, persisted after the shell runs.
-        let env = open_agent_env(&state.config)?;
-        let expected_sha256 = state.config.agent.expected_sha256.clone();
+        let env = open_agent_env(config)?;
+        let expected_sha256 = config.agent.expected_sha256.clone();
         let mut result = tokio::task::spawn_blocking(move || {
             run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
         })
@@ -44,13 +66,13 @@ pub(crate) async fn agent_install_handler(
         })?;
         crate::runtime::install::agent_installer::persist_step_logs_to_disk(
             &mut result.row,
-            &state.config.agent.id,
+            &config.agent.id,
             Some(&log_base),
         )?;
         {
             let store = state.state.lock().await;
             store.append_installer_run(InstallerRunInput {
-                agent_id: &state.config.agent.id,
+                agent_id: &config.agent.id,
                 started_at: &result.row.started_at,
                 finished_at: result.row.finished_at.as_deref(),
                 status: &result.row.status,
@@ -69,12 +91,12 @@ pub(crate) async fn agent_install_handler(
         let override_path = home.join(".config").join("acp-stack").join("agents.toml");
         let registry = RegistryCatalog::load_with_override(&override_path)?;
         let entry = registry
-            .lookup(&state.config.agent.id)
+            .lookup(&config.agent.id)
             .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: state.config.agent.id.clone(),
+                id: config.agent.id.clone(),
             })?
             .clone();
-        let agent = state.config.agent.clone();
+        let agent = config.agent.clone();
         let mut result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
             install_resolved_capture(
                 &agent,
@@ -91,7 +113,7 @@ pub(crate) async fn agent_install_handler(
         for row in result.rows.iter_mut() {
             crate::runtime::install::agent_installer::persist_step_logs_to_disk(
                 row,
-                &state.config.agent.id,
+                &config.agent.id,
                 Some(&log_base),
             )?;
         }
@@ -99,7 +121,7 @@ pub(crate) async fn agent_install_handler(
             let store = state.state.lock().await;
             for row in &result.rows {
                 store.append_installer_run(InstallerRunInput {
-                    agent_id: &state.config.agent.id,
+                    agent_id: &config.agent.id,
                     started_at: &row.started_at,
                     finished_at: row.finished_at.as_deref(),
                     status: &row.status,
@@ -119,11 +141,11 @@ pub(crate) async fn agent_install_handler(
     let outcome_label = outcome.label();
     let path = outcome.path().to_string_lossy().into_owned();
     let sha256 = outcome.sha256().to_owned();
-    Ok(ApiSuccess::new(AgentInstallResponse {
+    Ok(AgentInstallResponse {
         outcome: outcome_label,
         path,
         sha256,
-    }))
+    })
 }
 
 pub(super) fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, String>> {
@@ -138,6 +160,20 @@ pub(super) fn open_agent_env(config: &Config) -> Result<std::collections::HashMa
         env.insert(name.clone(), value.to_owned());
     }
     Ok(env)
+}
+
+async fn load_fresh_config_with_runtime_agent_metadata(state: &AppState) -> Result<Config> {
+    let mut config = Config::load_from_path(&state.runtime_paths.config_path)?;
+    let live_agent = state.live_agent_config.lock().await.clone();
+    if config.agent.id == live_agent.id && config.agent.adapter.is_none() {
+        config.agent.adapter = live_agent.adapter;
+    }
+    if config.agent.adapter.is_none()
+        && let Ok(registry) = load_active_registry()
+    {
+        populate_agent_adapter_from_registry(&mut config, &registry);
+    }
+    Ok(config)
 }
 
 /// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer`
@@ -164,23 +200,27 @@ pub(crate) struct AgentStartResponse {
 pub(crate) async fn agent_start_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
-    // Resolve env BEFORE invoking the supervisor so the secret store is only
-    // opened when [agent].env is non-empty. Production deployments always
-    // have a populated store; tests with empty agent.env skip the open
-    // entirely. open_agent_env enforces the same allowlist semantics
+    // Re-read disk config and resolve env BEFORE invoking the supervisor so
+    // `acps agent set` changes made while the daemon is running are honored
+    // by the next start. open_agent_env enforces the same allowlist semantics
     // (security.md:91) regardless of caller.
-    let env = open_agent_env(&state.config)?;
+    let config = load_fresh_config_with_runtime_agent_metadata(&state).await?;
+    let env = open_agent_env(&config)?;
     let capabilities = state
         .agent_supervisor
         .start(
-            &state.config.agent,
-            &state.config.workspace.root,
+            &config.agent,
+            &config.workspace.root,
             env,
             &state.state,
             state.event_hub.clone(),
             Some(state.permissions.clone()),
         )
         .await?;
+    {
+        let mut live = state.live_agent_config.lock().await;
+        *live = config.agent.clone();
+    }
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
     let pid = state.agent_supervisor.snapshot().await.pid;
     Ok(ApiSuccess::new(AgentStartResponse {
@@ -230,10 +270,9 @@ pub(crate) struct AgentRestartResponse {
 /// after a restart. Goose model changes do NOT need this endpoint;
 /// clients can switch live via `session/set_config_option`.
 ///
-/// Note: the daemon's other handlers (status, capabilities, etc.)
-/// continue to see the cached config until the daemon itself is
-/// restarted (`systemctl restart acps` or equivalent). This endpoint
-/// only refreshes the supervised agent process.
+/// This endpoint also refreshes the daemon's live agent cache so
+/// status, capabilities, and subsequent session creation observe the
+/// same `[agent]` block used to spawn the supervised process.
 pub(crate) async fn agent_restart_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
@@ -242,7 +281,7 @@ pub(crate) async fn agent_restart_handler(
     // missing required secret should fail this call cleanly and leave
     // the running agent alone, rather than taking it down and
     // returning an error with no agent running at all.
-    let fresh_config = crate::config::Config::load_from_path(&state.runtime_paths.config_path)?;
+    let fresh_config = load_fresh_config_with_runtime_agent_metadata(&state).await?;
     let env = open_agent_env(&fresh_config)?;
 
     // Now safe to stop the prior process. `stop` returns
@@ -295,6 +334,198 @@ pub(crate) async fn agent_restart_handler(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct AgentSwitchRequest {
+    agent: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    api_key_ref: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AgentSwitchResponse {
+    old_agent_id: String,
+    agent_id: String,
+    provider_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_ref: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    required_env_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    secret_migrations: Vec<AgentSwitchSecretMigrationJson>,
+    install: AgentInstallResponse,
+    restarted: bool,
+    restart_started: bool,
+    set_model: bool,
+    models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    follow_up: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    provisioned: Vec<ProvisionedAgentConfigJson>,
+}
+
+#[derive(Serialize)]
+struct ProvisionedAgentConfigJson {
+    label: &'static str,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct AgentSwitchSecretMigrationJson {
+    from_ref: String,
+    to_ref: String,
+}
+
+impl From<ProvisionedAgentConfig> for ProvisionedAgentConfigJson {
+    fn from(value: ProvisionedAgentConfig) -> Self {
+        Self {
+            label: value.label,
+            path: value.path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+pub(crate) async fn agent_switch_handler(
+    State(state): State<AppState>,
+    Json(body): Json<AgentSwitchRequest>,
+) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
+    let home = home_dir()?;
+    let fresh_config = Config::load_from_path(&state.runtime_paths.config_path)?;
+    let registry = RegistryCatalog::load_with_override(
+        &home.join(".config").join("acp-stack").join("agents.toml"),
+    )?;
+    let plan = plan_agent_switch(
+        &fresh_config,
+        &registry,
+        PlannedAgentSwitchRequest {
+            target_agent: body.agent,
+            provider_id: body.provider,
+            api_key_ref: body.api_key_ref,
+        },
+    )?;
+    let target_entry =
+        registry
+            .lookup(&plan.target_agent_id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: plan.target_agent_id.clone(),
+            })?;
+    let mut candidate_config = plan.config.clone();
+    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+
+    let canonical = candidate_config.to_canonical_toml()?;
+    let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
+    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    let secret_migrations = apply_switch_secret_migrations(&home, &plan.secret_migrations)?;
+    let _env = open_agent_env(&candidate_config)?;
+
+    let install = install_agent_for_config(&state, &candidate_config).await?;
+    let provisioned =
+        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
+            &candidate_config,
+            &home,
+        )?
+        .into_iter()
+        .map(ProvisionedAgentConfigJson::from)
+        .collect::<Vec<_>>();
+
+    let models = if target_entry.set_model {
+        let response = fetch_session_config_with_timeout(
+            &home,
+            &candidate_config,
+            DEFAULT_MODELS_DISCOVERY_TIMEOUT,
+        )
+        .await?;
+        advertised_values_for_category(&response, AgentSessionConfigCategory::Model)?
+    } else {
+        Vec::new()
+    };
+
+    let was_running = state.agent_supervisor.snapshot().await.state.as_wire_str() == "running";
+    crate::fs_util::atomic_write_owner_only(
+        &state.runtime_paths.config_path,
+        canonical.as_bytes(),
+    )?;
+    {
+        let mut live = state.live_agent_config.lock().await;
+        *live = candidate_config.agent.clone();
+    }
+
+    let mut restart_started = false;
+    if was_running {
+        restart_agent_with_config(&state, &candidate_config).await?;
+        restart_started = true;
+    }
+
+    let response = AgentSwitchResponse {
+        old_agent_id: plan.old_agent_id,
+        agent_id: plan.target_agent_id,
+        provider_status: plan.provider_status.label(),
+        provider: plan.provider_status.provider_id().map(str::to_owned),
+        api_key_ref: plan.provider_status.api_key_ref().map(str::to_owned),
+        required_env_refs: plan.required_env_refs,
+        secret_migrations,
+        install,
+        restarted: was_running,
+        restart_started,
+        set_model: target_entry.set_model,
+        models,
+        follow_up: target_entry
+            .set_model
+            .then_some("acps agent set --model <model-id>"),
+        provisioned,
+    };
+    Ok(ApiSuccess::new(response))
+}
+
+fn apply_switch_secret_migrations(
+    home: &std::path::Path,
+    migrations: &[AgentSwitchSecretMigration],
+) -> Result<Vec<AgentSwitchSecretMigrationJson>> {
+    if migrations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut store = SecretStore::open(home)?;
+    let mut applied = Vec::with_capacity(migrations.len());
+    for migration in migrations {
+        let value = store.get(&migration.from_ref)?.to_owned();
+        if !store.contains(&migration.to_ref) {
+            store.set(&migration.to_ref, &value)?;
+        }
+        applied.push(AgentSwitchSecretMigrationJson {
+            from_ref: migration.from_ref.clone(),
+            to_ref: migration.to_ref.clone(),
+        });
+    }
+    Ok(applied)
+}
+
+async fn restart_agent_with_config(state: &AppState, config: &Config) -> Result<()> {
+    let env = open_agent_env(config)?;
+    match state
+        .agent_supervisor
+        .stop(&state.state, &state.event_hub)
+        .await
+    {
+        Ok(_) | Err(StackError::AgentNotRunning) => {}
+        Err(err) => return Err(err),
+    }
+    state
+        .agent_supervisor
+        .start(
+            &config.agent,
+            &config.workspace.root,
+            env,
+            &state.state,
+            state.event_hub.clone(),
+            Some(state.permissions.clone()),
+        )
+        .await?;
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub(crate) struct AgentCapabilitiesResponseBody {
     agent_id: String,
@@ -307,7 +538,8 @@ pub(crate) struct AgentCapabilitiesResponseBody {
 pub(crate) async fn agent_capabilities_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentCapabilitiesResponseBody>, StackError> {
-    let agent_id = state.config.agent.id.clone();
+    let agent = state.live_agent_config.lock().await.clone();
+    let agent_id = agent.id.clone();
     let snapshot: AgentSnapshot = state.agent_supervisor.snapshot().await;
     let store = state.state.lock().await;
     let record = store.latest_agent_capabilities(&agent_id)?;
@@ -320,7 +552,7 @@ pub(crate) async fn agent_capabilities_handler(
     })?;
     Ok(ApiSuccess::new(AgentCapabilitiesResponseBody {
         agent_id: record.agent_id,
-        adapter: state.config.agent.adapter.clone(),
+        adapter: agent.adapter,
         captured_at: record.captured_at,
         capabilities,
         process_state: format!("{:?}", snapshot.state).to_lowercase(),
