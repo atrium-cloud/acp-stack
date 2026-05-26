@@ -14,7 +14,7 @@ use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, optional_env_refs_for_provider_id, provider_id_is_known,
     provider_id_supports_agent, required_env_refs_for_provider_id,
 };
-use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
+use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, SubagentFreeModel};
 
 use super::agent::{
     default_api_key_ref_for_agent_provider, default_custom_provider_api,
@@ -23,16 +23,8 @@ use super::agent::{
     validate_agent_session_config_value,
 };
 
-// These are OpenCode-specific free small-model shortcuts exposed by provider
-// families that are stable enough to make the operator intent explicit.
-const OPENCODE_FREE_OPENROUTER_MODEL: &str = "openrouter/free";
-const OPENCODE_FREE_OPENCODE_MODEL: &str = "opencode/big-pickle";
-const OPENROUTER_PROVIDER_ID: &str = "openrouter";
-const OPENCODE_PROVIDER_ID: &str = "opencode";
-const OPENCODE_GO_PROVIDER_ID: &str = "opencode-go";
-const OPENROUTER_API_KEY_REF: &str = "OPENROUTER_API_KEY";
-const OPENCODE_API_KEY_REF: &str = "OPENCODE_API_KEY";
 const SUBAGENT_UNSUPPORTED_MESSAGE: &str = "Current agent does not support subagent configuration.";
+const SUBAGENT_FREE_UNSUPPORTED_MESSAGE: &str = "Current provider does not support free.";
 
 #[derive(Debug, Subcommand)]
 pub enum SubagentCommand {
@@ -40,8 +32,10 @@ pub enum SubagentCommand {
     Status,
     /// Set the provider id, model, and API-key ref used by auxiliary/subagent tasks.
     Set(Box<SubagentSetArgs>),
+    /// Match auxiliary/subagent model calls to the current main provider/model.
+    Match,
     /// Use a known free auxiliary model for the configured OpenCode provider family.
-    Free(SubagentFreeArgs),
+    Free,
     /// Disable auxiliary/subagent model calls where the harness supports it.
     Disable,
 }
@@ -51,9 +45,10 @@ pub struct SubagentSetArgs {
     /// Configure a provider/model outside the embedded provider mapping.
     #[arg(long)]
     custom_provider: bool,
-    /// Provider id, such as opencode-go, openai, or anthropic.
+    /// Provider id, such as opencode-go, openai, or anthropic. Defaults to the
+    /// main agent provider when omitted (mapped mode only).
     #[arg(long)]
-    provider: String,
+    provider: Option<String>,
     /// Display name for a custom provider.
     #[arg(long = "provider-name")]
     provider_name: Option<String>,
@@ -75,17 +70,9 @@ pub struct SubagentSetArgs {
     /// Maximum output tokens for a custom model.
     #[arg(long = "output-max-tokens")]
     output_max_tokens: Option<String>,
-    /// Secret ref to inject for this provider. Defaults from provider metadata.
-    #[arg(long)]
-    api_key_ref: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct SubagentFreeArgs {
-    /// Free provider family to use: openrouter or opencode. Defaults from current config.
-    #[arg(long)]
-    provider: Option<String>,
-    /// Secret ref to inject for the selected free provider. Defaults from provider metadata.
+    /// Secret ref to inject for this provider. Defaults to the main agent
+    /// api-key ref when the resolved subagent provider matches the main
+    /// provider; otherwise defaults to the provider's well-known env var.
     #[arg(long)]
     api_key_ref: Option<String>,
 }
@@ -94,7 +81,8 @@ pub(super) fn run_subagent_command(command: SubagentCommand) -> Result<()> {
     match command {
         SubagentCommand::Status => run_subagent_status(),
         SubagentCommand::Set(args) => run_subagent_set(*args),
-        SubagentCommand::Free(args) => run_subagent_free(args),
+        SubagentCommand::Match => run_subagent_match(),
+        SubagentCommand::Free => run_subagent_free(),
         SubagentCommand::Disable => run_subagent_disable(),
     }
 }
@@ -128,12 +116,7 @@ fn run_subagent_status() -> Result<()> {
         .as_ref()
         .and_then(|subagent| subagent.provider.as_ref())
     else {
-        if let Some(provider) = config.agent.provider.as_ref()
-            && provider
-                .model
-                .as_deref()
-                .is_some_and(|model| !model.trim().is_empty())
-        {
+        if let Some(provider) = configured_main_provider_with_model(&config) {
             println!("status: inherited");
             println!("provider: {}", provider.id);
             println!("model: {}", provider.model.as_deref().unwrap_or("unset"));
@@ -153,6 +136,49 @@ fn run_subagent_status() -> Result<()> {
         "api_key_ref: {}",
         provider.api_key_ref.as_deref().unwrap_or("unset")
     );
+    Ok(())
+}
+
+fn run_subagent_match() -> Result<()> {
+    let home = home_dir()?;
+    let config_path = config::default_config_path()?;
+    let mut config = Config::load_from_path(&config_path)?;
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    let entry =
+        registry
+            .lookup(&config.agent.id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: config.agent.id.clone(),
+            })?;
+    ensure_subagent_supported(entry)?;
+
+    configured_main_provider_with_model(&config).ok_or_else(|| {
+        StackError::AgentConfigProvision {
+            path: config_path.clone(),
+            reason: "main provider/model must be configured before `acps subagent match`"
+                .to_owned(),
+        }
+    })?;
+
+    config.agent.subagent = None;
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    let provisioned = provision_agent_headless_config(&config, &home)?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+
+    let provider = configured_main_provider_with_model(&config).expect("main provider model set");
+    print_subagent_header(&config, entry);
+    println!("status: inherited");
+    println!("provider: {}", provider.id);
+    println!("model: {}", provider.model.as_deref().unwrap_or("unset"));
+    println!(
+        "api_key_ref: {}",
+        provider.api_key_ref.as_deref().unwrap_or("unset")
+    );
+    for item in provisioned {
+        println!("{}: {}", item.label, item.path.display());
+    }
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
 
@@ -188,7 +214,7 @@ fn run_subagent_disable() -> Result<()> {
     Ok(())
 }
 
-fn run_subagent_free(args: SubagentFreeArgs) -> Result<()> {
+fn run_subagent_free() -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
     let mut config = Config::load_from_path(&config_path)?;
@@ -201,19 +227,27 @@ fn run_subagent_free(args: SubagentFreeArgs) -> Result<()> {
             })?;
     ensure_subagent_supported(entry)?;
 
-    let free_model = resolve_free_model(&config, args.provider.as_deref())?;
-    let default_api_key_ref =
-        default_api_key_ref_for_agent_provider(&config.agent.id, free_model.provider_id);
-    let api_key_ref = args.api_key_ref.or(default_api_key_ref).ok_or_else(|| {
-        StackError::AgentConfigProvision {
+    let free_model = resolve_free_model(&config, entry)?;
+    let provider_id = free_model.provider.clone();
+    let model = free_model.model.clone();
+    // When the resolved free provider is in the same family as the main
+    // provider (same id or same canonical env ref), reuse the main api_key_ref
+    // so a custom secret name (e.g. `MY_OPENROUTER_KEY`, or `MY_OPENCODE_KEY`
+    // shared between `opencode` and `opencode-go`) is preserved instead of
+    // being silently replaced by the canonical default.
+    let inherited_main_api_key_ref = config
+        .agent
+        .provider
+        .as_ref()
+        .filter(|main| same_provider_family(&config.agent.id, &main.id, &provider_id))
+        .and_then(|main| main.api_key_ref.clone());
+    let api_key_ref = inherited_main_api_key_ref
+        .or_else(|| default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id))
+        .ok_or_else(|| StackError::AgentConfigProvision {
             path: config_path.clone(),
-            reason: format!(
-                "provider `{}` has no default API-key env var; pass --api-key-ref",
-                free_model.provider_id
-            ),
-        }
-    })?;
-    let required_env_refs = required_env_refs_for_provider_id(free_model.provider_id, &api_key_ref);
+            reason: format!("provider `{provider_id}` has no default API-key env var"),
+        })?;
+    let required_env_refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
     for env_ref in &required_env_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
@@ -222,8 +256,8 @@ fn run_subagent_free(args: SubagentFreeArgs) -> Result<()> {
     config.agent.subagent = Some(AgentSubagentConfig {
         disabled: false,
         provider: Some(AgentProviderConfig {
-            id: free_model.provider_id.to_owned(),
-            model: Some(free_model.model.to_owned()),
+            id: provider_id.clone(),
+            model: Some(model.clone()),
             api_key_ref: Some(api_key_ref),
             custom: None,
         }),
@@ -234,8 +268,8 @@ fn run_subagent_free(args: SubagentFreeArgs) -> Result<()> {
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
     print_subagent_header(&config, entry);
-    println!("provider: {}", free_model.provider_id);
-    println!("model: {}", free_model.model);
+    println!("provider: {provider_id}");
+    println!("model: {model}");
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
     }
@@ -336,49 +370,68 @@ fn configure_mapped_subagent(
     config: &mut Config,
     args: SubagentSetArgs,
 ) -> Result<()> {
-    if !provider_id_is_known(&args.provider) {
+    // Inherit from main when --provider is omitted: the subagent lane is a
+    // convenience over the main provider/key, so most operators only need to
+    // supply --model. Falling back here keeps the common case ergonomic and
+    // matches the inherited-main semantic surfaced by `acps subagent match`.
+    let provider = args
+        .provider
+        .clone()
+        .or_else(|| config.agent.provider.as_ref().map(|p| p.id.clone()))
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "provider",
+            reason: "--provider not supplied and no main agent provider configured to inherit from"
+                .to_owned(),
+        })?;
+    if !provider_id_is_known(&provider) {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!("provider `{provider}` is not listed in provider/env mapping"),
+        });
+    }
+    if !provider_id_supports_agent(&provider, &config.agent.id) {
         return Err(StackError::InvalidParam {
             field: "provider",
             reason: format!(
-                "provider `{}` is not listed in provider/env mapping",
-                args.provider
+                "provider `{provider}` is not supported for agent `{}`",
+                config.agent.id
             ),
         });
     }
-    if !provider_id_supports_agent(&args.provider, &config.agent.id) {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "provider `{}` is not supported for agent `{}`",
-                args.provider, config.agent.id
-            ),
-        });
-    }
-    let default_api_key_ref =
-        default_api_key_ref_for_agent_provider(&config.agent.id, &args.provider);
-    let api_key_ref = args.api_key_ref.or(default_api_key_ref).ok_or_else(|| {
-        StackError::AgentConfigProvision {
+    // api-key-ref resolution order:
+    //   1. explicit --api-key-ref
+    //   2. main agent api-key-ref (only when resolved provider == main provider)
+    //   3. provider's well-known env var default
+    let main_inherited_api_key_ref = config
+        .agent
+        .provider
+        .as_ref()
+        .filter(|main| main.id == provider)
+        .and_then(|main| main.api_key_ref.clone());
+    let default_api_key_ref = default_api_key_ref_for_agent_provider(&config.agent.id, &provider);
+    let api_key_ref = args
+        .api_key_ref
+        .or(main_inherited_api_key_ref)
+        .or(default_api_key_ref)
+        .ok_or_else(|| StackError::AgentConfigProvision {
             path: config_path.to_path_buf(),
             reason: format!(
-                "provider `{}` has no default API-key env var; pass --api-key-ref",
-                args.provider
+                "provider `{provider}` has no default API-key env var; pass --api-key-ref"
             ),
-        }
-    })?;
-    let required_env_refs = required_env_refs_for_provider_id(&args.provider, &api_key_ref);
+        })?;
+    let required_env_refs = required_env_refs_for_provider_id(&provider, &api_key_ref);
     for env_ref in &required_env_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
-    let Some(agent_provider_id) =
-        agent_provider_id_for_provider_id(&config.agent.id, &args.provider)
+    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, &provider)
     else {
         return Err(StackError::InvalidParam {
             field: "provider",
             reason: format!(
-                "provider `{}` is not supported for agent `{}`",
-                args.provider, config.agent.id
+                "provider `{provider}` is not supported for agent `{}`",
+                config.agent.id
             ),
         });
     };
@@ -386,7 +439,7 @@ fn configure_mapped_subagent(
     config.agent.subagent = Some(AgentSubagentConfig {
         disabled: false,
         provider: Some(AgentProviderConfig {
-            id: args.provider,
+            id: provider,
             model: Some(model),
             api_key_ref: Some(api_key_ref),
             custom: None,
@@ -412,6 +465,7 @@ fn configure_custom_subagent(
             reason: format!("{} does not support custom model setup", entry.name),
         });
     }
+    let provider = required_custom_arg("provider", args.provider)?;
     let provider_name = required_custom_arg("provider-name", args.provider_name)?;
     let base_url = required_custom_arg("base-url", args.base_url)?;
     let api_key_ref = required_custom_arg("api-key-ref", args.api_key_ref)?;
@@ -436,7 +490,7 @@ fn configure_custom_subagent(
     config.agent.subagent = Some(AgentSubagentConfig {
         disabled: false,
         provider: Some(AgentProviderConfig {
-            id: args.provider,
+            id: provider,
             model: Some(args.model),
             api_key_ref: Some(api_key_ref),
             custom: Some(AgentCustomProviderConfig {
@@ -476,86 +530,67 @@ fn print_subagent_header(config: &Config, entry: &RegistryEntry) {
     );
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FreeSubagentModel {
-    provider_id: &'static str,
-    model: &'static str,
+fn configured_main_provider_with_model(config: &Config) -> Option<&AgentProviderConfig> {
+    config.agent.provider.as_ref().filter(|provider| {
+        provider
+            .model
+            .as_deref()
+            .is_some_and(|model| !model.trim().is_empty())
+    })
 }
 
-fn resolve_free_model(
+// Resolution priority:
+//   1. Main provider is in the same provider family as a free model — either
+//      same id, or same canonical env ref (covers `opencode-go` ↔ `opencode`
+//      even when the operator uses a non-canonical `api_key_ref` like
+//      `MY_OPENCODE_KEY`).
+//   2. ONLY when no main provider is configured at all, fall back to scanning
+//      `[agent].env` for a free model provider's canonical env ref. List order
+//      in `data/agents.toml` is the tiebreaker. Refusing env-fallback when a
+//      main provider is set prevents stale env entries from silently routing
+//      an unsupported provider (e.g. `openai` with leftover `OPENCODE_API_KEY`)
+//      to a free model that doesn't match the operator's current intent.
+fn resolve_free_model<'a>(
     config: &Config,
-    requested_provider: Option<&str>,
-) -> Result<FreeSubagentModel> {
-    match requested_provider {
-        Some(OPENROUTER_PROVIDER_ID) => {
-            return Ok(FreeSubagentModel {
-                provider_id: OPENROUTER_PROVIDER_ID,
-                model: OPENCODE_FREE_OPENROUTER_MODEL,
-            });
-        }
-        Some(OPENCODE_PROVIDER_ID | OPENCODE_GO_PROVIDER_ID) => {
-            return Ok(FreeSubagentModel {
-                provider_id: OPENCODE_PROVIDER_ID,
-                model: OPENCODE_FREE_OPENCODE_MODEL,
-            });
-        }
-        Some(other) => {
-            return Err(StackError::InvalidParam {
-                field: "provider",
-                reason: format!(
-                    "free subagent model provider must be `{OPENROUTER_PROVIDER_ID}` or `{OPENCODE_PROVIDER_ID}`, got `{other}`"
-                ),
-            });
-        }
-        None => {}
-    }
-
-    let configured_provider = config.agent.provider.as_ref();
-    if configured_provider.is_some_and(|provider| provider.id == OPENROUTER_PROVIDER_ID) {
-        return Ok(FreeSubagentModel {
-            provider_id: OPENROUTER_PROVIDER_ID,
-            model: OPENCODE_FREE_OPENROUTER_MODEL,
+    entry: &'a RegistryEntry,
+) -> Result<&'a SubagentFreeModel> {
+    if entry.subagent_free_models.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: SUBAGENT_FREE_UNSUPPORTED_MESSAGE.to_owned(),
         });
     }
-    if configured_provider.is_some_and(|provider| {
-        provider.id == OPENCODE_PROVIDER_ID || provider.id == OPENCODE_GO_PROVIDER_ID
-    }) {
-        return Ok(FreeSubagentModel {
-            provider_id: OPENCODE_PROVIDER_ID,
-            model: OPENCODE_FREE_OPENCODE_MODEL,
-        });
-    }
-    if configured_provider
-        .is_some_and(|provider| provider.api_key_ref.as_deref() == Some(OPENROUTER_API_KEY_REF))
-        || config
-            .agent
-            .env
+    let main = config.agent.provider.as_ref();
+    if let Some(main) = main
+        && let Some(free) = entry
+            .subagent_free_models
             .iter()
-            .any(|name| name == OPENROUTER_API_KEY_REF)
+            .find(|free| same_provider_family(&config.agent.id, &main.id, &free.provider))
     {
-        return Ok(FreeSubagentModel {
-            provider_id: OPENROUTER_PROVIDER_ID,
-            model: OPENCODE_FREE_OPENROUTER_MODEL,
-        });
+        return Ok(free);
     }
-    if configured_provider
-        .is_some_and(|provider| provider.api_key_ref.as_deref() == Some(OPENCODE_API_KEY_REF))
-        || config
-            .agent
-            .env
-            .iter()
-            .any(|name| name == OPENCODE_API_KEY_REF)
+    if main.is_none()
+        && let Some(free) = entry.subagent_free_models.iter().find(|free| {
+            default_api_key_ref_for_agent_provider(&config.agent.id, &free.provider)
+                .is_some_and(|env_ref| config.agent.env.iter().any(|name| name == &env_ref))
+        })
     {
-        return Ok(FreeSubagentModel {
-            provider_id: OPENCODE_PROVIDER_ID,
-            model: OPENCODE_FREE_OPENCODE_MODEL,
-        });
+        return Ok(free);
     }
-
     Err(StackError::InvalidParam {
         field: "provider",
-        reason: format!(
-            "could not infer a free subagent model provider; pass --provider {OPENROUTER_PROVIDER_ID} or --provider {OPENCODE_PROVIDER_ID}"
-        ),
+        reason: SUBAGENT_FREE_UNSUPPORTED_MESSAGE.to_owned(),
     })
+}
+
+// Two provider ids are in the same family for the given agent when they share
+// the same canonical env ref. This is the data-driven way to recognize aliases
+// like `opencode-go` ↔ `opencode` without hardcoding the alias here.
+fn same_provider_family(agent_id: &str, a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let canon_a = default_api_key_ref_for_agent_provider(agent_id, a);
+    let canon_b = default_api_key_ref_for_agent_provider(agent_id, b);
+    matches!((canon_a, canon_b), (Some(x), Some(y)) if x == y)
 }
