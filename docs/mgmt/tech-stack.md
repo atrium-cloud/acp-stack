@@ -35,4 +35,4 @@ This document records technology choices that affect maintenance or deployment. 
 
 ## Maintainer Details
 
-Development checks, smoke scripts, and CI notes live in [development.md](development.md).
+Development checks, test scripts, and CI notes live in [development.md](development.md).
