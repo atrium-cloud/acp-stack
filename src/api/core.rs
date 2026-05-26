@@ -41,7 +41,7 @@ use super::auth::{
 };
 use super::routes::agent::{
     agent_capabilities_handler, agent_install_handler, agent_restart_handler, agent_start_handler,
-    agent_stop_handler,
+    agent_stop_handler, agent_switch_handler,
 };
 use super::routes::commands::{
     commands_cancel_handler, commands_get_handler, commands_list_handler, commands_submit_handler,
@@ -86,6 +86,7 @@ use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::supervisor::AgentSupervisor;
+use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::mediation::commands::CommandGateway;
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::state::StateStore;
@@ -95,13 +96,10 @@ use crate::state::StateStore;
 pub struct AppState {
     pub config: Arc<Config>,
     /// Mutable agent-block cache. Initialized from `config.agent` at
-    /// startup and updated by `POST /v1/agent/restart` after it reads
-    /// the freshly-on-disk config. Handlers that pass session-affecting
-    /// agent fields (`agent.model`, `agent.mode`, `agent.provider`)
-    /// into the supervisor read from this so a post-restart session
-    /// creation honors the new values; handlers that only read static
-    /// fields (`agent.id`, install spec, adapter metadata) can keep
-    /// using `config.agent` since those don't change on a model swap.
+    /// startup and updated by agent restart/switch flows after they read
+    /// or write the on-disk config. Handlers that operate on the active
+    /// agent read from this so daemon restart is not required after an
+    /// agent config migration.
     pub live_agent_config: Arc<TokioMutex<crate::config::AgentConfig>>,
     pub effective_bind: Arc<String>,
     pub runtime_paths: Arc<RuntimePaths>,
@@ -256,12 +254,10 @@ impl AppState {
     }
 }
 
-fn load_active_registry() -> Result<crate::runtime::install::agent_registry::RegistryCatalog> {
+pub(crate) fn load_active_registry() -> Result<RegistryCatalog> {
     match operator_registry_override_path() {
-        Some(path) => {
-            crate::runtime::install::agent_registry::RegistryCatalog::load_with_override(&path)
-        }
-        None => crate::runtime::install::agent_registry::RegistryCatalog::load_embedded(),
+        Some(path) => RegistryCatalog::load_with_override(&path),
+        None => RegistryCatalog::load_embedded(),
     }
 }
 
@@ -275,9 +271,9 @@ fn registry_override_path(home: &Path) -> PathBuf {
     home.join(".config").join("acp-stack").join("agents.toml")
 }
 
-fn populate_agent_adapter_from_registry(
+pub(crate) fn populate_agent_adapter_from_registry(
     config: &mut Config,
-    registry: &crate::runtime::install::agent_registry::RegistryCatalog,
+    registry: &RegistryCatalog,
 ) {
     if let Some(entry) = registry.lookup(&config.agent.id)
         && matches!(
@@ -412,6 +408,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/agent/start", post(agent_start_handler))
         .route("/v1/agent/stop", post(agent_stop_handler))
         .route("/v1/agent/restart", post(agent_restart_handler))
+        .route("/v1/agent/switch", post(agent_switch_handler))
         .route("/v1/deps/apply", post(deps_apply_handler))
         .route("/v1/config/import", post(config_import_handler))
         .route(

@@ -60,12 +60,15 @@ Secret values are never returned by the API.
 | `POST /v1/agent/start`       | admin   | starts the supervised agent process                           |
 | `POST /v1/agent/stop`        | admin   | stops the supervised agent process                            |
 | `POST /v1/agent/restart`     | admin   | restarts the supervised agent process                         |
+| `POST /v1/agent/switch`      | admin   | switches harness, installs it, and returns model choices      |
 | `GET /v1/agent/status`       | session | returns configured identity and process state                 |
 | `GET /v1/agent/capabilities` | session | returns the latest ACP capability snapshot when available     |
 | `GET /v1/providers`          | session | lists provider ids available for the configured agent         |
 | `GET /v1/models`             | session | lists ACP-advertised model and mode choices when discoverable |
 
 Agent start/restart uses the current `[agent]` config and injected secret refs. Provider/model changes that require process reload are applied after restart.
+
+`POST /v1/agent/switch` accepts `{ "agent": "<id>", "provider": "<optional-provider-id>", "api_key_ref": "<optional-ref>" }`. The route validates provider compatibility, copies compatible provider secret refs when the target expects a different default ref, installs the target harness, provisions agent-owned config without a model, discovers ACP-advertised model values when the target supports model selection, writes canonical config, and restarts the supervised agent only if it was already running.
 
 ## Sessions
 

@@ -13,6 +13,7 @@ This document records technology choices that affect maintenance or deployment. 
 | age-compatible encryption | local secret store                                         |
 | agent-client-protocol SDK | ACP client boundary to agents                              |
 | rmcp                      | local MCP server/client integration for `acpctl mcp serve` |
+| rpassword                 | hidden terminal prompts for admin-key entry                |
 
 ## Protocols And Interfaces
 

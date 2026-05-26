@@ -77,7 +77,7 @@ pub(crate) async fn status_agent_handler(
     let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
     drop(store);
     let snapshot = state.agent_supervisor.snapshot().await;
-    let agent = &state.config.agent;
+    let agent = state.live_agent_config.lock().await.clone();
     Ok(ApiSuccess::new(StatusAgentResponse {
         configured: true,
         agent: AgentStatusJson {

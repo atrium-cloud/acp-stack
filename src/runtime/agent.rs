@@ -7,3 +7,4 @@ pub mod model_discovery;
 pub mod provider_keys;
 pub mod session_sink;
 pub mod supervisor;
+pub mod switch;

@@ -44,6 +44,7 @@
 - [ ] Add progress output for long-running installer, dependency, import, and export operations.
 - [ ] Add richer init selection UX for code sources, data sources, MCP presets, custom MCP declarations, and required secrets.
 - [ ] Add provider/model selection UX on top of the Phase 4 `models.dev` resolver, including clear filtering by available secret refs.
+- [x] Add `acps agent switch` UX with target install preview, compatible provider reuse, secret-ref migration, and model follow-up gating.
 - [ ] Add retry/reporting polish for failed init, dependency, ingestion, and testflight steps.
 - [ ] Add shell completion generation.
 - [ ] Add help examples for common workflows.

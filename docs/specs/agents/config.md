@@ -22,6 +22,8 @@ acps subagent disable
 
 `acps subagent set` inherits `--provider` (and the matching `--api-key-ref`) from the main agent provider when omitted. `acps subagent free` takes no flags; it routes to `openrouter/free` or `opencode/big-pickle` based on the configured main provider or env, and errors with "Current provider does not support free." otherwise.
 
+`acps agent switch <agent>` rewrites the harness and provider lane through the admin API. It clears any existing model because model ids are agent-specific. After a switch, `acps agent set --model <model-id>` applies the model to the existing provider-backed config.
+
 ## Config Shape
 
 ```toml
@@ -58,6 +60,7 @@ api_key_ref = "<provider-api-key-ref>"
 - Mapped model and mode values are validated against ACP-advertised options.
 - Custom-provider model ids are accepted as supplied.
 - API-key refs must be valid secret-ref names and are added to `[agent].env`.
+- Switch does not migrate custom providers in place; configure the target provider explicitly.
 - Agent-owned config provisioning must succeed before canonical config is
   updated.
 
