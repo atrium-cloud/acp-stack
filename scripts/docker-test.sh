@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly BUILD_CONTEXT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly HOST_PORT="${ACP_STACK_DOCKER_SMOKE_PORT:-7700}"
+readonly HOST_PORT="${ACP_STACK_DOCKER_TEST_PORT:-7700}"
 readonly STATUS_URL="http://127.0.0.1:${HOST_PORT}/v1/status"
 
 persistent=false
@@ -20,19 +20,19 @@ status_file=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/docker-smoke.sh [--cleanup-volumes]
-       scripts/docker-smoke.sh --persistent [--rebuild] [--reset]
+Usage: scripts/docker-test.sh [--cleanup-volumes]
+       scripts/docker-test.sh --persistent [--rebuild] [--reset]
 
 Builds the acp-stack Docker image, initializes it in a one-shot container,
 starts a runtime container, checks GET /v1/status with a session key, and
 cleans up the runtime container. Named volumes are preserved by default.
 
 Persistent mode reuses:
-  image:     acp-stack-smoke:persistent
-  container: acp-stack-smoke-server
-  volumes:   acp-stack-smoke-workspace/config/state
+  image:     acp-stack-test:persistent
+  container: acp-stack-test-server
+  volumes:   acp-stack-test-workspace/config/state
 
-Set ACP_STACK_DOCKER_SMOKE_PORT to override the host port, default 7700.
+Set ACP_STACK_DOCKER_TEST_PORT to override the host port, default 7700.
 USAGE
 }
 
@@ -67,22 +67,22 @@ if [[ "${persistent}" != true && ( "${rebuild}" == true || "${reset}" == true ) 
 fi
 
 if [[ "${persistent}" == true && "${cleanup_volumes}" == true ]]; then
-  echo "--cleanup-volumes is only valid for the default ephemeral smoke; use --persistent --reset for persistent state" >&2
+  echo "--cleanup-volumes is only valid for the default ephemeral test; use --persistent --reset for persistent state" >&2
   exit 1
 fi
 
 configure_names() {
   if [[ "${persistent}" == true ]]; then
-    image_tag="acp-stack-smoke:persistent"
-    workspace_volume="acp-stack-smoke-workspace"
-    config_volume="acp-stack-smoke-config"
-    state_volume="acp-stack-smoke-state"
-    container_name="acp-stack-smoke-server"
+    image_tag="acp-stack-test:persistent"
+    workspace_volume="acp-stack-test-workspace"
+    config_volume="acp-stack-test-config"
+    state_volume="acp-stack-test-state"
+    container_name="acp-stack-test-server"
   else
     local suffix="epoch-$$"
     suffix="$(date +%s)-$$"
-    local name_prefix="acp-stack-smoke-${suffix}"
-    image_tag="acp-stack-smoke:phase4"
+    local name_prefix="acp-stack-test-${suffix}"
+    image_tag="acp-stack-test:phase4"
     workspace_volume="${name_prefix}-workspace"
     config_volume="${name_prefix}-config"
     state_volume="${name_prefix}-state"
@@ -109,7 +109,7 @@ trap cleanup EXIT
 configure_names
 
 persistent_state_dir() {
-  printf '%s\n' "${BUILD_CONTEXT}/.git/docker-smoke"
+  printf '%s\n' "${BUILD_CONTEXT}/.git/docker-test"
 }
 
 persistent_init_output_file() {
@@ -145,7 +145,7 @@ create_volumes() {
 }
 
 remove_persistent_state() {
-  echo "Resetting persistent smoke container and volumes..."
+  echo "Resetting persistent test container and volumes..."
   docker rm -f "${container_name}" >/dev/null 2>&1 || true
   docker volume rm -f "${workspace_volume}" "${config_volume}" "${state_volume}" >/dev/null 2>&1 || true
   rm -f "$(persistent_init_output_file)" "$(persistent_session_key_file)"
@@ -174,13 +174,13 @@ load_persistent_session_key() {
   local key_file
   key_file="$(persistent_session_key_file)"
   if [[ ! -s "${key_file}" ]]; then
-    echo "persistent session key cache is missing; run scripts/docker-smoke.sh --persistent --reset" >&2
+    echo "persistent session key cache is missing; run scripts/docker-test.sh --persistent --reset" >&2
     exit 1
   fi
   local key
   key="$(<"${key_file}")"
   if [[ -z "${key}" ]]; then
-    echo "persistent session key cache is empty; run scripts/docker-smoke.sh --persistent --reset" >&2
+    echo "persistent session key cache is empty; run scripts/docker-test.sh --persistent --reset" >&2
     exit 1
   fi
   printf '%s\n' "${key}"
@@ -269,7 +269,7 @@ if [[ "${status_exit}" -ne 0 ]] || ! grep -Eq '"ok"[[:space:]]*:[[:space:]]*true
   exit 1
 fi
 
-echo "Smoke test passed."
+echo "Test passed."
 if [[ "${persistent}" == true ]]; then
   echo "Persistent container ${container_name} is still running."
 fi

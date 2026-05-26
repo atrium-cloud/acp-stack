@@ -14,18 +14,18 @@ This document is for maintainers and (future) contributors.
 For code changes, use the repository's `cargo` checks (build, test, fmt, clippy) and run the pre-commit hook before commit. For doc-only changes, run the link/leak checks below.
 
 ```sh
-rg -n "tests/|\\.github|smoke|Phase [0-9]|migration|src/" README.md docs/specs docs/deploy docs/agents
+rg -n "tests/|\\.github|Phase [0-9]|migration|src/" README.md docs/specs docs/deploy docs/agents
 rg -n "\\[[^]]+\\]\\(([^)#]+)\\)" README.md docs
 ```
 
 The first check flags maintainer/internal language that has leaked into operator docs or stable specs — review any hit there. Hits inside `docs/mgmt/` are expected.
 
-## Smoke Scripts
+## Test Scripts
 
-Repository smoke scripts are maintainer tools, not deployment instructions:
+Repository test scripts are maintainer tools, not deployment instructions:
 
-- `scripts/docker-smoke.sh` validates the Docker image startup path.
-- `scripts/install-systemd-smoke.sh` validates the systemd installer path in a containerized systemd environment.
+- `scripts/docker-test.sh` validates the Docker image startup path.
+- `scripts/install-systemd-test.sh` validates the systemd installer path in a containerized systemd environment. Its default image is built from `packaging/systemd/installer-test.Dockerfile` so `/sbin/init` exists before the container boots.
 
 ## Local Interface Coupling
 
