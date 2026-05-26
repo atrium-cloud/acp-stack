@@ -1,16 +1,18 @@
 # Docker Deployment
 
-`acp-stack` ships a production Dockerfile for the `acps` daemon. The image builds the Rust binaries in a builder stage, copies `acps` and `acpctl` into a slim Debian runtime image, and runs as the unprivileged `acp` user by default.
+The Docker image runs `acps serve` as the unprivileged `acp` user and stores all instance state in mounted volumes.
 
 ## Image Behavior
 
-- Runtime user: `acp` (`uid 1000`, `gid 1000`).
-- Working directory: `/workspace`.
-- Exposed port: `7700`.
-- Default command: `acps serve --bind 0.0.0.0:${PORT:-7700}`.
-- Included binaries: `acps`, `acpctl`.
+| Item              | Value                                     |
+| ----------------- | ----------------------------------------- |
+| Runtime user      | `acp` (`uid 1000`, `gid 1000`)            |
+| Working directory | `/workspace`                              |
+| Default port      | `7700` or `$PORT` when set                |
+| Default command   | `acps serve --bind 0.0.0.0:${PORT:-7700}` |
+| Included binaries | `acps`, `acpctl`                          |
 
-Persistent paths should be mounted explicitly:
+Mount these paths for a persistent instance:
 
 ```text
 /workspace
@@ -18,7 +20,7 @@ Persistent paths should be mounted explicitly:
 /home/acp/.local/share/acp-stack
 ```
 
-`/workspace` stores runtime workspace files and should be writable by uid 1000. The config and state mounts preserve `acp-stack.toml`, `age.key`, `state.sqlite`, and `secrets.age`.
+`/workspace` stores project files. The config and state mounts preserve `acp-stack.toml`, `age.key`, `state.sqlite`, and `secrets.age`.
 
 ## First Run
 
@@ -47,7 +49,7 @@ docker run --rm \
   acps init --no-install-agent
 ```
 
-Save both printed API keys immediately. The session key is used for routine API calls such as `GET /v1/status`; the admin key is used for management routes and is shown only when generated.
+Save both printed API keys immediately. The session key is used for normal API calls. The admin key is used for management actions and is printed only when it is first generated.
 
 Start the daemon:
 
@@ -61,57 +63,18 @@ docker run -d \
   acp-stack:local
 ```
 
-Set `ACP_STACK_AUTO_INIT=1` only when you want the container entrypoint to run `acps init --no-install-agent` automatically if `acp-stack.toml` is missing. The generated API keys are printed to container logs on first initialization.
-
-## Smoke Test
-
-Run the container startup smoke test from the repository root:
-
-```sh
-scripts/docker-smoke.sh
-```
-
-The script builds an `acp-stack-smoke:phase4` image, initializes fresh named volumes, starts a daemon container, parses the generated session key locally, and checks authenticated `GET /v1/status`.
-
-Named volumes are preserved by default for inspection. Remove them after the run with:
-
-```sh
-scripts/docker-smoke.sh --cleanup-volumes
-```
-
-If host port `7700` is already in use:
-
-```sh
-ACP_STACK_DOCKER_SMOKE_PORT=17700 scripts/docker-smoke.sh
-```
-
-For repeated local smoke runs, use persistent mode:
-
-```sh
-scripts/docker-smoke.sh --persistent --rebuild
-scripts/docker-smoke.sh --persistent
-```
-
-Persistent mode reuses image `acp-stack-smoke:persistent`, container `acp-stack-smoke-server`, and stable named volumes. It runs `acps init --no-install-agent` only when the config volume has not been initialized. The first init output and parsed session key are stored under `.git/docker-smoke/` with owner-only permissions so later persistent smoke runs can authenticate without reinitializing the instance.
-
-Reset the persistent environment with:
-
-```sh
-scripts/docker-smoke.sh --persistent --reset
-```
+Set `ACP_STACK_AUTO_INIT=1` only when you want the entrypoint to initialize a missing config automatically. First-run API keys are printed to container logs in that mode.
 
 ## Railway
 
-For Railway, use the root `Dockerfile` and attach a persistent volume at `/home/acp`. Provide a Railway service config that uses the Dockerfile builder and marks `/home/acp` as the required volume mount path.
+Use the root `Dockerfile` and attach a persistent Railway volume at `/home/acp`. Railway provides `PORT`; the image binds to that port automatically.
 
-Railway provides `PORT`; the Docker image binds `acps` to `0.0.0.0:${PORT}` automatically. When Railway's platform variables are present, the entrypoint defaults `ACP_STACK_AUTO_INIT=1` so a missing `/home/acp/.config/acp-stack/acp-stack.toml` is initialized on first boot. If Railway starts the image as root for a mounted volume, the entrypoint also defaults `ACP_STACK_ALLOW_ROOT=1` for that Railway runtime only. Set either variable explicitly in Railway if you need to override those defaults.
+Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`, and `ACP_STACK_ALLOW_ROOT=1` if the volume mount forces root execution.
 
-On the first successful deploy, capture both generated API keys from the deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
-
-`GET /v1/security/check` also detects Railway's platform variables. In that profile it suppresses the Railway-specific `api.public_bind` warning, the default `acp` runtime-user mismatch caused by root volume execution, and the `/workspace` uid 1000 owner mismatch caused by Railway's checked-out workspace ownership. Managed runtime files under `/home/acp` are still checked normally.
+On the first successful deploy, capture both generated API keys from deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
 
 ## Security Notes
 
-Production containers should use the image default `USER acp`. `acps serve` has an `ACP_STACK_ALLOW_ROOT=1` escape hatch for disposable development profiles and Railway root-volume execution, but it is not needed for normal Docker deployments and should not be set there.
+Production Docker deployments should use the image default `USER acp`. `ACP_STACK_ALLOW_ROOT=1` is only for disposable environments and platform shapes that require root-owned mounted volumes.
 
-For public exposure, keep TLS termination and public routing at a reverse proxy or Cloudflare Tunnel. Runtime HTTP hardening remains active behind the proxy, including authentication, request limits, CORS/origin checks, rate limits, and security logging.
+For public exposure, put TLS termination and routing at a reverse proxy or Cloudflare Tunnel. Runtime HTTP hardening remains active behind the proxy, including authentication, request limits, origin checks, rate limits, and security logging.

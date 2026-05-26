@@ -1,368 +1,99 @@
 # Security
 
-Security boundaries span API authentication, secret storage, permission review, HTTP hardening, deployment posture, and local runtime ownership.
+`acp-stack` treats local instance integrity as part of the product contract. The runtime fails fast on unsafe config and keeps secret values out of config, responses, and logs.
 
 ## API Keys
 
-The runtime uses two API keys:
+Two API keys are generated on first init:
 
-- session key
-- admin key
+| Key     | Scope                                                                   |
+| ------- | ----------------------------------------------------------------------- |
+| Session | normal sessions, workspace, commands, logs, status, pending permissions |
+| Admin   | secrets, config import, agent process control, and sensitive operations |
 
-`acps init` generates both keys, stores them in the age-encrypted secret store under the names declared by `[auth].session_key_ref` and `[auth].admin_key_ref` in the config, and prints the values once on stdout. The admin key is printed only on the run that generates it; re-running `acps init` against an already-initialized instance preserves both keys and does not reveal the admin value again. Keys are formatted as `acps_<43-char base64url>` (32 random bytes from the system CSPRNG, base64url-no-pad, with the `acps_` prefix).
+The session key can be regenerated. The admin key is generated once and is replaced only by resetting and reinitializing the instance.
 
-The session key authorizes general operations and can be regenerated with `acps auth regenerate-session-key`.
+## Key Tiering
 
-The admin key authorizes elevated operations. It is generated only once during init and is never regenerable in place. If it is lost or compromised, the operator must run `acps reset --yes` to wipe config, state, age key, and the secret store, then re-run `acps init` to regenerate a fresh pair. `acps init` fails fast if the secret store exists but is missing the admin key reference, treating that state as an anomaly that requires the operator to investigate.
+Tiering is strict and non-superset: the admin key is rejected on session-tier routes with `401 auth.wrong_kind`, and the session key is rejected on admin-tier routes with the same code. The admin key is not a superset of the session key.
 
-## API Key Tiering
+Session-tier routes cover everything that is not management or destructive: status reads, config export, log queries, workspace operations, command runs, session and prompt lifecycle, and permission approve/deny. Session operations stay session-tier even when they write rows.
 
-The HTTP layer applies strict tiering between the two keys: the admin key authorizes management functions and destructive / runtime-state-altering actions (e.g. secrets mutations, config import, agent install/start/stop, key rotation). The session key authorizes everything else (status reads, config export, config validate, log queries, sessions, prompts, workspace operations, command runs, permission decisions). Normal session operations stay session-tier even when they write rows.
+Both keys are presented as `Authorization: Bearer <key>` and compared against stored values in constant time.
 
-Strict tiering means the admin key is rejected on session-tier routes (`auth.wrong_kind`, 401) and the session key is rejected on admin-tier routes. There is no superset relationship. This isolates the higher-blast-radius credential to the smallest set of routes that need it.
+## Secret Store
 
-Both keys are presented as `Authorization: Bearer <key>`. The server determines which key was presented by constant-time comparing against both stored values, then enforces the route's required tier in a per-route middleware.
+Secret values are stored in the encrypted local secret store. Config files carry secret reference names only.
 
-## Auth Failure Logging
+Rules:
 
-Every rejected authentication is recorded as a row in the `auth_failures` table. Rows capture the request route, the resolved key kind (`session`, `admin`, or `unknown` when no match), and the reason code (`missing`, `malformed_header`, `invalid`, `wrong_kind`). The attempted token value is never stored; only the kind that was expected and why it failed. Rows carry the trusted-proxy-aware client IP when `security.http.trust_proxy_headers` is enabled and the socket peer is configured in `security.http.trusted_proxies`; otherwise they carry the socket client IP when available. Rows also carry a small JSON payload for forward-compatible context (rate-limit hints, etc.).
+- API responses never return secret values.
+- Config export returns refs only.
+- Agent and MCP secrets are injected only where explicitly referenced.
+- Secret-ref fields reject likely pasted secret values.
 
-## Baseline Posture
+## HTTP Hardening
 
-- supports bearer key auth
-- supports request size limits
-- validates API keys with constant-time comparison
-- logs failed authentication without storing attempted key values
-- applies per-IP and per-key rate limits to HTTP routes
-- applies lower unauthenticated request limits before a key is accepted
-- temporarily blocks IPs after repeated authentication failures
-- validates WebSocket `Origin` against the configured allowlist when present
-- supports CORS only for configured origins
-- rejects oversized request bodies before route handlers process them
-- runs as an unprivileged Linux user by default, normally `acp`
-- spawns the agent, MCP servers, and mediated shell commands as the same unprivileged runtime user
-- stores config, state, age key, and encrypted secret store under paths owned by the runtime user with owner-only permissions
-- binds to `127.0.0.1:7700` by default
-- assumes TLS and public-edge hardening are handled by a reverse proxy for internet exposure
-- keeps TLS termination and persistent IP allowlists out of the `acp-stack` core
-- treats root execution as an explicit disposable/dev deployment profile, not the standard deployment model
+The public API enforces:
 
-Deployment guidance should document reverse proxy patterns for Caddy, Nginx, Fly, Railway, and Hetzner.
+- bearer authentication
+- auth tier checks
+- CORS and WebSocket Origin allowlists
+- request body limits
+- per-key and per-IP rate limits
+- temporary blocking after repeated auth failures
+- bounded trusted-proxy handling
+- security event logging
 
-## Secrets
+`trust_proxy_headers = true` accepts forwarded client metadata only from exact IPs listed in `trusted_proxies`. Do not trust broad public ranges.
 
-Secrets are stored outside the portable config.
+## Auth Failures And Rate Limits
 
-The initial release uses age-compatible encryption:
+Every rejected authentication is recorded in the `auth_failures` table with a structural `reason` (`missing`, `malformed_header`, `invalid`, `wrong_kind`). The attempted token value is never stored. After `auth_failures_per_minute` rejections in a 60-second window, the client IP is blocked for `auth_block_duration`.
 
-- private key: `~/.config/acp-stack/age.key` (bech32 x25519 identity, owner-only `0600`)
-- encrypted store: `~/.local/share/acp-stack/secrets.age` (owner-only `0600`)
-- the store is encrypted to its own public key; the inner plaintext is a TOML document of the form `[secrets]\nNAME = "value"`
-- mutations rewrite the full ciphertext through an atomic temp-file rename
+Hardening errors use stable codes in the standard error envelope:
 
-Secret references appear in config:
-
-```toml
-[agent]
-env = ["<provider-api-key-ref>"]
-
-[logging.supabase]
-api_key_ref = "SUPABASE_SECRET_KEY"
-
-[[mcp.servers]]
-type = "http"
-name = "linear"
-url = "https://mcp.linear.app/mcp"
-headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
-```
-
-See [mcp.md](mcp.md) for the full Linear MCP example, including `acps secrets set` commands and HTTP header layout.
-
-Secret values are managed by CLI or API:
-
-```sh
-acps secrets set <provider-api-key-ref>
-acps secrets list
-acps secrets delete <provider-api-key-ref>
-```
-
-Scoped injection rules:
-
-- the agent receives only reserved non-secret runtime context (`PATH`, `HOME`)
-  plus names listed in `[agent].env`
-- registry-resolved installer steps receive no agent runtime env secrets; future
-  install-only tokens must be declared separately from `[agent].env`
-- a stdio MCP server receives only names listed in its `env`
-- HTTP MCP headers may interpolate referenced secrets
-- the Supabase sink receives only the configured `api_key_ref` when external logging is enabled
-- the full secret store is never injected into any child process
-- secret values are never returned by API or config export
-
-Secret-reference classifications:
-
-- **agent runtime env** - reserved non-secret runtime context plus secret values
-  injected only into the configured agent process when listed in `[agent].env`
-- **MCP stdio env** - secret values injected only into that server process when
-  listed in the server's `env`
-- **MCP HTTP header** - secret values interpolated only into the configured
-  outbound header for that HTTP MCP server
-- **Git credential** - secret values used only for workspace repository clone
-  during init or workspace source setup
-- **S3 credential** - secret values used only for S3 data ingestion
-- **install-only token** - secret values made available only to a bounded
-  installer step, not to the launched agent unless separately referenced
-
-Each reference name has exactly one declared purpose in config. The same secret value may be stored twice under two names if an operator intentionally wants to reuse material across purposes, but implicit aliasing across subsystems is not part of the contract.
-
-Security limitation:
-
-If an attacker has root on a running instance, process environment variables may be readable through OS facilities. Age protects secrets at rest and in exported configs; it cannot protect secrets from full runtime compromise.
+| Status | Code                       | Trigger                                          |
+| ------ | -------------------------- | ------------------------------------------------ |
+| `401`  | `auth.wrong_kind`          | key valid but used on the wrong tier             |
+| `429`  | `auth.rate_limited`        | per-IP, per-key, or unauthenticated bucket empty |
+| `403`  | `auth.origin_not_allowed`  | CORS / WebSocket Origin not in allowlist         |
+| `413`  | `request.too_large`        | request body exceeds the configured cap          |
 
 ## Permissions
 
-Phase 2 implements the permission pipeline as a durable product primitive.
+Permission policy applies to ACP permission requests and mediated shell commands.
 
-Permission sources:
+| Policy input      | Behavior                                   |
+| ----------------- | ------------------------------------------ |
+| `deny` match      | reject immediately                         |
+| `review` match    | create a permission request or audit event |
+| `auto` mode       | allow unmatched requests                   |
+| `supervised` mode | require approval for unmatched risky work  |
+| `locked` mode     | require approval for unmatched commands    |
 
-- ACP `session/request_permission`
-- commands launched through `POST /v1/commands`
-- future runtime modules
+Pending requests expire according to config. Approval and denial decisions are durable events.
 
-Permission lifecycle:
+## Workspace Boundary
 
-1. Runtime creates a permission request.
-2. Request is persisted in SQLite.
-3. Request is pushed over WebSocket to subscribed clients.
-4. Request is visible through `GET /v1/permissions/pending`.
-5. User approves or denies over HTTP or WebSocket.
-6. Decision is persisted.
-7. Runtime resumes, rejects, or times out the blocked operation.
+Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, symlink escapes, writes through existing symlink targets, and files above `workspace.max_file_bytes`. Oversized reads/writes/uploads/downloads return `413 workspace.too_large`.
 
-Policy example:
+## Local Interface
 
-```toml
-[permissions]
-mode = "auto"
-review = ["rm *", "git push *", "chmod *", "curl * | sh", "sudo *"]
-deny = ["shutdown*", "reboot*"]
-```
+`acpctl` uses a local Unix socket protected by filesystem permissions. It does not use the public session or admin API keys. The local surface is allowlisted and cannot read secret values, rotate keys, import config, approve its own high-risk requests, or control public WebSocket disconnections.
 
-Patterns are full-string shell-style globs matched against the raw command line. `*` matches any sequence of characters (including the empty string); `?` matches exactly one. They are anchored at both ends, so a bare `shutdown` matches only the literal `shutdown` and not `shutdown now` — explicit args should be covered with `shutdown*` or `shutdown *`. Patterns do not currently introspect shell composition (`;`, `&&`, pipelines), so `true; shutdown now` would not be matched by `shutdown*` — denylist coverage of shell composition is deferred to the permissions module.
+## Deployment Posture
 
-The `[permissions].request_timeout` (duration string, default `5m`) and `[permissions].timeout_action` (`"deny"` | `"approve"`, default `"deny"`) keys govern per-request expiry. When a pending request crosses `request_timeout`, the timer transitions it to `expired` (or `approved` when `timeout_action = "approve"`) and records a `system`-principal decision.
+Production deployments should:
 
-`[security.http].trusted_proxies` is an array of exact IP-address strings (no CIDR). When `trust_proxy_headers = true`, the runtime consults `X-Forwarded-For` / `Forwarded` headers only when the socket peer matches an entry; otherwise the socket peer is used as the client IP for auth-failure tracking and rate-limit accounting.
-
-Modes:
-
-- `auto` - allow most mediated operations, review or deny matching patterns
-- `supervised` - review destructive mediated operations
-- `locked` - require approval for every mediated command
-
-Important initial-release boundary:
-
-The Command Gateway controls commands launched through `acp-stack` and terminal capabilities that `acp-stack` mediates. It does not claim to intercept arbitrary process activity outside its control path.
-
-The Phase 1+2 permissions module is in place. `review` matches now create a pending permission row when `mode` is `supervised` or `locked` (the row's `subject_id` is the command id); operators decide through `/v1/permissions/{id}/approve` or `/v1/permissions/{id}/deny`. `locked` mode also gates every non-deny submission through the same pipeline. In `auto` mode, `review` matches still proceed with a `command.review_flagged` event for audit. ACP `session/request_permission` requests follow the same path with `subject_id = session_id`.
-
-Two independent defensive layers gate every HTTP request:
-
-1. **Auth-failure IP block** (`http_hardening::AuthFailureBlocker`): every rejected authentication increments a per-IP counter in a 60-second rolling window. When the count crosses `[security.http].auth_failures_per_minute`, the IP is blocked for `[security.http].auth_block_duration` and a `security.ip_block_applied` event is appended. Blocked IPs are short-circuited before bearer comparison; the block clears on successful authentication, on window roll-over after the configured duration, or on daemon restart (state is in-memory only — persistent IP blocks belong in a reverse proxy). This layer targets brute-force key guessing.
-
-2. **Rate limiter** (`http_hardening::RateLimiter`): three independent token buckets enforce the per-window throughput contract from `[security.http].rate_limit_per_minute` and `[security.http].burst`.
-   - **Per-IP** — ticked on every request before bearer parsing, keyed by the trusted-proxy-aware client IP. Capacity `burst`; refill `rate_limit_per_minute / 60` tokens/second.
-   - **Per-key** — ticked on requests that successfully match an API key, keyed by `sha256(bearer)` truncated to 16 hex characters. The raw bearer is never stored. Same capacity/refill as per-IP.
-   - **Unauthenticated** — ticked on requests that fail bearer parse/match, keyed by client IP, with a stricter capacity/refill (one-quarter of the authenticated tier). Defense-in-depth against bad-credential floods below the auth-failure-block threshold.
-
-Rate-limit rejections return `429 auth.rate_limited` in the standard envelope and append a `security.rate_limited` event whose payload carries the scope (`per_ip` / `per_key` / `unauthenticated`), the client IP, the route, and (for per-key) the key fingerprint. Bucket state is in-process only.
-
-HTTP requests with a disallowed `Origin` return `403 auth.origin_not_allowed` and append `security.cors_origin_denied`. WebSocket upgrades use the same allowlist, return the same error code on rejection, and append `security.ws_origin_denied`. Framework-generated oversized request-body rejections return `413 request.too_large` and append `security.request_oversized` with method, route, and configured byte limit.
-
-## Cloudflare Edge Hardening
-
-Cloudflare Tunnel is the preferred public exposure model. In that profile, `acps` stays bound to loopback and `cloudflared` creates an outbound tunnel to Cloudflare, which provides public-edge DDoS filtering, WAF/rate-limit rules, TLS, and request geolocation signals before traffic reaches the host. A proxied-DNS public-origin deployment remains an advanced fallback and should require firewall guidance that admits only Cloudflare edge ranges to the origin.
-
-`acp-stack` should still keep its internal auth, per-IP/per-key rate limiting, CORS/origin validation, request-size limits, and security logging active behind Cloudflare. Cloudflare reduces exposed attack surface and absorbs edge floods; runtime hardening remains defense in depth and protects private/local deployments too.
-
-When `[edge.cloudflare]` is configured and proxy headers are trusted, the runtime extracts bounded Cloudflare metadata only from trusted proxy peers:
-
-- `CF-Connecting-IP` as the edge-reported client IP.
-- `CF-IPCountry` as a coarse country code.
-- `CF-Ray` as a correlation id for Cloudflare logs.
-- optional visitor-location headers, when the operator enables Cloudflare Managed Transforms for them.
-
-That metadata is attached to `api.request`, `auth_failures`, `security.rate_limited`, `security.ip_block_applied`, `security.ip_block_active`, `security.cors_origin_denied`, `security.ws_origin_denied`, `security.request_oversized`, and WebSocket connect/disconnect events. The normal durable payload keeps this bounded to origin kind, country code, region code/name where available, Cloudflare Ray id, and proxy provider. It does not store high-resolution location or raw Cloudflare credentials.
-
-Planned self-check findings:
-
-- `edge.cloudflare.cloudflared_missing`: tunnel profile configured but `cloudflared` is not available.
-- `edge.cloudflare.public_bind_in_tunnel_mode`: tunnel mode configured while `[api].bind` listens publicly.
-- `edge.cloudflare.local_proxy_untrusted`: tunnel mode configured without loopback trusted proxies.
-- `edge.cloudflare.unsafe_origins`: configured `allowed_origins` are missing or include `*`.
-- `edge.cloudflare.headers_missing`: recent traffic expected to come through Cloudflare lacks bounded Cloudflare headers.
-- `edge.cloudflare.direct_public_requests`: direct public traffic bypassed the configured Cloudflare edge.
+- run as an unprivileged runtime user
+- keep config and state directories owner-only
+- bind the daemon to loopback unless a trusted platform requires otherwise
+- terminate TLS at a reverse proxy or Cloudflare Tunnel
+- keep runtime auth and origin checks enabled behind the edge
 
 ## Security Self-Check
 
-Phase 4 adds a self-check command:
+`GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, weak or missing cached keys, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, and external logging delivery failures.
 
-```sh
-acps security check
-```
-
-The same check is exposed through:
-
-```http
-GET /v1/security/check
-```
-
-The self-check inspects local configuration, file permissions, runtime status, and recent security events. It returns a severity-ranked report with `ok`, `warning`, and `critical` findings. Every finding carries an operator-actionable `remediation` hint alongside its diagnostic `message`; CLI output renders it on an indented `hint:` line, and the JSON payload exposes the string under each finding's `remediation` field (omitted when no hint applies).
-
-Checks include:
-
-- API bind address is not unexpectedly public.
-- Reverse proxy assumptions are explicit when `api.bind` is public.
-- API keys exist and are not default/empty.
-- Config, state, age key, and encrypted secret store are owner-only readable.
-- Runtime is not running as root unless disposable/dev profile is explicitly configured.
-- Workspace is owned by the runtime user.
-- Agent binary hash matches `expected_sha256` when configured.
-- Agent installer command has not changed since last successful install.
-- Recent auth failure rate is below configured thresholds.
-- Temporary IP blocks are not spiking.
-- CORS and WebSocket origin allowlists are not wildcarded on public binds.
-- `trust_proxy_headers` is not enabled without trusted proxy configuration.
-- Supabase logging failures are not silently accumulating.
-- No recent command or permission events match high-risk patterns without review.
-
-Example output shape:
-
-```json
-{
-  "ok": false,
-  "summary": {
-    "critical": 1,
-    "warning": 2,
-    "ok": 12
-  },
-  "findings": [
-    {
-      "id": "agent.hash_mismatch",
-      "severity": "critical",
-      "message": "Configured agent binary does not match expected_sha256.",
-      "remediation": "Reinstall the agent or update expected_sha256 after verifying the binary."
-    }
-  ]
-}
-```
-
-## Runtime User
-
-Recommended Linux layout:
-
-```text
-user: acp
-home: /home/acp
-workspace: /workspace
-config: /home/acp/.config/acp-stack
-state: /home/acp/.local/share/acp-stack
-```
-
-Host setup:
-
-```sh
-useradd --create-home --shell /bin/bash acp
-mkdir -p /workspace
-chown -R acp:acp /workspace
-```
-
-Systemd units should set:
-
-```ini
-User=acp
-Group=acp
-WorkingDirectory=/workspace
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/workspace /home/acp
-```
-
-`ReadWritePaths` covers the runtime user's whole home because supported
-headless agents write managed install shims under `~/.local/bin` and
-agent-owned config under paths such as `~/.config/{goose,opencode}`, `~/.pi`,
-and `~/.codex`. The daemon should still run as the unprivileged runtime user;
-writable home access is for agent bootstrap/configuration, not for root
-execution.
-
-Docker images should use `USER acp` and mount `/workspace` writable by that UID.
-
-Railway deployments are detected from the platform-provided
-`RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID`
-environment variables. In that profile, `acps security check` suppresses only
-Railway-specific diagnostics:
-
-- `api.public_bind`, because Railway requires the application to listen on the
-  injected service port while Railway's edge handles public routing.
-- `runtime.user_mismatch` when the daemon runs as uid 0, the configured
-  `workspace.runtime_user` remains the default `acp`, and Railway root-volume
-  execution is in effect.
-- `runtime.path_ownership` for the `/workspace` root only when Railway
-  root-volume execution runs the daemon as uid 0 and Railway's checkout is
-  owned by uid 1000.
-
-The Railway profile does not suppress loose permissions, uninspectable paths,
-managed config/state/secret ownership mismatches under `/home/acp`, weak keys,
-or HTTP hardening findings unrelated to Railway's runtime shape.
-
-`acps serve` refuses to start as root (`euid == 0`) unless the operator passes
-the `--allow-root` flag or sets `ACP_STACK_ALLOW_ROOT=1`. The opt-in is
-intended for disposable/dev profiles (ephemeral containers). Production
-deployments run as `workspace.runtime_user`, dropping into the unprivileged
-account via the systemd `User=` directive or the Docker `USER` directive.
-Even with the opt-in, the daemon refuses to start if the admin API key is
-empty — an empty admin key combined with root execution is an open back door
-into every mutating route.
-
-`acps security check` (CLI) and `GET /v1/security/check` (admin-tier API,
-also reachable on the acpctl UDS) report on runtime posture. The same helper
-backs both surfaces; the policy lives in one place at `src/security.rs`.
-The check surfaces the following findings beyond the existing `api.*` /
-`http.*` / `auth.*` / `logging.*` codes:
-
-- `auth.session_key_weak`, `auth.admin_key_weak` (warning): the configured
-  API key is shorter than 32 characters or matches a known weak placeholder
-  (`changeme`, `default`, etc., case-insensitive). The actual key value is
-  never echoed in the finding message.
-- `runtime.path_mode_loose` (critical): config dir / state dir is not 0o700,
-  or config file / state database / age key / secret store is not 0o600.
-- `runtime.path_ownership` (critical): a runtime-managed path is owned by a
-  uid other than the daemon's `geteuid()`.
-- `runtime.path_uninspectable` (critical): a runtime-managed path cannot be
-  inspected at all (missing, unreadable, or blocked by filesystem errors), so
-  the daemon cannot verify its owner or mode.
-- `runtime.user_mismatch` (warning): the daemon's effective uid does not
-  match the uid resolved from `workspace.runtime_user` via `getpwnam_r`. The
-  check skips this finding when the configured name does not resolve (e.g.
-  the installer hasn't run yet).
-- `runtime.workspace_not_writable` (critical): the daemon cannot create
-  files inside `workspace.root`.
-
-Each finding includes an actionable `remediation` string — for example
-`runtime.path_ownership` reports the diagnostic in `message` and a literal
-`chown -h <effective-uid> <path>` command in `remediation`. The hint names
-the daemon's effective uid (the value the check enforces) and omits the gid
-because the check validates owner uid only. `chown -h` keeps the command
-operating on the path itself if it is a symlink (`ownership::inspect` reads
-symlink metadata, so a symlinked managed path reports its own posture). CLI
-output renders the remediation on an indented `hint:` line:
-
-```
-findings:
-- critical runtime.path_mode_loose: config directory at /home/acp/.config/acp-stack has mode 0o755, expected 0o700
-    hint: Run `chmod 0700 -- '/home/acp/.config/acp-stack'` to restore owner-only permissions.
-```
-
-Paths inside command-form remediation strings are POSIX shell-quoted so a
-workspace root or HOME containing spaces, single quotes, or other
-metacharacters can't produce an unsafe-to-paste command.
+Findings include severity, code, message, and remediation when an operator action is available.

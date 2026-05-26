@@ -16,11 +16,10 @@ agent.example.com {
 			write_timeout 1h
 		}
 	}
-
 }
 ```
 
-Caddy handles WebSocket upgrades automatically for `reverse_proxy`.
+Caddy handles WebSocket upgrades automatically for `reverse_proxy`. Tune `read_timeout` / `write_timeout` to the longest streaming session you expect.
 
 ## Runtime Config
 
@@ -35,8 +34,4 @@ trust_proxy_headers = true
 trusted_proxies = ["127.0.0.1"]
 ```
 
-Use the actual Caddy source IP in `trusted_proxies` when Caddy runs on a different host or container network. Do not trust broad public ranges.
-
-## Compression Policy
-
-Compression is optional. If enabled, keep it limited to ordinary text and JSON responses and avoid compressing WebSocket streams or sensitive management traffic at an outer proxy. Runtime HTTP hardening remains enabled behind Caddy, including authentication, CORS/origin checks, request limits, rate limits, and security logging.
+Use the actual Caddy source IP when Caddy runs on a different host or container network. Do not trust broad public ranges.
