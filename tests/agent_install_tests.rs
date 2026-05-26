@@ -209,6 +209,7 @@ fn adapter_kind_entry() -> RegistryEntry {
         set_mode: false,
         subagents: false,
         subagent_alias: None,
+        subagent_free_models: Vec::new(),
         stdio_framing: RegistryStdioFraming::JsonLines,
         website: None,
         github: Some(format!("https://github.com/{HARNESS_REPO}")),

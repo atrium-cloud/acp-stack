@@ -51,11 +51,16 @@ To make this more easily configurable, you can run `acps subagent *` commands to
 
 ```sh
 acps subagent status
-acps subagent set --provider <provider-id> --model <provider/model-id>
+acps subagent set --model <provider/model-id> [--provider <provider-id>] [--api-key-ref <ref>]
+acps subagent match
 acps subagent free
 acps subagent disable
 ```
 
-`acps subagent free` selects `openrouter/free` if using `OPENROUTER_API_KEY` or `opencode/big-pickle` if using `OPENCODE_API_KEY`.
+Usage:
+- `acps subagent set` inherits `--provider` and `--api-key-ref` from the main agent provider when omitted, so the common case is `acps subagent set --model <model>`.
+- `acps subagent match` makes `small_model` follow the main agent model if not already.
+- `acps subagent free` selects `openrouter/free` if using `OPENROUTER_API_KEY` or `opencode/big-pickle` if using `OPENCODE_API_KEY`; errors with "Current provider does not support free." otherwise.
+- `acps subagent disable` sets model ID to an invalid string to ensure that OpenCode `small_model` requests cannot be executed. This is a tried-and-true workaround that will remain until PR#21184 is merged.
 
 When no subagent model is configured, OpenCode configured through `acp-stack` defaults to inheriting the main model for the small model.

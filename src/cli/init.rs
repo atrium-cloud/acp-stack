@@ -226,7 +226,7 @@ fn configure_subagent_inherit_for_init(
     }
     if io::stdin().is_terminal() {
         print!(
-            "use main agent provider/model for {}? [Y/n]: ",
+            "inherit main provider/model for {}? declining disables it. [Y/n]: ",
             entry.subagent_alias.as_deref().unwrap_or("subagent")
         );
         io::stdout()
@@ -238,14 +238,18 @@ fn configure_subagent_inherit_for_init(
             .map_err(|source| StackError::ServeIo { source })?;
         let answer = answer.trim();
         if answer.eq_ignore_ascii_case("n") || answer.eq_ignore_ascii_case("no") {
-            println!("subagent provider/model left unset; run `acps subagent set` to configure it");
-            return Ok(false);
+            config.agent.subagent = Some(AgentSubagentConfig {
+                disabled: true,
+                provider: None,
+            });
+            println!(
+                "subagent model disabled; run `acps subagent set` to configure, or `acps subagent match` to inherit later"
+            );
+            return Ok(true);
         }
     }
-    config.agent.subagent = Some(AgentSubagentConfig {
-        disabled: false,
-        provider: Some(provider.clone()),
-    });
+    // Accept path leaves `subagent` unset on purpose: under the new
+    // "absent = inherit" semantic, no mirror of the main provider is needed.
     Ok(true)
 }
 

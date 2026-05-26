@@ -90,7 +90,7 @@
 - [x] Resolve default API-key refs, companion refs, and optional provider refs from the provider/env mapping.
 - [x] Persist only non-secret provider id, ACP-advertised model id, supported mode value, and secret refs without storing secret values in plaintext config.
 - [x] Regenerate supported agent-owned config before writing canonical config when provider/model settings change.
-- [x] Add OpenCode-only `acps subagent` configuration for `small_model`, including inherited main-model defaults, free-model shortcuts, explicit disable, and rejection for all non-OpenCode agents.
+- [x] Add OpenCode-only `acps subagent` configuration for `small_model`, including inherited main-model defaults, explicit `match` re-inherit, free-model shortcuts, explicit disable, and rejection for all non-OpenCode agents.
 - [x] Provide a manual supervised-agent restart path for provider/model changes that require process-level config reload, and route Goose model changes through ACP session config on new sessions instead of requiring restart.
 - [x] Document whether each supported agent can change model/mode after session creation; reject unsupported live changes explicitly.
 

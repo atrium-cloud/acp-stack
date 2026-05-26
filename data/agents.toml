@@ -48,6 +48,23 @@ binary_name = "opencode"
 x86_64 = "x64"
 aarch64 = "arm64"
 
+# Free auxiliary/subagent models exposed via `acps subagent free`.
+#
+# Resolution:
+#   - If a main provider is configured, the first entry whose provider is in
+#     the same family as the main provider wins. Family membership is matched
+#     by provider id, or by shared canonical env ref (so `opencode-go` aliases
+#     to `opencode` because both canonicalize to OPENCODE_API_KEY).
+#   - If no main provider is configured, the first entry whose canonical env
+#     ref is present in `[agent].env` wins. List order is the tiebreaker.
+[[agents.subagent_free_models]]
+provider = "openrouter"
+model = "openrouter/free"
+
+[[agents.subagent_free_models]]
+provider = "opencode"
+model = "opencode/big-pickle"
+
 # Cursor CLI
 
 [[agents]]
