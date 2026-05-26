@@ -1,6 +1,6 @@
 # Nginx Reverse Proxy
 
-Use Nginx for TLS termination and public routing while keeping `acps` bound to a private origin. In a host install that is usually `127.0.0.1:7700`; in Docker it can be a private container network service.
+Use Nginx for TLS termination while keeping `acps` on a private origin such as `127.0.0.1:7700`.
 
 ## Example
 
@@ -41,8 +41,6 @@ server {
 
 ## Runtime Config
 
-Set the public URL and allow the browser origin explicitly:
-
 ```toml
 [api]
 bind = "127.0.0.1:7700"
@@ -54,8 +52,6 @@ trust_proxy_headers = true
 trusted_proxies = ["127.0.0.1"]
 ```
 
-Only enable `trust_proxy_headers` for proxy IPs that cannot be reached by untrusted clients. `acp-stack` uses trusted proxy validation before accepting forwarded client IP metadata.
+Set `client_max_body_size` to match (or exceed) the runtime's `max_request_bytes` cap so uploads aren't truncated at the proxy.
 
-## Compression And WebSockets
-
-Keep compression conservative. Do not compress WebSocket traffic, streamed event responses, or secrets-bearing management responses. The runtime still enforces its own HTTP hardening behind Nginx; the proxy does not replace API authentication, origin checks, rate limits, body limits, or audit logging.
+Only trust proxy IPs that untrusted clients cannot reach directly.
