@@ -2,6 +2,7 @@ mod check;
 mod install;
 mod set;
 mod status;
+mod switch;
 mod test;
 
 use clap::{Args, Subcommand};
@@ -37,6 +38,8 @@ pub enum AgentCommand {
     Test(AgentTestArgs),
     /// Set the provider id, model, and API-key ref used by generated agent config.
     Set(AgentSetArgs),
+    /// Switch to another supported agent harness.
+    Switch(AgentSwitchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -89,6 +92,21 @@ pub struct AgentSetArgs {
     pub(super) api_key_ref: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct AgentSwitchArgs {
+    /// Target agent id, such as opencode, pi, goose, codex, cursor, or amp.
+    pub(super) agent: String,
+    /// Provider id to use instead of attempting compatible reuse.
+    #[arg(long)]
+    pub(super) provider: Option<String>,
+    /// Secret ref to inject for the target provider.
+    #[arg(long = "api-key-ref")]
+    pub(super) api_key_ref: Option<String>,
+    /// Admin API key. Required when stdin is not a terminal.
+    #[arg(long = "admin-key")]
+    pub(super) admin_key: Option<String>,
+}
+
 pub(super) fn run_agent_command(command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::Install => self::install::run_agent_install(),
@@ -98,6 +116,7 @@ pub(super) fn run_agent_command(command: AgentCommand) -> Result<()> {
         AgentCommand::Check => self::check::run_agent_check(),
         AgentCommand::Test(args) => self::test::run_agent_test(args),
         AgentCommand::Set(args) => self::set::run_agent_set(args),
+        AgentCommand::Switch(args) => self::switch::run_agent_switch(args),
     }
 }
 

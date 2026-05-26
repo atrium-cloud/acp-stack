@@ -470,7 +470,7 @@ fn run_agent_model_set(
             ),
         });
     }
-    if entry.set_provider {
+    if entry.set_provider && config.agent.provider.is_none() {
         return Err(StackError::InvalidParam {
             field: "provider",
             reason: format!(
@@ -487,32 +487,63 @@ fn run_agent_model_set(
         });
     };
 
-    let required_env_refs = env_refs_for_agent_id(&config.agent.id)
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let required_env_refs = if let Some(provider) = config.agent.provider.as_ref() {
+        provider
+            .api_key_ref
+            .as_deref()
+            .map(|api_key_ref| {
+                required_env_refs_for_provider_id(&provider.id, api_key_ref)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        env_refs_for_agent_id(&config.agent.id)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
     for env_ref in &required_env_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
-    config.agent.provider = None;
-    let model = resolve_agent_model_value(home, &config, None, &model)?;
-    config.agent.model = Some(model);
+    let agent_provider_id = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| agent_provider_id_for_provider_id(&config.agent.id, &provider.id));
+    let model = resolve_agent_model_value(home, &config, agent_provider_id, &model)?;
+    if let Some(provider) = config.agent.provider.as_mut() {
+        provider.model = Some(model);
+        config.agent.model = None;
+    } else {
+        config.agent.model = Some(model);
+    }
 
     let canonical = config.to_canonical_toml()?;
     let config = config::load_config_from_str(&canonical)?;
+    let model_value = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+        .or(config.agent.model.as_deref())
+        .expect("agent model set");
     validate_agent_session_config_value(
         home,
         &config,
         AgentSessionConfigCategory::Model,
-        config.agent.model.as_deref().expect("agent model set"),
+        model_value,
     )?;
     let provisioned = provision_agent_headless_config(&config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
     print_agent_set_agent(&config);
-    println!("model: {}", config.agent.model.as_deref().unwrap_or(""));
+    if let Some(provider) = config.agent.provider.as_ref() {
+        println!("provider: {}", provider.id);
+    }
+    println!("model: {model_value}");
     if !required_env_refs.is_empty() {
         println!("required_env_refs: {}", required_env_refs.join(", "));
     }

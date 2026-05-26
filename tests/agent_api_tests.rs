@@ -8,7 +8,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use acp_stack::api::{self, AppState};
+use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
 use acp_stack::runtime::agent::model_discovery::fetch_session_config_with_timeout;
 use acp_stack::state::StateStore;
@@ -24,6 +24,7 @@ const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd
 
 struct AgentHarness {
     base_url: String,
+    config_path: std::path::PathBuf,
     _tempdir: TempDir,
     state: Arc<TokioMutex<StateStore>>,
     join: JoinHandle<acp_stack::error::Result<()>>,
@@ -37,15 +38,31 @@ impl AgentHarness {
     async fn spawn_with_config(config: Config) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
+        let config_path = tempdir.path().join("acp-stack.toml");
+        std::fs::write(
+            &config_path,
+            config.to_canonical_toml().expect("canonical test config"),
+        )
+        .expect("test config write");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
-        let app_state = AppState::new(config, store, SESSION_KEY.to_owned(), ADMIN_KEY.to_owned());
+        let effective_bind = config.api.bind.clone();
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path);
+        let app_state = AppState::with_effective_bind_and_runtime_paths(
+            config,
+            store,
+            SESSION_KEY.to_owned(),
+            ADMIN_KEY.to_owned(),
+            effective_bind,
+            runtime_paths,
+        );
         let state = app_state.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local"));
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
         Self {
             base_url,
+            config_path,
             _tempdir: tempdir,
             state,
             join,
@@ -265,6 +282,103 @@ fn session_bearer() -> String {
 fn shell_quote_path(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn write_cursor_registry_override(config_dir: &std::path::Path) {
+    let body = r#"
+[[agents]]
+id = "cursor"
+name = "Cursor CLI"
+kind = "native"
+headless_compatible = true
+set_model = true
+set_mode = true
+support_doc = "docs/agents/cursor.md"
+
+[agents.harness]
+id = "true"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "true"
+"#;
+    std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
+}
+
+fn write_amp_registry_override(config_dir: &std::path::Path) {
+    let body = r#"
+[[agents]]
+id = "amp"
+name = "Amp Code"
+kind = "adapter"
+headless_compatible = true
+set_provider = false
+set_model = false
+set_mode = true
+support_doc = "docs/agents/amp.md"
+
+[agents.adapter]
+id = "true"
+
+[agents.adapter.install.shell]
+script = "true"
+creates = "true"
+
+[agents.harness]
+id = "true"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "true"
+"#;
+    std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
+}
+
+fn write_pi_registry_override(config_dir: &std::path::Path) {
+    let body = r#"
+[[agents]]
+id = "pi"
+name = "Pi Agent"
+kind = "adapter"
+headless_compatible = true
+set_provider = true
+set_model = true
+support_doc = "docs/agents/pi.md"
+
+[agents.adapter]
+id = "true"
+
+[agents.adapter.install.shell]
+script = "true"
+creates = "true"
+
+[agents.harness]
+id = "true"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "true"
+"#;
+    std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
+}
+
+fn write_config_options_fixture(root: &std::path::Path, models: &[&str]) -> std::path::PathBuf {
+    let fixture_path = root.join("switch-config-options.json");
+    let body = serde_json::json!([
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": models[0],
+            "options": models
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }
+    ]);
+    std::fs::write(&fixture_path, body.to_string()).expect("fixture write");
+    fixture_path
 }
 
 #[tokio::test]
@@ -519,6 +633,208 @@ async fn models_rejects_admin_key() {
 }
 
 #[tokio::test]
+async fn agent_switch_requires_admin_key() {
+    let harness = AgentHarness::spawn().await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&serde_json::json!({ "agent": "cursor" }))
+        .send()
+        .await
+        .expect("send switch");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "auth.wrong_kind");
+}
+
+#[tokio::test]
+async fn agent_switch_installs_target_and_returns_model_choices() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    write_cursor_registry_override(&config_dir);
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("CURSOR_API_KEY", "cursor-secret")])
+        .expect("cursor secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent": "cursor" }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("switch json");
+    assert_eq!(body["data"]["old_agent_id"], "opencode");
+    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert_eq!(body["data"]["provider_status"], "not_applicable");
+    assert_eq!(body["data"]["set_model"], true);
+    assert_eq!(
+        body["data"]["follow_up"],
+        "acps agent set --model <model-id>"
+    );
+    assert!(matches!(
+        body["data"]["install"]["outcome"].as_str(),
+        Some("installed" | "already_present")
+    ));
+    assert_eq!(body["data"]["models"][0], "cursor/gpt-5.5");
+
+    let written = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(written.contains(r#"id = "cursor""#));
+    assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
+    assert!(!written.contains("[agent.provider]"));
+    assert!(!written.contains("model ="));
+}
+
+#[tokio::test]
+async fn agent_switch_preserves_adapter_metadata_and_skips_model_follow_up() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    write_amp_registry_override(&config_dir);
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("AMP_API_KEY", "amp-secret")])
+        .expect("amp secret");
+
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent": "amp" }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("switch json");
+    assert_eq!(body["data"]["agent_id"], "amp");
+    assert_eq!(body["data"]["set_model"], false);
+    assert!(body["data"].get("follow_up").is_none());
+    assert!(
+        body["data"]["models"]
+            .as_array()
+            .expect("models array")
+            .is_empty()
+    );
+
+    let response = client
+        .get(format!("{}/v1/agent/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send status");
+    let status_body: Value = response.json().await.expect("status json");
+    assert_eq!(status_body["data"]["agent"]["id"], "amp");
+    assert_eq!(status_body["data"]["agent"]["adapter"]["id"], "true");
+    assert_eq!(
+        status_body["data"]["agent"]["adapter"]["upstream_agent"],
+        "true"
+    );
+}
+
+#[tokio::test]
+async fn agent_switch_copies_provider_secret_to_target_default_ref() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    write_pi_registry_override(&config_dir);
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    config.agent.env = vec![
+        "CLOUDFLARE_API_TOKEN".to_owned(),
+        "CLOUDFLARE_ACCOUNT_ID".to_owned(),
+        "CLOUDFLARE_GATEWAY_ID".to_owned(),
+    ];
+    config.agent.provider = Some(acp_stack::config::AgentProviderConfig {
+        id: "cloudflare-ai-gateway".to_owned(),
+        model: Some("cloudflare-ai-gateway/workers-ai/@cf/test".to_owned()),
+        api_key_ref: Some("CLOUDFLARE_API_TOKEN".to_owned()),
+        custom: None,
+    });
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([
+            ("CLOUDFLARE_API_TOKEN", "cloudflare-secret"),
+            ("CLOUDFLARE_ACCOUNT_ID", "account-id"),
+            ("CLOUDFLARE_GATEWAY_ID", "gateway-id"),
+        ])
+        .expect("cloudflare secrets");
+    let fixture_path = write_config_options_fixture(
+        tempdir.path(),
+        &["cloudflare-ai-gateway/workers-ai/@cf/test"],
+    );
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent": "pi" }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("switch json");
+    assert_eq!(body["data"]["agent_id"], "pi");
+    assert_eq!(body["data"]["api_key_ref"], "CLOUDFLARE_API_KEY");
+    assert_eq!(
+        body["data"]["secret_migrations"][0]["from_ref"],
+        "CLOUDFLARE_API_TOKEN"
+    );
+    assert_eq!(
+        body["data"]["secret_migrations"][0]["to_ref"],
+        "CLOUDFLARE_API_KEY"
+    );
+
+    let secrets = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("secret store");
+    assert_eq!(
+        secrets.get("CLOUDFLARE_API_KEY").expect("copied secret"),
+        "cloudflare-secret"
+    );
+    let written = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(written.contains(r#"api_key_ref = "CLOUDFLARE_API_KEY""#));
+    assert!(written.contains(r#""CLOUDFLARE_API_KEY""#));
+}
+
+#[tokio::test]
 async fn model_discovery_timeout_shuts_down_provisional_agent() {
     let _fixture_guard = EnvVarGuard::unset("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH");
     let tempdir = TempDir::new().expect("tempdir");
@@ -564,40 +880,7 @@ fn process_is_gone(pid: u32) -> bool {
 async fn agent_restart_starts_when_not_running() {
     // POST /v1/agent/restart on a stopped supervisor degenerates into
     // a plain start. Confirms the endpoint exists, is admin-tier, and
-    // returns the same capability payload as `agent/start`. The
-    // handler re-reads the config from disk on each call (so a prior
-    // `acps agent set` is visible), so the test writes a valid config
-    // file at the default location before calling.
-    let home = TempDir::new().expect("home tempdir");
-    let config_dir = home.path().join(".config").join("acp-stack");
-    std::fs::create_dir_all(&config_dir).expect("config dir");
-    let config_text = include_str!("fixtures/valid-acp-stack.toml");
-    std::fs::write(config_dir.join("acp-stack.toml"), config_text).expect("write config");
-    // Point the test config at the same fake-agent binary as the
-    // default harness, so the on-disk config the restart handler
-    // re-reads is compatible with what the supervisor expects.
-    let on_disk = std::fs::read_to_string(config_dir.join("acp-stack.toml")).expect("read config");
-    let patched = on_disk
-        .replace(
-            "command = \"opencode\"",
-            &format!("command = \"{}\"", env!("CARGO_BIN_EXE_acps")),
-        )
-        .replace("args = [\"acp\"]", "args = [\"__acps-test-fake-agent\"]")
-        // Skip the secret-store dependency — the test home has no
-        // age key or encrypted store; an empty env list lets the
-        // restart handler bypass `SecretStore::open`.
-        .replace("env = [\"OPENCODE_API_KEY\"]", "env = []")
-        // The default cwd in the fixture is `/workspace`, which does
-        // not exist in this tempdir. Point at the OS temp dir, which
-        // is always present and writable — matches what
-        // `test_config()` uses for the standard harness.
-        .replace(
-            "cwd = \"/workspace\"",
-            &format!("cwd = \"{}\"", std::env::temp_dir().display()),
-        );
-    std::fs::write(config_dir.join("acp-stack.toml"), patched).expect("write patched config");
-
-    let _home_guard = HomeEnvGuard::set(home.path());
+    // returns the same capability payload as `agent/start`.
     let harness = AgentHarness::spawn().await;
     let client = http().await;
     let response = client
@@ -627,31 +910,9 @@ async fn agent_restart_picks_up_config_written_after_daemon_start() {
     // to the supervisor.
     use serde_json::Value as JsonValue;
 
-    let home = TempDir::new().expect("home tempdir");
-    let config_dir = home.path().join(".config").join("acp-stack");
-    std::fs::create_dir_all(&config_dir).expect("config dir");
-    let config_path = config_dir.join("acp-stack.toml");
-
-    // Write initial config that the daemon will cache at AppState
-    // construction. `[agent].id = "opencode"` matches the harness
-    // default; we change the model later to prove the restart picks
-    // it up.
-    let initial = include_str!("fixtures/valid-acp-stack.toml")
-        .replace(
-            "command = \"opencode\"",
-            &format!("command = \"{}\"", env!("CARGO_BIN_EXE_acps")),
-        )
-        .replace("args = [\"acp\"]", "args = [\"__acps-test-fake-agent\"]")
-        .replace("env = [\"OPENCODE_API_KEY\"]", "env = []")
-        .replace(
-            "cwd = \"/workspace\"",
-            &format!("cwd = \"{}\"", std::env::temp_dir().display()),
-        );
-    std::fs::write(&config_path, &initial).expect("write initial config");
-
-    let _home_guard = HomeEnvGuard::set(home.path());
     let harness = AgentHarness::spawn().await;
     let client = http().await;
+    let initial = std::fs::read_to_string(&harness.config_path).expect("read initial config");
 
     // Simulate `acps agent set` mutating the config on disk AFTER
     // the daemon has cached its own copy. Point `command` at a path
@@ -665,7 +926,7 @@ async fn agent_restart_picks_up_config_written_after_daemon_start() {
         &format!("command = \"{}\"", env!("CARGO_BIN_EXE_acps")),
         "command = \"/nonexistent/absolutely-not-a-binary\"",
     );
-    std::fs::write(&config_path, &mutated).expect("write mutated config");
+    std::fs::write(&harness.config_path, &mutated).expect("write mutated config");
 
     let response = client
         .post(format!("{}/v1/agent/restart", harness.base_url))
@@ -685,6 +946,40 @@ async fn agent_restart_picks_up_config_written_after_daemon_start() {
     // the on-disk command was honored. A regression that fell back
     // to the cached config would route through the original valid
     // binary and return 200 instead.
+    assert!(
+        matches!(code, "agent.spawn_failed" | "agent.initialize_failed"),
+        "unexpected error code `{code}`; expected agent.spawn_failed or agent.initialize_failed",
+    );
+}
+
+#[tokio::test]
+async fn agent_start_picks_up_config_written_after_daemon_start() {
+    use serde_json::Value as JsonValue;
+
+    let harness = AgentHarness::spawn().await;
+    let client = http().await;
+    let initial = std::fs::read_to_string(&harness.config_path).expect("read initial config");
+
+    let mutated = initial.replace(
+        &format!("command = \"{}\"", env!("CARGO_BIN_EXE_acps")),
+        "command = \"/nonexistent/absolutely-not-a-binary\"",
+    );
+    std::fs::write(&harness.config_path, &mutated).expect("write mutated config");
+
+    let response = client
+        .post(format!("{}/v1/agent/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send start");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert!(
+        status.is_server_error() || status == StatusCode::BAD_GATEWAY,
+        "start must fail when on-disk command no longer exists; got {status} body={body_text}",
+    );
+    let body: JsonValue = serde_json::from_str(&body_text).expect("start err json");
+    let code = body["error"]["code"].as_str().expect("error code present");
     assert!(
         matches!(code, "agent.spawn_failed" | "agent.initialize_failed"),
         "unexpected error code `{code}`; expected agent.spawn_failed or agent.initialize_failed",

@@ -71,13 +71,18 @@ impl AgentCliHarness {
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(tempdir.path(), &path);
-        let runtime_paths = RuntimePaths::new(config_path, path.clone());
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
         let mut config = load_config_from_str(VALID_CONFIG).expect("config parses");
         config.agent.command = env!("CARGO_BIN_EXE_acps").to_owned();
         config.agent.args = vec!["__acps-test-fake-agent".into()];
         config.agent.env = vec![];
         config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
         config.agent.expected_sha256 = None;
+        fs::write(
+            &config_path,
+            config.to_canonical_toml().expect("canonical test config"),
+        )
+        .expect("config should be written");
         let app_state = match effective_bind {
             Some(bind) => AppState::with_effective_bind_and_runtime_paths(
                 config,
@@ -2938,6 +2943,43 @@ fn agent_set_opencode_rejects_model_without_provider() {
 }
 
 #[test]
+fn agent_set_model_uses_existing_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config = VALID_CONFIG
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["OPENAI_API_KEY"]"#,
+        )
+        .replace(
+            r#"restart = "on-crash""#,
+            r#"restart = "on-crash"
+
+[agent.provider]
+id = "openai"
+api_key_ref = "OPENAI_API_KEY""#,
+        );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+    let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args(["agent", "set", "--model", "gpt-5.5"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("provider: openai"))
+        .stdout(predicates::str::contains("model: openai/gpt-5.5"));
+
+    let config =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains(r#"model = "openai/gpt-5.5""#));
+}
+
+#[test]
 fn agent_set_rejects_provider_not_supported_by_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -4484,6 +4526,16 @@ async fn agent_start_and_stop_call_running_daemon() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent stop: stopped"));
+}
+
+#[test]
+fn agent_switch_noninteractive_requires_admin_key() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["agent", "switch", "opencode"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--admin-key"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
