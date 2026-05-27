@@ -11,6 +11,7 @@ Registry entries describe:
 - native command or adapter-backed command
 - install steps and post-install executable checks
 - provider/model/mode support flags
+- MCP and Agent Skills support flags
 - support documentation path
 
 Only entries marked headless-compatible are offered as supported runtime targets.
@@ -24,3 +25,9 @@ The installer verifies declared executables after each managed step. Provider se
 ## Operator Override
 
 The embedded registry is the default source. Operators may provide a local override catalog for their instance, but unsupported entries remain outside the project's support guarantee.
+
+## Skills Catalog
+
+Agent Skills sources are cataloged separately in `data/skills.toml`. The skills
+catalog records trusted official source directories only; it does not affect
+agent installation or runtime launch behavior.

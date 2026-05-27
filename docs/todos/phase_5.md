@@ -90,7 +90,7 @@
 - [ ] Document whether MCP declarations are runtime-wide or session-scoped in the initial release.
 - [ ] Record per-session MCP as future/unsupported unless added deliberately.
 - [ ] Record known unsupported MCP features and workarounds.
-- [ ] Do not add a centralized agent skills catalog unless a trusted catalog source exists later.
+- [x] Add a centralized agent skills catalog after identifying trusted official sources.
 
 ## Operational Health
 
