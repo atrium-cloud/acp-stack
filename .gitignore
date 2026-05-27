@@ -44,6 +44,10 @@ dist/
 # Carbon storage
 .carbon/
 
+# Sprite
+.sprite/
+.sprite
+
 # Dropbox
 .dropbox*
 
