@@ -247,6 +247,9 @@ fn print_switch_result(data: &Value) {
         println!("agent install: {outcome}");
         println!("path: {path}");
     }
+    if let Some(skills_port) = data.get("skills_port") {
+        print_skills_port(skills_port);
+    }
     if let Some(cleaned_configs) = data.get("cleaned_configs").and_then(Value::as_array) {
         for cleaned in cleaned_configs {
             let label = cleaned
@@ -269,6 +272,37 @@ fn print_switch_result(data: &Value) {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     println!("restarted: {restarted}");
+}
+
+fn print_skills_port(skills_port: &Value) {
+    let status = skills_port
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let source_root = skills_port
+        .get("source_root")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let target_root = skills_port
+        .get("target_root")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match status {
+        "shared" => println!("skills port: shared path {target_root}"),
+        "none_found" => println!("skills port: none found in {source_root}"),
+        "copied" => {
+            let copied = skills_port
+                .get("copied")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let overwritten = skills_port
+                .get("overwritten")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            println!("skills port: copied {copied}, overwritten {overwritten} -> {target_root}");
+        }
+        _ => println!("skills port: {status}"),
+    }
 }
 
 fn print_model_follow_up(models: &[String]) {
