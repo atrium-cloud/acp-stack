@@ -15,16 +15,26 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 
 ## Supported Agents
 
-| Agent      | Path    | Adapter     |
-| ---------- | ------- | ----------- |
-| OpenCode   | native  |             |
-| Pi Agent   | adapter | `pi-acp`    |
-| Amp Code   | adapter | `amp-acp`   |
-| Cursor CLI | native  |             |
-| Goose      | native  |             |
-| Codex CLI  | adapter | `codex-acp` |
+| Agent      | Path    | Adapter     | MCP | Agent Skills |
+| ---------- | ------- | ----------- | --- | ------------ |
+| OpenCode   | native  |             | yes | yes          |
+| Pi Agent   | adapter | `pi-acp`    | yes | yes          |
+| Amp Code   | adapter | `amp-acp`   | yes | yes          |
+| Cursor CLI | native  |             | yes | yes          |
+| Goose      | native  |             | yes | yes          |
+| Codex CLI  | adapter | `codex-acp` | yes | yes          |
 
 Per-agent setup notes live under [../../agents](../../agents).
+
+## Agent Skills
+
+The embedded skills catalog is documented in [skills.md](skills.md). It records
+official Agent Skills directories from Anthropic and OpenAI for future
+installation/provisioning work.
+
+Supported agents advertise MCP and Agent Skills support in `data/agents.toml`.
+Goose Agent Skills support depends on the built-in Summon extension in
+supported Goose versions.
 
 ## Currently Unsupported
 
