@@ -180,6 +180,10 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_mode: bool,
     #[serde(default)]
+    pub supports_mcp: bool,
+    #[serde(default)]
+    pub supports_agent_skills: bool,
+    #[serde(default)]
     pub subagents: bool,
     #[serde(default)]
     pub subagent_alias: Option<String>,
@@ -543,6 +547,8 @@ mod tests {
         assert!(opencode.allow_custom_provider);
         assert!(opencode.allow_custom_model);
         assert!(opencode.set_mode);
+        assert!(opencode.supports_mcp);
+        assert!(opencode.supports_agent_skills);
         assert!(opencode.subagents);
         assert_eq!(opencode.subagent_alias.as_deref(), Some("small_model"));
         assert_eq!(
@@ -575,6 +581,16 @@ mod tests {
             .iter()
             .filter(|entry| entry.headless_compatible)
         {
+            assert!(
+                entry.supports_mcp,
+                "{} must advertise MCP support",
+                entry.id
+            );
+            assert!(
+                entry.supports_agent_skills,
+                "{} must advertise Agent Skills support",
+                entry.id
+            );
             assert_eq!(
                 entry.testflight_expect_fs.as_deref(),
                 Some(".acp-stack-testflight.txt"),
