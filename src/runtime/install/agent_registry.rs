@@ -15,7 +15,7 @@
 //! replaces the embedded entry; new `id`s are added.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 
@@ -134,6 +134,19 @@ impl RegistryCatalog {
                     reason: format!("agent `{}` testflight_prompt is empty", entry.id),
                 });
             }
+            if entry.supports_agent_skills {
+                match entry.agent_skills_install_dir.as_deref() {
+                    Some(value) => validate_agent_skills_install_dir(&entry.id, value)?,
+                    _ => {
+                        return Err(StackError::RegistryLoad {
+                            reason: format!(
+                                "agent `{}` supports Agent Skills but has no agent_skills_install_dir",
+                                entry.id
+                            ),
+                        });
+                    }
+                }
+            }
             let harness = entry.harness.as_ref().expect("validated harness presence");
             harness.validate(&entry.id, entry.github.as_deref())?;
             if entry.kind == RegistryKind::Adapter {
@@ -183,6 +196,8 @@ pub struct RegistryEntry {
     pub supports_mcp: bool,
     #[serde(default)]
     pub supports_agent_skills: bool,
+    #[serde(default)]
+    pub agent_skills_install_dir: Option<String>,
     #[serde(default)]
     pub subagents: bool,
     #[serde(default)]
@@ -459,6 +474,35 @@ fn validate_testflight_expect_fs(agent_id: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_agent_skills_install_dir(agent_id: &str, value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(StackError::RegistryLoad {
+            reason: format!("agent `{agent_id}` agent_skills_install_dir is empty"),
+        });
+    }
+    if !(trimmed.starts_with("~/") || Path::new(trimmed).is_absolute()) {
+        return Err(StackError::RegistryLoad {
+            reason: format!(
+                "agent `{agent_id}` agent_skills_install_dir `{trimmed}` must be absolute or start with `~/`"
+            ),
+        });
+    }
+    for component in Path::new(trimmed).components() {
+        match component {
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {}
+            Component::CurDir | Component::ParentDir => {
+                return Err(StackError::RegistryLoad {
+                    reason: format!(
+                        "agent `{agent_id}` agent_skills_install_dir `{trimmed}` contains an unsafe path segment"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_nonempty(agent_id: &str, field: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         Err(StackError::RegistryLoad {
@@ -549,6 +593,10 @@ mod tests {
         assert!(opencode.set_mode);
         assert!(opencode.supports_mcp);
         assert!(opencode.supports_agent_skills);
+        assert_eq!(
+            opencode.agent_skills_install_dir.as_deref(),
+            Some("~/.agents/skills")
+        );
         assert!(opencode.subagents);
         assert_eq!(opencode.subagent_alias.as_deref(), Some("small_model"));
         assert_eq!(
@@ -589,6 +637,17 @@ mod tests {
             assert!(
                 entry.supports_agent_skills,
                 "{} must advertise Agent Skills support",
+                entry.id
+            );
+            assert!(
+                entry
+                    .agent_skills_install_dir
+                    .as_deref()
+                    .is_some_and(|path| {
+                        matches!(entry.id.as_str(), "amp" if path == "~/.config/agents/skills")
+                            || (entry.id != "amp" && path == "~/.agents/skills")
+                    }),
+                "{} must declare the documented Agent Skills install directory",
                 entry.id
             );
             assert_eq!(
@@ -1017,6 +1076,66 @@ creates = "bad"
         match err {
             StackError::RegistryLoad { reason } => {
                 assert!(reason.contains("support_doc"), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_agent_skills_support_without_install_dir() {
+        let body = r#"
+[[agents]]
+id = "bad-skills"
+name = "Bad Skills"
+kind = "native"
+headless_compatible = true
+supports_agent_skills = true
+support_doc = "docs/agents/bad-skills.md"
+
+[agents.harness]
+id = "bad-skills"
+
+[agents.harness.install.npm]
+package = "bad-skills"
+creates = "bad-skills"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("skills support without install dir must be rejected");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(
+                    reason.contains("agent_skills_install_dir"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_agent_skills_install_dir() {
+        let body = r#"
+[[agents]]
+id = "bad-skills"
+name = "Bad Skills"
+kind = "native"
+headless_compatible = true
+supports_agent_skills = true
+agent_skills_install_dir = "relative/skills"
+support_doc = "docs/agents/bad-skills.md"
+
+[agents.harness]
+id = "bad-skills"
+
+[agents.harness.install.npm]
+package = "bad-skills"
+creates = "bad-skills"
+"#;
+        let err =
+            RegistryCatalog::from_toml(body).expect_err("relative install dir must be rejected");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("must be absolute"), "reason: {reason}");
             }
             other => panic!("expected RegistryLoad, got {other:?}"),
         }

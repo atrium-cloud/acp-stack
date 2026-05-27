@@ -15,12 +15,14 @@ official = true
 trusted = true
 reviewed_at = "2026-05-27"
 branch = "main"
+verified_commit = "690f15cac7f7b4c055c5ab109c79ed9259934081"
 descriptor = "SKILL.md"
 
 [[sources.directories]]
 path = "skills"
 source_url = "https://github.com/anthropics/skills/tree/main/skills"
 verified = true
+installable = true
 
 [[sources]]
 id = "openai-skills"
@@ -38,14 +40,17 @@ official = true
 trusted = true
 reviewed_at = "2026-05-27"
 branch = "main"
+verified_commit = "b0401f07213a66414d84a65cb50c1d226f99485a"
 descriptor = "SKILL.md"
 
 [[sources.directories]]
 path = "skills/.system"
 source_url = "https://github.com/openai/skills/tree/main/skills/.system"
 verified = true
+installable = false
 
 [[sources.directories]]
 path = "skills/.curated"
 source_url = "https://github.com/openai/skills/tree/main/skills/.curated"
 verified = true
+installable = true
