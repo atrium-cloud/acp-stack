@@ -1,8 +1,8 @@
 //! Init run orchestrator.
 //!
 //! Wraps each logical phase of `acps init` (config validation, state
-//! migration, secrets, agent install, workspace lanes, headless config,
-//! edge artifacts, init-complete event, testflight) so that:
+//! migration, secrets, agent install, Agent Skills install, workspace lanes,
+//! headless config, edge artifacts, init-complete event, testflight) so that:
 //!
 //! 1. Every executed/resumed phase is recorded as an `init_steps` row keyed
 //!    by `(run_id, ordinal)`. The CLI driver maintains the ordinal list as
@@ -37,6 +37,7 @@ pub mod step_kind {
     pub const STATE_INIT: &str = "state_init";
     pub const SECRETS_INIT: &str = "secrets_init";
     pub const AGENT_INSTALL: &str = "agent_install";
+    pub const AGENT_SKILLS_INSTALL: &str = "agent_skills_install";
     pub const PROVIDER_CONFIGURE: &str = "provider_configure";
     pub const WORKSPACE_MATERIALIZE: &str = "workspace_materialize";
     pub const AGENT_HEADLESS_CONFIG: &str = "agent_headless_config";

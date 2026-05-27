@@ -4,6 +4,7 @@ mod model_mode;
 mod provider;
 mod registry_apply;
 mod resume;
+mod skills;
 mod starter_config;
 mod testflight;
 
@@ -22,6 +23,8 @@ use crate::runtime::agent::agent_headless_config::OPENCODE_AGENT_ID;
 use crate::runtime::init_runner::{StepDisposition, StepOutcome, record_step, step_kind};
 use crate::runtime::install::agent_installer::InstallerOutcome;
 use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::runtime::install::skill_installer::SkillInstallReport;
+use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::secrets::{SecretStore, age_key_path, secret_store_path};
 use crate::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
@@ -44,6 +47,10 @@ use self::resume::{
     finalize_with_error, init_complete_event_already_recorded, installer_postcondition_holds,
     perform_secrets_init, recorded_init_args, resolve_init_run, step_needs_resume,
     workspace_postcondition_holds,
+};
+use self::skills::{
+    install_init_skills, prompt_init_skills_if_needed, resolve_skill_install_plan,
+    skill_install_postcondition_holds,
 };
 use self::starter_config::{starter_config, validate_deployment_overrides_match_existing};
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
@@ -96,6 +103,25 @@ pub struct InitArgs {
     /// Skip the install prompt in interactive runs.
     #[arg(long)]
     pub(super) no_install_agent: bool,
+    /// Skills marketplace/source: openai, anthropic, or github:<owner>.
+    #[arg(
+        long = "skills-source",
+        requires = "skills",
+        conflicts_with = "no_skills"
+    )]
+    pub(super) skills_source: Option<String>,
+    /// Comma-separated dash-case Agent Skills to install during init.
+    #[arg(
+        long = "skills",
+        value_name = "NAME",
+        value_delimiter = ',',
+        requires = "skills_source",
+        conflicts_with = "no_skills"
+    )]
+    pub(super) skills: Vec<String>,
+    /// Skip the Agent Skills prompt in interactive runs.
+    #[arg(long, conflicts_with_all = ["skills_source", "skills"])]
+    pub(super) no_skills: bool,
     /// Configure a public edge profile during init.
     #[arg(long, value_enum)]
     pub(super) edge: Option<EdgeProviderArg>,
@@ -298,6 +324,7 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         apply_registry_entry_to_config(&mut config, entry);
     }
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
+    prompt_init_skills_if_needed(&mut args, &config, &registry)?;
 
     // Pick the run row: either resume an existing one (explicit `--resume` or
     // auto-detected non-terminal latest) or start fresh. Recording every
@@ -317,6 +344,16 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     } else {
         None
     };
+    if resumed
+        && !args.no_skills
+        && args.skills_source.is_none()
+        && args.skills.is_empty()
+        && let Some(recorded) = recorded_args.as_ref()
+    {
+        args.skills_source = recorded.skills_source.clone();
+        args.skills = recorded.skills.clone();
+        args.no_skills = recorded.no_skills;
+    }
     if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE) {
         // Restore the original `--model`/`--mode` requests
         // unconditionally so the resumed provider_configure step
@@ -376,6 +413,9 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         args.testflight = true;
         args.skip_testflight = false;
     }
+    let skill_catalog = SkillCatalog::load_embedded()?;
+    let skill_install_plan =
+        resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog)?;
 
     let mut auth_status: &'static str = "preserved existing API keys";
     let session_ref_str = config.auth.session_key_ref.clone();
@@ -483,6 +523,49 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
                     "installer_run_ids": new_installer_run_ids,
                 });
                 Ok(StepOutcome::with_payload(payload.to_string()))
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 3: agent_skills_install — install selected Agent Skills before
+    // first launch/testflight. Agent harnesses auto-detect the files.
+    // -----------------------------------------------------------------
+    let mut skill_install_report: Option<SkillInstallReport> = None;
+    let skill_step_needs_resume =
+        step_needs_resume(&prior_init_steps, step_kind::AGENT_SKILLS_INSTALL);
+    if skill_install_plan.is_some() || skill_step_needs_resume {
+        let Some(plan) = skill_install_plan.clone() else {
+            return finalize_with_error(
+                &store,
+                &init_run,
+                StackError::InitRunCorrupted {
+                    reason: format!(
+                        "init run {} has a failed agent_skills_install step but no recorded skill install request",
+                        init_run.id
+                    ),
+                },
+            );
+        };
+        let verify_plan = plan.clone();
+        let result = record_step(
+            &store,
+            &init_run,
+            9,
+            step_kind::AGENT_SKILLS_INSTALL,
+            || Ok(skill_install_postcondition_holds(&verify_plan)),
+            || {
+                let report = install_init_skills(&plan)?;
+                let payload = serde_json::to_string(&report).map_err(|source| {
+                    StackError::SkillInstallFailed {
+                        reason: format!("serialize skill install report: {source}"),
+                    }
+                })?;
+                skill_install_report = Some(report);
+                Ok(StepOutcome::with_payload(payload))
             },
         );
         if let Err(error) = result {
@@ -715,6 +798,18 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         println!("agent install: {}", outcome.label());
         println!("agent path: {}", outcome.path().display());
         println!("agent sha256: {}", outcome.sha256());
+    }
+    if let Some(report) = skill_install_report {
+        for entry in report.installed {
+            println!(
+                "skill installed: {} -> {}",
+                entry.name,
+                entry.path.display()
+            );
+        }
+        for entry in report.skipped {
+            println!("skill already installed: {}", entry.name);
+        }
     }
     for provisioned in provisioned_agent_configs {
         println!("{}: {}", provisioned.label, provisioned.path.display());

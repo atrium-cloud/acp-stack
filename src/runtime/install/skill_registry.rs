@@ -157,6 +157,8 @@ pub struct SkillDirectory {
     pub source_url: String,
     #[serde(default)]
     pub verified: bool,
+    #[serde(default)]
+    pub installable: bool,
 }
 
 impl SkillDirectory {
@@ -339,6 +341,10 @@ verified = true
         assert_eq!(anthropic.owner, "anthropics");
         assert_eq!(anthropic.repo, "skills");
         assert_eq!(anthropic.branch, "main");
+        assert_eq!(
+            anthropic.verified_commit.as_deref(),
+            Some("690f15cac7f7b4c055c5ab109c79ed9259934081")
+        );
         assert_eq!(anthropic.descriptor, SKILL_DESCRIPTOR);
         assert!(
             anthropic
@@ -360,12 +366,17 @@ verified = true
             anthropic.directories[0].source_url,
             "https://github.com/anthropics/skills/tree/main/skills"
         );
+        assert!(anthropic.directories[0].installable);
 
         let openai = catalog
             .lookup("openai-skills")
             .expect("openai source exists");
         assert_eq!(openai.owner, "openai");
         assert_eq!(openai.repo, "skills");
+        assert_eq!(
+            openai.verified_commit.as_deref(),
+            Some("b0401f07213a66414d84a65cb50c1d226f99485a")
+        );
         assert!(
             openai
                 .docs
@@ -382,6 +393,8 @@ verified = true
                 .collect::<Vec<_>>(),
             ["skills/.system", "skills/.curated"]
         );
+        assert!(!openai.directories[0].installable);
+        assert!(openai.directories[1].installable);
         assert_eq!(
             openai.directories[1].source_url,
             "https://github.com/openai/skills/tree/main/skills/.curated"

@@ -12,6 +12,7 @@ Registry entries describe:
 - install steps and post-install executable checks
 - provider/model/mode support flags
 - MCP and Agent Skills support flags
+- Agent Skills install directory when skills are supported
 - support documentation path
 
 Only entries marked headless-compatible are offered as supported runtime targets.
@@ -28,6 +29,6 @@ The embedded registry is the default source. Operators may provide a local overr
 
 ## Skills Catalog
 
-Agent Skills sources are cataloged separately in `data/skills.toml`. The skills
-catalog records trusted official source directories only; it does not affect
-agent installation or runtime launch behavior.
+Agent Skills sources are cataloged separately in `data/skills.toml`. During
+`acps init`, selected skills are copied into the selected agent's
+`agent_skills_install_dir`.

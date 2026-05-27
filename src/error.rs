@@ -424,6 +424,24 @@ pub enum StackError {
     #[error("agent registry could not be loaded: {reason}")]
     RegistryLoad { reason: String },
 
+    #[error("invalid skill source `{source_id}`")]
+    SkillInstallInvalidSource { source_id: String },
+
+    #[error("skill source `{source_id}` is not available")]
+    SkillInstallSourceMissing { source_id: String },
+
+    #[error("invalid skill name `{name}`")]
+    SkillInstallInvalidName { name: String },
+
+    #[error("skill `{skill}` was not found in source `{source_id}`")]
+    SkillInstallSkillMissing { source_id: String, skill: String },
+
+    #[error("skill install target conflict at {path}: {reason}")]
+    SkillInstallTargetConflict { path: PathBuf, reason: String },
+
+    #[error("skill install failed: {reason}")]
+    SkillInstallFailed { reason: String },
+
     #[error("failed to query GitHub Releases for {repo}: {source}")]
     GithubReleaseFetch {
         repo: String,

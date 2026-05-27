@@ -21,6 +21,12 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentUnsupported { .. } => "agent.unsupported",
         AgentCheckStale => "agent.check_stale",
         RegistryLoad { .. } => "agent.registry_load_failed",
+        SkillInstallInvalidSource { .. } => "agent.skill_install_invalid_source",
+        SkillInstallSourceMissing { .. } => "agent.skill_install_source_missing",
+        SkillInstallInvalidName { .. } => "agent.skill_install_invalid_name",
+        SkillInstallSkillMissing { .. } => "agent.skill_install_missing_skill",
+        SkillInstallTargetConflict { .. } => "agent.skill_install_target_conflict",
+        SkillInstallFailed { .. } => "agent.skill_install_failed",
         GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
         NpmRegistryFetch { .. } => "agent.npm_registry_fetch_failed",
         NpmRegistryEmptyVersion { .. } => "agent.npm_registry_empty_version",
@@ -62,6 +68,18 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             "one or more managed agent components are stale or missing; re-run `acps agent install` to upgrade".to_owned()
         }
         RegistryLoad { reason } => format!("agent registry could not be loaded: {reason}"),
+        SkillInstallInvalidSource { source_id } => format!("invalid skill source `{source_id}`"),
+        SkillInstallSourceMissing { source_id } => {
+            format!("skill source `{source_id}` is not available")
+        }
+        SkillInstallInvalidName { name } => format!("invalid skill name `{name}`"),
+        SkillInstallSkillMissing { source_id, skill } => {
+            format!("skill `{skill}` was not found in source `{source_id}`")
+        }
+        SkillInstallTargetConflict { path, reason } => {
+            format!("skill install target conflict at {}: {reason}", path.display())
+        }
+        SkillInstallFailed { reason } => format!("skill install failed: {reason}"),
         GithubReleaseFetch { repo, .. } => format!("failed to query GitHub Releases for {repo}"),
         NpmRegistryFetch { package, .. } => {
             format!("failed to query npm registry for `{package}`")
@@ -107,6 +125,10 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         AgentNotConfigured => StatusCode::BAD_REQUEST,
         AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
         AgentCheckStale => StatusCode::CONFLICT,
+        SkillInstallInvalidSource { .. }
+        | SkillInstallInvalidName { .. }
+        | SkillInstallSkillMissing { .. } => StatusCode::BAD_REQUEST,
+        SkillInstallTargetConflict { .. } => StatusCode::CONFLICT,
         AgentInstallerFailed { .. }
         | AgentInstallerCreatesMissing { .. }
         | AgentInstallerTimeout
@@ -114,6 +136,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | AgentRegistryMissing { .. }
         | InitRunCorrupted { .. }
         | RegistryLoad { .. }
+        | SkillInstallSourceMissing { .. }
+        | SkillInstallFailed { .. }
         | GithubReleaseFetch { .. }
         | NpmRegistryFetch { .. }
         | NpmRegistryEmptyVersion { .. }

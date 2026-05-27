@@ -28,6 +28,7 @@ Common flags:
 ```sh
 acps init \
   [--agent <id>] [--install-agent|--no-install-agent] \
+  [--skills-source <openai|anthropic|github:owner>] [--skills <name,name>|--no-skills] \
   [--provider <provider-id>] [--api-key-ref <ref>] [--model <model-id>] [--mode <mode>] \
   [--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>] \
   [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] \
@@ -41,6 +42,10 @@ Interactive init may prompt for missing choices. Non-interactive init requires e
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
 
 `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected. Use `--skip-workspace-init` when workspace sources should be applied manually.
+
+`--skills-source` and `--skills` install selected Agent Skills before testflight.
+Official sources are `openai` and `anthropic`; custom sources use
+`github:<owner>` and expect `<owner>/skills` on branch `main`.
 
 ## Auth And Reset
 

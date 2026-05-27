@@ -209,6 +209,7 @@ fn adapter_kind_entry() -> RegistryEntry {
         set_mode: false,
         supports_mcp: true,
         supports_agent_skills: true,
+        agent_skills_install_dir: Some("~/.agents/skills".to_owned()),
         subagents: false,
         subagent_alias: None,
         subagent_free_models: Vec::new(),

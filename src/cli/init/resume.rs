@@ -20,6 +20,9 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "provider": args.provider,
         "model": args.model,
         "mode": args.mode,
+        "skills_source": args.skills_source,
+        "skills": args.skills,
+        "no_skills": args.no_skills,
         "testflight": args.testflight,
         "skip_testflight": args.skip_testflight,
         "fresh": args.fresh,
@@ -48,6 +51,11 @@ pub(super) struct RecordedInitArgs {
     pub(super) provider: Option<String>,
     pub(super) model: Option<String>,
     pub(super) mode: Option<String>,
+    pub(super) skills_source: Option<String>,
+    #[serde(default)]
+    pub(super) skills: Vec<String>,
+    #[serde(default)]
+    pub(super) no_skills: bool,
 }
 
 pub(super) fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {

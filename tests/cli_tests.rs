@@ -511,6 +511,77 @@ fn init_skip_testflight_flag_is_acknowledged_in_output() {
 }
 
 #[test]
+fn init_no_skills_flag_skips_skill_install_prompt() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--no-install-agent",
+            "--no-skills",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("initialized acp-stack"));
+}
+
+#[test]
+fn init_rejects_skills_without_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["init", "--skills", "repo-map"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--skills-source"));
+}
+
+#[test]
+fn init_rejects_source_without_skills() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["init", "--skills-source", "openai"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--skills"));
+}
+
+#[test]
+fn init_validates_skill_names_before_download() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--no-install-agent",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--skills-source",
+            "openai",
+            "--skills",
+            "BadSkill",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid skill name"));
+}
+
+#[test]
 fn init_rejects_combining_testflight_and_skip_testflight() {
     // clap conflicts_with should fail at parse time, so init never starts.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
