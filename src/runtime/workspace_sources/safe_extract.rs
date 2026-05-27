@@ -202,6 +202,9 @@ fn extract_tar(
         let entry_type = entry.header().entry_type();
         reject_unsafe_entry(entry_type, &raw_path)?;
         let safe_path = sanitize_relative_path(&raw_path)?;
+        if is_tar_metadata_entry(entry_type) {
+            continue;
+        }
         if let Some(top) = safe_path.components().next().and_then(|c| match c {
             Component::Normal(name) => name.to_str(),
             _ => None,
@@ -369,6 +372,16 @@ fn reject_unsafe_entry(entry_type: EntryType, name: &Path) -> Result<()> {
     }
 }
 
+fn is_tar_metadata_entry(entry_type: EntryType) -> bool {
+    matches!(
+        entry_type,
+        EntryType::XHeader
+            | EntryType::XGlobalHeader
+            | EntryType::GNULongName
+            | EntryType::GNULongLink
+    )
+}
+
 fn entry_kind_label(entry_type: EntryType) -> &'static str {
     match entry_type {
         EntryType::Regular => "regular",
@@ -379,6 +392,11 @@ fn entry_kind_label(entry_type: EntryType) -> &'static str {
         EntryType::Directory => "directory",
         EntryType::Fifo => "fifo",
         EntryType::Continuous => "continuous",
+        EntryType::GNUSparse => "gnu-sparse",
+        EntryType::XHeader => "pax-local-header",
+        EntryType::XGlobalHeader => "pax-global-header",
+        EntryType::GNULongName => "gnu-long-name",
+        EntryType::GNULongLink => "gnu-long-link",
         _ => "unknown",
     }
 }
@@ -637,6 +655,34 @@ mod tests {
             err,
             StackError::ArchiveUnsafeEntry { kind, .. } if kind == "symlink"
         ));
+    }
+
+    #[test]
+    fn ignores_tar_metadata_entries() {
+        let bytes = write_tar_gz(|t| {
+            let pax_data = b"13 comment=x\n";
+            let mut pax_header = tar::Header::new_ustar();
+            pax_header.set_entry_type(tar::EntryType::XGlobalHeader);
+            pax_header.set_path("pax_global_header").unwrap();
+            pax_header.set_size(pax_data.len() as u64);
+            pax_header.set_mode(0o644);
+            pax_header.set_cksum();
+            t.append(&pax_header, &pax_data[..]).unwrap();
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(11);
+            header.set_mode(0o644);
+            header.set_cksum();
+            t.append_data(&mut header, "wrapper/hello.txt", &b"hello, acp\n"[..])
+                .unwrap();
+        });
+        let (_dir, archive) = write_archive_to_tmp(&bytes, "pax.tar.gz");
+        let dest = tempdir().expect("dest");
+        let report = extract_archive(&archive, dest.path(), &ExtractOpts::default()).expect("ok");
+        assert_eq!(report.entries_written, 1);
+        assert_eq!(report.top_level_dir.as_deref(), Some("wrapper"));
+        assert!(dest.path().join("wrapper").join("hello.txt").is_file());
+        assert!(!dest.path().join("pax_global_header").exists());
     }
 
     #[test]
