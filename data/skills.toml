@@ -1,0 +1,51 @@
+# Official Agent Skills Catalog
+
+[[sources]]
+id = "anthropic-skills"
+name = "Anthropic Agent Skills"
+owner = "anthropics"
+repo = "skills"
+url = "https://github.com/anthropics/skills"
+docs = [
+  "https://github.com/anthropics/skills",
+  "https://github.com/anthropics/skills/tree/main/skills",
+  "https://agentskills.io/specification",
+]
+official = true
+trusted = true
+reviewed_at = "2026-05-27"
+branch = "main"
+descriptor = "SKILL.md"
+
+[[sources.directories]]
+path = "skills"
+source_url = "https://github.com/anthropics/skills/tree/main/skills"
+verified = true
+
+[[sources]]
+id = "openai-skills"
+name = "OpenAI Agent Skills"
+owner = "openai"
+repo = "skills"
+url = "https://github.com/openai/skills"
+docs = [
+  "https://github.com/openai/skills",
+  "https://github.com/openai/skills/tree/main/skills",
+  "https://developers.openai.com/codex/skills",
+  "https://agentskills.io/specification",
+]
+official = true
+trusted = true
+reviewed_at = "2026-05-27"
+branch = "main"
+descriptor = "SKILL.md"
+
+[[sources.directories]]
+path = "skills/.system"
+source_url = "https://github.com/openai/skills/tree/main/skills/.system"
+verified = true
+
+[[sources.directories]]
+path = "skills/.curated"
+source_url = "https://github.com/openai/skills/tree/main/skills/.curated"
+verified = true

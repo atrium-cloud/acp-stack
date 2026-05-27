@@ -30,6 +30,7 @@ flowchart LR
 | Agent supervisor | process lifecycle for the configured ACP agent                    |
 | ACP bridge       | ACP initialization, sessions, prompts, updates, and permissions   |
 | Agent switch     | harness migration planning and provider/API-key compatibility     |
+| Install catalogs | curated agent and Agent Skills source registries                  |
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |
 | Permissions      | durable approval, denial, cancellation, and expiry                |
