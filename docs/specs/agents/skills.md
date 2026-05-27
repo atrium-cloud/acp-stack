@@ -17,6 +17,13 @@ normal init flows.
 the selected skill directories into the configured agent's skills install
 directory and does not mutate agent-owned config.
 
+`acps agent switch` copies valid installed skills from the source agent's
+canonical skills directory to the target agent's canonical skills directory
+before committing the switch. Switches among agents that share
+`~/.agents/skills` are no-ops. Switches to or from Amp copy between
+`~/.agents/skills` and `~/.config/agents/skills`. Existing valid target skills
+with the same name are replaced.
+
 ## Compatibility
 
 | Agent      | Managed init install directory |
