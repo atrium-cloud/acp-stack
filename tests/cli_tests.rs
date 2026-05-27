@@ -4609,6 +4609,17 @@ fn agent_switch_noninteractive_requires_admin_key() {
         .stderr(predicates::str::contains("--admin-key"));
 }
 
+#[test]
+fn agent_switch_accepts_drop_flag() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["agent", "switch", "opencode", "--drop"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--admin-key"))
+        .stderr(predicates::str::contains("unexpected argument").not());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn security_check_calls_running_daemon_with_admin_key() {
     let harness = AgentCliHarness::spawn().await;
