@@ -36,13 +36,19 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
             .ok_or_else(|| StackError::AgentRegistryMissing {
                 id: plan.target_agent_id.clone(),
             })?;
-    print_switch_plan(&plan.provider_status, target_entry, &plan);
+    print_switch_plan(
+        &plan.provider_status,
+        target_entry,
+        &plan,
+        args.drop_configs,
+    );
 
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let request = serde_json::json!({
         "agent": args.agent,
         "provider": args.provider,
         "api_key_ref": args.api_key_ref,
+        "drop": args.drop_configs,
     });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -121,6 +127,7 @@ fn print_switch_plan(
     provider_status: &AgentSwitchProviderStatus,
     target_entry: &RegistryEntry,
     plan: &AgentSwitchPlan,
+    drop_configs: bool,
 ) {
     let target_sets_model = target_entry.set_model;
     println!(
@@ -132,6 +139,9 @@ fn print_switch_plan(
     }
     if let Some(adapter) = target_entry.adapter.as_ref() {
         println!("will install adapter: {}", adapter.id);
+    }
+    if drop_configs {
+        println!("will drop source agent-owned config after successful switch");
     }
     for migration in &plan.secret_migrations {
         println!(
@@ -236,6 +246,23 @@ fn print_switch_result(data: &Value) {
         let path = install.get("path").and_then(Value::as_str).unwrap_or("");
         println!("agent install: {outcome}");
         println!("path: {path}");
+    }
+    if let Some(cleaned_configs) = data.get("cleaned_configs").and_then(Value::as_array) {
+        for cleaned in cleaned_configs {
+            let label = cleaned
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("config");
+            let path = cleaned.get("path").and_then(Value::as_str).unwrap_or("");
+            println!("cleaned {label}: {path}");
+        }
+    }
+    if let Some(errors) = data.get("cleanup_errors").and_then(Value::as_array) {
+        for error in errors {
+            if let Some(error) = error.as_str() {
+                println!("cleanup warning: {error}");
+            }
+        }
     }
     let restarted = data
         .get("restarted")

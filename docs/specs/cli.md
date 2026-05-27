@@ -76,10 +76,12 @@ Export emits canonical TOML with secret references only. Import validates and ca
 `acps agent switch <agent>` migrates to another supported harness through the running daemon:
 
 ```sh
-acps agent switch <agent> [--provider <provider-id>] [--api-key-ref <ref>] [--admin-key <key>]
+acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <ref>] [--admin-key <key>]
 ```
 
-The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider secret refs that will be copied if missing, and fields that need input. Switch installs the target harness, reuses the current provider/API-key ref only when compatible, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
+The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider secret refs that will be copied if missing, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses the current provider/API-key ref only when compatible, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
+
+By default, switch preserves source agent-owned config, secrets, installed harnesses/adapters, and sessions so switching back is fast. `--drop` removes source agent-owned config after the target switch succeeds. It does not delete secrets, binaries, adapters, or sessions.
 
 `acps agent set` updates provider, model, mode, and custom-provider metadata:
 

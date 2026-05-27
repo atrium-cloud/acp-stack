@@ -96,6 +96,9 @@ pub struct AgentSetArgs {
 pub struct AgentSwitchArgs {
     /// Target agent id, such as opencode, pi, goose, codex, cursor, or amp.
     pub(super) agent: String,
+    /// Drop source agent-owned config after a successful switch.
+    #[arg(long = "drop")]
+    pub(super) drop_configs: bool,
     /// Provider id to use instead of attempting compatible reuse.
     #[arg(long)]
     pub(super) provider: Option<String>,
