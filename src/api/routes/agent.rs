@@ -9,7 +9,9 @@ use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::{AgentCapabilitiesDto, AgentSessionConfigCategory};
-use crate::runtime::agent::agent_headless_config::ProvisionedAgentConfig;
+use crate::runtime::agent::agent_headless_config::{
+    CleanedAgentConfig, ProvisionedAgentConfig, cleanup_agent_headless_config,
+};
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
     fetch_session_config_with_timeout,
@@ -337,6 +339,8 @@ pub(crate) async fn agent_restart_handler(
 #[derive(Debug, Deserialize)]
 pub(crate) struct AgentSwitchRequest {
     agent: String,
+    #[serde(default, rename = "drop")]
+    drop_configs: bool,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -365,10 +369,20 @@ pub(crate) struct AgentSwitchResponse {
     follow_up: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     provisioned: Vec<ProvisionedAgentConfigJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cleaned_configs: Vec<CleanedAgentConfigJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cleanup_errors: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct ProvisionedAgentConfigJson {
+    label: &'static str,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct CleanedAgentConfigJson {
     label: &'static str,
     path: String,
 }
@@ -381,6 +395,15 @@ struct AgentSwitchSecretMigrationJson {
 
 impl From<ProvisionedAgentConfig> for ProvisionedAgentConfigJson {
     fn from(value: ProvisionedAgentConfig) -> Self {
+        Self {
+            label: value.label,
+            path: value.path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+impl From<CleanedAgentConfig> for CleanedAgentConfigJson {
+    fn from(value: CleanedAgentConfig) -> Self {
         Self {
             label: value.label,
             path: value.path.to_string_lossy().into_owned(),
@@ -452,12 +475,28 @@ pub(crate) async fn agent_switch_handler(
         let mut live = state.live_agent_config.lock().await;
         *live = candidate_config.agent.clone();
     }
-
     let mut restart_started = false;
     if was_running {
         restart_agent_with_config(&state, &candidate_config).await?;
         restart_started = true;
     }
+    let (cleaned_configs, cleanup_errors) = if body.drop_configs {
+        match cleanup_agent_headless_config(&fresh_config, &home) {
+            Ok(cleaned) => (
+                cleaned
+                    .into_iter()
+                    .map(CleanedAgentConfigJson::from)
+                    .collect(),
+                Vec::new(),
+            ),
+            Err(err) => {
+                tracing::warn!(error = %err, "source agent config cleanup failed after switch");
+                (Vec::new(), vec![err.to_string()])
+            }
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let response = AgentSwitchResponse {
         old_agent_id: plan.old_agent_id,
@@ -476,6 +515,8 @@ pub(crate) async fn agent_switch_handler(
             .set_model
             .then_some("acps agent set --model <model-id>"),
         provisioned,
+        cleaned_configs,
+        cleanup_errors,
     };
     Ok(ApiSuccess::new(response))
 }

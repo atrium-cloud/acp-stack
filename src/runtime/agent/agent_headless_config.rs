@@ -38,6 +38,12 @@ pub struct ProvisionedAgentConfig {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanedAgentConfig {
+    pub label: &'static str,
+    pub path: PathBuf,
+}
+
 pub fn provision_agent_headless_config(
     config: &Config,
     home: &Path,
@@ -77,6 +83,19 @@ pub fn provision_agent_headless_config(
                 })
                 .collect()
         }),
+        _ => Ok(Vec::new()),
+    }
+}
+
+pub fn cleanup_agent_headless_config(
+    config: &Config,
+    home: &Path,
+) -> Result<Vec<CleanedAgentConfig>> {
+    match config.agent.id.as_str() {
+        "goose" => cleanup_goose_config(config, home),
+        OPENCODE_AGENT_ID => cleanup_opencode_config(config, home),
+        "codex" => cleanup_codex_config(config, home),
+        "pi" => cleanup_pi_config(config, home),
         _ => Ok(Vec::new()),
     }
 }
@@ -176,6 +195,47 @@ fn provision_goose_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> 
     Ok(written)
 }
 
+fn cleanup_goose_config(config: &Config, home: &Path) -> Result<Vec<CleanedAgentConfig>> {
+    let mut cleaned = Vec::new();
+    let path = home.join(".config").join("goose").join("config.yaml");
+    if path.exists() {
+        let mut root = read_yaml_mapping(&path)?;
+        let mut changed = false;
+        for key in [
+            "GOOSE_PROVIDER",
+            "GOOSE_MODEL",
+            "GOOSE_MODE",
+            "GOOSE_CONTEXT_STRATEGY",
+            "GOOSE_DISABLE_SESSION_NAMING",
+        ] {
+            changed |= root.remove(YamlValue::String(key.to_owned())).is_some();
+        }
+        if changed {
+            write_or_remove_yaml_mapping(&path, root)?;
+            cleaned.push(CleanedAgentConfig {
+                label: "Goose config",
+                path: path.clone(),
+            });
+        }
+    }
+    if let Some(provider) = config.agent.provider.as_ref()
+        && provider.custom.is_some()
+    {
+        let path = home
+            .join(".config")
+            .join("goose")
+            .join("custom_providers")
+            .join(format!("{}.json", provider.id));
+        if remove_file_if_exists(&path)? {
+            cleaned.push(CleanedAgentConfig {
+                label: "Goose custom provider",
+                path,
+            });
+        }
+    }
+    Ok(cleaned)
+}
+
 fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
     let path = home.join(".config").join("opencode").join("opencode.json");
     let Some(provider) = config.agent.provider.as_ref() else {
@@ -241,6 +301,58 @@ fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<Path
 
     write_json_object(&path, root)?;
     Ok(Some(path))
+}
+
+fn cleanup_opencode_config(config: &Config, home: &Path) -> Result<Vec<CleanedAgentConfig>> {
+    let path = home.join(".config").join("opencode").join("opencode.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut root = read_json_object(&path)?;
+    let mut changed = false;
+    for key in ["$schema", "model", "small_model", "enabled_providers"] {
+        changed |= root.remove(key).is_some();
+    }
+    let mut provider_keys = BTreeSet::new();
+    if let Some(provider) = config.agent.provider.as_ref() {
+        provider_keys.insert(opencode_provider_config_key(config, provider).to_owned());
+    }
+    if let Some(provider) = configured_subagent_provider(config) {
+        provider_keys.insert(opencode_provider_config_key(config, provider).to_owned());
+    }
+    let mut remove_provider_object = false;
+    if let Some(providers) = root
+        .get_mut("provider")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for key in provider_keys {
+            changed |= providers.remove(&key).is_some();
+        }
+        remove_provider_object = providers.is_empty();
+    }
+    if remove_provider_object {
+        root.remove("provider");
+    }
+    if !changed {
+        return Ok(Vec::new());
+    }
+    write_or_remove_json_object(&path, root)?;
+    Ok(vec![CleanedAgentConfig {
+        label: "OpenCode config",
+        path,
+    }])
+}
+
+fn opencode_provider_config_key<'a>(
+    config: &'a Config,
+    provider: &'a AgentProviderConfig,
+) -> &'a str {
+    provider
+        .custom
+        .as_ref()
+        .map(|_| provider.id.as_str())
+        .or_else(|| agent_provider_id_for_provider_id(&config.agent.id, &provider.id))
+        .unwrap_or(provider.id.as_str())
 }
 
 fn write_opencode_provider_config(
@@ -327,6 +439,49 @@ fn provision_pi_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> 
     Ok(Some(path))
 }
 
+fn cleanup_pi_config(config: &Config, home: &Path) -> Result<Vec<CleanedAgentConfig>> {
+    let mut cleaned = Vec::new();
+    let settings_path = home.join(".pi").join("agent").join("settings.json");
+    if settings_path.exists() {
+        let mut root = read_json_object(&settings_path)?;
+        if root.remove("enabledModels").is_some() {
+            write_or_remove_json_object(&settings_path, root)?;
+            cleaned.push(CleanedAgentConfig {
+                label: "Pi settings",
+                path: settings_path,
+            });
+        }
+    }
+    if let Some(provider) = config.agent.provider.as_ref()
+        && provider.custom.is_some()
+    {
+        let models_path = home.join(".pi").join("agent").join("models.json");
+        if models_path.exists() {
+            let mut root = read_json_object(&models_path)?;
+            let mut changed = false;
+            let mut remove_providers_object = false;
+            if let Some(providers) = root
+                .get_mut("providers")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                changed |= providers.remove(&provider.id).is_some();
+                remove_providers_object = providers.is_empty();
+            }
+            if remove_providers_object {
+                root.remove("providers");
+            }
+            if changed {
+                write_or_remove_json_object(&models_path, root)?;
+                cleaned.push(CleanedAgentConfig {
+                    label: "Pi custom models",
+                    path: models_path,
+                });
+            }
+        }
+    }
+    Ok(cleaned)
+}
+
 fn write_pi_custom_models_json(
     path: &Path,
     provider: &crate::config::AgentProviderConfig,
@@ -385,6 +540,50 @@ fn provision_codex_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> 
         written.push(path);
     }
     Ok(written)
+}
+
+fn cleanup_codex_config(config: &Config, home: &Path) -> Result<Vec<CleanedAgentConfig>> {
+    let path = home.join(".codex").join("config.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut root = read_toml_table(&path)?;
+    let mut changed = root.remove("model").is_some();
+    if let Some(provider_key) = codex_provider_config_key(config) {
+        if root.get("model_provider").and_then(TomlValue::as_str) == Some(provider_key.as_str()) {
+            root.remove("model_provider");
+            changed = true;
+        }
+        if provider_key != "openai" {
+            let mut remove_providers_table = false;
+            if let Some(providers) = root
+                .get_mut("model_providers")
+                .and_then(TomlValue::as_table_mut)
+            {
+                changed |= providers.remove(&provider_key).is_some();
+                remove_providers_table = providers.is_empty();
+            }
+            if remove_providers_table {
+                root.remove("model_providers");
+            }
+        }
+    }
+    if !changed {
+        return Ok(Vec::new());
+    }
+    write_or_remove_toml_table(&path, root)?;
+    Ok(vec![CleanedAgentConfig {
+        label: "Codex config",
+        path,
+    }])
+}
+
+fn codex_provider_config_key(config: &Config) -> Option<String> {
+    let provider = config.agent.provider.as_ref()?;
+    if provider.id == CODEX_OPENROUTER_PROVIDER_ID || provider.id == "openai" {
+        return Some(provider.id.clone());
+    }
+    provider.custom.as_ref().map(|_| provider.id.clone())
 }
 
 fn provision_codex_main_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
@@ -616,6 +815,48 @@ fn unique_codex_backup_path(parent: &Path, provider_id: &str) -> PathBuf {
         }
     }
     unreachable!("unbounded suffix search returns a backup path")
+}
+
+fn write_or_remove_json_object(path: &Path, root: Map<String, serde_json::Value>) -> Result<()> {
+    if root.is_empty() {
+        remove_file(path)?;
+    } else {
+        write_json_object(path, root)?;
+    }
+    Ok(())
+}
+
+fn write_or_remove_yaml_mapping(path: &Path, root: serde_yaml::Mapping) -> Result<()> {
+    if root.is_empty() {
+        remove_file(path)?;
+    } else {
+        write_yaml_mapping(path, root)?;
+    }
+    Ok(())
+}
+
+fn write_or_remove_toml_table(path: &Path, root: TomlMap<String, TomlValue>) -> Result<()> {
+    if root.is_empty() {
+        remove_file(path)?;
+    } else {
+        write_toml_table(path, root)?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    remove_file(path)?;
+    Ok(true)
+}
+
+fn remove_file(path: &Path) -> Result<()> {
+    std::fs::remove_file(path).map_err(|source| StackError::FileRemove {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn configured_provider_model(config: &Config) -> Option<&str> {
@@ -1223,6 +1464,178 @@ wire_api = "responses"
         assert_eq!(
             value["provider"]["opencode-go"]["options"]["apiKey"],
             "{env:OPENCODE_API_KEY}"
+        );
+    }
+
+    #[test]
+    fn opencode_cleanup_removes_managed_keys_and_keeps_user_settings() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            r#"{"$schema":"https://opencode.ai/config.json","model":"openai/gpt-5.5","small_model":"openai/gpt-5.5","enabled_providers":["openai"],"provider":{"openai":{"options":{"apiKey":"{env:OPENAI_API_KEY}"}},"anthropic":{"options":{"timeout":600000}}},"theme":"keep"}"#,
+        )
+        .expect("write opencode config");
+        let mut config = config_with_agent("opencode", &["OPENAI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("openai/gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        let cleaned = cleanup_agent_headless_config(&config, tempdir.path()).expect("cleanup");
+
+        assert_eq!(cleaned[0].path, path);
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read opencode config"))
+                .expect("json parses");
+        assert_eq!(value["theme"], "keep");
+        assert_eq!(value["provider"]["anthropic"]["options"]["timeout"], 600000);
+        assert!(value.get("model").is_none());
+        assert!(value["provider"].get("openai").is_none());
+    }
+
+    #[test]
+    fn goose_cleanup_removes_managed_keys_and_custom_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("goose", crate::config::CustomProviderApi::ChatCompletions);
+        let goose_path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("config.yaml");
+        let custom_provider_path = tempdir
+            .path()
+            .join(".config")
+            .join("goose")
+            .join("custom_providers")
+            .join("myprovider.json");
+        std::fs::create_dir_all(custom_provider_path.parent().expect("path has parent"))
+            .expect("create parent");
+        std::fs::write(
+            &goose_path,
+            "GOOSE_PROVIDER: myprovider\nGOOSE_MODEL: my-model\nGOOSE_MODE: auto\nGOOSE_CONTEXT_STRATEGY: summarize\nGOOSE_DISABLE_SESSION_NAMING: true\nKEEP_ME: yes\n",
+        )
+        .expect("write goose config");
+        std::fs::write(&custom_provider_path, r#"{"id":"myprovider"}"#)
+            .expect("write custom provider");
+
+        let cleaned = cleanup_agent_headless_config(&config, tempdir.path()).expect("cleanup");
+
+        assert_eq!(cleaned.len(), 2);
+        assert!(!custom_provider_path.exists());
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&goose_path).expect("goose readable"))
+                .expect("goose yaml parses");
+        assert_eq!(value["KEEP_ME"], "yes");
+        for key in [
+            "GOOSE_PROVIDER",
+            "GOOSE_MODEL",
+            "GOOSE_MODE",
+            "GOOSE_CONTEXT_STRATEGY",
+            "GOOSE_DISABLE_SESSION_NAMING",
+        ] {
+            assert!(
+                value.as_mapping().is_some_and(|map| {
+                    !map.contains_key(serde_yaml::Value::String(key.to_owned()))
+                }),
+                "{key} should be removed"
+            );
+        }
+    }
+
+    #[test]
+    fn pi_cleanup_removes_managed_model_scope_and_custom_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("pi", crate::config::CustomProviderApi::ChatCompletions);
+        let settings_path = tempdir
+            .path()
+            .join(".pi")
+            .join("agent")
+            .join("settings.json");
+        let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
+        std::fs::create_dir_all(settings_path.parent().expect("path has parent"))
+            .expect("create parent");
+        std::fs::write(
+            &settings_path,
+            r#"{"enabledModels":["my-model"],"theme":"keep"}"#,
+        )
+        .expect("write settings");
+        std::fs::write(
+            &models_path,
+            r#"{"providers":{"myprovider":{"baseUrl":"https://api.myprovider.example/v1"},"other":{"baseUrl":"https://api.other.example/v1"}},"keep":true}"#,
+        )
+        .expect("write models");
+
+        let cleaned = cleanup_agent_headless_config(&config, tempdir.path()).expect("cleanup");
+
+        assert_eq!(cleaned.len(), 2);
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings_path).expect("settings readable"),
+        )
+        .expect("settings json parses");
+        assert_eq!(settings["theme"], "keep");
+        assert!(settings.get("enabledModels").is_none());
+        let models: Value =
+            serde_json::from_str(&std::fs::read_to_string(&models_path).expect("models readable"))
+                .expect("models json parses");
+        assert_eq!(models["keep"], true);
+        assert!(models["providers"].get("myprovider").is_none());
+        assert_eq!(
+            models["providers"]["other"]["baseUrl"],
+            "https://api.other.example/v1"
+        );
+    }
+
+    #[test]
+    fn codex_cleanup_removes_managed_provider_and_keeps_unrelated_config() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = custom_provider_config("codex", crate::config::CustomProviderApi::Responses);
+        let path = tempdir.path().join(".codex").join("config.toml");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).expect("create parent");
+        std::fs::write(
+            &path,
+            r#"model = "my-model"
+model_provider = "myprovider"
+approval_policy = "on-request"
+
+[model_providers.myprovider]
+name = "My Provider"
+base_url = "https://api.myprovider.example/v1"
+env_key = "CUSTOM_API_KEY"
+wire_api = "responses"
+
+[model_providers.other]
+name = "Other"
+base_url = "https://api.other.example/v1"
+env_key = "OTHER_API_KEY"
+wire_api = "responses"
+"#,
+        )
+        .expect("write codex config");
+
+        let cleaned = cleanup_agent_headless_config(&config, tempdir.path()).expect("cleanup");
+
+        assert_eq!(cleaned[0].path, path);
+        let value: toml::Value = toml::from_str(
+            &std::fs::read_to_string(&path).expect("codex config should be readable"),
+        )
+        .expect("codex config toml parses");
+        assert_eq!(value["approval_policy"].as_str(), Some("on-request"));
+        assert!(value.get("model").is_none());
+        assert!(value.get("model_provider").is_none());
+        assert!(value["model_providers"].get("myprovider").is_none());
+        assert_eq!(
+            value["model_providers"]["other"]["base_url"].as_str(),
+            Some("https://api.other.example/v1")
         );
     }
 

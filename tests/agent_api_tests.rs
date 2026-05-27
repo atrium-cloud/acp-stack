@@ -835,6 +835,140 @@ async fn agent_switch_copies_provider_secret_to_target_default_ref() {
 }
 
 #[tokio::test]
+async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    write_cursor_registry_override(&config_dir);
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    config.agent.env = vec!["OPENAI_API_KEY".to_owned()];
+    config.agent.provider = Some(acp_stack::config::AgentProviderConfig {
+        id: "openai".to_owned(),
+        model: Some("openai/gpt-5.5".to_owned()),
+        api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+        custom: None,
+    });
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    std::fs::create_dir_all(opencode_path.parent().expect("path has parent"))
+        .expect("opencode dir");
+    std::fs::write(
+        &opencode_path,
+        r#"{"$schema":"https://opencode.ai/config.json","model":"openai/gpt-5.5","small_model":"openai/gpt-5.5","enabled_providers":["openai"],"provider":{"openai":{"options":{"apiKey":"{env:OPENAI_API_KEY}"}}},"theme":"keep"}"#,
+    )
+    .expect("opencode config");
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([
+            ("OPENAI_API_KEY", "openai-secret"),
+            ("CURSOR_API_KEY", "cursor-secret"),
+        ])
+        .expect("secrets");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent": "cursor", "drop": true }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("switch json");
+    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert_eq!(
+        body["data"]["cleaned_configs"][0]["path"],
+        opencode_path.to_string_lossy().as_ref()
+    );
+
+    let value: Value = serde_json::from_str(
+        &std::fs::read_to_string(&opencode_path).expect("opencode config remains"),
+    )
+    .expect("opencode json");
+    assert_eq!(value["theme"], "keep");
+    assert!(value.get("model").is_none());
+    assert!(value.get("provider").is_none());
+
+    let secrets = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("secret store");
+    assert_eq!(
+        secrets.get("OPENAI_API_KEY").expect("source secret"),
+        "openai-secret"
+    );
+    assert_eq!(
+        secrets.get("CURSOR_API_KEY").expect("target secret"),
+        "cursor-secret"
+    );
+}
+
+#[tokio::test]
+async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    write_cursor_registry_override(&config_dir);
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    std::fs::create_dir_all(opencode_path.parent().expect("path has parent"))
+        .expect("opencode dir");
+    std::fs::write(&opencode_path, "not json").expect("opencode config");
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("CURSOR_API_KEY", "cursor-secret")])
+        .expect("cursor secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent": "cursor", "drop": true }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("switch json");
+    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert!(
+        body["data"]["cleanup_errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "cleanup error should be reported: {body}"
+    );
+    let written = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(written.contains(r#"id = "cursor""#));
+}
+
+#[tokio::test]
 async fn model_discovery_timeout_shuts_down_provisional_agent() {
     let _fixture_guard = EnvVarGuard::unset("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH");
     let tempdir = TempDir::new().expect("tempdir");
