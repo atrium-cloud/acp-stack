@@ -25,6 +25,7 @@ use crate::runtime::install::agent_installer::{
     InstallerSequenceResult, install_resolved_capture, run_installer_capture,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::runtime::install::skill_installer::{SkillPortReport, port_agent_skills};
 use crate::secrets::SecretStore;
 use crate::state::InstallerRunInput;
 
@@ -369,6 +370,8 @@ pub(crate) struct AgentSwitchResponse {
     follow_up: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     provisioned: Vec<ProvisionedAgentConfigJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skills_port: Option<SkillPortReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     cleaned_configs: Vec<CleanedAgentConfigJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -465,6 +468,12 @@ pub(crate) async fn agent_switch_handler(
     } else {
         Vec::new()
     };
+    let skills_port = port_agent_skills(
+        &home,
+        &registry,
+        &fresh_config.agent.id,
+        &candidate_config.agent.id,
+    )?;
 
     let was_running = state.agent_supervisor.snapshot().await.state.as_wire_str() == "running";
     crate::fs_util::atomic_write_owner_only(
@@ -515,6 +524,7 @@ pub(crate) async fn agent_switch_handler(
             .set_model
             .then_some("acps agent set --model <model-id>"),
         provisioned,
+        skills_port,
         cleaned_configs,
         cleanup_errors,
     };
