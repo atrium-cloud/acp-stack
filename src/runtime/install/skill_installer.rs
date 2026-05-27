@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::error::{Result, StackError};
 use crate::fs_util::{create_dir_owner_only, set_owner_only_dir, set_owner_only_file};
+use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::runtime::install::skill_registry::{SkillCatalog, SkillDirectory, SkillSource};
 use crate::runtime::workspace_sources::safe_download::{DownloadOpts, download_to_file};
 use crate::runtime::workspace_sources::safe_extract::{ExtractOpts, extract_archive};
@@ -59,6 +60,23 @@ pub struct SkillInstallReport {
 pub struct SkillInstallEntry {
     pub name: String,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillPortReport {
+    pub source_root: PathBuf,
+    pub target_root: PathBuf,
+    pub status: SkillPortStatus,
+    pub copied: Vec<SkillInstallEntry>,
+    pub overwritten: Vec<SkillInstallEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillPortStatus {
+    Shared,
+    Copied,
+    NoneFound,
 }
 
 pub fn parse_skill_source(value: &str) -> Result<SkillSourceSelection> {
@@ -295,6 +313,187 @@ pub fn all_skills_installed(destination_root: &Path, skill_names: &[String]) -> 
     })
 }
 
+pub fn port_agent_skills(
+    home: &Path,
+    registry: &RegistryCatalog,
+    old_agent_id: &str,
+    target_agent_id: &str,
+) -> Result<Option<SkillPortReport>> {
+    let home = home
+        .canonicalize()
+        .map_err(|source| StackError::SkillInstallFailed {
+            reason: format!("canonicalize home directory `{}`: {source}", home.display()),
+        })?;
+    let Some(old_entry) = registry.lookup(old_agent_id) else {
+        return Ok(None);
+    };
+    let target_entry =
+        registry
+            .lookup(target_agent_id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: target_agent_id.to_owned(),
+            })?;
+    let Some(source_root) = agent_skill_root(&home, old_entry)? else {
+        return Ok(None);
+    };
+    let Some(target_root) = agent_skill_root(&home, target_entry)? else {
+        return Ok(None);
+    };
+    port_skill_directories(&source_root, &target_root).map(Some)
+}
+
+fn agent_skill_root(home: &Path, entry: &RegistryEntry) -> Result<Option<PathBuf>> {
+    if !entry.supports_agent_skills {
+        return Ok(None);
+    }
+    let Some(install_dir) = entry.agent_skills_install_dir.as_deref() else {
+        return Ok(None);
+    };
+    expand_agent_skills_install_dir(home, install_dir).map(Some)
+}
+
+fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<SkillPortReport> {
+    if source_root == target_root {
+        return Ok(SkillPortReport {
+            source_root: source_root.to_path_buf(),
+            target_root: target_root.to_path_buf(),
+            status: SkillPortStatus::Shared,
+            copied: Vec::new(),
+            overwritten: Vec::new(),
+        });
+    }
+    if !source_root_exists_without_symlink_ancestors(source_root)? {
+        return Ok(SkillPortReport {
+            source_root: source_root.to_path_buf(),
+            target_root: target_root.to_path_buf(),
+            status: SkillPortStatus::NoneFound,
+            copied: Vec::new(),
+            overwritten: Vec::new(),
+        });
+    }
+    let mut candidates = Vec::new();
+    for entry in
+        std::fs::read_dir(source_root).map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "read source skills directory `{}`: {source}",
+                source_root.display()
+            ),
+        })?
+    {
+        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "read source skills directory entry `{}`: {source}",
+                source_root.display()
+            ),
+        })?;
+        let entry_path = entry.path();
+        let entry_metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
+            StackError::SkillInstallFailed {
+                reason: format!(
+                    "stat source skill entry `{}`: {source}",
+                    entry_path.display()
+                ),
+            }
+        })?;
+        if entry_metadata.file_type().is_symlink() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("refusing to port symlink `{}`", entry_path.display()),
+            });
+        }
+        if entry_metadata.is_file() {
+            continue;
+        }
+        if !entry_metadata.is_dir() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("refusing to port special file `{}`", entry_path.display()),
+            });
+        }
+        let Some(skill_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if validate_skill_name(&skill_name).is_err() {
+            continue;
+        }
+        let descriptor = entry_path.join(SKILL_DESCRIPTOR);
+        let descriptor_metadata = match std::fs::symlink_metadata(&descriptor) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!("stat skill descriptor `{}`: {source}", descriptor.display()),
+                });
+            }
+        };
+        if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("skill `{skill_name}` descriptor must be a regular SKILL.md file"),
+            });
+        }
+        validate_skill_dir_for_port(&entry_path)?;
+        candidates.push((skill_name, entry_path));
+    }
+
+    if candidates.is_empty() {
+        return Ok(SkillPortReport {
+            source_root: source_root.to_path_buf(),
+            target_root: target_root.to_path_buf(),
+            status: SkillPortStatus::NoneFound,
+            copied: Vec::new(),
+            overwritten: Vec::new(),
+        });
+    }
+
+    ensure_directory_no_symlink_ancestors(target_root, true)?;
+    let mut installs = Vec::with_capacity(candidates.len());
+    for (skill_name, entry_path) in candidates {
+        let target_dir = target_root.join(&skill_name);
+        let action = match existing_target_state(&target_dir)? {
+            ExistingTargetState::Missing => PortAction::Copy,
+            ExistingTargetState::AlreadyInstalled => PortAction::Overwrite,
+        };
+        installs.push(ResolvedPort {
+            name: skill_name,
+            source_dir: entry_path,
+            target_dir,
+            action,
+        });
+    }
+
+    let mut copied = Vec::new();
+    let mut overwritten = Vec::new();
+    for install in installs {
+        match install.action {
+            PortAction::Copy => {
+                copy_skill_dir_atomically(&install.source_dir, &install.target_dir, &install.name)?;
+                copied.push(SkillInstallEntry {
+                    name: install.name,
+                    path: install.target_dir,
+                });
+            }
+            PortAction::Overwrite => {
+                replace_skill_dir_atomically(
+                    &install.source_dir,
+                    &install.target_dir,
+                    &install.name,
+                )?;
+                overwritten.push(SkillInstallEntry {
+                    name: install.name,
+                    path: install.target_dir,
+                });
+            }
+        }
+    }
+    copied.sort_by(|left, right| left.name.cmp(&right.name));
+    overwritten.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(SkillPortReport {
+        source_root: source_root.to_path_buf(),
+        target_root: target_root.to_path_buf(),
+        status: SkillPortStatus::Copied,
+        copied,
+        overwritten,
+    })
+}
+
 fn resolve_official_source(source: &SkillSource) -> ResolvedSkillSource {
     ResolvedSkillSource {
         id: source.id.clone(),
@@ -434,6 +633,64 @@ fn copy_skill_dir_atomically(source_dir: &Path, target_dir: &Path, skill_name: &
     Ok(())
 }
 
+fn replace_skill_dir_atomically(
+    source_dir: &Path,
+    target_dir: &Path,
+    skill_name: &str,
+) -> Result<()> {
+    let parent = target_dir
+        .parent()
+        .ok_or_else(|| StackError::SkillInstallFailed {
+            reason: format!("skill target `{}` has no parent", target_dir.display()),
+        })?;
+    let tempdir = tempfile::Builder::new()
+        .prefix(&format!(".{skill_name}."))
+        .tempdir_in(parent)
+        .map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "create temporary skill target in `{}`: {source}",
+                parent.display()
+            ),
+        })?;
+    copy_dir_recursive(source_dir, tempdir.path())?;
+
+    let backup = tempfile::Builder::new()
+        .prefix(&format!(".{skill_name}.backup."))
+        .tempdir_in(parent)
+        .map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "create temporary skill backup in `{}`: {source}",
+                parent.display()
+            ),
+        })?;
+    let backup_path = backup.path().to_path_buf();
+    std::fs::remove_dir(&backup_path).map_err(|source| StackError::SkillInstallFailed {
+        reason: format!("prepare skill backup `{}`: {source}", backup_path.display()),
+    })?;
+    std::fs::rename(target_dir, &backup_path).map_err(|source| StackError::SkillInstallFailed {
+        reason: format!(
+            "move existing skill `{}` to backup `{}`: {source}",
+            target_dir.display(),
+            backup_path.display()
+        ),
+    })?;
+    if let Err(source) = std::fs::rename(tempdir.path(), target_dir) {
+        let restore = std::fs::rename(&backup_path, target_dir);
+        let restore_message = restore
+            .err()
+            .map(|err| format!("; restore failed: {err}"))
+            .unwrap_or_default();
+        return Err(StackError::SkillInstallFailed {
+            reason: format!(
+                "replace installed skill at `{}`: {source}{restore_message}",
+                target_dir.display()
+            ),
+        });
+    }
+    std::mem::forget(tempdir);
+    Ok(())
+}
+
 fn copy_dir_recursive(source_dir: &Path, target_dir: &Path) -> Result<()> {
     let metadata =
         std::fs::symlink_metadata(source_dir).map_err(|source| StackError::SkillInstallFailed {
@@ -492,6 +749,47 @@ fn copy_dir_recursive(source_dir: &Path, target_dir: &Path) -> Result<()> {
     set_owner_only_dir(target_dir)
 }
 
+fn validate_skill_dir_for_port(source_dir: &Path) -> Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(source_dir).map_err(|source| StackError::SkillInstallFailed {
+            reason: format!("stat source `{}`: {source}", source_dir.display()),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(StackError::SkillInstallFailed {
+            reason: format!("source `{}` is not a directory", source_dir.display()),
+        });
+    }
+    for entry in std::fs::read_dir(source_dir).map_err(|source| StackError::SkillInstallFailed {
+        reason: format!("read source directory `{}`: {source}", source_dir.display()),
+    })? {
+        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "read source directory entry `{}`: {source}",
+                source_dir.display()
+            ),
+        })?;
+        let entry_path = entry.path();
+        let entry_metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
+            StackError::SkillInstallFailed {
+                reason: format!("stat source entry `{}`: {source}", entry_path.display()),
+            }
+        })?;
+        if entry_metadata.file_type().is_symlink() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("refusing to port symlink `{}`", entry_path.display()),
+            });
+        }
+        if entry_metadata.is_dir() {
+            validate_skill_dir_for_port(&entry_path)?;
+        } else if !entry_metadata.is_file() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("refusing to port special file `{}`", entry_path.display()),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn ensure_directory_no_symlink_ancestors(path: &Path, create_missing: bool) -> Result<()> {
     let mut current = PathBuf::new();
     let mut normal_components = 0usize;
@@ -548,6 +846,57 @@ fn ensure_directory_no_symlink_ancestors(path: &Path, create_missing: bool) -> R
         });
     }
     set_owner_only_dir(path)
+}
+
+fn source_root_exists_without_symlink_ancestors(path: &Path) -> Result<bool> {
+    let mut current = PathBuf::new();
+    let mut normal_components = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::Normal(part) => {
+                normal_components += 1;
+                current.push(part);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "skill source directory `{}` contains an unsafe path segment",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        if current.as_os_str().is_empty() || matches!(component, Component::RootDir) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(StackError::SkillInstallTargetConflict {
+                        path: current.clone(),
+                        reason: "source skills path segment is not a real directory".to_owned(),
+                    });
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "stat skill source directory `{}`: {source}",
+                        current.display()
+                    ),
+                });
+            }
+        }
+    }
+    if normal_components == 0 {
+        return Err(StackError::SkillInstallFailed {
+            reason: format!("skill source directory `{}` is not valid", path.display()),
+        });
+    }
+    Ok(true)
 }
 
 fn create_single_owner_only_dir(path: &Path) -> Result<()> {
@@ -638,6 +987,20 @@ struct ResolvedInstall {
     action: InstallAction,
 }
 
+#[derive(Debug)]
+struct ResolvedPort {
+    name: String,
+    source_dir: PathBuf,
+    target_dir: PathBuf,
+    action: PortAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortAction {
+    Copy,
+    Overwrite,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstallAction {
     Copy,
@@ -681,6 +1044,13 @@ mod tests {
         let skill_dir = root.join(directory).join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), "# Skill\n").expect("descriptor");
+        std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
+    }
+
+    fn write_installed_skill(root: &Path, name: &str, descriptor: &str) {
+        let skill_dir = root.join(name);
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), descriptor).expect("descriptor");
         std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
     }
 
@@ -915,5 +1285,156 @@ mod tests {
             expand_agent_skills_install_dir(home, "~/.agents/skills").expect("expand"),
             Path::new("/tmp/test-home/.agents/skills")
         );
+    }
+
+    #[test]
+    fn port_skill_directories_shared_path_is_noop() {
+        let home = tempfile::tempdir().expect("home");
+        let source = canonical_temp_home(&home).join(".agents/skills");
+
+        let report = port_skill_directories(&source, &source).expect("port");
+
+        assert_eq!(report.status, SkillPortStatus::Shared);
+        assert!(report.copied.is_empty());
+        assert!(report.overwritten.is_empty());
+    }
+
+    #[test]
+    fn port_skill_directories_copies_valid_skills() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        write_installed_skill(&source, "repo-map", "# Repo Map\n");
+        write_installed_skill(&source, "code-review", "# Code Review\n");
+
+        let report = port_skill_directories(&source, &target).expect("port");
+
+        assert_eq!(report.status, SkillPortStatus::Copied);
+        assert_eq!(report.copied.len(), 2);
+        assert!(target.join("repo-map").join(SKILL_DESCRIPTOR).is_file());
+        assert!(target.join("code-review").join("script.sh").is_file());
+    }
+
+    #[test]
+    fn port_skill_directories_overwrites_valid_target_skill() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        write_installed_skill(&source, "repo-map", "# New\n");
+        write_installed_skill(&target, "repo-map", "# Old\n");
+        std::fs::write(target.join("repo-map").join("old.txt"), "old\n").expect("old file");
+
+        let report = port_skill_directories(&source, &target).expect("port");
+
+        assert_eq!(report.status, SkillPortStatus::Copied);
+        assert!(report.copied.is_empty());
+        assert_eq!(report.overwritten.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(target.join("repo-map").join(SKILL_DESCRIPTOR))
+                .expect("descriptor"),
+            "# New\n"
+        );
+        assert!(!target.join("repo-map").join("old.txt").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn port_skill_directories_preflight_rejects_nested_symlink_before_target_mutation() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        write_installed_skill(&source, "a-skill", "# New\n");
+        write_installed_skill(&target, "a-skill", "# Old\n");
+        write_installed_skill(&source, "b-skill", "# B\n");
+        let external = tempfile::tempdir().expect("external");
+        std::fs::create_dir_all(source.join("b-skill/nested")).expect("nested");
+        std::os::unix::fs::symlink(external.path(), source.join("b-skill/nested/symlinked-dir"))
+            .expect("symlink");
+
+        let err = port_skill_directories(&source, &target).expect_err("nested symlink");
+
+        assert!(matches!(err, StackError::SkillInstallFailed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(target.join("a-skill").join(SKILL_DESCRIPTOR))
+                .expect("descriptor"),
+            "# Old\n"
+        );
+    }
+
+    #[test]
+    fn port_skill_directories_rejects_target_conflict() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        write_installed_skill(&source, "repo-map", "# Repo Map\n");
+        std::fs::create_dir_all(target.join("repo-map")).expect("target");
+
+        let err = port_skill_directories(&source, &target).expect_err("conflict");
+
+        assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn port_skill_directories_rejects_source_symlink() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        let external = tempfile::tempdir().expect("external");
+        std::fs::create_dir_all(&source).expect("source root");
+        std::fs::write(external.path().join(SKILL_DESCRIPTOR), "# Skill\n").expect("descriptor");
+        std::os::unix::fs::symlink(external.path(), source.join("repo-map")).expect("symlink");
+
+        let err = port_skill_directories(&source, &target).expect_err("symlink");
+
+        assert!(matches!(err, StackError::SkillInstallFailed { .. }));
+    }
+
+    #[test]
+    fn port_skill_directories_skips_non_skills_and_invalid_names() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        std::fs::create_dir_all(source.join("notes")).expect("notes");
+        std::fs::create_dir_all(source.join("BadName")).expect("bad name");
+        std::fs::write(source.join("README.md"), "readme\n").expect("readme");
+
+        let report = port_skill_directories(&source, &target).expect("port");
+
+        assert_eq!(report.status, SkillPortStatus::NoneFound);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn port_skill_directories_missing_source_is_none_found() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+
+        let report = port_skill_directories(
+            &home.join(".agents/skills"),
+            &home.join(".config/agents/skills"),
+        )
+        .expect("port");
+
+        assert_eq!(report.status, SkillPortStatus::NoneFound);
+        assert!(report.copied.is_empty());
+        assert!(report.overwritten.is_empty());
+    }
+
+    #[test]
+    fn port_agent_skills_treats_unknown_source_agent_as_noop() {
+        let home = tempfile::tempdir().expect("home");
+        let catalog = RegistryCatalog::load_embedded().expect("registry");
+
+        let report =
+            port_agent_skills(home.path(), &catalog, "removed-agent", "opencode").expect("port");
+
+        assert_eq!(report, None);
     }
 }
