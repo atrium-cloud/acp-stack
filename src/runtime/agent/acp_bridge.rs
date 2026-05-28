@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
@@ -37,7 +37,7 @@ use agent_client_protocol::{Agent, Client, ConnectionTo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex as TokioMutex, Notify, oneshot};
+use tokio::sync::{Mutex as TokioMutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -69,6 +69,10 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
 /// the agent child. The closure should return immediately once the oneshot
 /// fires; if it does not, the child is misbehaving and we cut losses.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Poll cadence for the bridge-owned child exit watcher. ACP transports can
+/// remain parked until orderly shutdown, so process death is observed directly.
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSessionConfigCategory {
@@ -201,7 +205,7 @@ pub struct AcpBridge {
     /// `TokioMutex<Option<Child>>` so `shutdown(&self)` can `.take()` the
     /// child to await/kill without consuming the bridge. Reads after a
     /// successful shutdown see `None` and short-circuit.
-    child: TokioMutex<Option<Child>>,
+    child: Arc<TokioMutex<Option<Child>>>,
     capabilities: AgentCapabilitiesDto,
     /// Cloneable handle for sending requests/notifications to the agent.
     /// Populated inside the connect closure before it parks on `shutdown_rx`,
@@ -210,12 +214,42 @@ pub struct AcpBridge {
     connection: TokioMutex<Option<ConnectionTo<Agent>>>,
     shutdown_tx: TokioMutex<Option<oneshot::Sender<()>>>,
     connection_task: TokioMutex<Option<JoinHandle<()>>>,
+    planned_shutdown: Arc<AtomicBool>,
+    exit_rx: watch::Receiver<Option<AcpBridgeExit>>,
     spawn_pid: Option<u32>,
     /// Held so `shutdown()` can flush any pending `session/update` writes the
     /// sink's background writer task has queued.
     sink: Arc<dyn SessionEventSink>,
     notification_drain: Arc<NotificationDrain>,
     session_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpBridgeExitReason {
+    Shutdown,
+    ProcessExited,
+    ConnectionEnded,
+    ConnectionError,
+}
+
+impl AcpBridgeExitReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shutdown => "shutdown",
+            Self::ProcessExited => "process_exited",
+            Self::ConnectionEnded => "connection_ended",
+            Self::ConnectionError => "connection_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpBridgeExit {
+    pub pid: Option<u32>,
+    pub planned: bool,
+    pub reason: AcpBridgeExitReason,
+    pub message: Option<String>,
+    pub exit_status: Option<i32>,
 }
 
 #[derive(Default)]
@@ -329,6 +363,10 @@ impl AcpBridge {
             std::result::Result<(InitializeResponse, ConnectionTo<Agent>), String>,
         >();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (exit_tx, exit_rx) = watch::channel(None);
+        let planned_shutdown = Arc::new(AtomicBool::new(false));
+        let planned_shutdown_for_task = Arc::clone(&planned_shutdown);
+        let spawn_pid = child.id();
 
         // Notifications get persisted to the durable event log keyed by
         // session_id and then fanned out live through the event hub.
@@ -343,6 +381,7 @@ impl AcpBridge {
         // bridge handle can outlive the call site, and we use a oneshot
         // shutdown signal to ask the closure to wrap up cleanly.
         let permissions_for_task = permissions.clone();
+        let connection_exit_tx = exit_tx.clone();
         let connection_task: JoinHandle<()> = tokio::spawn(async move {
             let run = Client
                 .builder()
@@ -411,9 +450,34 @@ impl AcpBridge {
                     Ok(())
                 })
                 .await;
-            if let Err(err) = run {
-                tracing::warn!(error = ?err, "acp bridge connection task exited with error");
-            }
+            let planned = planned_shutdown_for_task.load(Ordering::SeqCst);
+            let exit = match run {
+                Ok(()) if planned => AcpBridgeExit {
+                    pid: spawn_pid,
+                    planned,
+                    reason: AcpBridgeExitReason::Shutdown,
+                    message: None,
+                    exit_status: None,
+                },
+                Ok(()) => AcpBridgeExit {
+                    pid: spawn_pid,
+                    planned,
+                    reason: AcpBridgeExitReason::ConnectionEnded,
+                    message: None,
+                    exit_status: None,
+                },
+                Err(err) => {
+                    tracing::warn!(error = ?err, "acp bridge connection task exited with error");
+                    AcpBridgeExit {
+                        pid: spawn_pid,
+                        planned,
+                        reason: AcpBridgeExitReason::ConnectionError,
+                        message: Some(err.to_string()),
+                        exit_status: None,
+                    }
+                }
+            };
+            let _ = connection_exit_tx.send(Some(exit));
         });
 
         let (init_response, connection) = match timeout(INITIALIZE_TIMEOUT, init_rx).await {
@@ -440,7 +504,6 @@ impl AcpBridge {
         };
 
         let capabilities = AgentCapabilitiesDto::from_initialize_response(&init_response)?;
-        let pid = child.id();
         let session_model = agent.provider.as_ref().and_then(|provider| {
             if agent.id == "goose" {
                 provider.model.clone()
@@ -448,14 +511,23 @@ impl AcpBridge {
                 None
             }
         });
+        let child = Arc::new(TokioMutex::new(Some(child)));
+        spawn_child_exit_watcher(
+            Arc::clone(&child),
+            Arc::clone(&planned_shutdown),
+            exit_tx,
+            spawn_pid,
+        );
 
         Ok(Self {
-            child: TokioMutex::new(Some(child)),
+            child,
             capabilities,
             connection: TokioMutex::new(Some(connection)),
             shutdown_tx: TokioMutex::new(Some(shutdown_tx)),
             connection_task: TokioMutex::new(Some(connection_task)),
-            spawn_pid: pid,
+            planned_shutdown,
+            exit_rx,
+            spawn_pid,
             sink: bridge_sink,
             notification_drain,
             session_model,
@@ -471,6 +543,29 @@ impl AcpBridge {
     /// child, callers should rely on `agent_lifecycle` rows instead.
     pub fn pid(&self) -> Option<u32> {
         self.spawn_pid
+    }
+
+    pub fn subscribe_exit(&self) -> watch::Receiver<Option<AcpBridgeExit>> {
+        self.exit_rx.clone()
+    }
+
+    pub fn planned_shutdown(&self) -> bool {
+        self.planned_shutdown.load(Ordering::SeqCst)
+    }
+
+    pub async fn try_wait_child(&self) -> Result<Option<i32>> {
+        let mut guard = self.child.lock().await;
+        let Some(child) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let Some(status) = child
+            .try_wait()
+            .map_err(|source| StackError::AgentSpawnFailed { source })?
+        else {
+            return Ok(None);
+        };
+        *guard = None;
+        Ok(status.code())
     }
 
     async fn connection(&self) -> Result<ConnectionTo<Agent>> {
@@ -691,6 +786,7 @@ impl AcpBridge {
     /// Returns the exit status if available. Idempotent: a second call sees
     /// every field already `None` and returns `Ok(None)`.
     pub async fn shutdown(&self) -> Result<Option<i32>> {
+        self.planned_shutdown.store(true, Ordering::SeqCst);
         // Clear the cloneable handle so any in-flight session calls fail
         // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
         {
@@ -751,6 +847,48 @@ impl AcpBridge {
 
         Ok(status.and_then(|s| s.code()))
     }
+}
+
+fn spawn_child_exit_watcher(
+    child: Arc<TokioMutex<Option<Child>>>,
+    planned_shutdown: Arc<AtomicBool>,
+    exit_tx: watch::Sender<Option<AcpBridgeExit>>,
+    spawn_pid: Option<u32>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(CHILD_EXIT_POLL_INTERVAL).await;
+            let exit_status = {
+                let mut guard = child.lock().await;
+                let Some(child) = guard.as_mut() else {
+                    return;
+                };
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        *guard = None;
+                        Some(status.code())
+                    }
+                    Ok(None) => None,
+                    Err(err) => {
+                        tracing::warn!(error = ?err, "acp bridge child exit poll failed");
+                        None
+                    }
+                }
+            };
+            let Some(exit_status) = exit_status else {
+                continue;
+            };
+            let planned = planned_shutdown.load(Ordering::SeqCst);
+            let _ = exit_tx.send(Some(AcpBridgeExit {
+                pid: spawn_pid,
+                planned,
+                reason: AcpBridgeExitReason::ProcessExited,
+                message: None,
+                exit_status,
+            }));
+            return;
+        }
+    });
 }
 
 /// Translate a classified prompt failure into the appropriate `StackError`

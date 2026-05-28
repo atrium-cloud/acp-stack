@@ -126,7 +126,7 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 | `args`    | argv after the executable                                 |
 | `cwd`     | launch directory; defaults to workspace root when omitted |
 | `env`     | secret refs injected as environment variables             |
-| `restart` | process restart policy                                    |
+| `restart` | process restart policy: `on-crash` or `never`             |
 
 Provider and model fields are documented in [agents/config.md](agents/config.md).
 
