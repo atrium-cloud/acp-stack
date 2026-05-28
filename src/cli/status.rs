@@ -14,14 +14,14 @@ use crate::runtime::health::{
 };
 use crate::state::{StateStore, default_state_path};
 
-use super::core::{CliKey, daemon_base_url, open_cli_key};
+use super::core::{CliKey, OutputFormat, daemon_base_url, open_cli_key, print_json};
 
 // `acps status` should not hang behind a dead listener or half-open tunnel.
 // Other daemon-facing commands can wait for their operation; status is a
 // diagnostic surface, so keep the live probe bounded and report unavailable.
 const STATUS_DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-pub(super) fn run_status() -> Result<()> {
+pub(super) fn run_status(output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
     let config_dir = parent_dir(&config_path)?;
@@ -53,20 +53,49 @@ pub(super) fn run_status() -> Result<()> {
         .latest_event_timestamp()?
         .unwrap_or_else(|| "none".to_owned());
 
+    let workspace_root = config.workspace.root.as_str();
+    let agent_id = config.agent.id.as_str();
+
+    if output.is_json() {
+        print_json(&serde_json::json!({
+            "config": {
+                "ok": true,
+                "path": config_path.display().to_string(),
+            },
+            "state": {
+                "ok": true,
+                "path": state_path.display().to_string(),
+                "schema_version": schema_version,
+                "latest_event": latest_event,
+            },
+            "workspace": {
+                "ok": ownership::workspace_writable(Path::new(workspace_root)),
+                "root": workspace_root,
+            },
+            "agent": {
+                "configured": !agent_id.is_empty(),
+                "id": agent_id,
+            },
+            "sink": sink_status_json(&store, &config)?,
+            "deps": deps_status_json(&store)?,
+            "prompts": prompts_status_json(&store, &config)?,
+            "daemon": daemon_status_json(&config, &home),
+        }))?;
+        return Ok(());
+    }
+
     println!("config:    ok ({})", config_path.display());
     println!(
         "state:     ok ({}, schema={schema_version}, latest_event={latest_event})",
         state_path.display()
     );
 
-    let workspace_root = config.workspace.root.as_str();
     if ownership::workspace_writable(Path::new(workspace_root)) {
         println!("workspace: ok ({workspace_root})");
     } else {
         println!("workspace: not writable ({workspace_root})");
     }
 
-    let agent_id = config.agent.id.as_str();
     if agent_id.is_empty() {
         println!("agent:     not configured");
     } else {
@@ -88,6 +117,18 @@ pub(super) fn run_status() -> Result<()> {
     print_daemon_status(&config, &home);
 
     Ok(())
+}
+
+fn prompts_status_json(store: &StateStore, config: &Config) -> Result<serde_json::Value> {
+    let threshold = config.prompts.effective_stale_threshold();
+    let (count, oldest_at) = store.count_stuck_prompts(threshold)?;
+    Ok(serde_json::json!({
+        "ok": count == 0,
+        "stuck_count": count,
+        "threshold_secs": threshold.as_secs(),
+        "oldest_at": oldest_at,
+        "oldest_age_secs": oldest_at.as_deref().and_then(prompts_age_seconds),
+    }))
 }
 
 // Mirror `runtime/health.rs::collect_prompts` so the CLI surface stays in
@@ -140,6 +181,36 @@ fn print_sink_status(store: &StateStore) -> Result<()> {
     Ok(())
 }
 
+fn sink_status_json(store: &StateStore, config: &Config) -> Result<serde_json::Value> {
+    let Some(supabase) = config.logging.supabase.as_ref() else {
+        return Ok(serde_json::json!({ "configured": false, "enabled": false }));
+    };
+    if !supabase.enabled {
+        return Ok(serde_json::json!({
+            "configured": true,
+            "enabled": false,
+            "kind": "supabase",
+        }));
+    }
+    let open = store.sink_open_failure_count()?;
+    let latest = store.latest_sink_failure_summary()?;
+    Ok(serde_json::json!({
+        "configured": true,
+        "enabled": true,
+        "kind": "supabase",
+        "ok": open == 0,
+        "open_failure_count": open,
+        "latest_failure": latest.map(|(window_started_at, count, last_error, observed_at)| {
+            serde_json::json!({
+                "window_started_at": window_started_at,
+                "count": count,
+                "last_error": last_error,
+                "observed_at": observed_at,
+            })
+        }),
+    }))
+}
+
 // Mirror the lookup used in `runtime/health.rs::collect_deps`: new
 // `acps deps apply` rows share an exact apply_run_id, while legacy rows fall
 // back to the old timestamp cluster. The CLI surfaces a one-line summary of
@@ -177,6 +248,39 @@ fn print_deps_status(store: &StateStore) -> Result<()> {
     Ok(())
 }
 
+fn deps_status_json(store: &StateStore) -> Result<serde_json::Value> {
+    let rows: Vec<_> = store
+        .query_installer_runs_filtered(Some(DEPS_APPLY_AGENT_ID), DEPS_RECENT_ROW_LIMIT)?
+        .into_iter()
+        .filter(|row| row.step == DEPS_APPLY_STEP)
+        .collect();
+    let mut iter = rows.into_iter();
+    let Some(latest) = iter.next() else {
+        return Ok(serde_json::json!({
+            "has_apply_runs": false,
+        }));
+    };
+    let cluster_has_failure = deps_cluster_has_failure_for_latest(store, &latest, iter)?;
+    let ok = !deps_status_is_failure(&latest.status) && !cluster_has_failure;
+    Ok(serde_json::json!({
+        "has_apply_runs": true,
+        "latest": {
+            "id": latest.id,
+            "agent_id": latest.agent_id,
+            "started_at": latest.started_at,
+            "finished_at": latest.finished_at,
+            "status": latest.status,
+            "exit_status": latest.exit_status,
+            "step": latest.step,
+            "version": latest.version,
+            "log_dir": latest.log_dir,
+            "apply_run_id": latest.apply_run_id,
+        },
+        "cluster_has_failure": cluster_has_failure,
+        "ok": ok,
+    }))
+}
+
 fn print_daemon_status(config: &Config, home: &Path) {
     match probe_daemon_status(config, home) {
         DaemonStatus::Ready => println!("daemon:   ready"),
@@ -188,6 +292,18 @@ fn print_daemon_status(config: &Config, home: &Path) {
             }
         }
         DaemonStatus::Unavailable(reason) => println!("daemon:   unavailable ({reason})"),
+    }
+}
+
+fn daemon_status_json(config: &Config, home: &Path) -> serde_json::Value {
+    match probe_daemon_status(config, home) {
+        DaemonStatus::Ready => serde_json::json!({ "status": "ready", "ok": true }),
+        DaemonStatus::Degraded(failing) => {
+            serde_json::json!({ "status": "degraded", "ok": false, "failing": failing })
+        }
+        DaemonStatus::Unavailable(reason) => {
+            serde_json::json!({ "status": "unavailable", "ok": false, "reason": reason })
+        }
     }
 }
 

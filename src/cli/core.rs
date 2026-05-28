@@ -3,7 +3,8 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{home_dir, set_owner_only_file};
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use super::agent::AgentCommand;
@@ -28,14 +29,36 @@ use super::ws::WsCommand;
     version,
     about = env!("CARGO_PKG_DESCRIPTION"),
     color = clap::ColorChoice::Never,
+    after_help = "Examples:
+  acps init --agent opencode --provider openrouter --api-key-ref OPENROUTER_API_KEY
+  acps status --format json
+  acps sessions list --range week --format json
+  acps logs query --since 1h --kind prompt. --format json
+  acps deps check --format json
+  acps security history --format json
+  acps config export --output acp-stack.toml
+  acps config import --path acp-stack.toml --dry-run
+  acps completion zsh > _acps",
 )]
 pub struct Cli {
+    /// Output format for commands that support structured output.
+    #[arg(long = "format", global = true, value_enum)]
+    format: Option<OutputFormat>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Generate shell completion scripts.
+    #[command(after_help = "Examples:
+  acps completion bash > acps.bash
+  acps completion zsh > _acps
+  acps completion fish > acps.fish")]
+    Completion {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     Init(Box<InitArgs>),
     Status,
     Reset(ResetArgs),
@@ -49,14 +72,28 @@ enum Command {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    #[command(after_help = "Examples:
+  acps config validate
+  acps config export --output acp-stack.toml
+  acps config export --format json
+  acps config import --path acp-stack.toml --dry-run")]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    #[command(after_help = "Examples:
+  acps logs query --since 1h --kind prompt.
+  acps logs query --follow --format json
+  acps logs tail")]
     Logs {
         #[command(subcommand)]
         command: LogsCommand,
     },
+    #[command(after_help = "Examples:
+  acps agent status --format json
+  acps agent check
+  acps agent start
+  acps agent restart")]
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
@@ -70,15 +107,27 @@ enum Command {
         #[command(subcommand)]
         command: InstallerCommand,
     },
+    #[command(after_help = "Examples:
+  acps sessions list --range week
+  acps sessions new --format json
+  acps sessions prompt <session-id> --text \"hello\"")]
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
     },
+    #[command(after_help = "Examples:
+  acps deps check
+  acps deps check --format json
+  acps deps apply --yes")]
     Deps {
         #[command(subcommand)]
         command: DepsCommand,
     },
     /// Run runtime security self-checks.
+    #[command(after_help = "Examples:
+  acps security check
+  acps security history --format json
+  acps security show <run-id> --format json")]
     Security {
         #[command(subcommand)]
         command: SecurityCommand,
@@ -125,23 +174,55 @@ pub fn run() -> Result<()> {
 }
 
 fn run_cli(cli: Cli) -> Result<()> {
+    let output = OutputFormatChoice::new(cli.format);
     let result = match cli.command {
-        Command::Init(args) => super::init::run_init(*args),
-        Command::Status => super::status::run_status(),
-        Command::Reset(args) => super::reset::run_reset(args),
-        Command::Serve(args) => super::serve::run_serve(args),
-        Command::Auth { command } => super::auth::run_auth_command(command),
-        Command::Secrets { command } => super::secrets::run_secrets_command(command),
-        Command::Config { command } => super::config::run_config_command(command),
-        Command::Logs { command } => super::logs::run_logs_command(command),
-        Command::Agent { command } => super::agent::run_agent_command(command),
-        Command::Subagent { command } => super::subagent::run_subagent_command(command),
-        Command::Installer { command } => super::installer::run_installer_command(command),
-        Command::Sessions { command } => super::sessions::run_sessions_command(command),
-        Command::Deps { command } => super::deps::run_deps_command(command),
-        Command::Security { command } => super::security::run_security_command(command),
-        Command::Metrics { command } => super::metrics::run_metrics_command(command),
-        Command::Ws { command } => super::ws::run_ws_command(command),
+        Command::Completion { shell } => {
+            output.reject_json("completion")?;
+            let mut command = Cli::command();
+            generate(shell, &mut command, "acps", &mut std::io::stdout());
+            Ok(())
+        }
+        Command::Init(args) => {
+            output.reject_json("init")?;
+            super::init::run_init(*args)
+        }
+        Command::Status => super::status::run_status(output.effective()),
+        Command::Reset(args) => {
+            output.reject_json("reset")?;
+            super::reset::run_reset(args)
+        }
+        Command::Serve(args) => {
+            output.reject_json("serve")?;
+            super::serve::run_serve(args)
+        }
+        Command::Auth { command } => {
+            output.reject_json("auth")?;
+            super::auth::run_auth_command(command)
+        }
+        Command::Secrets { command } => {
+            super::secrets::run_secrets_command(command, output.effective())
+        }
+        Command::Config { command } => {
+            super::config::run_config_command(command, output.effective())
+        }
+        Command::Logs { command } => super::logs::run_logs_command(command, output),
+        Command::Agent { command } => super::agent::run_agent_command(command, output),
+        Command::Subagent { command } => {
+            output.reject_json("subagent")?;
+            super::subagent::run_subagent_command(command)
+        }
+        Command::Installer { command } => {
+            super::installer::run_installer_command(command, output.effective())
+        }
+        Command::Sessions { command } => {
+            super::sessions::run_sessions_command(command, output.effective())
+        }
+        Command::Deps { command } => super::deps::run_deps_command(command, output.effective()),
+        Command::Security { command } => super::security::run_security_command(command, output),
+        Command::Metrics { command } => {
+            super::metrics::run_metrics_command(command, output.effective())
+        }
+        Command::Ws { command } => super::ws::run_ws_command(command, output.effective()),
     };
 
     if let Err(error) = &result {
@@ -155,6 +236,70 @@ fn run_cli(cli: Cli) -> Result<()> {
     }
 
     result
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(super) enum OutputFormat {
+    Text,
+    Json,
+}
+
+impl OutputFormat {
+    pub(super) fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OutputFormatChoice {
+    format: OutputFormat,
+    explicit: bool,
+}
+
+impl OutputFormatChoice {
+    fn new(format: Option<OutputFormat>) -> Self {
+        Self {
+            format: format.unwrap_or(OutputFormat::Text),
+            explicit: format.is_some(),
+        }
+    }
+
+    pub(super) fn effective(self) -> OutputFormat {
+        self.format
+    }
+
+    pub(super) fn reject_json(self, command: &'static str) -> Result<()> {
+        if self.explicit && self.format == OutputFormat::Json {
+            return Err(StackError::InvalidParam {
+                field: "format",
+                reason: format!("{command} does not support --format json"),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn resolve_json_alias(self, json: bool, flag: &'static str) -> Result<OutputFormat> {
+        if json && self.explicit && self.format == OutputFormat::Text {
+            return Err(StackError::InvalidParam {
+                field: flag,
+                reason: "--json conflicts with --format text; use --format json or omit --format"
+                    .to_owned(),
+            });
+        }
+        if json {
+            Ok(OutputFormat::Json)
+        } else {
+            Ok(self.format)
+        }
+    }
+}
+
+pub(super) fn print_json(data: &serde_json::Value) -> Result<()> {
+    let rendered = serde_json::to_string_pretty(data).map_err(|source| StackError::ServeIo {
+        source: std::io::Error::other(format!("serialize CLI JSON: {source}")),
+    })?;
+    println!("{rendered}");
+    Ok(())
 }
 
 /// Tier of the API key used for a daemon-RPC call. Session-tier matches the

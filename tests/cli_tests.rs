@@ -3722,6 +3722,45 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
 }
 
 #[test]
+fn status_format_json_reports_same_top_level_sections() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let workspace_dir = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace_dir).expect("workspace dir should be created");
+    let uploads_dir = workspace_dir.join("uploads");
+    std::fs::create_dir_all(&uploads_dir).expect("uploads dir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .arg("--workspace-root")
+        .arg(&workspace_dir)
+        .arg("--workspace-uploads")
+        .arg(&uploads_dir)
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["status", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("status json parses");
+    assert_eq!(body["config"]["ok"], true);
+    assert_eq!(body["workspace"]["ok"], true);
+    assert_eq!(
+        body["workspace"]["root"],
+        workspace_dir.display().to_string()
+    );
+    assert!(body["state"]["schema_version"].as_i64().is_some(), "{body}");
+    assert_eq!(body["daemon"]["status"], "unavailable");
+}
+
+#[test]
 fn status_reports_sink_open_failures_when_supabase_configured() {
     use chrono::{SecondsFormat, Utc};
 
@@ -3851,6 +3890,29 @@ fn agent_check_reports_no_runs_when_state_is_empty() {
         .assert()
         .failure()
         .stdout(predicates::str::contains("install: not installed"));
+}
+
+#[test]
+fn agent_check_format_json_reports_steps() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "check", "--format", "json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("agent check json parses");
+    assert_eq!(body["agent"], "opencode");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["steps"][0]["step"], "install");
+    assert_eq!(body["steps"][0]["result"]["status"], "not_installed");
 }
 
 #[test]
@@ -3986,6 +4048,55 @@ fn installer_history_renders_rows_with_filter() {
 }
 
 #[test]
+fn installer_history_format_json_renders_runs() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    fs::create_dir_all(tempdir.path().join(".config/acp-stack"))
+        .expect("config dir should be created");
+    fs::write(
+        tempdir.path().join(".config/acp-stack/acp-stack.toml"),
+        VALID_CONFIG,
+    )
+    .expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store
+        .append_installer_run(InstallerRunInput {
+            agent_id: "opencode",
+            started_at: "2026-05-22T01:00:00.000000000Z",
+            finished_at: Some("2026-05-22T01:00:01.000000000Z"),
+            status: "ran",
+            stdout: "hi",
+            stderr: "",
+            exit_status: Some(0),
+            step: "harness",
+            version: Some("v1.0.0"),
+            log_dir: Some("/tmp/installer-logs/opencode/harness"),
+            apply_run_id: None,
+        })
+        .expect("seed row");
+    drop(store);
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["installer", "history", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("installer json parses");
+    let runs = body["runs"].as_array().expect("runs should be an array");
+    assert_eq!(runs.len(), 1, "{body}");
+    assert_eq!(runs[0]["agent_id"], "opencode");
+    assert_eq!(runs[0]["duration_ms"], 1_000);
+}
+
+#[test]
 fn installer_history_renders_log_dir_continuation_line() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     fs::create_dir_all(tempdir.path().join(".config/acp-stack"))
@@ -4114,6 +4225,88 @@ creates = {}
         stdout[after_index..].contains(&format!("  OK   {dependency_name}")),
         "after section must report available dependency, got:\n{stdout}",
     );
+}
+
+#[test]
+fn deps_check_format_json_reports_dependency_shape() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+
+    let config = VALID_CONFIG.replace(
+        "[agent]",
+        r#"[[dependencies.commands]]
+name = "deps-check-json"
+required = true
+
+[agent]"#,
+    );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["deps", "check", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("deps check json parses");
+    let deps = body["dependencies"]
+        .as_array()
+        .expect("dependencies should be an array");
+    assert_eq!(deps[0]["name"], "deps-check-json");
+    assert_eq!(deps[0]["available"], false);
+}
+
+#[test]
+fn deps_apply_format_json_omits_stderr_tail() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+
+    let marker = tempdir.path().join("deps-apply-failed-marker");
+    let config = VALID_CONFIG.replace(
+        "[agent]",
+        &format!(
+            r#"[[dependencies.commands]]
+name = "deps-apply-json-failure"
+required = true
+
+[dependencies.commands.install]
+shell = "printf 'token sk-test-secret' >&2; exit 7"
+creates = {}
+
+[agent]"#,
+            toml_string(&marker.to_string_lossy()),
+        ),
+    );
+    fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["deps", "apply", "--yes", "--format", "json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!String::from_utf8_lossy(&output).contains("sk-test-secret"));
+    let body: Value = serde_json::from_slice(&output).expect("deps apply json parses");
+    let outcome = &body["results"][0]["outcome"];
+    assert_eq!(outcome["kind"], "failed");
+    assert_eq!(outcome["exit_code"], 7);
+    assert_eq!(outcome["stderr_tail_omitted"], true);
+    assert!(outcome.get("stderr_tail").is_none(), "{body}");
 }
 
 #[test]
@@ -4280,6 +4473,45 @@ fn agent_status_surfaces_installed_versions_from_state() {
             "adapter version: version unknown",
         ))
         .stdout(predicates::str::contains("ACP version: 1"));
+}
+
+#[test]
+fn agent_status_format_json_omits_lifecycle_payloads() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    store
+        .append_agent_lifecycle(
+            "agent.failed",
+            "agent failed",
+            r#"{"reason":"token sk-test-secret"}"#,
+        )
+        .expect("lifecycle row should append");
+    drop(store);
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["agent", "status", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("agent status json parses");
+    let lifecycle = body["recent_lifecycle"]
+        .as_array()
+        .expect("recent_lifecycle is an array");
+    assert_eq!(lifecycle.len(), 1, "{body}");
+    assert!(lifecycle[0].get("payload").is_none(), "{body}");
+    assert!(!String::from_utf8_lossy(&output).contains("sk-test-secret"));
 }
 
 #[test]
@@ -4596,6 +4828,20 @@ async fn agent_start_and_stop_call_running_daemon() {
         .stdout(predicates::str::contains("agent start: running"))
         .stdout(predicates::str::contains("pid: "));
 
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "restart", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("restart json parses");
+    assert!(body["started_at"].as_str().is_some(), "{body}");
+    assert!(body["stopped_at"].as_str().is_some(), "{body}");
+    assert!(body["capabilities"].is_object(), "{body}");
+
     Command::cargo_bin("acps")
         .expect("binary should build")
         .env("HOME", home.path())
@@ -4737,6 +4983,60 @@ async fn security_history_json_renders_runs_and_cursor() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn security_history_global_format_json_matches_json_alias() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    let run_id = run_security_check_and_extract_run_id(home.path());
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["security", "history", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("history json should parse");
+    let runs = body["runs"].as_array().expect("runs should be an array");
+    assert!(runs.iter().any(|run| run["id"] == run_id), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn security_history_json_alias_conflicts_with_explicit_text_format() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["security", "history", "--json", "--format", "text"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--json conflicts with --format text",
+        ));
+}
+
+#[test]
+fn security_history_json_alias_conflict_precedes_config_load() {
+    let home = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["security", "history", "--json", "--format", "text"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--json conflicts with --format text",
+        ));
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn security_show_renders_run_findings_hints_and_details() {
@@ -4834,6 +5134,85 @@ fn run_security_check_and_extract_run_id(home: &std::path::Path) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn metrics_summary_format_json_returns_summary() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["metrics", "summary", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("metrics json parses");
+    assert!(body["counts"].is_object(), "{body}");
+    assert!(body["window"].is_object(), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ws_common_commands_format_json() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    let connections_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["ws", "connections", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let connections_body: Value =
+        serde_json::from_slice(&connections_output).expect("connections json parses");
+    assert!(
+        connections_body["connections"].as_array().is_some(),
+        "{connections_body}",
+    );
+
+    let sessions_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["ws", "sessions", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sessions_body: Value =
+        serde_json::from_slice(&sessions_output).expect("sessions json parses");
+    assert!(
+        sessions_body["sessions"].as_array().is_some(),
+        "{sessions_body}"
+    );
+
+    let disconnect_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args([
+            "ws",
+            "disconnect",
+            "--connection-id",
+            "missing",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let disconnect_body: Value =
+        serde_json::from_slice(&disconnect_output).expect("disconnect json parses");
+    assert_eq!(disconnect_body["requested"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sessions_new_list_prompt_close_round_trip() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
@@ -4889,6 +5268,143 @@ async fn sessions_new_list_prompt_close_round_trip() {
         .assert()
         .success()
         .stdout(predicates::str::contains("session close: closed"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_new_format_json_returns_session_object() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "new", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("session json parses");
+    assert!(body["id"].as_str().is_some(), "{body}");
+    assert!(body["cwd"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_common_commands_format_json() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["agent", "start"])
+        .assert()
+        .success();
+
+    let new_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "new", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let new_body: Value = serde_json::from_slice(&new_output).expect("new json parses");
+    let session_id = new_body["id"].as_str().expect("session id").to_owned();
+
+    let list_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "list", "--range", "all", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_body: Value = serde_json::from_slice(&list_output).expect("list json parses");
+    assert_eq!(list_body["truncated"], false);
+    assert!(
+        list_body["sessions"]
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .any(|session| session["id"] == session_id),
+        "{list_body}",
+    );
+
+    let status_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .args(["sessions", "status", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status_body: Value = serde_json::from_slice(&status_output).expect("status json parses");
+    assert!(
+        status_body["sessions"].as_array().is_some(),
+        "{status_body}"
+    );
+
+    let prompt_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .arg("sessions")
+        .arg("prompt")
+        .arg(&session_id)
+        .arg("hello")
+        .args(["--no-wait", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prompt_body: Value = serde_json::from_slice(&prompt_output).expect("prompt json parses");
+    assert_eq!(prompt_body["status"], "pending");
+    assert!(prompt_body["prompt_id"].as_str().is_some(), "{prompt_body}");
+
+    let cancel_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .arg("sessions")
+        .arg("cancel")
+        .arg(&session_id)
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cancel_body: Value = serde_json::from_slice(&cancel_output).expect("cancel json parses");
+    assert_eq!(cancel_body["status"], "requested");
+    assert_eq!(cancel_body["session_id"], session_id);
+
+    let close_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", home.path())
+        .arg("sessions")
+        .arg("close")
+        .arg(&session_id)
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let close_body: Value = serde_json::from_slice(&close_output).expect("close json parses");
+    assert_eq!(close_body["id"], session_id);
+    assert_eq!(close_body["status"], "closed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5211,6 +5727,106 @@ fn logs_query_json_emits_envelope_with_cursor() {
         !stderr.contains("-- more rows available"),
         "JSON mode must suppress the human cursor hint, got: {stderr}"
     );
+}
+
+#[test]
+fn logs_query_global_format_json_matches_json_alias() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["logs", "query", "--limit", "1", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: Value = serde_json::from_slice(&output).expect("format json should parse");
+    assert!(parsed["events"].as_array().is_some(), "{parsed}");
+    assert!(parsed.get("next_cursor").is_some(), "{parsed}");
+}
+
+#[test]
+fn logs_query_json_alias_conflicts_with_explicit_text_format() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["logs", "query", "--json", "--format", "text"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--json conflicts with --format text",
+        ));
+}
+
+#[test]
+fn logs_tail_rejects_format_json_before_loading_config() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["logs", "tail", "--format", "json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "logs tail does not support --format json",
+        ));
+}
+
+#[test]
+fn text_only_commands_reject_format_json_before_loading_config() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["subagent", "status", "--format", "json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "subagent does not support --format json",
+        ));
+}
+
+#[test]
+fn completion_scripts_include_root_and_common_commands() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let output = Command::cargo_bin("acps")
+            .expect("binary should build")
+            .args(["completion", shell])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).expect("completion is utf8");
+        assert!(
+            stdout.contains("acps"),
+            "{shell} completion missing binary name"
+        );
+        assert!(
+            stdout.contains("sessions"),
+            "{shell} completion missing sessions"
+        );
+        assert!(
+            stdout.contains("completion"),
+            "{shell} completion missing completion command"
+        );
+    }
+}
+
+#[test]
+fn completion_rejects_format_json() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["completion", "bash", "--format", "json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "completion does not support --format json",
+        ));
 }
 
 #[test]
@@ -5955,6 +6571,56 @@ fn secrets_list_shows_session_and_admin_names_only_after_init() {
 }
 
 #[test]
+fn secrets_commands_format_json_never_print_values() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let set_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "set", "OPENCODE_API_KEY", "--format", "json"])
+        .write_stdin("super-secret-value\n")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let set_body: Value = serde_json::from_slice(&set_output).expect("set json parses");
+    assert_eq!(set_body["action"], "set");
+    assert_eq!(set_body["name"], "OPENCODE_API_KEY");
+    assert!(!String::from_utf8_lossy(&set_output).contains("super-secret-value"));
+
+    let list_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "list", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_body: Value = serde_json::from_slice(&list_output).expect("list json parses");
+    let names = list_body["secrets"]
+        .as_array()
+        .expect("secrets should be an array");
+    assert!(names.iter().any(|name| name == "OPENCODE_API_KEY"));
+    assert!(!String::from_utf8_lossy(&list_output).contains("super-secret-value"));
+
+    let delete_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["secrets", "delete", "OPENCODE_API_KEY", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let delete_body: Value = serde_json::from_slice(&delete_output).expect("delete json parses");
+    assert_eq!(delete_body["action"], "delete");
+    assert_eq!(delete_body["name"], "OPENCODE_API_KEY");
+}
+
+#[test]
 fn secrets_set_reads_value_from_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
@@ -6221,6 +6887,67 @@ fn config_import_with_force_replaces_existing_config() {
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
         .expect("config readable");
     assert!(written.contains("127.0.0.1:7777"));
+}
+
+#[test]
+fn config_validate_and_import_dry_run_format_json() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+    let config_path = tempdir.path().join(".config/acp-stack/acp-stack.toml");
+
+    let validate_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "validate", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let validate_body: Value =
+        serde_json::from_slice(&validate_output).expect("validate json parses");
+    assert_eq!(validate_body["valid"], true);
+    assert!(validate_body["path"].is_null(), "{validate_body}");
+
+    let import_output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("config")
+        .arg("import")
+        .arg(&config_path)
+        .args(["--dry-run", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let import_body: Value = serde_json::from_slice(&import_output).expect("import json parses");
+    assert_eq!(import_body["dry_run"], true);
+    assert_eq!(import_body["auth_refs_unchanged"], true);
+    assert_eq!(import_body["target_exists"], true);
+}
+
+#[test]
+fn config_export_format_json_wraps_toml_without_leaking_secret_values() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["config", "export", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("config export json parses");
+    assert_eq!(body["format"], "toml");
+    assert!(body["bytes"].as_u64().unwrap_or(0) > 0);
+    let value = body["value"].as_str().expect("exported value is string");
+    assert!(value.contains("ACP_STACK_SESSION_KEY"));
+    assert!(!value.contains(SESSION_KEY));
+    assert!(!value.contains(ADMIN_KEY));
 }
 
 #[test]

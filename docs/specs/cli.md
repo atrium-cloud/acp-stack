@@ -16,8 +16,11 @@
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
 | WebSockets     | `acps ws connections`, `ws sessions`, `ws disconnect`                       |
+| Shell          | `acps completion <shell>`                                                   |
 
 Commands read `~/.config/acp-stack/acp-stack.toml` by default unless an explicit path argument is documented.
+
+Most operator commands accept global `--format text|json`; text is the default. Commands that remain text-only reject `--format json` instead of silently ignoring it. Existing `--json` flags remain accepted as aliases for `--format json` and conflict with explicit `--format text`. `acps logs query --follow --format json` emits newline-delimited event objects.
 
 ## Initialization
 
@@ -126,3 +129,7 @@ acps sessions close <session-id>
 `acps metrics summary` prints the daemon's summary metrics for a time window.
 
 `acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed.
+
+## Shell Completion
+
+`acps completion <bash|zsh|fish|powershell|elvish>` writes a completion script to stdout.
