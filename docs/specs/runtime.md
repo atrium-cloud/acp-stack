@@ -12,6 +12,8 @@ The supervisor owns the configured agent process. It starts the agent with:
 
 Lifecycle transitions are recorded in durable state and published to live subscribers. Agent start, stop, and restart are admin operations. With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start. `restart = "never"` leaves the process stopped. Planned stop, restart, and daemon shutdown do not trigger crash recovery.
 
+Readiness scans recent `agent.started` lifecycle rows for live Unix process groups whose PID is not the currently supervised process. A match is reported as an orphaned agent or adapter process group and degrades `/v1/health/ready`.
+
 Session recovery remains explicit. After an automatic relaunch, clients use `GET /v1/sessions/{id}/snapshot` to recover local state and call `POST /v1/sessions/{id}/resume` only when the agent advertises `sessionCapabilities.resume`.
 
 ## Agent Installation

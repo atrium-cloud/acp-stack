@@ -79,7 +79,7 @@
 - [x] Add health checks for workspace access.
 - [x] Add health checks for external logging sink when enabled.
 - [x] Add health checks for configured MCP declarations.
-- [ ] Add health checks for orphaned agent/adapter processes.
+- [x] Add health checks for orphaned agent/adapter processes.
 - [x] Add health checks for prompts stuck without progress beyond a configured threshold.
 
 ## Observability
@@ -88,7 +88,7 @@
 - [x] Include inference endpoint failure counters in the future observability dashboard data model. Closed via the `prompt.inference_failed` event kind with its structured `{ prompt_id, status_code, reason_category }` payload; future dashboards count from there.
 - [x] Enrich `api.request`, auth-failure, rate-limit, denied-origin, oversized-request, and WebSocket lifecycle events with bounded request-origin metadata.
 - [x] Trust Cloudflare request metadata only after normal trusted-proxy validation (`CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers).
-- [ ] Add request/response counts by method, route, status bucket, key kind, source, origin kind, country, and region.
+- [x] Add request/response counts by method, route, status bucket, key kind, source, origin kind, country, and region.
 - [x] Add live WebSocket connection registry with connection IDs, topics, derived `sessions.{id}` subscriptions, origin metadata, and disconnect reason tracking.
 - [x] Add admin `acps` commands to list WebSocket connections, list unique subscribed session IDs, disconnect selected connections, and disconnect all connections for selected session IDs.
 - [x] Add read-only `acpctl` and `acpctl mcp serve` surfaces for sanitized WebSocket connection/session reporting.

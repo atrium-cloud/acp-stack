@@ -119,6 +119,8 @@ The `agent.inference_*` codes carry a sanitized public message of the form `"inf
 
 `GET /v1/metrics/summary` includes `prompt_failures` so operators can separate upstream inference outages from local runtime failures. The object contains `total`, explicit counters for each `failure_class` (`inference_5xx`, `inference_4xx`, `agent_request`, `vm`, `sqlite`, `daemon`, `agent_process`, `stalled`), `by_class`, and inference event breakdowns by HTTP status code and reason category.
 
+The `api_connections` metrics block includes `request_count`, `average_duration_ms`, existing `by_status` response buckets, and count maps by method, route template, key kind, event source, origin kind, country code, and region code. Missing country or region metadata is grouped under `unknown`.
+
 ## Workspace Files
 
 Workspace routes are session-tier. Paths are workspace-relative. The runtime rejects absolute paths, NUL bytes, `..` traversal, symlink escapes, writes through existing symlink targets, and files above `workspace.max_file_bytes`.
@@ -223,6 +225,8 @@ Readiness includes an `mcp` object for configured MCP declarations:
 ```
 
 Stdio server rows may include `command_path`. Failing rows may include `missing_secret_refs` and `reason`. HTTP MCP readiness validates declaration shape and secret refs only; it does not call the remote MCP endpoint.
+
+Readiness also reports orphaned agent process groups under `agent.orphaned_process_count` and `agent.orphaned_process_pids`. Any live process group from an older `agent.started` lifecycle row, excluding the currently supervised PID, degrades readiness with `agent` in `failing`.
 
 ## WebSocket
 

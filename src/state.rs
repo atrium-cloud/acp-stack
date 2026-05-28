@@ -25,8 +25,8 @@ mod sessions;
 pub(crate) mod sink_outbox;
 
 pub use agent::{
-    AgentCapabilitiesRecord, AgentLifecycleEvent, INSTALLER_OUTPUT_CAP_BYTES, InstallerRun,
-    InstallerRunInput, default_installer_log_base,
+    AgentCapabilitiesRecord, AgentLifecycleEvent, AgentStartedProcess, INSTALLER_OUTPUT_CAP_BYTES,
+    InstallerRun, InstallerRunInput, default_installer_log_base,
 };
 pub use auth::{AuthFailure, AuthFailureFilter};
 pub use commands::{CommandRecord, CommandStatus, NewCommandRecord};

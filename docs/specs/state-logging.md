@@ -123,7 +123,7 @@ Unknown category labels are rejected with a 4xx `invalid_param`.
 - `commands.total`, `commands.by_status`, command duration p50/p95, `commands.truncated_count`
 - `permissions.total`, `permissions.by_outcome`, permission response_ms p50/p95
 - `security.auth_failures`, `security.by_reason`, `security.events_by_kind`
-- `api_connections.request_count`, by-status buckets, average duration
+- `api_connections.request_count`, average duration, and count maps by status bucket, method, route template, key kind, event source, origin kind, country code, and region code
 - `ws_connections.connections_opened`, `connections_closed`, `average_duration_ms`
 - `usage.tokens_input`, `usage.tokens_output`, `usage.context_window_max`
 - `prompt_failures.total`, explicit `failure_class` counters, `by_class`, `by_status_code`, and `by_reason_category`

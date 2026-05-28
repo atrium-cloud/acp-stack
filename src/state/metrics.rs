@@ -113,11 +113,18 @@ pub struct SecurityMetrics {
 #[derive(Debug, Clone, Default)]
 pub struct ApiConnectionMetrics {
     /// `None` when no `api.request` events were emitted in the window. The
-    /// middleware that emits these events landed in 0.0.3; on a runtime that
-    /// pre-dates it, callers can still tell the difference between "instrument
-    /// not installed" (None) and "instrument installed, no requests" (Some(0)).
+    /// running binary always has this instrument, so a quiet window reports
+    /// `Some(0)` rather than leaving consumers to distinguish that case from a
+    /// missing metrics block.
     pub request_count: Option<i64>,
     pub by_status: std::collections::BTreeMap<String, i64>,
+    pub by_method: std::collections::BTreeMap<String, i64>,
+    pub by_route: std::collections::BTreeMap<String, i64>,
+    pub by_key_kind: std::collections::BTreeMap<String, i64>,
+    pub by_source: std::collections::BTreeMap<String, i64>,
+    pub by_origin_kind: std::collections::BTreeMap<String, i64>,
+    pub by_country: std::collections::BTreeMap<String, i64>,
+    pub by_region: std::collections::BTreeMap<String, i64>,
     pub average_duration_ms: Option<i64>,
 }
 
@@ -537,30 +544,40 @@ impl StateStore {
             |row| row.get(0),
         )?;
         if request_count == 0 {
-            return Ok(ApiConnectionMetrics::default());
+            return Ok(ApiConnectionMetrics {
+                request_count: Some(0),
+                ..ApiConnectionMetrics::default()
+            });
         }
-        let mut by_status = std::collections::BTreeMap::new();
-        let mut status_statement = self.connection().prepare(
-            "SELECT \
-                CASE \
-                    WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 200 AND 299 THEN '2xx' \
-                    WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 300 AND 399 THEN '3xx' \
-                    WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 400 AND 499 THEN '4xx' \
-                    WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 500 AND 599 THEN '5xx' \
-                    ELSE 'other' \
-                END AS bucket, COUNT(*) \
-             FROM events \
-             WHERE kind = 'api.request' AND created_at >= ?1 AND created_at < ?2 \
-             GROUP BY bucket",
+        let by_status = self.api_request_group_counts(
+            window,
+            "CASE \
+                WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 200 AND 299 THEN '2xx' \
+                WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 300 AND 399 THEN '3xx' \
+                WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 400 AND 499 THEN '4xx' \
+                WHEN CAST(json_extract(payload_json, '$.status') AS INTEGER) BETWEEN 500 AND 599 THEN '5xx' \
+                ELSE 'other' \
+             END",
         )?;
-        let status_rows = status_statement
-            .query_map(params![window.since, window.until], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-        for entry in status_rows {
-            let (bucket, count) = entry?;
-            by_status.insert(bucket, count);
-        }
+        let by_method =
+            self.api_request_group_counts(window, "json_extract(payload_json, '$.method')")?;
+        let by_route =
+            self.api_request_group_counts(window, "json_extract(payload_json, '$.path')")?;
+        let by_key_kind =
+            self.api_request_group_counts(window, "json_extract(payload_json, '$.key_kind')")?;
+        let by_source = self.api_request_group_counts(window, "source")?;
+        let by_origin_kind = self.api_request_group_counts(
+            window,
+            "json_extract(payload_json, '$.origin.origin_kind')",
+        )?;
+        let by_country = self.api_request_group_counts(
+            window,
+            "json_extract(payload_json, '$.origin.country_code')",
+        )?;
+        let by_region = self.api_request_group_counts(
+            window,
+            "json_extract(payload_json, '$.origin.region_code')",
+        )?;
         let mut duration_statement = self.connection().prepare(
             "SELECT CAST(json_extract(payload_json, '$.duration_ms') AS INTEGER) FROM events \
              WHERE kind = 'api.request' \
@@ -573,8 +590,38 @@ impl StateStore {
         Ok(ApiConnectionMetrics {
             request_count: Some(request_count),
             by_status,
+            by_method,
+            by_route,
+            by_key_kind,
+            by_source,
+            by_origin_kind,
+            by_country,
+            by_region,
             average_duration_ms: average_i64(&durations),
         })
+    }
+
+    fn api_request_group_counts(
+        &self,
+        window: &MetricsWindow,
+        expression: &'static str,
+    ) -> Result<std::collections::BTreeMap<String, i64>> {
+        let sql = format!(
+            "SELECT COALESCE(NULLIF(CAST({expression} AS TEXT), ''), 'unknown') AS bucket, COUNT(*) \
+             FROM events \
+             WHERE kind = 'api.request' AND created_at >= ?1 AND created_at < ?2 \
+             GROUP BY bucket"
+        );
+        let mut statement = self.connection().prepare(&sql)?;
+        let rows = statement.query_map(params![window.since, window.until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut out = std::collections::BTreeMap::new();
+        for entry in rows {
+            let (bucket, count) = entry?;
+            out.insert(bucket, count);
+        }
+        Ok(out)
     }
 
     fn ws_connection_metrics(&self, window: &MetricsWindow) -> Result<WsConnectionMetrics> {

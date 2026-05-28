@@ -112,6 +112,13 @@ pub(crate) struct MetricsSecurityJson {
 pub(crate) struct MetricsApiConnectionsJson {
     request_count: Option<i64>,
     by_status: std::collections::BTreeMap<String, i64>,
+    by_method: std::collections::BTreeMap<String, i64>,
+    by_route: std::collections::BTreeMap<String, i64>,
+    by_key_kind: std::collections::BTreeMap<String, i64>,
+    by_source: std::collections::BTreeMap<String, i64>,
+    by_origin_kind: std::collections::BTreeMap<String, i64>,
+    by_country: std::collections::BTreeMap<String, i64>,
+    by_region: std::collections::BTreeMap<String, i64>,
     average_duration_ms: Option<i64>,
 }
 
@@ -248,6 +255,13 @@ impl From<crate::state::MetricsSummary> for MetricsSummaryResponse {
             api_connections: MetricsApiConnectionsJson {
                 request_count: summary.api_connections.request_count,
                 by_status: summary.api_connections.by_status,
+                by_method: summary.api_connections.by_method,
+                by_route: summary.api_connections.by_route,
+                by_key_kind: summary.api_connections.by_key_kind,
+                by_source: summary.api_connections.by_source,
+                by_origin_kind: summary.api_connections.by_origin_kind,
+                by_country: summary.api_connections.by_country,
+                by_region: summary.api_connections.by_region,
                 average_duration_ms: summary.api_connections.average_duration_ms,
             },
             ws_connections: MetricsWsConnectionsJson {
