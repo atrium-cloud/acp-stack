@@ -44,7 +44,8 @@ use super::routes::agent::{
     agent_stop_handler, agent_switch_handler,
 };
 use super::routes::commands::{
-    commands_cancel_handler, commands_get_handler, commands_list_handler, commands_submit_handler,
+    commands_cancel_handler, commands_get_handler, commands_list_handler, commands_output_handler,
+    commands_submit_handler,
 };
 use super::routes::config::{
     config_export_handler, config_import_handler, config_validate_handler, secrets_delete_handler,
@@ -372,6 +373,7 @@ pub fn build_router(state: AppState) -> Router {
             get(commands_list_handler).post(commands_submit_handler),
         )
         .route("/v1/commands/{id}", get(commands_get_handler))
+        .route("/v1/commands/{id}/output", get(commands_output_handler))
         .route("/v1/commands/{id}/cancel", post(commands_cancel_handler))
         .route("/v1/deps", get(deps_get_handler))
         .route("/v1/deps/check", post(deps_check_handler))

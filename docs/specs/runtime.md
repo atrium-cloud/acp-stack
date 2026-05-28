@@ -69,6 +69,10 @@ Materialization refuses unsafe archives, parent-directory traversal, symlinks, h
 
 The Command Gateway runs shell commands through the configured default shell inside the workspace boundary. It applies permission policy before execution, streams output to live subscribers, persists bounded output, and supports cancellation and timeouts.
 
+Persisted output chunks are command-scoped events with stream name, sequence number, timestamp, event id, and command id. Command rows track the latest output event, output byte count, and latest progress timestamp so clients can reconnect and distinguish quiet work from a stalled runtime.
+
+While a command is running, the gateway emits `command.progress` events every `[commands].progress_interval` when no output has reset the quiet timer. Cancellation produces a terminal `command.canceled` event after the child process is settled.
+
 Only environment variables in `[commands].env_allowlist` are forwarded from the request. Secrets are not injected into command children unless another explicit runtime mechanism provides them.
 
 ## Prompts

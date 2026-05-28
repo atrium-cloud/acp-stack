@@ -51,6 +51,7 @@ timeout_action = "deny"
 [commands]
 default_timeout = "10m"
 cancel_grace = "5s"
+progress_interval = "30s"
 env_allowlist = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
 max_output_bytes = 1048576
 

@@ -3,7 +3,7 @@ use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 
 use super::super::core::AppState;
-use super::logs::{LogsLimitParams, MAX_LOGS_LIMIT};
+use super::logs::{LogsLimitParams, MAX_LOGS_LIMIT, default_logs_limit, parse_order};
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::runtime::mediation::commands::SubmitRequest;
@@ -32,6 +32,11 @@ pub(crate) struct CommandResponse {
     cwd: Option<String>,
     duration_ms: Option<i64>,
     truncated: bool,
+    last_output_event_id: Option<String>,
+    last_output_at: Option<String>,
+    last_output_seq: Option<i64>,
+    output_bytes: i64,
+    last_progress_at: Option<String>,
 }
 
 impl From<crate::state::CommandRecord> for CommandResponse {
@@ -48,6 +53,11 @@ impl From<crate::state::CommandRecord> for CommandResponse {
             cwd: record.cwd,
             duration_ms: record.duration_ms,
             truncated: record.truncated,
+            last_output_event_id: record.last_output_event_id,
+            last_output_at: record.last_output_at,
+            last_output_seq: record.last_output_seq,
+            output_bytes: record.output_bytes,
+            last_progress_at: record.last_progress_at,
         }
     }
 }
@@ -77,6 +87,90 @@ pub(crate) async fn commands_get_handler(
 ) -> std::result::Result<ApiSuccess<CommandResponse>, StackError> {
     let record = state.commands.get(&id).await?;
     Ok(ApiSuccess::new(record.into()))
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct CommandOutputParams {
+    #[serde(default = "default_logs_limit")]
+    limit: u32,
+    after: Option<String>,
+    order: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CommandOutputResponse {
+    chunks: Vec<CommandOutputFrame>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CommandOutputFrame {
+    event_id: String,
+    created_at: String,
+    command_id: String,
+    stream: String,
+    seq: i64,
+    data: String,
+}
+
+impl CommandOutputFrame {
+    fn from_event(event: crate::state::Event) -> std::result::Result<Self, StackError> {
+        let payload: serde_json::Value = serde_json::from_str(&event.payload_json)
+            .map_err(|_| StackError::InvalidEventPayload)?;
+        let command_id = payload
+            .get("command_id")
+            .and_then(|value| value.as_str())
+            .ok_or(StackError::InvalidEventPayload)?;
+        let stream = payload
+            .get("stream")
+            .and_then(|value| value.as_str())
+            .ok_or(StackError::InvalidEventPayload)?;
+        let seq = payload
+            .get("seq")
+            .and_then(|value| value.as_i64())
+            .ok_or(StackError::InvalidEventPayload)?;
+        let data = payload
+            .get("data")
+            .and_then(|value| value.as_str())
+            .ok_or(StackError::InvalidEventPayload)?;
+        Ok(Self {
+            event_id: event.id,
+            created_at: event.created_at,
+            command_id: command_id.to_owned(),
+            stream: stream.to_owned(),
+            seq,
+            data: data.to_owned(),
+        })
+    }
+}
+
+pub(crate) async fn commands_output_handler(
+    Path(id): Path<String>,
+    Query(params): Query<CommandOutputParams>,
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<CommandOutputResponse>, StackError> {
+    let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let order = parse_order(params.order.as_deref())?;
+    let store = state.state.lock().await;
+    if store.get_command(&id)?.is_none() {
+        return Err(StackError::CommandNotFound { id });
+    }
+    let events = store.query_command_output_events(&id, limit, params.after.as_deref(), order)?;
+    drop(store);
+    let next_cursor = if events.len() == limit as usize {
+        events.last().map(|event| event.id.clone())
+    } else {
+        None
+    };
+    let chunks = events
+        .into_iter()
+        .map(CommandOutputFrame::from_event)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(ApiSuccess::new(CommandOutputResponse {
+        chunks,
+        next_cursor,
+    }))
 }
 
 pub(crate) async fn commands_list_handler(
