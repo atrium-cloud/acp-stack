@@ -18,14 +18,14 @@ use std::path::{Path, PathBuf};
 pub use self::schema::{
     AcpctlConfig, AgentAdapterConfig, AgentConfig, AgentCustomProviderConfig, AgentInstallConfig,
     AgentProviderConfig, AgentSubagentConfig, ApiConfig, AuthConfig, CloudflareEdgeConfig,
-    CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_CUSTOM_MODEL_CONTEXT,
-    DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
-    DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
-    DEFAULT_PROMPTS_SWEEP_INTERVAL, DataSourceConfig, DependenciesConfig, DependencyEntry,
-    DependencyInstallAction, DependencyInstallScope, EdgeConfig, HttpHeaderRef, LoggingConfig,
-    McpConfig, McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction,
-    PermissionsConfig, PromptsConfig, SecurityConfig, SecurityHttpConfig, SupabaseLoggingConfig,
-    WorkspaceConfig,
+    CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+    DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
+    DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL, DataSourceConfig,
+    DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
+    EdgeConfig, HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig,
+    McpStdioServer, PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SecurityConfig,
+    SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig,
 };
 pub use self::validate::primitives::{
     compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,

@@ -171,6 +171,10 @@ impl CommandGateway {
                 field: "commands.cancel_grace",
             },
         )?;
+        let progress_interval = parse_duration_string(&self.config.commands.progress_interval)
+            .ok_or(StackError::InvalidDurationField {
+                field: "commands.progress_interval",
+            })?;
 
         // 5. Insert the pending row.
         let cwd_owned = resolved_cwd
@@ -246,6 +250,7 @@ impl CommandGateway {
             workspace_root: self.config.workspace.root.clone(),
             timeout_duration,
             cancel_grace,
+            progress_interval,
             cancel_rx,
             max_output_bytes: self.config.commands.max_output_bytes as usize,
             review_flagged,

@@ -466,6 +466,7 @@ async fn env_not_on_allowlist_rejected() {
         cancel_grace: "5s".to_owned(),
         env_allowlist: vec!["FOO".to_owned()],
         max_output_bytes: 1_048_576,
+        ..CommandsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: None,
@@ -489,6 +490,7 @@ async fn env_on_allowlist_reaches_child() {
         cancel_grace: "5s".to_owned(),
         env_allowlist: vec!["GREETING".to_owned()],
         max_output_bytes: 1_048_576,
+        ..CommandsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: None,
@@ -555,6 +557,17 @@ async fn cancel_transitions_running_command_to_canceled() {
 
     let final_body = wait_for_terminal(&harness, &id).await;
     assert_eq!(final_body["data"]["status"], "canceled");
+
+    let events = auth(session_client().get(format!(
+        "{}/v1/logs/events?kind=command.canceled&command_id={id}",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(events.status(), StatusCode::OK);
+    let events_body: Value = events.json().await.expect("json");
+    assert_eq!(events_body["data"]["events"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -564,6 +577,7 @@ async fn timeout_marks_failed_status() {
         cancel_grace: "200ms".to_owned(),
         env_allowlist: vec![],
         max_output_bytes: 1_048_576,
+        ..CommandsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: None,
@@ -584,6 +598,7 @@ async fn output_truncation_marks_truncated_flag() {
         cancel_grace: "5s".to_owned(),
         env_allowlist: vec![],
         max_output_bytes: 16,
+        ..CommandsConfig::default()
     };
     let harness = Harness::spawn_with(HarnessOverrides {
         permissions: None,
@@ -599,6 +614,118 @@ async fn output_truncation_marks_truncated_flag() {
     let id = body["data"]["id"].as_str().unwrap().to_owned();
     let final_body = wait_for_terminal(&harness, &id).await;
     assert_eq!(final_body["data"]["truncated"], true);
+}
+
+#[tokio::test]
+async fn command_output_endpoint_replays_chunks_with_cursor() {
+    let harness = Harness::spawn().await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": "printf stdout-one; printf stderr-two >&2"}),
+    )
+    .await;
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let final_body = wait_for_terminal(&harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+    assert_eq!(final_body["data"]["last_output_seq"], 1);
+    assert!(final_body["data"]["last_output_event_id"].is_string());
+    assert!(final_body["data"]["last_output_at"].is_string());
+    assert!(final_body["data"]["last_progress_at"].is_string());
+    assert!(final_body["data"]["output_bytes"].as_i64().unwrap() >= 20);
+
+    let first = auth(session_client().get(format!(
+        "{}/v1/commands/{id}/output?order=asc&limit=1",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body: Value = first.json().await.expect("json");
+    let first_chunks = first_body["data"]["chunks"].as_array().unwrap();
+    assert_eq!(first_chunks.len(), 1);
+    let cursor = first_body["data"]["next_cursor"].as_str().unwrap();
+    assert_eq!(first_chunks[0]["command_id"], id);
+    assert!(first_chunks[0]["event_id"].is_string());
+    assert!(first_chunks[0]["created_at"].is_string());
+    assert!(first_chunks[0]["stream"] == "stdout" || first_chunks[0]["stream"] == "stderr");
+    assert_eq!(first_chunks[0]["seq"], 0);
+
+    let second = auth(session_client().get(format!(
+        "{}/v1/commands/{id}/output?order=asc&after={cursor}",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body: Value = second.json().await.expect("json");
+    let second_chunks = second_body["data"]["chunks"].as_array().unwrap();
+    assert_eq!(second_chunks.len(), 1);
+    assert_eq!(second_chunks[0]["command_id"], id);
+    assert_eq!(second_chunks[0]["seq"], 1);
+    assert_ne!(second_chunks[0]["event_id"], first_chunks[0]["event_id"]);
+}
+
+#[tokio::test]
+async fn command_output_endpoint_isolates_unrelated_commands() {
+    let harness = Harness::spawn().await;
+    let first = submit(&harness, serde_json::json!({"command": "printf first"})).await;
+    let first_body: Value = first.json().await.expect("json");
+    let first_id = first_body["data"]["id"].as_str().unwrap().to_owned();
+    let second = submit(&harness, serde_json::json!({"command": "printf second"})).await;
+    let second_body: Value = second.json().await.expect("json");
+    let second_id = second_body["data"]["id"].as_str().unwrap().to_owned();
+    wait_for_terminal(&harness, &first_id).await;
+    wait_for_terminal(&harness, &second_id).await;
+
+    let output = auth(session_client().get(format!(
+        "{}/v1/commands/{first_id}/output?order=asc",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(output.status(), StatusCode::OK);
+    let body: Value = output.json().await.expect("json");
+    let chunks = body["data"]["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0]["command_id"], first_id);
+    assert_eq!(chunks[0]["data"], "first");
+}
+
+#[tokio::test]
+async fn quiet_command_emits_progress_events() {
+    let commands = CommandsConfig {
+        progress_interval: "100ms".to_owned(),
+        ..CommandsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: None,
+        commands: Some(commands),
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "sleep 0.35"})).await;
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let final_body = wait_for_terminal(&harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+    assert!(final_body["data"]["last_progress_at"].is_string());
+
+    let events = auth(session_client().get(format!(
+        "{}/v1/logs/events?kind=command.progress&command_id={id}",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(events.status(), StatusCode::OK);
+    let events_body: Value = events.json().await.expect("json");
+    assert!(
+        !events_body["data"]["events"].as_array().unwrap().is_empty(),
+        "expected at least one progress event"
+    );
 }
 
 #[tokio::test]
@@ -715,6 +842,46 @@ where
 }
 
 #[tokio::test]
+async fn truncated_noisy_command_still_emits_progress_events() {
+    let commands = CommandsConfig {
+        progress_interval: "50ms".to_owned(),
+        max_output_bytes: 8,
+        ..CommandsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: None,
+        commands: Some(commands),
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({
+            "command": "i=0; while [ $i -lt 20 ]; do printf 1234567890; i=$((i+1)); sleep 0.03; done"
+        }),
+    )
+    .await;
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let final_body = wait_for_terminal(&harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+    assert_eq!(final_body["data"]["truncated"], true);
+
+    let events = auth(session_client().get(format!(
+        "{}/v1/logs/events?kind=command.progress&command_id={id}",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(events.status(), StatusCode::OK);
+    let events_body: Value = events.json().await.expect("json");
+    assert!(
+        !events_body["data"]["events"].as_array().unwrap().is_empty(),
+        "expected progress events after output truncation"
+    );
+}
+
+#[tokio::test]
 async fn websocket_streams_command_stdout_and_exit() {
     let harness = Harness::spawn().await;
     // `commands.{id}` is per-row, so the id has to exist before subscribing.
@@ -749,6 +916,17 @@ async fn websocket_streams_command_stdout_and_exit() {
         kinds.contains(&"command.exited") && kinds.contains(&"command.stdout"),
         "expected both command.stdout and command.exited, got: {kinds:?}"
     );
+    let stdout = events
+        .iter()
+        .find(|event| event["payload"]["kind"] == "command.stdout")
+        .expect("stdout event");
+    let data = &stdout["payload"]["data"];
+    assert!(data["event_id"].is_string());
+    assert!(data["created_at"].is_string());
+    assert_eq!(data["command_id"], id);
+    assert_eq!(data["stream"], "stdout");
+    assert!(data["seq"].is_number());
+    assert!(data["data"].as_str().unwrap().contains("streamed"));
 }
 
 #[tokio::test]

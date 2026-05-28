@@ -144,6 +144,7 @@ Commands are session-tier and mediated by policy.
 | `POST /v1/commands`             | starts or queues a shell command |
 | `GET /v1/commands`              | lists command records            |
 | `GET /v1/commands/{id}`         | returns one command              |
+| `GET /v1/commands/{id}/output`  | returns persisted output chunks  |
 | `POST /v1/commands/{id}/cancel` | cancels a running command        |
 
 Request body:
@@ -157,7 +158,11 @@ Request body:
 }
 ```
 
-Command status values are `pending`, `running`, `exited`, `failed`, and `canceled`. Output is persisted up to the configured byte cap and streamed on the command WebSocket topic while the command runs.
+Command status values are `pending`, `running`, `exited`, `failed`, and `canceled`. Command records include `last_output_event_id`, `last_output_at`, `last_output_seq`, `output_bytes`, and `last_progress_at` for reconnect and liveness checks.
+
+Output is persisted up to the configured byte cap and streamed on the command WebSocket topic while the command runs. `GET /v1/commands/{id}/output` accepts `limit`, `after`, and `order=asc|desc` and returns `{ chunks, next_cursor }`. Each chunk is shaped as `{ event_id, created_at, command_id, stream, seq, data }`.
+
+The reconnect flow is: read `GET /v1/commands/{id}`, subscribe to `commands.{id}`, then query `/output?order=asc&after=<last-seen-event-id>` to catch chunks missed between the HTTP read and WebSocket subscribe.
 
 ## Permissions
 

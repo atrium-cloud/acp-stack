@@ -87,3 +87,9 @@ id = 15
 name = "prompts_lifecycle_extension"
 sqlite_file = "015_prompts_lifecycle_extension.sqlite.sql"
 postgres_file = "015_prompts_lifecycle_extension.postgres.sql"
+
+[[migration]]
+id = 16
+name = "command_output_reconnect"
+sqlite_file = "016_command_output_reconnect.sqlite.sql"
+postgres_file = "016_command_output_reconnect.postgres.sql"

@@ -1,6 +1,6 @@
 use acp_stack::config::{
-    AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_CUSTOM_MODEL_CONTEXT,
-    DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, load_config_from_str,
+    AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, load_config_from_str,
 };
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
@@ -1312,6 +1312,46 @@ fn rejects_secret_ref_looking_like_jwt_value() {
             .to_string()
             .contains("looks like an inline secret value"),
         "got: {error}"
+    );
+}
+
+#[test]
+fn commands_progress_interval_defaults_and_overrides() {
+    let config = load_config_from_str(VALID_CONFIG).expect("default config should parse");
+    assert_eq!(
+        config.commands.progress_interval,
+        DEFAULT_COMMAND_PROGRESS_INTERVAL
+    );
+
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [commands]\n\
+         default_timeout = \"10m\"\n\
+         cancel_grace = \"5s\"\n\
+         progress_interval = \"250ms\"\n\
+         env_allowlist = []\n\
+         max_output_bytes = 1048576\n"
+    );
+    let config = load_config_from_str(&config_text).expect("commands override should parse");
+    assert_eq!(config.commands.progress_interval, "250ms");
+}
+
+#[test]
+fn rejects_commands_with_invalid_progress_interval() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [commands]\n\
+         default_timeout = \"10m\"\n\
+         cancel_grace = \"5s\"\n\
+         progress_interval = \"0s\"\n\
+         env_allowlist = []\n\
+         max_output_bytes = 1048576\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("zero commands.progress_interval must be rejected");
+    assert!(
+        err.to_string().contains("commands.progress_interval"),
+        "got: {err}"
     );
 }
 
