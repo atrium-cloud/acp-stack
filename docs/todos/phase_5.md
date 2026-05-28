@@ -52,12 +52,12 @@
 
 ## Log Query Polish
 
-- [ ] Add stable pagination cursors.
-- [ ] Add filters by event kind, source, session, command, permission, security category, and time range.
-- [ ] Add sorting options where safe.
-- [ ] Add `acps logs query --json`.
-- [ ] Add `acps logs query --follow` where supported.
-- [ ] Add tests for pagination stability during concurrent writes.
+- [x] Add stable pagination cursors.
+- [x] Add filters by event kind, source, session, command, permission, security category, and time range.
+- [x] Add sorting options where safe.
+- [x] Add `acps logs query --json`.
+- [x] Add `acps logs query --follow` where supported.
+- [x] Add tests for pagination stability during concurrent writes.
 
 ## Command Output Streaming
 

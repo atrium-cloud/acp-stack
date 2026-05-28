@@ -5144,6 +5144,76 @@ fn logs_query_supports_limit_and_level_filter() {
 }
 
 #[test]
+fn logs_query_json_emits_envelope_with_cursor() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("init")
+        .assert()
+        .success();
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .arg("status")
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("acps")
+        .expect("binary should build")
+        .env("HOME", tempdir.path())
+        .args(["logs", "query", "--limit", "1", "--json"])
+        .output()
+        .expect("acps logs query --json should execute");
+    assert!(
+        output.status.success(),
+        "exit status: {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be valid JSON");
+    let events = parsed
+        .get("events")
+        .and_then(|v| v.as_array())
+        .expect("events array present");
+    assert_eq!(events.len(), 1, "limit=1 must return exactly one event");
+    let event = &events[0];
+    for field in [
+        "id",
+        "created_at",
+        "level",
+        "kind",
+        "message",
+        "payload_json",
+        "source",
+    ] {
+        assert!(
+            event.get(field).is_some(),
+            "event JSON missing field `{field}`: {event}"
+        );
+    }
+    let cursor = parsed
+        .get("next_cursor")
+        .expect("next_cursor key present even when null")
+        .as_str()
+        .expect("next_cursor populated when page saturates limit");
+    assert!(
+        !cursor.is_empty(),
+        "next_cursor must be a non-empty id when limit=1 saturates"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
+    assert!(
+        !stderr.contains("-- more rows available"),
+        "JSON mode must suppress the human cursor hint, got: {stderr}"
+    );
+}
+
+#[test]
 fn failed_cli_command_records_error_after_state_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
