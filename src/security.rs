@@ -17,12 +17,41 @@ pub use self::findings::{PathInspectionIssue, SecurityFinding};
 use crate::config::CloudflareEdgeConfig;
 use crate::config::SecurityHttpConfig;
 use crate::ownership::PathPosture;
+use crate::runtime::dependencies::deps::DepsReport;
 
 /// Minimum acceptable length for the session and admin API keys. Set to 32
 /// because the keys generated at `acps init` time are 32-byte random values
 /// rendered as 43-char base64. Shorter keys typically come from operator
 /// edits and are flagged with `auth.*_key_weak`.
 pub const MIN_API_KEY_LEN: usize = 32;
+
+/// Maximum dependency rows copied into the `deps.required_unavailable` details
+/// payload. Operators still get the complete report from `acps deps check`;
+/// the self-check detail stays bounded so one oversized config cannot bloat
+/// security history rows indefinitely.
+pub const MAX_DEPENDENCY_FINDING_DETAILS: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencySecurityFailure {
+    pub name: String,
+    pub kind: String,
+    pub feature: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub fn dependency_security_failures(report: &DepsReport) -> Vec<DependencySecurityFailure> {
+    report
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.required && !dependency.available)
+        .map(|dependency| DependencySecurityFailure {
+            name: dependency.name.clone(),
+            kind: format!("{:?}", dependency.kind).to_ascii_lowercase(),
+            feature: dependency.feature.clone(),
+            reason: dependency.reason.clone(),
+        })
+        .collect()
+}
 
 /// Inputs to the security self-check. Decoupled from `AppState` so the helper
 /// can live outside `api.rs` without pulling that module into `security.rs`.
@@ -82,6 +111,7 @@ pub struct SecurityCheckInputs<'a> {
     pub cloudflared_available: bool,
     pub recent_direct_cloudflare_mode_requests: i64,
     pub recent_missing_cloudflare_header_requests: i64,
+    pub dependency_failures: &'a [DependencySecurityFailure],
 }
 
 /// Compute the list of security findings for the running daemon.
@@ -94,6 +124,7 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
     rules::check_keys(&inputs, &mut findings);
     rules::check_paths(&inputs, &mut findings);
     rules::check_runtime_user(&inputs, &mut findings);
+    rules::check_deps(&inputs, &mut findings);
     findings
 }
 
@@ -138,6 +169,7 @@ mod tests {
             cloudflared_available: true,
             recent_direct_cloudflare_mode_requests: 0,
             recent_missing_cloudflare_header_requests: 0,
+            dependency_failures: &[],
         }
     }
 
@@ -855,6 +887,33 @@ mod tests {
         assert!(remediation.contains("uid 1000"));
     }
 
+    #[test]
+    fn required_dependency_failures_emit_bounded_finding() {
+        let http = baseline_http();
+        let failures = [DependencySecurityFailure {
+            name: "cloudflared".to_owned(),
+            kind: "command".to_owned(),
+            feature: Some("cloudflare-tunnel".to_owned()),
+            reason: Some("`cloudflared` not found on PATH".to_owned()),
+        }];
+        let mut inputs = baseline_inputs(&http);
+        inputs.dependency_failures = &failures;
+        let findings = check(inputs);
+        let finding = findings
+            .iter()
+            .find(|finding| finding.code == "deps.required_unavailable")
+            .expect("dependency finding");
+        assert_eq!(finding.severity, "warning");
+        let remediation = finding.remediation.as_deref().expect("remediation");
+        assert!(remediation.contains("acps deps check"));
+        assert!(remediation.contains("acps deps apply"));
+        let details = finding.details.as_ref().expect("details");
+        assert_eq!(details["total"], 1);
+        assert_eq!(details["truncated"], false);
+        assert_eq!(details["dependencies"][0]["name"], "cloudflared");
+        assert_eq!(details["dependencies"][0]["kind"], "command");
+    }
+
     /// Every finding produced by `check()` must carry a non-empty remediation.
     /// Phase 4 ("Add remediation hints for incorrect ownership") is broader
     /// than ownership findings — operators benefit from an actionable hint on
@@ -884,6 +943,12 @@ mod tests {
             error: "Permission denied".to_owned(),
         };
         let path_issues = [path_issue];
+        let dependency_failures = [DependencySecurityFailure {
+            name: "cloudflared".to_owned(),
+            kind: "command".to_owned(),
+            feature: Some("cloudflare-tunnel".to_owned()),
+            reason: Some("`cloudflared` not found on PATH".to_owned()),
+        }];
 
         // Pass 1: empty keys.
         let mut empty_inputs = SecurityCheckInputs {
@@ -908,6 +973,7 @@ mod tests {
             cloudflared_available: true,
             recent_direct_cloudflare_mode_requests: 0,
             recent_missing_cloudflare_header_requests: 0,
+            dependency_failures: &dependency_failures,
         };
         let empty_findings = check(empty_inputs.clone_for_test());
         assert_remediations_present(&empty_findings);
@@ -942,6 +1008,7 @@ mod tests {
             "runtime.path_uninspectable",
             "runtime.user_mismatch",
             "runtime.workspace_not_writable",
+            "deps.required_unavailable",
         ] {
             assert!(
                 codes.contains(expected),
@@ -992,6 +1059,7 @@ mod tests {
                 recent_direct_cloudflare_mode_requests: self.recent_direct_cloudflare_mode_requests,
                 recent_missing_cloudflare_header_requests: self
                     .recent_missing_cloudflare_header_requests,
+                dependency_failures: self.dependency_failures,
             }
         }
     }

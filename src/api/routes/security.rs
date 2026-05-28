@@ -88,6 +88,8 @@ pub(crate) async fn security_check_handler(
         .and_then(|(_window, _count, last_error, _observed)| last_error);
     let recent_origin_counts = recent_cloudflare_origin_counts(&store)?;
     drop(store);
+    let dependency_report = crate::runtime::dependencies::deps::check_dependencies(&state.config);
+    let dependency_failures = crate::security::dependency_security_failures(&dependency_report);
     let (path_postures, path_issues) = collect_path_inspections(
         &state.runtime_paths.config_path,
         &state.runtime_paths.state_path,
@@ -116,6 +118,7 @@ pub(crate) async fn security_check_handler(
         cloudflared_available(),
         recent_origin_counts.direct,
         recent_origin_counts.missing_headers,
+        dependency_failures.len(),
     );
     let findings = crate::security::check(crate::security::SecurityCheckInputs {
         effective_bind: state.effective_bind.as_str(),
@@ -139,6 +142,7 @@ pub(crate) async fn security_check_handler(
         cloudflared_available: cloudflared_available(),
         recent_direct_cloudflare_mode_requests: recent_origin_counts.direct,
         recent_missing_cloudflare_header_requests: recent_origin_counts.missing_headers,
+        dependency_failures: &dependency_failures,
     });
 
     // Serialize each finding's details payload once so we can hand the
@@ -273,6 +277,7 @@ fn redacted_inputs_snapshot(
     cloudflared_available: bool,
     recent_direct_cloudflare_mode_requests: i64,
     recent_missing_cloudflare_header_requests: i64,
+    dependency_failure_count: usize,
 ) -> String {
     let snapshot = serde_json::json!({
         "effective_bind": effective_bind,
@@ -289,6 +294,7 @@ fn redacted_inputs_snapshot(
         "cloudflared_available": cloudflared_available,
         "recent_direct_cloudflare_mode_requests": recent_direct_cloudflare_mode_requests,
         "recent_missing_cloudflare_header_requests": recent_missing_cloudflare_header_requests,
+        "dependency_failure_count": dependency_failure_count,
         "http": {
             "trust_proxy_headers": http.trust_proxy_headers,
             "trusted_proxies_count": http.trusted_proxies.len(),
