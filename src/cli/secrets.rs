@@ -5,6 +5,8 @@ use crate::secrets::{SecretStore, reject_auth_ref_mutation};
 use clap::{Args, Subcommand};
 use std::io::BufRead as _;
 
+use super::core::{OutputFormat, print_json};
+
 #[derive(Debug, Subcommand)]
 pub enum SecretsCommand {
     /// List secret reference names. Values are never printed.
@@ -25,13 +27,18 @@ pub struct SecretsDeleteArgs {
     name: String,
 }
 
-pub(super) fn run_secrets_command(command: SecretsCommand) -> Result<()> {
+pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     match command {
         SecretsCommand::List => {
             let store = SecretStore::open(&home)?;
-            for name in store.list_names() {
-                println!("{name}");
+            let names = store.list_names();
+            if output.is_json() {
+                print_json(&serde_json::json!({ "secrets": names }))?;
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
             }
             Ok(())
         }
@@ -49,7 +56,11 @@ pub(super) fn run_secrets_command(command: SecretsCommand) -> Result<()> {
             let value = buffer.trim_end_matches(['\n', '\r']);
             let mut store = SecretStore::open(&home)?;
             store.set(&args.name, value)?;
-            println!("set secret: {}", args.name);
+            if output.is_json() {
+                print_json(&serde_json::json!({ "action": "set", "name": args.name }))?;
+            } else {
+                println!("set secret: {}", args.name);
+            }
             Ok(())
         }
         SecretsCommand::Delete(args) => {
@@ -57,7 +68,11 @@ pub(super) fn run_secrets_command(command: SecretsCommand) -> Result<()> {
             reject_auth_ref_mutation(&args.name, &config)?;
             let mut store = SecretStore::open(&home)?;
             store.delete(&args.name)?;
-            println!("deleted secret: {}", args.name);
+            if output.is_json() {
+                print_json(&serde_json::json!({ "action": "delete", "name": args.name }))?;
+            } else {
+                println!("deleted secret: {}", args.name);
+            }
             Ok(())
         }
     }

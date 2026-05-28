@@ -7,6 +7,7 @@ mod test;
 
 use clap::{Args, Subcommand};
 
+use super::core::OutputFormatChoice;
 use crate::error::Result;
 
 pub(in crate::cli) use self::install::operator_registry_override;
@@ -30,6 +31,8 @@ pub enum AgentCommand {
     Start,
     /// Ask the running daemon to stop the configured agent.
     Stop,
+    /// Ask the running daemon to restart the configured agent.
+    Restart,
     /// Print the latest persisted agent state from SQLite.
     Status,
     /// Report whether the installed managed harness/adapter is stale against upstream.
@@ -110,16 +113,32 @@ pub struct AgentSwitchArgs {
     pub(super) admin_key: Option<String>,
 }
 
-pub(super) fn run_agent_command(command: AgentCommand) -> Result<()> {
+pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoice) -> Result<()> {
     match command {
-        AgentCommand::Install => self::install::run_agent_install(),
-        AgentCommand::Start => self::install::run_agent_daemon_post("/v1/agent/start", "start"),
-        AgentCommand::Stop => self::install::run_agent_daemon_post("/v1/agent/stop", "stop"),
-        AgentCommand::Status => self::status::run_agent_status(),
-        AgentCommand::Check => self::check::run_agent_check(),
-        AgentCommand::Test(args) => self::test::run_agent_test(args),
-        AgentCommand::Set(args) => self::set::run_agent_set(args),
-        AgentCommand::Switch(args) => self::switch::run_agent_switch(args),
+        AgentCommand::Install => self::install::run_agent_install(output.effective()),
+        AgentCommand::Start => {
+            self::install::run_agent_daemon_post("/v1/agent/start", "start", output.effective())
+        }
+        AgentCommand::Stop => {
+            self::install::run_agent_daemon_post("/v1/agent/stop", "stop", output.effective())
+        }
+        AgentCommand::Restart => {
+            self::install::run_agent_daemon_post("/v1/agent/restart", "restart", output.effective())
+        }
+        AgentCommand::Status => self::status::run_agent_status(output.effective()),
+        AgentCommand::Check => self::check::run_agent_check(output.effective()),
+        AgentCommand::Test(args) => {
+            output.reject_json("agent test")?;
+            self::test::run_agent_test(args)
+        }
+        AgentCommand::Set(args) => {
+            output.reject_json("agent set")?;
+            self::set::run_agent_set(args)
+        }
+        AgentCommand::Switch(args) => {
+            output.reject_json("agent switch")?;
+            self::switch::run_agent_switch(args)
+        }
     }
 }
 
