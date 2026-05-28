@@ -84,9 +84,37 @@ pub(super) fn run_status() -> Result<()> {
     }
 
     print_deps_status(&store)?;
+    print_prompts_status(&store, &config)?;
     print_daemon_status(&config, &home);
 
     Ok(())
+}
+
+// Mirror `runtime/health.rs::collect_prompts` so the CLI surface stays in
+// step with `/v1/health/ready`. The threshold is read from the operator's
+// `[prompts]` block (or its defaults) so a deployment that tunes the
+// sweeper sees the same window reflected here.
+fn print_prompts_status(store: &StateStore, config: &Config) -> Result<()> {
+    let threshold = config.prompts.effective_stale_threshold();
+    let threshold_secs = threshold.as_secs();
+    let (count, oldest_at) = store.count_stuck_prompts(threshold)?;
+    if count == 0 {
+        println!("prompts:   ok (threshold {threshold_secs}s)");
+        return Ok(());
+    }
+    let age_suffix = oldest_at
+        .as_deref()
+        .and_then(prompts_age_seconds)
+        .map(|age| format!(", oldest {age}s"))
+        .unwrap_or_default();
+    println!("prompts:   {count} stuck (threshold {threshold_secs}s{age_suffix})");
+    Ok(())
+}
+
+fn prompts_age_seconds(raw: &str) -> Option<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+    Some(age.num_seconds().max(0))
 }
 
 fn print_sink_status(store: &StateStore) -> Result<()> {

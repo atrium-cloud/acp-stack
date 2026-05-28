@@ -9,6 +9,7 @@ use crate::error::Result;
 use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
+use super::sessions::{EVENT_KIND_PROMPT_INFERENCE_FAILED, FailureClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateCounts {
@@ -42,6 +43,7 @@ pub struct MetricsSummary {
     pub counts: StateCounts,
     pub sessions: SessionMetrics,
     pub turns: TurnMetrics,
+    pub prompt_failures: PromptFailureMetrics,
     pub commands: CommandMetrics,
     pub permissions: PermissionMetrics,
     pub security: SecurityMetrics,
@@ -64,6 +66,22 @@ pub struct TurnMetrics {
     pub total: i64,
     pub by_status: std::collections::BTreeMap<String, i64>,
     pub average_per_session: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PromptFailureMetrics {
+    pub total: i64,
+    pub inference_5xx: i64,
+    pub inference_4xx: i64,
+    pub agent_request: i64,
+    pub vm: i64,
+    pub sqlite: i64,
+    pub daemon: i64,
+    pub agent_process: i64,
+    pub stalled: i64,
+    pub by_class: std::collections::BTreeMap<String, i64>,
+    pub by_status_code: std::collections::BTreeMap<String, i64>,
+    pub by_reason_category: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -238,6 +256,7 @@ impl StateStore {
 
         let sessions = self.session_metrics(&window)?;
         let turns = self.turn_metrics(&window, sessions.active + sessions.closed)?;
+        let prompt_failures = self.prompt_failure_metrics(&window)?;
         let commands = self.command_metrics(&window)?;
         let permissions = self.permission_metrics(&window)?;
         let security = self.security_metrics(&window)?;
@@ -250,6 +269,7 @@ impl StateStore {
             counts,
             sessions,
             turns,
+            prompt_failures,
             commands,
             permissions,
             security,
@@ -322,6 +342,66 @@ impl StateStore {
             by_status,
             average_per_session,
         })
+    }
+
+    fn prompt_failure_metrics(&self, window: &MetricsWindow) -> Result<PromptFailureMetrics> {
+        let mut out = PromptFailureMetrics::default();
+        let mut statement = self.connection().prepare(
+            "SELECT failure_class, COUNT(*) FROM prompts \
+             WHERE status IN ('errored', 'stalled') \
+               AND failure_class IS NOT NULL \
+               AND updated_at >= ?1 AND updated_at < ?2 \
+             GROUP BY failure_class",
+        )?;
+        let rows = statement.query_map(params![window.since, window.until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for entry in rows {
+            let (failure_class, count) = entry?;
+            out.total += count;
+            match failure_class.as_str() {
+                value if value == FailureClass::Inference5xx.as_str() => out.inference_5xx = count,
+                value if value == FailureClass::Inference4xx.as_str() => out.inference_4xx = count,
+                value if value == FailureClass::AgentRequest.as_str() => out.agent_request = count,
+                value if value == FailureClass::Vm.as_str() => out.vm = count,
+                value if value == FailureClass::Sqlite.as_str() => out.sqlite = count,
+                value if value == FailureClass::Daemon.as_str() => out.daemon = count,
+                value if value == FailureClass::AgentProcess.as_str() => out.agent_process = count,
+                value if value == FailureClass::Stalled.as_str() => out.stalled = count,
+                _ => {}
+            }
+            out.by_class.insert(failure_class, count);
+        }
+
+        let mut event_statement = self.connection().prepare(
+            "SELECT payload_json FROM events \
+             WHERE kind = ?1 AND created_at >= ?2 AND created_at < ?3",
+        )?;
+        let event_rows = event_statement.query_map(
+            params![
+                EVENT_KIND_PROMPT_INFERENCE_FAILED,
+                window.since,
+                window.until
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        for entry in event_rows {
+            let payload_json = entry?;
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else {
+                continue;
+            };
+            if let Some(status_code) = payload.get("status_code").and_then(|value| value.as_u64()) {
+                let key = status_code.to_string();
+                *out.by_status_code.entry(key).or_insert(0) += 1;
+            }
+            if let Some(reason) = payload
+                .get("reason_category")
+                .and_then(serde_json::Value::as_str)
+            {
+                *out.by_reason_category.entry(reason.to_owned()).or_insert(0) += 1;
+            }
+        }
+        Ok(out)
     }
 
     fn command_metrics(&self, window: &MetricsWindow) -> Result<CommandMetrics> {

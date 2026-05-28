@@ -69,6 +69,43 @@ The Command Gateway runs shell commands through the configured default shell ins
 
 Only environment variables in `[commands].env_allowlist` are forwarded from the request. Secrets are not injected into command children unless another explicit runtime mechanism provides them.
 
+## Prompts
+
+### Stale-Prompt Sweeper
+
+A background task flips `pending`/`running` prompt rows to terminal `stalled` when no ACP `session/update` notification has touched the row within the configured threshold. Without it, an agent that crashes mid-stream or hangs on an upstream call would leave rows stuck in `running` forever, breaking client polling.
+
+Config under `[prompts]`:
+
+```toml
+[prompts]
+stale_threshold = "5m"
+sweep_interval  = "30s"
+```
+
+Defaults are `5m` / `30s`. The sweeper runs every `sweep_interval` from `acps serve`; the first sweep happens after one interval has elapsed (not immediately at boot) so startup reconcile settles first. `stalled` is terminal: a flipped row does not transition back, and recovery means submitting a fresh prompt. Each flipped row also emits a `prompt.stalled` session event (see `docs/specs/state-logging.md`).
+
+Re-touch path: every ACP `session/update` runs through `touch_running_prompt` (in `src/runtime/agent/session_sink.rs`), which advances `updated_at` on the oldest in-flight prompt for that session. ACP notifications carry no `prompt_id`, so the session-scoped lookup is the best precision available; concurrent multi-prompt sessions are not currently supported through this path. The `PromptsHealth` probe surfaced through `/v1/health/ready` and `acps status` reports the stuck-prompt count using the same threshold, so operators see stalled traffic before the next sweep cadence.
+
+### Inference Failure Classifier
+
+When the agent's `session/prompt` call fails because the underlying inference provider returned an HTTP error, the SDK surfaces it as an ACP error whose `Display` output embeds the upstream status text. The classifier (`src/runtime/agent/inference_failure.rs`) sits between the SDK error and the persisted prompt row, deciding whether the failure is `inference_5xx`, `inference_4xx`, or generic `agent_request`.
+
+Sanitization contract: the classifier returns a `Classified { class, status_code: Option<u16>, reason_category: &'static str }`. Only the enum variant, the parsed `u16`, and a `&'static str` drawn from a fixed catalog can flow out — the raw upstream message never reaches state, events, or API responses. Callers persist `reason_category` directly into `prompts.failure_detail_json` and the `prompt.inference_failed` event payload.
+
+The `reason_category` catalog is:
+
+- `rate_limit` (HTTP 429)
+- `internal_server_error` (HTTP 500)
+- `bad_gateway` (HTTP 502)
+- `service_unavailable` (HTTP 503)
+- `gateway_timeout` (HTTP 504)
+- `server_overloaded` (HTTP 529)
+- `client_error` (any other 4xx)
+- `unknown` (no status code parsed)
+
+500-range codes plus the 529-overloaded variant map to `FailureClass::Inference5xx` and HTTP 502; 400-range codes map to `FailureClass::Inference4xx` and HTTP 424. Anything else falls back to `FailureClass::AgentRequest` with `reason_category = "unknown"`.
+
 ## Dependencies And MCP
 
 Dependency declarations report whether expected tools, packages, runtimes, and MCP servers are present. Install actions run only when explicitly declared for a command dependency.

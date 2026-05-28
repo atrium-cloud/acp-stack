@@ -85,10 +85,39 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 | `DELETE /v1/sessions/{id}`                  | session | closes or deletes a session when supported                     |
 | `GET /v1/sessions/{id}/prompts/{prompt_id}` | session | returns prompt status                                          |
 | `GET /v1/sessions/{id}/events`              | session | returns durable session events                                 |
+| `GET /v1/sessions/{id}/snapshot`            | session | returns session row, in-flight prompts, and recent events      |
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
 
+Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. `stalled` is a terminal status reached only when the stale-prompt sweeper observes no ACP `session/update` activity for longer than `[prompts].stale_threshold`. From the client's perspective, a `stalled` prompt is final: it will not transition back to `running`, and recovery means submitting a new prompt. See `docs/specs/runtime.md` for the sweeper contract.
+
+`GET /v1/sessions/{id}/snapshot` is the reconnect-bootstrap helper. The response carries:
+
+- `session` — full session row (id, status, agent id, cwd, title, metadata).
+- `in_flight_prompts` — prompts currently in `pending` or `running`. Empty when the session is idle. Each entry is the same shape returned by `GET /v1/sessions/{id}/prompts/{prompt_id}`.
+- `last_event_id` — the id of the newest persisted session event, or `null` when the session has no events. Acts as a tail cursor for forward catch-up: callers fetch events newer than the snapshot via `GET /v1/sessions/{id}/events?after=last_event_id`, which paginates forward on `(created_at, id)` ascending.
+- `recent_events` — the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
+
+The intended reconnect flow is: `GET snapshot` once to recover state, subscribe to `sessions.{id}` over WebSocket, then use `GET events?after=last_event_id` to catch up on any events that landed between the snapshot read and the WebSocket subscribe. For deeper history (older than the 50-event snapshot window), additional pagination is not currently exposed; older events are reachable only through the durable logs endpoints.
+
 Session list filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
+
+### Prompt-Path Error Codes
+
+Terminal prompt failures surface through the prompt row's `error_code` and through the matching session-scoped event:
+
+| `error_code`           | HTTP status | Description                                                                            |
+| ---------------------- | ----------- | -------------------------------------------------------------------------------------- |
+| `agent.inference_5xx`  | 502         | Upstream inference endpoint returned 5xx (or the 529-overloaded variant)               |
+| `agent.inference_4xx`  | 424         | Upstream inference endpoint returned 4xx (rate limit, malformed request)               |
+| `agent.request_failed` | 502         | Agent rejected the ACP request for a non-inference reason                              |
+| `prompt.stalled`       | n/a         | Sweeper-written code on rows it flipped to `stalled`; not surfaced as an HTTP response |
+
+The `agent.inference_*` codes carry a sanitized public message of the form `"inference endpoint returned <status_code> (<reason_category>)"`, where `reason_category` is drawn from a fixed static enum. No URLs, request/response bodies, headers, or secret material reach the API response or the persisted prompt row; see `docs/specs/state-logging.md` for the full taxonomy and event shapes.
+
+## Metrics Summary
+
+`GET /v1/metrics/summary` includes `prompt_failures` so operators can separate upstream inference outages from local runtime failures. The object contains `total`, explicit counters for each `failure_class` (`inference_5xx`, `inference_4xx`, `agent_request`, `vm`, `sqlite`, `daemon`, `agent_process`, `stalled`), `by_class`, and inference event breakdowns by HTTP status code and reason category.
 
 ## Workspace Files
 

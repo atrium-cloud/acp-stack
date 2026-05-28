@@ -336,7 +336,8 @@ fn hydrate_prompts(conn: &Connection, id: &str) -> Result<Option<Map<String, Val
         .query_row(
             r#"
             SELECT id, session_id, created_at, updated_at, status,
-                   stop_reason, error_code, error_message, prompt_json
+                   stop_reason, error_code, error_message, prompt_json,
+                   failure_class, failure_detail_json
             FROM prompts WHERE id = ?1
             "#,
             params![id],
@@ -367,6 +368,21 @@ fn hydrate_prompts(conn: &Connection, id: &str) -> Result<Option<Map<String, Val
                     "_prompt_json_bytes".into(),
                     Value::Number((raw_prompt.len() as u64).into()),
                 );
+                let failure_class: Option<String> = row.get(9)?;
+                obj.insert(
+                    "failure_class".into(),
+                    failure_class.map(Value::String).unwrap_or(Value::Null),
+                );
+                // failure_detail_json is a free-form JSON envelope; parse so
+                // downstream consumers see structured fields rather than a
+                // double-encoded string. Fall back to Null on parse failure
+                // to mirror prompt_json's defensive coercion.
+                let raw_detail: Option<String> = row.get(10)?;
+                let detail_value = match raw_detail {
+                    Some(text) => serde_json::from_str(&text).unwrap_or(Value::Null),
+                    None => Value::Null,
+                };
+                obj.insert("failure_detail_json".into(), detail_value);
                 Ok(obj)
             },
         )
