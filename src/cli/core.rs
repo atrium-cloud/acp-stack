@@ -234,6 +234,10 @@ fn static_path_label(path: &str) -> &'static str {
     let bare = path.split('?').next().unwrap_or(path);
     if bare == "/v1/security/check" {
         "/v1/security/check"
+    } else if bare == "/v1/security/history" {
+        "/v1/security/history"
+    } else if bare.starts_with("/v1/security/history/") {
+        "/v1/security/history/{run_id}"
     } else if bare == "/v1/ws/connections" {
         "/v1/ws/connections"
     } else if bare == "/v1/ws/sessions" {

@@ -61,7 +61,9 @@ use super::routes::permissions::{
     permissions_pending_handler,
 };
 use super::routes::providers::{models_handler, providers_handler};
-use super::routes::security::security_check_handler;
+use super::routes::security::{
+    security_check_handler, security_history_handler, security_history_show_handler,
+};
 use super::routes::sessions::{
     sessions_cancel_handler, sessions_close_handler, sessions_create_handler,
     sessions_events_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
@@ -396,6 +398,11 @@ pub fn build_router(state: AppState) -> Router {
 
     let admin_routes = Router::new()
         .route("/v1/security/check", get(security_check_handler))
+        .route("/v1/security/history", get(security_history_handler))
+        .route(
+            "/v1/security/history/{run_id}",
+            get(security_history_show_handler),
+        )
         .route(
             "/v1/ws/connections/disconnect",
             post(ws_disconnect_connections_handler),
