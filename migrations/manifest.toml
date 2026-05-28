@@ -75,3 +75,9 @@ id = 13
 name = "installer_runs_apply_run_id"
 sqlite_file = "013_installer_runs_apply_run_id.sqlite.sql"
 postgres_file = "013_installer_runs_apply_run_id.postgres.sql"
+
+[[migration]]
+id = 14
+name = "security_runs"
+sqlite_file = "014_security_runs.sqlite.sql"
+postgres_file = "014_security_runs.postgres.sql"

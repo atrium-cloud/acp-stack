@@ -14,7 +14,7 @@
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
 | Sessions       | `acps sessions list/status/new/prompt/cancel/close`                         |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
-| Operations     | `acps deps check`, `deps apply`, `security check`, `installer history`      |
+| Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
 | WebSockets     | `acps ws connections`, `ws sessions`, `ws disconnect`                       |
 
 Commands read `~/.config/acp-stack/acp-stack.toml` by default unless an explicit path argument is documented.
@@ -125,4 +125,4 @@ acps sessions close <session-id>
 
 `acps metrics summary` prints the daemon's summary metrics for a time window.
 
-`acps security check` runs the security self-check. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed.
+`acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed.
