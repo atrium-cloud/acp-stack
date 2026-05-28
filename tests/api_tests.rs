@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
+use acp_stack::config::{
+    AgentAdapterConfig, Config, DependenciesConfig, DependencyEntry, HttpHeaderRef, McpConfig,
+    McpHttpServer, McpServerConfig, McpStdioServer, load_config_from_str,
+};
+use acp_stack::secrets::SecretStore;
 use acp_stack::state::{AuthFailureFilter, EventFilter, StateStore};
 use reqwest::StatusCode;
 use rusqlite::Connection;
@@ -140,8 +144,8 @@ fn create_runtime_files(root: &Path, state_path: &Path) -> PathBuf {
     let age_key_path = config_dir.join("age.key");
     let secret_store_path = state_dir.join("secrets.age");
     std::fs::write(&config_path, "test config").expect("write config file");
-    std::fs::write(&age_key_path, "test age key").expect("write age key");
-    std::fs::write(&secret_store_path, "test secret store").expect("write secret store");
+    SecretStore::open_or_create_at_paths(&age_key_path, &secret_store_path)
+        .expect("create secret store");
 
     #[cfg(unix)]
     {
@@ -796,6 +800,77 @@ async fn health_ready_returns_200_when_subsystems_are_healthy() {
     // Default fixture has Supabase disabled; sink subsystem should still report
     // but with `enabled=false`.
     assert_eq!(body["data"]["sink"]["enabled"], Value::Bool(false));
+    assert_eq!(body["data"]["mcp"]["configured_count"], Value::from(0));
+    assert_eq!(body["data"]["mcp"]["failing_count"], Value::from(0));
+}
+
+#[tokio::test]
+async fn health_ready_reports_healthy_mcp_declarations() {
+    let mut config = test_config();
+    config.mcp = McpConfig {
+        servers: vec![
+            McpServerConfig::Stdio(McpStdioServer {
+                name: "local-shell".to_owned(),
+                command: "sh".to_owned(),
+                args: vec![],
+                env: vec![],
+            }),
+            McpServerConfig::Http(McpHttpServer {
+                name: "generic-http".to_owned(),
+                url: "https://example.com/mcp".to_owned(),
+                headers: vec![],
+            }),
+        ],
+    };
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["mcp"]["configured_count"], Value::from(2));
+    assert_eq!(body["data"]["mcp"]["failing_count"], Value::from(0));
+    assert_eq!(body["data"]["mcp"]["servers"][0]["kind"], "stdio");
+    assert_eq!(body["data"]["mcp"]["servers"][0]["ok"], true);
+    assert!(body["data"]["mcp"]["servers"][0]["command_path"].is_string());
+    assert_eq!(body["data"]["mcp"]["servers"][1]["kind"], "http");
+    assert_eq!(body["data"]["mcp"]["servers"][1]["ok"], true);
+}
+
+#[tokio::test]
+async fn health_ready_marks_mcp_failing_when_secret_ref_is_missing() {
+    let mut config = test_config();
+    config.mcp = McpConfig {
+        servers: vec![McpServerConfig::Http(McpHttpServer {
+            name: "linear".to_owned(),
+            url: "https://mcp.linear.app/mcp".to_owned(),
+            headers: vec![HttpHeaderRef {
+                name: "Authorization".to_owned(),
+                value_ref: "LINEAR_API_KEY".to_owned(),
+            }],
+        })],
+    };
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("json");
+    let failing = body["data"]["failing"].as_array().expect("failing array");
+    assert!(failing.iter().any(|value| value == "mcp"));
+    assert_eq!(body["data"]["mcp"]["configured_count"], Value::from(1));
+    assert_eq!(body["data"]["mcp"]["failing_count"], Value::from(1));
+    assert_eq!(body["data"]["mcp"]["servers"][0]["ok"], false);
+    assert_eq!(
+        body["data"]["mcp"]["servers"][0]["missing_secret_refs"],
+        serde_json::json!(["LINEAR_API_KEY"])
+    );
 }
 
 #[tokio::test]
@@ -1603,6 +1678,68 @@ async fn security_check_reports_public_bind_proxy_and_auth_failure_findings() {
             .expect("remediation")
             .contains("/v1/logs/security")
     );
+}
+
+#[tokio::test]
+async fn security_check_persists_required_dependency_finding() {
+    let mut config = test_config();
+    config.dependencies = DependenciesConfig {
+        commands: vec![DependencyEntry {
+            name: "definitely-missing-required-dep-12345".to_owned(),
+            required: true,
+            feature: Some("test-feature".to_owned()),
+            install: None,
+        }],
+        ..DependenciesConfig::default()
+    };
+    let harness = ServerHarness::spawn_with_config(config).await;
+    let client = reqwest::Client::new();
+
+    let check: Value = client
+        .get(format!("{}/v1/security/check", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let run_id = check["data"]["run_id"].as_str().expect("run_id");
+    let live_finding = check["data"]["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|finding| finding["code"] == "deps.required_unavailable")
+        .expect("dependency finding");
+    assert_eq!(live_finding["details"]["total"], Value::from(1));
+    assert_eq!(
+        live_finding["details"]["dependencies"][0]["name"],
+        "definitely-missing-required-dep-12345"
+    );
+    assert!(
+        live_finding["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("acps deps check")
+    );
+
+    let show: Value = client
+        .get(format!("{}/v1/security/history/{run_id}", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let recorded = show["data"]["findings"]
+        .as_array()
+        .expect("recorded findings")
+        .iter()
+        .find(|finding| finding["code"] == "deps.required_unavailable")
+        .expect("recorded dependency finding");
+    assert_eq!(recorded["details"], live_finding["details"]);
+    assert_eq!(recorded["remediation"], live_finding["remediation"]);
 }
 
 #[cfg(unix)]

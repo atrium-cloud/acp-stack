@@ -94,7 +94,7 @@ Production deployments should:
 
 ## Security Self-Check
 
-`GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, weak or missing cached keys, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, and external logging delivery failures.
+`GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, weak or missing cached keys, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, unavailable required dependencies, and external logging delivery failures.
 
 Findings include severity (`warning` or `critical`), code, message, an optional structured `details` payload for findings with machine-readable context, and remediation when an operator action is available.
 
@@ -118,7 +118,8 @@ Every emitted finding carries a non-empty remediation. The category-to-code map 
 - origin and CORS: `http.wildcard_origin_public_bind`, `edge.cloudflare.unsafe_origins`
 - proxy: `http.trust_proxy_without_trusted_proxies`, `edge.cloudflare.missing_local_trusted_proxies`
 - sink: `logging.supabase.delivery_failing`
+- deps: `deps.required_unavailable`
 - runtime user: `runtime.user_mismatch`
 - bind: `api.public_bind`, `edge.cloudflare.public_bind_tunnel`, `edge.cloudflare.cloudflared_missing`, `edge.cloudflare.headers_missing`, `edge.cloudflare.direct_public_requests`
 
-Dependency posture (deps apply readiness and recent failures) is currently exposed through the deps subsystem rather than as a self-check finding; a dedicated dependency-self-check finding is tracked as a future addition.
+`deps.required_unavailable` is emitted when required dependency declarations are unavailable. Details include a bounded list of dependency names, kinds, features, and reasons; the complete report remains available from `acps deps check`.

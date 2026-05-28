@@ -206,6 +206,24 @@ The runtime never invents package-manager commands. Only install actions declare
 
 Log query filters include `limit`, `level`, `kind`, `source`, `session_id`, `command_id`, `permission_id`, `category`, `since`, `until`, `after`, and `order`. `order` accepts `asc` or `desc` (default `desc`). On `/v1/logs/security`, `order` applies to both `auth_failures` and `events`; `category` accepts the security-category labels documented in `docs/specs/state-logging.md` and constrains only the `events` stream.
 
+Readiness includes an `mcp` object for configured MCP declarations:
+
+```json
+{
+  "configured_count": 1,
+  "failing_count": 0,
+  "servers": [
+    {
+      "name": "linear",
+      "kind": "http",
+      "ok": true
+    }
+  ]
+}
+```
+
+Stdio server rows may include `command_path`. Failing rows may include `missing_secret_refs` and `reason`. HTTP MCP readiness validates declaration shape and secret refs only; it does not call the remote MCP endpoint.
+
 ## WebSocket
 
 `GET /v1/ws` upgrades to a WebSocket connection. Clients authenticate with the session key and subscribe to topics such as:
