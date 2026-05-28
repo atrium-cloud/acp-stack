@@ -953,11 +953,243 @@ async fn security_check_requires_admin_key() {
     let body: Value = admin_response.json().await.expect("json");
     assert_eq!(body["ok"], Value::Bool(true));
     assert_eq!(body["data"]["ok"], Value::Bool(true));
+    assert_eq!(body["data"]["status"], Value::String("succeeded".into()));
     assert!(
         body["data"]["findings"]
             .as_array()
             .expect("findings")
             .is_empty()
+    );
+    // run_id is the durable handle into `acps security show`; it must be
+    // present even on clean runs so the operator can correlate the response
+    // with the persisted history row.
+    let run_id = body["data"]["run_id"].as_str().expect("run_id present");
+    assert!(
+        run_id.starts_with("srun_"),
+        "run_id should follow the srun_ prefix convention, got {run_id}"
+    );
+}
+
+#[tokio::test]
+async fn security_check_persists_history_row() {
+    let harness = ServerHarness::spawn().await;
+    let client = reqwest::Client::new();
+    let first = client
+        .get(format!("{}/v1/security/check", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let run_id = first["data"]["run_id"]
+        .as_str()
+        .expect("run_id present")
+        .to_owned();
+
+    let history = client
+        .get(format!("{}/v1/security/history", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let runs = history["data"]["runs"]
+        .as_array()
+        .expect("runs array")
+        .clone();
+    assert_eq!(runs.len(), 1);
+    let summary = &runs[0];
+    assert_eq!(summary["id"], Value::String(run_id.clone()));
+    assert_eq!(summary["status"], Value::String("succeeded".into()));
+    assert_eq!(summary["ok"], Value::Bool(true));
+    assert_eq!(summary["critical_count"], Value::from(0));
+    assert_eq!(summary["warning_count"], Value::from(0));
+
+    let show = client
+        .get(format!("{}/v1/security/history/{run_id}", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(show["data"]["run"]["id"], Value::String(run_id));
+    assert!(
+        show["data"]["findings"]
+            .as_array()
+            .expect("findings")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn security_history_requires_admin_key() {
+    let harness = ServerHarness::spawn().await;
+    let client = reqwest::Client::new();
+
+    let session_response = client
+        .get(format!("{}/v1/security/history", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(session_response.status(), StatusCode::UNAUTHORIZED);
+
+    let session_show = client
+        .get(format!(
+            "{}/v1/security/history/srun_does_not_exist",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(session_show.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn security_history_show_returns_404_for_unknown_run() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/security/history/srun_does_not_exist",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "security.run_not_found");
+}
+
+#[tokio::test]
+async fn security_history_paginates_with_keyset_cursor() {
+    let harness = ServerHarness::spawn().await;
+    let client = reqwest::Client::new();
+    // Three sequential checks; each creates a fresh history row.
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let body: Value = client
+            .get(format!("{}/v1/security/check", harness.base_url))
+            .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+            .send()
+            .await
+            .expect("send")
+            .json()
+            .await
+            .expect("json");
+        ids.push(body["data"]["run_id"].as_str().expect("run_id").to_owned());
+    }
+
+    let first: Value = client
+        .get(format!("{}/v1/security/history?limit=2", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let first_runs = first["data"]["runs"].as_array().expect("runs").clone();
+    assert_eq!(first_runs.len(), 2);
+    assert_eq!(first_runs[0]["id"], Value::String(ids[2].clone()));
+    assert_eq!(first_runs[1]["id"], Value::String(ids[1].clone()));
+    let cursor = first["data"]["next_cursor"]
+        .as_str()
+        .expect("cursor present when page full")
+        .to_owned();
+    assert_eq!(cursor, ids[1]);
+
+    let second: Value = client
+        .get(format!(
+            "{}/v1/security/history?limit=2&after={cursor}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let second_runs = second["data"]["runs"].as_array().expect("runs").clone();
+    assert_eq!(second_runs.len(), 1);
+    assert_eq!(second_runs[0]["id"], Value::String(ids[0].clone()));
+    assert!(
+        second["data"].get("next_cursor").is_none() || second["data"]["next_cursor"].is_null(),
+        "next_cursor should be absent on the final page"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn security_history_show_preserves_finding_order_and_details() {
+    let harness = ServerHarness::spawn().await;
+    // Loosen the state DB so a critical path_mode_loose finding is emitted
+    // with structured details attached to it.
+    std::fs::set_permissions(&harness.state_path, std::fs::Permissions::from_mode(0o644))
+        .expect("loosen state db mode");
+    let client = reqwest::Client::new();
+    let check: Value = client
+        .get(format!("{}/v1/security/check", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let run_id = check["data"]["run_id"].as_str().expect("run_id").to_owned();
+    let live_findings = check["data"]["findings"]
+        .as_array()
+        .expect("findings")
+        .clone();
+    let live_codes: Vec<&str> = live_findings
+        .iter()
+        .map(|f| f["code"].as_str().expect("code"))
+        .collect();
+    assert!(live_codes.contains(&"runtime.path_mode_loose"));
+
+    let show: Value = client
+        .get(format!("{}/v1/security/history/{run_id}", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let recorded = show["data"]["findings"]
+        .as_array()
+        .expect("findings")
+        .clone();
+    let recorded_codes: Vec<&str> = recorded
+        .iter()
+        .map(|f| f["code"].as_str().expect("code"))
+        .collect();
+    assert_eq!(live_codes, recorded_codes, "order must be preserved");
+
+    let path_mode = recorded
+        .iter()
+        .find(|f| f["code"] == "runtime.path_mode_loose")
+        .expect("path_mode_loose finding");
+    let details = path_mode
+        .get("details")
+        .expect("details payload present on path_mode_loose");
+    assert!(
+        details["path"].as_str().is_some(),
+        "details.path should be set"
+    );
+    assert!(
+        details["kind"].as_str().is_some(),
+        "details.kind should be set"
     );
 }
 

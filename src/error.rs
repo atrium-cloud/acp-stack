@@ -11,6 +11,7 @@ mod download;
 mod edge;
 mod permission;
 mod secrets;
+mod security;
 mod serve;
 mod session;
 mod state;
@@ -674,6 +675,17 @@ pub enum StackError {
     #[error("durable JSON corruption in `{field}`: {reason}")]
     StateInvalidJson { field: &'static str, reason: String },
 
+    // === security self-check history ===
+    #[error("security run `{id}` was not found")]
+    SecurityRunNotFound { id: String },
+
+    #[error("security run `{run_id}` finding {ordinal} has unreadable details_json: {source}")]
+    SecurityFindingDetailsCorrupt {
+        run_id: String,
+        ordinal: i64,
+        source: serde_json::Error,
+    },
+
     // === auth_http (HTTP-edge auth) ===
     #[error("rate limit exceeded; retry later")]
     RateLimited,
@@ -711,6 +723,7 @@ impl StackError {
     pub fn error_code(&self) -> &'static str {
         config::error_code(self)
             .or_else(|| state::error_code(self))
+            .or_else(|| security::error_code(self))
             .or_else(|| secrets::error_code(self))
             .or_else(|| supabase::error_code(self))
             .or_else(|| edge::error_code(self))
@@ -735,6 +748,7 @@ impl StackError {
     pub fn public_message(&self) -> String {
         config::public_message(self)
             .or_else(|| state::public_message(self))
+            .or_else(|| security::public_message(self))
             .or_else(|| secrets::public_message(self))
             .or_else(|| supabase::public_message(self))
             .or_else(|| edge::public_message(self))
@@ -758,6 +772,7 @@ impl StackError {
     pub fn http_status(&self) -> StatusCode {
         config::http_status(self)
             .or_else(|| state::http_status(self))
+            .or_else(|| security::http_status(self))
             .or_else(|| secrets::http_status(self))
             .or_else(|| supabase::http_status(self))
             .or_else(|| edge::http_status(self))

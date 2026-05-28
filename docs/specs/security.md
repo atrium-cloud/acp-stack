@@ -96,4 +96,29 @@ Production deployments should:
 
 `GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, weak or missing cached keys, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, and external logging delivery failures.
 
-Findings include severity, code, message, and remediation when an operator action is available.
+Findings include severity (`warning` or `critical`), code, message, an optional structured `details` payload for findings with machine-readable context, and remediation when an operator action is available.
+
+### History
+
+Every self-check invocation through `GET /v1/security/check` is persisted into the `security_runs` and `security_findings` tables in the local state database. The check response includes the generated `run_id` so operators can correlate the live response with the durable row. Runs are kept indefinitely; pruning is left to future operations work.
+
+- `GET /v1/security/history?limit=N&after=<run-id>` (admin tier) returns recent runs newest-first with aggregate counts and a `next_cursor` for keyset pagination. `limit` defaults to 20 and is capped at 500.
+- `GET /v1/security/history/{run_id}` (admin tier) returns a single run with its findings in emit order, replaying exactly what `acps security check` produced.
+- `acps security history [--limit N] [--after <id>] [--json]` prints the operator table or raw JSON.
+- `acps security show <run-id> [--json]` prints the run summary plus its findings.
+
+Aggregate run status is `succeeded` when no critical findings were emitted and `failed` otherwise; the orthogonal `ok` boolean is true only when neither warnings nor critical findings were emitted.
+
+### Finding categories and remediation coverage
+
+Every emitted finding carries a non-empty remediation. The category-to-code map for the operator-facing self-check is:
+
+- key: `auth.session_key_empty`, `auth.admin_key_empty`, `auth.session_key_weak`, `auth.admin_key_weak`, `auth.failure_threshold`
+- file permission: `runtime.path_ownership`, `runtime.path_mode_loose`, `runtime.path_uninspectable`, `runtime.workspace_not_writable`
+- origin and CORS: `http.wildcard_origin_public_bind`, `edge.cloudflare.unsafe_origins`
+- proxy: `http.trust_proxy_without_trusted_proxies`, `edge.cloudflare.missing_local_trusted_proxies`
+- sink: `logging.supabase.delivery_failing`
+- runtime user: `runtime.user_mismatch`
+- bind: `api.public_bind`, `edge.cloudflare.public_bind_tunnel`, `edge.cloudflare.cloudflared_missing`, `edge.cloudflare.headers_missing`, `edge.cloudflare.direct_public_requests`
+
+Dependency posture (deps apply readiness and recent failures) is currently exposed through the deps subsystem rather than as a self-check finding; a dedicated dependency-self-check finding is tracked as a future addition.

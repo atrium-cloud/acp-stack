@@ -19,6 +19,7 @@ mod permissions;
 mod records;
 mod rows;
 mod schema;
+mod security;
 mod sessions;
 pub(crate) mod sink_outbox;
 
@@ -50,6 +51,11 @@ pub use permissions::{
     NewPermissionRequest, PermissionDecisionRecord, PermissionRequestRecord, PermissionStatus,
 };
 pub use records::{CommandFilter, EventFilter, LogFilter, SessionFilter};
+pub use security::{
+    NewSecurityFinding, NewSecurityRun, SECURITY_FINDING_SEVERITY_CRITICAL,
+    SECURITY_FINDING_SEVERITY_WARNING, SECURITY_RUN_FAILED, SECURITY_RUN_SUCCEEDED,
+    SecurityFindingRow, SecurityRunFilter, SecurityRunRecord,
+};
 pub use sessions::{
     DEFAULT_SESSION_ACTIVITY_THRESHOLD, ListedSessionRecord, ListedSessionUpsertCounts,
     NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,

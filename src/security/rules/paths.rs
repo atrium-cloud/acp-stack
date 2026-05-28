@@ -43,6 +43,12 @@ pub(in crate::security) fn check_paths(
                         expected = inputs.process_euid,
                     ),
                 )
+                .with_details(serde_json::json!({
+                    "path": posture.path.display().to_string(),
+                    "kind": posture.kind.label(),
+                    "actual_uid": posture.uid,
+                    "expected_uid": inputs.process_euid,
+                }))
                 // The check compares `posture.uid` against `process_euid` (the
                 // running daemon), so the hint must name the daemon's uid —
                 // not `runtime_user_name`, which could resolve to a different
@@ -99,6 +105,13 @@ pub(in crate::security) fn check_paths(
                         expected = expected_mode,
                     ),
                 )
+                .with_details(serde_json::json!({
+                    "path": posture.path.display().to_string(),
+                    "kind": posture.kind.label(),
+                    "actual_mode": format!("0o{:o}", posture.mode),
+                    "expected_mode": format!("0o{:o}", expected_mode),
+                    "is_symlink": posture.is_symlink,
+                }))
                 .with_remediation(remediation),
             );
         }
@@ -116,6 +129,11 @@ pub(in crate::security) fn check_paths(
                     error = issue.error,
                 ),
             )
+            .with_details(serde_json::json!({
+                "path": issue.path.display().to_string(),
+                "kind": issue.kind.label(),
+                "error": issue.error,
+            }))
             .with_remediation(format!(
                 "Restore {label} at {path_quoted} so the daemon uid {uid} can stat it. \
                  If the file was deleted, restore it from backup or run `acps init` to \
