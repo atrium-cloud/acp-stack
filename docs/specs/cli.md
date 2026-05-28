@@ -81,7 +81,7 @@ acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <re
 
 The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider secret refs that will be copied if missing, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses the current provider/API-key ref only when compatible, copies installed Agent Skills into the target skills directory when needed, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
 
-By default, switch preserves source agent-owned config, secrets, installed harnesses/adapters, and sessions so switching back is fast. `--drop` removes source agent-owned config after the target switch succeeds. It does not delete secrets, binaries, adapters, or sessions.
+Switch preserves runtime-scoped config, including workspace, MCP declarations, permissions, auth, secrets config, and sessions. By default, it also preserves source agent-owned config, secrets, and installed harnesses/adapters so switching back is fast. `--drop` removes only source agent-owned config after the target switch succeeds. It does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
 
 `acps agent set` updates provider, model, mode, and custom-provider metadata:
 

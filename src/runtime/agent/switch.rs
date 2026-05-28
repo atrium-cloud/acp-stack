@@ -399,11 +399,35 @@ fn default_agent_env_refs(agent_id: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::load_config_from_str;
+    use crate::config::{
+        HttpHeaderRef, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
+        load_config_from_str,
+    };
 
     fn valid_config() -> Config {
         load_config_from_str(include_str!("../../../tests/fixtures/valid-acp-stack.toml"))
             .expect("fixture parses")
+    }
+
+    fn mcp_config() -> McpConfig {
+        McpConfig {
+            servers: vec![
+                McpServerConfig::Stdio(McpStdioServer {
+                    name: "local-tools".to_owned(),
+                    command: "/usr/local/bin/local-tools-mcp".to_owned(),
+                    args: vec!["--stdio".to_owned()],
+                    env: vec!["LOCAL_TOOLS_TOKEN".to_owned()],
+                }),
+                McpServerConfig::Http(McpHttpServer {
+                    name: "linear".to_owned(),
+                    url: "https://mcp.linear.app/mcp".to_owned(),
+                    headers: vec![HttpHeaderRef {
+                        name: "Authorization".to_owned(),
+                        value_ref: "LINEAR_API_KEY".to_owned(),
+                    }],
+                }),
+            ],
+        }
     }
 
     #[test]
@@ -444,6 +468,28 @@ mod tests {
                 .and_then(|provider| provider.model.as_ref()),
             None
         );
+    }
+
+    #[test]
+    fn switch_preserves_mcp_runtime_config() {
+        let mut config = valid_config();
+        let expected_mcp = mcp_config();
+        config.mcp = expected_mcp.clone();
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "cursor".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect("switch planned");
+
+        assert_eq!(plan.target_agent_id, "cursor");
+        assert_eq!(plan.config.mcp, expected_mcp);
     }
 
     #[test]

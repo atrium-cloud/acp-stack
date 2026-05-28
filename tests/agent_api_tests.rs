@@ -9,7 +9,10 @@
 use std::{sync::Arc, time::Duration};
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::{AgentAdapterConfig, Config, load_config_from_str};
+use acp_stack::config::{
+    AgentAdapterConfig, Config, HttpHeaderRef, McpConfig, McpHttpServer, McpServerConfig,
+    McpStdioServer, load_config_from_str,
+};
 use acp_stack::runtime::agent::model_discovery::fetch_session_config_with_timeout;
 use acp_stack::state::StateStore;
 use reqwest::StatusCode;
@@ -394,6 +397,27 @@ fn write_config_options_fixture(root: &std::path::Path, models: &[&str]) -> std:
     fixture_path
 }
 
+fn switch_mcp_config() -> McpConfig {
+    McpConfig {
+        servers: vec![
+            McpServerConfig::Stdio(McpStdioServer {
+                name: "local-tools".to_owned(),
+                command: "/usr/local/bin/local-tools-mcp".to_owned(),
+                args: vec!["--stdio".to_owned()],
+                env: vec!["LOCAL_TOOLS_TOKEN".to_owned()],
+            }),
+            McpServerConfig::Http(McpHttpServer {
+                name: "linear".to_owned(),
+                url: "https://mcp.linear.app/mcp".to_owned(),
+                headers: vec![HttpHeaderRef {
+                    name: "Authorization".to_owned(),
+                    value_ref: "LINEAR_API_KEY".to_owned(),
+                }],
+            }),
+        ],
+    }
+}
+
 #[tokio::test]
 async fn install_then_start_then_capabilities_then_stop() {
     let harness = AgentHarness::spawn().await;
@@ -715,6 +739,48 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
     assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
     assert!(!written.contains("[agent.provider]"));
     assert!(!written.contains("model ="));
+}
+
+#[tokio::test]
+async fn agent_switch_preserves_mcp_runtime_config() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    write_cursor_registry_override(&config_dir);
+    let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
+    let expected_mcp = switch_mcp_config();
+    config.mcp = expected_mcp.clone();
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("CURSOR_API_KEY", "cursor-secret")])
+        .expect("cursor secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let client = http().await;
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&serde_json::json!({ "agent": "cursor" }))
+        .send()
+        .await
+        .expect("send switch");
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+
+    let written = std::fs::read_to_string(&harness.config_path).expect("read config");
+    let written_config = load_config_from_str(&written).expect("written config parses");
+    assert_eq!(written_config.agent.id, "cursor");
+    assert_eq!(written_config.mcp, expected_mcp);
 }
 
 #[tokio::test]

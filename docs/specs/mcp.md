@@ -4,7 +4,7 @@
 
 ## Declaration Scope
 
-MCP declarations are runtime-wide in the initial release. Every session receives the configured servers when the selected agent and ACP SDK support session MCP configuration.
+MCP declarations are runtime-wide in the initial release. Every session receives the configured servers when the selected agent and ACP SDK support session MCP configuration. Agent switching preserves MCP declarations because they are attached through ACP sessions, not stored in agent-owned harness config.
 
 Per-session MCP declarations are unsupported. Use separate runtime configs when sessions need different MCP server sets.
 
