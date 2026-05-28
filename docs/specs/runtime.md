@@ -10,7 +10,9 @@ The supervisor owns the configured agent process. It starts the agent with:
 - a scrubbed environment with managed `PATH` and the runtime user's `HOME`; `[agent].env` cannot override these reserved keys
 - secret values listed in `[agent].env`
 
-Lifecycle transitions are recorded in durable state and published to live subscribers. Agent start, stop, and restart are admin operations.
+Lifecycle transitions are recorded in durable state and published to live subscribers. Agent start, stop, and restart are admin operations. With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start. `restart = "never"` leaves the process stopped. Planned stop, restart, and daemon shutdown do not trigger crash recovery.
+
+Session recovery remains explicit. After an automatic relaunch, clients use `GET /v1/sessions/{id}/snapshot` to recover local state and call `POST /v1/sessions/{id}/resume` only when the agent advertises `sessionCapabilities.resume`.
 
 ## Agent Installation
 
