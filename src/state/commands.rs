@@ -23,6 +23,11 @@ pub struct CommandRecord {
     pub env_json: Option<String>,
     pub duration_ms: Option<i64>,
     pub truncated: bool,
+    pub last_output_event_id: Option<String>,
+    pub last_output_at: Option<String>,
+    pub last_output_seq: Option<i64>,
+    pub output_bytes: i64,
+    pub last_progress_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +76,11 @@ pub(super) fn row_to_command(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comman
         env_json: row.get(9)?,
         duration_ms: row.get(10)?,
         truncated: truncated != 0,
+        last_output_event_id: row.get(12)?,
+        last_output_at: row.get(13)?,
+        last_output_seq: row.get(14)?,
+        output_bytes: row.get(15)?,
+        last_progress_at: row.get(16)?,
     })
 }
 
@@ -78,7 +88,9 @@ impl StateStore {
     pub fn query_commands(&self, filter: CommandFilter<'_>) -> Result<Vec<CommandRecord>> {
         let mut sql = String::from(
             "SELECT id, created_at, updated_at, status, command, exit_status, \
-                    started_at, finished_at, cwd, env_json, duration_ms, truncated \
+                    started_at, finished_at, cwd, env_json, duration_ms, truncated, \
+                    last_output_event_id, last_output_at, last_output_seq, output_bytes, \
+                    last_progress_at \
              FROM commands WHERE 1=1",
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
@@ -122,7 +134,9 @@ impl StateStore {
             .query_row(
                 r#"
                 SELECT id, created_at, updated_at, status, command, exit_status,
-                       started_at, finished_at, cwd, env_json, duration_ms, truncated
+                       started_at, finished_at, cwd, env_json, duration_ms, truncated,
+                       last_output_event_id, last_output_at, last_output_seq,
+                       output_bytes, last_progress_at
                 FROM commands
                 WHERE id = ?1
                 "#,
@@ -154,6 +168,11 @@ impl StateStore {
             env_json: input.env_json.map(str::to_owned),
             duration_ms: None,
             truncated: false,
+            last_output_event_id: None,
+            last_output_at: None,
+            last_output_seq: None,
+            output_bytes: 0,
+            last_progress_at: None,
         };
 
         self.persist_with_outbox("commands", &record.id, &record.created_at, |conn| {
@@ -161,8 +180,11 @@ impl StateStore {
                 r#"
                 INSERT INTO commands
                     (id, created_at, updated_at, status, command, exit_status,
-                     started_at, finished_at, cwd, env_json, duration_ms, truncated)
-                VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?7, NULL, 0)
+                     started_at, finished_at, cwd, env_json, duration_ms, truncated,
+                     last_output_event_id, last_output_at, last_output_seq,
+                     output_bytes, last_progress_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, ?6, ?7, NULL, 0,
+                        NULL, NULL, NULL, 0, NULL)
                 "#,
                 params![
                     record.id,
@@ -189,7 +211,7 @@ impl StateStore {
             let rows_affected = conn.execute(
                 r#"
                 UPDATE commands
-                SET status = ?1, started_at = ?2, updated_at = ?2
+                SET status = ?1, started_at = ?2, updated_at = ?2, last_progress_at = ?2
                 WHERE id = ?3
                 "#,
                 params![CommandStatus::Running.as_str(), now, id],
@@ -268,7 +290,116 @@ impl StateStore {
         let payload_json =
             serde_json::to_string(&payload).map_err(|_| StackError::InvalidEventPayload)?;
         let kind = format!("command.{stream}");
-        self.append_event_with_source("info", &kind, EVENT_SOURCE_COMMAND, "", &payload_json)
+        let event =
+            self.append_event_with_source("info", &kind, EVENT_SOURCE_COMMAND, "", &payload_json)?;
+        let seq_i64 = i64::try_from(seq).unwrap_or(i64::MAX);
+        let byte_len = i64::try_from(chunk.len()).unwrap_or(i64::MAX);
+        self.record_command_output_progress(command_id, &event, seq_i64, byte_len)?;
+        Ok(event)
+    }
+
+    pub fn append_command_progress(&self, command_id: &str) -> Result<Event> {
+        let payload = serde_json::json!({
+            "command_id": command_id,
+        });
+        let payload_json =
+            serde_json::to_string(&payload).map_err(|_| StackError::InvalidEventPayload)?;
+        let event = self.append_event_with_source(
+            "info",
+            "command.progress",
+            EVENT_SOURCE_COMMAND,
+            "",
+            &payload_json,
+        )?;
+        self.record_command_progress_at(command_id, &event.created_at)?;
+        Ok(event)
+    }
+
+    pub fn query_command_output_events(
+        &self,
+        command_id: &str,
+        limit: u32,
+        after_id: Option<&str>,
+        order: super::records::LogOrder,
+    ) -> Result<Vec<Event>> {
+        let mut sql = String::from(
+            "SELECT id, created_at, level, kind, message, payload_json, source, session_id \
+             FROM events \
+             WHERE source = ? \
+               AND kind IN ('command.stdout', 'command.stderr') \
+               AND json_extract(payload_json, '$.command_id') = ?",
+        );
+        let mut bindings: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(EVENT_SOURCE_COMMAND.to_owned()),
+            rusqlite::types::Value::Text(command_id.to_owned()),
+        ];
+        if let Some(after) = after_id {
+            match order {
+                super::records::LogOrder::Desc => sql.push_str(
+                    " AND (created_at, id) < (SELECT created_at, id FROM events WHERE id = ?)",
+                ),
+                super::records::LogOrder::Asc => sql.push_str(
+                    " AND (created_at, id) > (SELECT created_at, id FROM events WHERE id = ?)",
+                ),
+            }
+            bindings.push(rusqlite::types::Value::Text(after.to_owned()));
+        }
+        let direction = order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY created_at {direction}, id {direction} LIMIT ?"
+        ));
+        bindings.push(rusqlite::types::Value::Integer(i64::from(limit)));
+        let mut statement = self.connection().prepare(&sql)?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(bindings.iter()),
+            super::events::row_to_event,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn record_command_output_progress(
+        &self,
+        command_id: &str,
+        event: &Event,
+        seq: i64,
+        byte_len: i64,
+    ) -> Result<()> {
+        self.persist_with_outbox("commands", command_id, &event.created_at, |conn| {
+            let rows_affected = conn.execute(
+                r#"
+                UPDATE commands
+                SET updated_at = ?1,
+                    last_output_event_id = ?2,
+                    last_output_at = ?1,
+                    last_output_seq = ?3,
+                    output_bytes = output_bytes + ?4,
+                    last_progress_at = ?1
+                WHERE id = ?5
+                "#,
+                params![event.created_at, event.id, seq, byte_len, command_id],
+            )?;
+            if rows_affected == 0 {
+                return Err(StackError::CommandNotFound {
+                    id: command_id.to_owned(),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    fn record_command_progress_at(&self, command_id: &str, created_at: &str) -> Result<()> {
+        self.persist_with_outbox("commands", command_id, created_at, |conn| {
+            let rows_affected = conn.execute(
+                "UPDATE commands SET updated_at = ?1, last_progress_at = ?1 WHERE id = ?2",
+                params![created_at, command_id],
+            )?;
+            if rows_affected == 0 {
+                return Err(StackError::CommandNotFound {
+                    id: command_id.to_owned(),
+                });
+            }
+            Ok(())
+        })
     }
 
     /// Same idea for `commands` as `reconcile_orphaned_prompts`: a daemon

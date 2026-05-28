@@ -49,6 +49,7 @@ pub(super) struct SupervisorTask {
     pub(super) workspace_root: String,
     pub(super) timeout_duration: Duration,
     pub(super) cancel_grace: Duration,
+    pub(super) progress_interval: Duration,
     pub(super) cancel_rx: watch::Receiver<bool>,
     pub(super) max_output_bytes: usize,
     pub(super) review_flagged: bool,
@@ -166,6 +167,7 @@ impl SupervisorTask {
         drop(tx);
 
         let deadline = started + self.timeout_duration;
+        let mut next_progress_deadline = Instant::now() + self.progress_interval;
         let outcome = loop {
             tokio::select! {
                 biased;
@@ -182,6 +184,10 @@ impl SupervisorTask {
                 _ = sleep_until(deadline) => {
                     break self.handle_timeout(&mut child).await;
                 }
+                _ = sleep_until(next_progress_deadline) => {
+                    self.publish_progress_event().await;
+                    next_progress_deadline = Instant::now() + self.progress_interval;
+                }
                 wait_result = child.wait() => {
                     break match wait_result {
                         Ok(status) => Outcome::Exited(status.code()),
@@ -189,7 +195,9 @@ impl SupervisorTask {
                     };
                 }
                 Some(chunk) = rx.recv() => {
-                    self.handle_chunk(chunk, &mut byte_counter).await;
+                    if self.handle_chunk(chunk, &mut byte_counter).await {
+                        next_progress_deadline = Instant::now() + self.progress_interval;
+                    }
                 }
             }
         };
@@ -225,7 +233,9 @@ impl SupervisorTask {
                 break;
             }
             match tokio::time::timeout(drain_deadline - now, rx.recv()).await {
-                Ok(Some(chunk)) => self.handle_chunk(chunk, &mut byte_counter).await,
+                Ok(Some(chunk)) => {
+                    let _ = self.handle_chunk(chunk, &mut byte_counter).await;
+                }
                 Ok(None) => break,
                 Err(_) => {
                     drained_within_budget = false;
@@ -325,11 +335,11 @@ impl SupervisorTask {
         store.start_command(&self.command_id)
     }
 
-    async fn handle_chunk(&self, chunk: OutputChunk, counter: &mut OutputCounter) {
+    async fn handle_chunk(&self, chunk: OutputChunk, counter: &mut OutputCounter) -> bool {
         if counter.exhausted {
             // Already past the cap: drop without persisting; keep draining so
             // the child does not block on a full pipe buffer.
-            return;
+            return false;
         }
         let remaining = counter.remaining();
         let bytes = chunk.data.as_bytes();
@@ -337,10 +347,12 @@ impl SupervisorTask {
             // First overflow boundary: record what fits, then truncate.
             let cutoff = floor_char_boundary(&chunk.data, remaining);
             let head = &chunk.data[..cutoff];
+            let mut persisted_progress = false;
             if !head.is_empty() {
                 self.persist_chunk(&chunk.stream, counter.seq, head).await;
                 counter.seq += 1;
                 counter.used += head.len();
+                persisted_progress = true;
             }
             counter.exhausted = true;
             if let Err(error) = {
@@ -354,12 +366,13 @@ impl SupervisorTask {
                 json!({"command_id": self.command_id}),
             )
             .await;
-            return;
+            return persisted_progress;
         }
         self.persist_chunk(&chunk.stream, counter.seq, &chunk.data)
             .await;
         counter.seq += 1;
         counter.used += bytes.len();
+        true
     }
 
     async fn persist_chunk(&self, stream: &str, seq: u64, data: &str) {
@@ -373,6 +386,8 @@ impl SupervisorTask {
                     &self.command_id,
                     &event,
                     json!({
+                        "event_id": event.id,
+                        "created_at": event.created_at,
                         "command_id": self.command_id,
                         "stream": stream,
                         "seq": seq,
@@ -382,6 +397,25 @@ impl SupervisorTask {
             }
             Err(error) => {
                 tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command output");
+            }
+        }
+    }
+
+    async fn publish_progress_event(&self) {
+        let event = {
+            let store = self.state.lock().await;
+            store.append_command_progress(&self.command_id)
+        };
+        match event {
+            Ok(event) => {
+                self.event_hub.publish_command_event(
+                    &self.command_id,
+                    &event,
+                    json!({"command_id": self.command_id}),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command progress");
             }
         }
     }
