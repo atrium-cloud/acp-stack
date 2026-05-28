@@ -797,6 +797,7 @@ async fn health_ready_returns_200_when_subsystems_are_healthy() {
     assert_eq!(body["data"]["sqlite"]["reachable"], Value::Bool(true));
     assert_eq!(body["data"]["workspace"]["writable"], Value::Bool(true));
     assert_eq!(body["data"]["agent"]["id"], "opencode");
+    assert_eq!(body["data"]["agent"]["orphaned_process_count"], 0);
     // Default fixture has Supabase disabled; sink subsystem should still report
     // but with `enabled=false`.
     assert_eq!(body["data"]["sink"]["enabled"], Value::Bool(false));
@@ -900,6 +901,72 @@ async fn health_ready_returns_503_when_workspace_is_not_writable() {
     let failing = body["data"]["failing"].as_array().expect("failing array");
     assert!(failing.iter().any(|v| v == "workspace"));
     assert_eq!(body["data"]["workspace"]["writable"], Value::Bool(false));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn health_ready_reports_orphaned_agent_process_groups() {
+    struct ProcessGroupGuard {
+        child: std::process::Child,
+        pid: u32,
+    }
+
+    impl Drop for ProcessGroupGuard {
+        fn drop(&mut self) {
+            let Ok(pid) = i32::try_from(self.pid) else {
+                return;
+            };
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    use std::os::unix::process::CommandExt as _;
+
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("sleep 60")
+        .process_group(0)
+        .spawn()
+        .expect("spawn process group");
+    let orphan = ProcessGroupGuard {
+        pid: child.id(),
+        child,
+    };
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_agent_lifecycle(
+                "agent.started",
+                "agent initialized",
+                &serde_json::json!({
+                    "agent_id": "opencode",
+                    "pid": orphan.pid,
+                    "adapter": null,
+                })
+                .to_string(),
+            )
+            .expect("append agent.started");
+    }
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/health/ready", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.expect("json");
+    let failing = body["data"]["failing"].as_array().expect("failing array");
+    assert!(failing.iter().any(|value| value == "agent"));
+    assert_eq!(body["data"]["agent"]["orphaned_process_count"], 1);
+    assert_eq!(
+        body["data"]["agent"]["orphaned_process_pids"],
+        serde_json::json!([orphan.pid])
+    );
 }
 
 #[tokio::test]
@@ -1038,6 +1105,60 @@ async fn metrics_summary_exposes_prompt_failure_breakdowns() {
         prompt_failures["by_reason_category"]["service_unavailable"],
         1
     );
+}
+
+#[tokio::test]
+async fn metrics_summary_exposes_api_request_breakdowns() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_event_with_source(
+                "info",
+                "api.request",
+                acp_stack::state::EVENT_SOURCE_API,
+                "",
+                r#"{"method":"GET","path":"/v1/sessions","status":200,"duration_ms":10,"key_kind":"session","origin":{"origin_kind":"cloudflare","country_code":"US","region_code":"CA"}}"#,
+            )
+            .expect("append api request");
+        guard
+            .append_event_with_source(
+                "info",
+                "api.request",
+                acp_stack::state::EVENT_SOURCE_LOCAL,
+                "",
+                r#"{"method":"POST","path":"/v1/commands","status":503,"duration_ms":20,"key_kind":null,"origin":{"origin_kind":"direct"}}"#,
+            )
+            .expect("append local api request");
+    }
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/metrics/summary?since=1h", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let api_connections = &body["data"]["api_connections"];
+    assert_eq!(api_connections["request_count"], 2);
+    assert_eq!(api_connections["by_status"]["2xx"], 1);
+    assert_eq!(api_connections["by_status"]["5xx"], 1);
+    assert_eq!(api_connections["by_method"]["GET"], 1);
+    assert_eq!(api_connections["by_method"]["POST"], 1);
+    assert_eq!(api_connections["by_route"]["/v1/sessions"], 1);
+    assert_eq!(api_connections["by_route"]["/v1/commands"], 1);
+    assert_eq!(api_connections["by_key_kind"]["session"], 1);
+    assert_eq!(api_connections["by_key_kind"]["unknown"], 1);
+    assert_eq!(api_connections["by_source"]["api"], 1);
+    assert_eq!(api_connections["by_source"]["local"], 1);
+    assert_eq!(api_connections["by_origin_kind"]["cloudflare"], 1);
+    assert_eq!(api_connections["by_origin_kind"]["direct"], 1);
+    assert_eq!(api_connections["by_country"]["US"], 1);
+    assert_eq!(api_connections["by_country"]["unknown"], 1);
+    assert_eq!(api_connections["by_region"]["CA"], 1);
+    assert_eq!(api_connections["by_region"]["unknown"], 1);
+    assert_eq!(api_connections["average_duration_ms"], 15);
 }
 
 #[tokio::test]

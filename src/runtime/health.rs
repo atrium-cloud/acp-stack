@@ -25,7 +25,7 @@ use crate::ownership;
 use crate::runtime::dependencies::deps::resolve_command_path;
 use crate::runtime::dependencies::deps_apply::{DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP};
 use crate::secrets::SecretStore;
-use crate::state::{InstallerRun, StateStore};
+use crate::state::{AgentStartedProcess, InstallerRun, StateStore};
 
 // Threshold above which the sink subsystem is reported as failing. The sink
 // worker writes to `sink_failures_summary` after at least one retry, so a
@@ -107,6 +107,17 @@ pub struct AgentHealth {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    pub orphaned_process_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orphaned_process_pids: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orphan_probe_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AgentProcessProbe {
+    started_processes: Vec<AgentStartedProcess>,
+    probe_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,6 +212,7 @@ impl HealthReport {
         let sink;
         let deps;
         let prompts;
+        let agent_process_probe;
         {
             let store = state.state.lock().await;
             sqlite = collect_sqlite(&store);
@@ -213,9 +225,10 @@ impl HealthReport {
             sink = collect_sink(&store, supabase_enabled);
             deps = collect_deps(&store);
             prompts = collect_prompts(&store, state.config.prompts.effective_stale_threshold());
+            agent_process_probe = collect_agent_process_probe(&store);
         }
         let workspace = collect_workspace(&state.config.workspace.root);
-        let agent = collect_agent(state).await;
+        let agent = collect_agent(state, agent_process_probe).await;
         let mcp = collect_mcp(
             &state.config.mcp,
             &mcp_secret_store_paths(
@@ -245,6 +258,9 @@ impl HealthReport {
         }
         if prompts.probe_error.is_some() || prompts.stuck_count > 0 {
             failing.push("prompts".to_owned());
+        }
+        if agent.orphan_probe_error.is_some() || agent.orphaned_process_count > 0 {
+            failing.push("agent".to_owned());
         }
         Self {
             ok: failing.is_empty(),
@@ -413,15 +429,73 @@ fn collect_workspace(root: &str) -> WorkspaceHealth {
     }
 }
 
-async fn collect_agent(state: &AppState) -> AgentHealth {
+async fn collect_agent(state: &AppState, process_probe: AgentProcessProbe) -> AgentHealth {
     let snapshot = state.agent_supervisor.snapshot().await;
     let id = state.config.agent.id.clone();
+    let orphaned_process_pids = orphaned_agent_process_pids(&process_probe, snapshot.pid);
     AgentHealth {
         configured: !id.is_empty(),
         id,
         state: snapshot.state.as_wire_str().to_owned(),
         pid: snapshot.pid,
+        orphaned_process_count: orphaned_process_pids.len(),
+        orphaned_process_pids,
+        orphan_probe_error: process_probe.probe_error,
     }
+}
+
+fn collect_agent_process_probe(store: &StateStore) -> AgentProcessProbe {
+    match store.query_agent_started_processes() {
+        Ok(started_processes) => AgentProcessProbe {
+            started_processes,
+            probe_error: None,
+        },
+        Err(err) => AgentProcessProbe {
+            started_processes: Vec::new(),
+            probe_error: Some(err.to_string()),
+        },
+    }
+}
+
+fn orphaned_agent_process_pids(
+    process_probe: &AgentProcessProbe,
+    current_pid: Option<u32>,
+) -> Vec<u32> {
+    let mut pids = BTreeSet::new();
+    for process in &process_probe.started_processes {
+        if Some(process.pid) == current_pid {
+            continue;
+        }
+        if process_group_is_alive(process.pid) {
+            pids.insert(process.pid);
+        }
+    }
+    pids.into_iter().collect()
+}
+
+#[cfg(unix)]
+fn process_group_is_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill` with signal 0 does not send a signal. A negative pid probes
+    // the process group whose id matches the supervised agent's spawn pid.
+    let result = unsafe { libc::kill(-pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
+}
+
+#[cfg(not(unix))]
+fn process_group_is_alive(_pid: u32) -> bool {
+    false
 }
 
 fn collect_sink(store: &StateStore, enabled: bool) -> SinkHealth {
@@ -612,6 +686,25 @@ mod tests {
         let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
         store.set_many(pairs.iter().copied()).expect("set secrets");
         empty_secret_paths(home)
+    }
+
+    #[test]
+    fn orphan_probe_without_started_processes_is_empty() {
+        let probe = AgentProcessProbe::default();
+        assert!(orphaned_agent_process_pids(&probe, None).is_empty());
+    }
+
+    #[test]
+    fn orphan_probe_ignores_current_supervised_pid() {
+        let probe = AgentProcessProbe {
+            started_processes: vec![AgentStartedProcess {
+                created_at: "2026-05-28T00:00:00.000000000Z".to_owned(),
+                agent_id: Some("opencode".to_owned()),
+                pid: std::process::id(),
+            }],
+            probe_error: None,
+        };
+        assert!(orphaned_agent_process_pids(&probe, Some(std::process::id())).is_empty());
     }
 
     #[test]

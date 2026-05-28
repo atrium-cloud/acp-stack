@@ -1,6 +1,6 @@
 //! Agent lifecycle records, capability snapshots, and installer runs.
 
-use crate::error::Result;
+use crate::error::{Result, StackError};
 use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
@@ -21,6 +21,13 @@ pub struct AgentCapabilitiesRecord {
     pub agent_id: String,
     pub captured_at: String,
     pub capabilities_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStartedProcess {
+    pub created_at: String,
+    pub agent_id: Option<String>,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +179,49 @@ impl StateStore {
         })?;
 
         Ok(event)
+    }
+
+    pub fn query_agent_started_processes(&self) -> Result<Vec<AgentStartedProcess>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT created_at, payload_json
+            FROM agent_lifecycle
+            WHERE event_kind = 'agent.started'
+            ORDER BY created_at DESC, id DESC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (created_at, payload_json) = row?;
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_json).map_err(|source| {
+                    StackError::StateInvalidJson {
+                        field: "agent_lifecycle.payload_json",
+                        reason: source.to_string(),
+                    }
+                })?;
+            let Some(raw_pid) = payload.get("pid").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let Ok(pid) = u32::try_from(raw_pid) else {
+                continue;
+            };
+            if pid == 0 {
+                continue;
+            }
+            out.push(AgentStartedProcess {
+                created_at,
+                agent_id: payload
+                    .get("agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                pid,
+            });
+        }
+        Ok(out)
     }
 
     /// Upsert the latest capabilities for an agent. We keep one row per agent_id;

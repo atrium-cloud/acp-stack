@@ -1286,14 +1286,23 @@ fn log_filter_cursor_paginates_across_timestamp_ties() {
 fn metrics_summary_aggregates_within_window() {
     use acp_stack::state::{MetricsWindow, NewCommandRecord};
     let (_dir, store) = fresh_state("metrics.sqlite");
-    // Seed one event, one command, one auth_failure inside the window.
+    // Seed API request events plus one command and one auth_failure inside the window.
     store
         .append_event_with_source(
             "info",
             "api.request",
             "api",
             "",
-            r#"{"status":200,"duration_ms":42}"#,
+            r#"{"method":"GET","path":"/v1/sessions/{id}","status":200,"duration_ms":42,"key_kind":"session","origin":{"origin_kind":"cloudflare","country_code":"US","region_code":"CA"}}"#,
+        )
+        .unwrap();
+    store
+        .append_event_with_source(
+            "info",
+            "api.request",
+            "local",
+            "",
+            r#"{"method":"POST","path":"/v1/commands","status":404,"duration_ms":62,"key_kind":null,"origin":{"origin_kind":"direct"}}"#,
         )
         .unwrap();
     store
@@ -1316,7 +1325,7 @@ fn metrics_summary_aggregates_within_window() {
         .unwrap();
     assert_eq!(summary.commands.total, 1);
     assert_eq!(summary.security.auth_failures, 1);
-    assert_eq!(summary.api_connections.request_count, Some(1));
+    assert_eq!(summary.api_connections.request_count, Some(2));
     assert_eq!(
         summary
             .api_connections
@@ -1326,6 +1335,75 @@ fn metrics_summary_aggregates_within_window() {
             .unwrap_or(0),
         1
     );
+    assert_eq!(
+        summary.api_connections.by_status.get("4xx").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_method.get("GET").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_method.get("POST").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary
+            .api_connections
+            .by_route
+            .get("/v1/sessions/{id}")
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_key_kind.get("session").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_key_kind.get("unknown").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_source.get("api").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_source.get("local").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary
+            .api_connections
+            .by_origin_kind
+            .get("cloudflare")
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary
+            .api_connections
+            .by_origin_kind
+            .get("direct")
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_country.get("US").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_country.get("unknown").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_region.get("CA").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.api_connections.by_region.get("unknown").copied(),
+        Some(1)
+    );
+    assert_eq!(summary.api_connections.average_duration_ms, Some(52));
 }
 
 #[test]
@@ -1442,11 +1520,11 @@ fn metrics_summary_returns_zero_when_window_misses_all_rows() {
         })
         .unwrap();
     assert_eq!(summary.counts.events, 0);
-    // Optional metric instruments stay None when no inputs landed in the
-    // window — distinguishes "instrument absent" from "instrument has 0 hits"
-    // semantically, even when the column counts to 0.
+    // Usage remains optional because agents may never emit it. API request
+    // instrumentation is part of the running binary, so a quiet window reports
+    // an explicit zero.
     assert!(summary.usage.tokens_input.is_none());
-    assert!(summary.api_connections.request_count.is_none());
+    assert_eq!(summary.api_connections.request_count, Some(0));
     assert_eq!(summary.prompt_failures.total, 0);
 }
 
