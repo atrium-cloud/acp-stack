@@ -5,6 +5,7 @@ use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
     set_owner_only_file,
 };
+use crate::runtime::agent::stale_prompt_sweeper::StalePromptSweeper;
 use crate::runtime::agent::supervisor::ServerLifecycle;
 use crate::runtime::logging::supabase_sink::SupabaseSink;
 use crate::secrets::SecretStore;
@@ -238,6 +239,17 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
             None => None,
         };
 
+        // Background sweep for prompts whose agent stopped streaming. Without
+        // this task an agent that hangs mid-stream leaves the `prompts` row
+        // in `running` forever; the sweeper flips it to terminal `Stalled`
+        // so polling clients always see settlement. Held in scope so it
+        // shuts down before `acps serve` returns.
+        let stale_prompt_sweeper = StalePromptSweeper::spawn(
+            state_handle.clone(),
+            app_state.config.prompts.effective_stale_threshold(),
+            app_state.config.prompts.effective_sweep_interval(),
+        );
+
         // The acpctl UDS server runs alongside the TCP server. Both subscribe
         // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
         // so a single signal stops both. If the TCP serve exits first, the
@@ -269,6 +281,11 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
         agent_supervisor
             .shutdown_on_serve_exit(&state_handle, &event_hub)
             .await;
+        // Stop the stale-prompt sweeper before recording `server.stopped`.
+        // Otherwise a sweep racing with shutdown could append a
+        // `prompt.stalled` event after the lifecycle row, muddling the
+        // durable shutdown trail.
+        stale_prompt_sweeper.shutdown().await;
         let reason = match &serve_result {
             Ok(()) => "signal",
             Err(_) => "error",
@@ -336,6 +353,9 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
     let mut session_new_fails = false;
     let mut session_new_stalls = false;
     let mut prompt_fails = false;
+    let mut prompt_inference_error: Option<String> = None;
+    let mut prompt_inference_error_after_update: Option<String> = None;
+    let mut prompt_response_delay_ms: Option<u64> = None;
     let mut prompt_stalls_after_update = false;
     let mut session_list_paginated = false;
     let mut session_list_repeated_cursor = false;
@@ -393,6 +413,24 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
             }
             "--prompt-error" => {
                 prompt_fails = true;
+            }
+            "--prompt-inference-error" => {
+                // Tests use this to simulate an upstream inference HTTP
+                // failure embedded inside the ACP error message — the bridge
+                // classifier scans that string for a recognizable status.
+                if let Some(value) = iter.next() {
+                    prompt_inference_error = Some(value.to_owned());
+                }
+            }
+            "--prompt-inference-error-after-update" => {
+                if let Some(value) = iter.next() {
+                    prompt_inference_error_after_update = Some(value.to_owned());
+                }
+            }
+            "--prompt-response-delay-ms" => {
+                if let Some(value) = iter.next() {
+                    prompt_response_delay_ms = value.parse::<u64>().ok();
+                }
             }
             "--prompt-stall-after-update" => {
                 prompt_stalls_after_update = true;
@@ -673,6 +711,15 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                             "message": "fake prompt failure"
                         }
                     })
+                } else if let Some(message) = prompt_inference_error.as_deref() {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": message
+                        }
+                    })
                 } else if expected_model_config.is_some()
                     && !model_configured.load(Ordering::SeqCst)
                 {
@@ -730,16 +777,30 @@ pub(super) fn run_fake_agent(args: Vec<String>) -> Result<()> {
                         std::thread::sleep(std::time::Duration::from_secs(3600));
                         continue;
                     }
-                    let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
-                        "cancelled"
+                    if let Some(delay_ms) = prompt_response_delay_ms {
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    }
+                    if let Some(message) = prompt_inference_error_after_update.as_deref() {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32000,
+                                "message": message
+                            }
+                        })
                     } else {
-                        "end_turn"
-                    };
-                    serde_json::json!({
+                        let stop = if cancel_requested.swap(false, Ordering::SeqCst) {
+                            "cancelled"
+                        } else {
+                            "end_turn"
+                        };
+                        serde_json::json!({
                         "jsonrpc": "2.0",
-                        "id": id,
-                        "result": { "stopReason": stop }
-                    })
+                            "id": id,
+                            "result": { "stopReason": stop }
+                        })
+                    }
                 }
             }
             _ => serde_json::json!({

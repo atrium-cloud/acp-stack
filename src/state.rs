@@ -45,7 +45,8 @@ pub use init::{
 };
 pub use metrics::{
     ApiConnectionMetrics, CommandMetrics, MetricsSummary, MetricsWindow, PermissionMetrics,
-    SecurityMetrics, SessionMetrics, StateCounts, TurnMetrics, UsageMetrics, WsConnectionMetrics,
+    PromptFailureMetrics, SecurityMetrics, SessionMetrics, StateCounts, TurnMetrics, UsageMetrics,
+    WsConnectionMetrics,
 };
 pub use permissions::{
     NewPermissionRequest, PermissionDecisionRecord, PermissionRequestRecord, PermissionStatus,
@@ -57,8 +58,10 @@ pub use security::{
     SecurityFindingRow, SecurityRunFilter, SecurityRunRecord,
 };
 pub use sessions::{
-    DEFAULT_SESSION_ACTIVITY_THRESHOLD, ListedSessionRecord, ListedSessionUpsertCounts,
-    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
-    SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, SessionActivityRecord, SessionRecord, SessionUpdateBounds,
+    DEFAULT_SESSION_ACTIVITY_THRESHOLD, EVENT_KIND_PROMPT_ERRORED,
+    EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_KIND_PROMPT_STALLED, FailureClass,
+    ListedSessionRecord, ListedSessionUpsertCounts, NewPromptRecord, NewSessionRecord,
+    PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionActivityRecord,
+    SessionRecord, SessionUpdateBounds,
 };

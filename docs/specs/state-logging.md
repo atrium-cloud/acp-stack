@@ -40,6 +40,34 @@ Every rejected authentication writes one row. The attempted token value is never
 | `route`        | rejected route                                                            |
 | `payload_json` | forward-compatible structured payload (validated JSON)                    |
 
+## Prompt Lifecycle Columns
+
+The `prompts` table carries two columns for terminal failure classification beyond `error_code` / `error_message`:
+
+| Column                | Type      | Notes                                                                                                  |
+| --------------------- | --------- | ------------------------------------------------------------------------------------------------------ |
+| `failure_class`       | TEXT NULL | Internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover |
+| `failure_detail_json` | TEXT NULL | Class-specific JSON envelope. NULL when no structured detail is captured                               |
+
+`prompts.status` accepts six values: `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. The `stalled` value is terminal and is only written by the stale-prompt sweeper (see `docs/specs/runtime.md`). The index `prompts_status_updated_at_idx` on `(status, updated_at)` backs the sweeper's stuck-prompt query.
+
+### Failure Class Taxonomy
+
+`failure_class` is one of:
+
+| Value            | Meaning                                                                                       |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| `agent_request`  | Agent-side ACP request failure (protocol error, bad request shape)                            |
+| `inference_5xx`  | Upstream inference endpoint returned 5xx (or the 529-overloaded variant)                      |
+| `inference_4xx`  | Upstream inference endpoint returned 4xx (rate limit, client error)                           |
+| `vm`             | VM / sandbox layer failure (workspace mount, syscall guard)                                   |
+| `sqlite`         | SQLite-level failure (constraint violation, IO error)                                         |
+| `daemon`         | Daemon-level failure (supervisor crash, runtime panic)                                        |
+| `agent_process`  | Agent subprocess failure (binary crash, missing stream)                                       |
+| `stalled`        | Inactivity threshold exceeded; paired with `prompts.status = 'stalled'`                       |
+
+For `inference_5xx` / `inference_4xx`, `failure_detail_json` carries `{ "status_code": <u16>, "reason_category": "<static-label>" }` populated by the classifier (see `docs/specs/runtime.md`). For `stalled`, the sweeper writes `error_code = 'prompt.stalled'` and a fixed `error_message`; `failure_detail_json` is NULL.
+
 ## Event Model
 
 Events carry:
@@ -54,6 +82,18 @@ Events carry:
 - structured payload JSON
 
 Common sources are `system`, `api`, `acp`, `command`, `permission`, `cli`, and `local`.
+
+### Prompt Lifecycle Event Kinds
+
+Session-scoped events that mirror terminal prompt transitions:
+
+| Kind                       | Level | Source   | Payload                                                                  | Emit site                                        |
+| -------------------------- | ----- | -------- | ------------------------------------------------------------------------ | ------------------------------------------------ |
+| `prompt.inference_failed`  | warn  | `system` | `{ "prompt_id", "status_code": <u16>, "reason_category": "<label>" }`    | Supervisor, on `StackError::InferenceRequestFailed` |
+| `prompt.stalled`           | warn  | `system` | `{ "prompt_id", "threshold_secs": <u64> }`                               | Stale-prompt sweeper, after flipping the row     |
+| `prompt.errored`           | error | `system` | `{ "prompt_id", "error_code": "<code>" }`                                | Supervisor, on any other terminal error          |
+
+The `prompt.inference_failed` payload is intentionally sanitized. Only `status_code` and a `reason_category` drawn from a fixed static enum (`rate_limit`, `internal_server_error`, `bad_gateway`, `service_unavailable`, `gateway_timeout`, `server_overloaded`, `client_error`, `unknown`) reach SQLite. Upstream URLs, request headers, response bodies, and any secret material embedded in the SDK's rendered error string never flow into the persisted event or row. The classifier (`src/runtime/agent/inference_failure.rs`) is the only code path allowed to inspect the raw error string, and it returns only a `&'static str` category plus the parsed status code.
 
 ## Logs API
 
@@ -73,6 +113,9 @@ Common sources are `system`, `api`, `acp`, `command`, `permission`, `cli`, and `
 - `api_connections.request_count`, by-status buckets, average duration
 - `ws_connections.connections_opened`, `connections_closed`, `average_duration_ms`
 - `usage.tokens_input`, `usage.tokens_output`, `usage.context_window_max`
+- `prompt_failures.total`, explicit `failure_class` counters, `by_class`, `by_status_code`, and `by_reason_category`
+
+`prompt_failures` counts terminal `errored` and `stalled` prompt rows by `failure_class` using `prompts.updated_at` for the metrics window. The inference breakdowns are derived from sanitized `prompt.inference_failed` events.
 
 Usage fields stay `null` when the configured agent does not report them. The shape is additive: existing keys remain stable as new dimensions are added.
 

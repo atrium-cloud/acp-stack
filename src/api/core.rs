@@ -68,7 +68,7 @@ use super::routes::sessions::{
     sessions_cancel_handler, sessions_close_handler, sessions_create_handler,
     sessions_events_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
     sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
-    sessions_status_handler,
+    sessions_snapshot_handler, sessions_status_handler,
 };
 use super::routes::status::{
     health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
@@ -355,6 +355,7 @@ pub fn build_router(state: AppState) -> Router {
             get(sessions_prompt_status_handler),
         )
         .route("/v1/sessions/{id}/events", get(sessions_events_handler))
+        .route("/v1/sessions/{id}/snapshot", get(sessions_snapshot_handler))
         .route("/v1/workspace", get(workspace_metadata_handler))
         .route(
             "/v1/files",

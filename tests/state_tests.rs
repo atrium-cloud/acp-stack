@@ -1,6 +1,7 @@
 use acp_stack::state::{
-    AuthFailureFilter, EVENT_SOURCE_ACP, EventFilter, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED,
-    INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
+    AuthFailureFilter, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM,
+    EventFilter, FailureClass, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
+    INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
     InstallerRunInput, ListedSessionRecord, NewInitRun, NewInitStep, NewPermissionRequest,
     NewPromptRecord, NewSessionRecord, PermissionStatus, PromptStatus,
     SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
@@ -8,6 +9,7 @@ use acp_stack::state::{
 };
 use rusqlite::Connection;
 use rusqlite::params;
+use std::str::FromStr;
 
 #[test]
 fn resolves_default_state_path_under_home() {
@@ -36,7 +38,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        14
+        15
     );
 }
 
@@ -332,7 +334,15 @@ fn active_session_activity_tracks_prompt_status_update_as_agent() {
         .expect("prompt inserted");
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_prompt_status("prm_active", PromptStatus::Running, None, None, None)
+        .update_prompt_status(
+            "prm_active",
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .expect("prompt status updated");
     let prompt = store
         .get_prompt("prm_active")
@@ -616,7 +626,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 14")
+            .contains("state schema version 99 is newer than supported version 15")
     );
 }
 
@@ -1181,6 +1191,108 @@ fn metrics_summary_aggregates_within_window() {
 }
 
 #[test]
+fn metrics_summary_exposes_prompt_failure_counters() {
+    use acp_stack::state::{MetricsWindow, NewCommandRecord};
+    let (_dir, store) = fresh_state("metrics_prompt_failures.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_metrics_failures".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    for (prompt_id, status, failure_class) in [
+        (
+            "prm_inference_5xx",
+            PromptStatus::Errored,
+            FailureClass::Inference5xx,
+        ),
+        (
+            "prm_agent_process",
+            PromptStatus::Errored,
+            FailureClass::AgentProcess,
+        ),
+        ("prm_stalled", PromptStatus::Stalled, FailureClass::Stalled),
+    ] {
+        store
+            .insert_prompt(NewPromptRecord {
+                id: prompt_id.to_owned(),
+                session_id: "sess_metrics_failures".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+        assert!(
+            store
+                .update_prompt_status(
+                    prompt_id,
+                    status,
+                    None,
+                    Some("prompt.failed"),
+                    Some("prompt failed"),
+                    Some(failure_class.as_str()),
+                    None,
+                )
+                .expect("prompt terminal update"),
+            "terminal update for {prompt_id} should apply"
+        );
+    }
+    store
+        .append_session_event_with_source(
+            "sess_metrics_failures",
+            "warn",
+            EVENT_KIND_PROMPT_INFERENCE_FAILED,
+            EVENT_SOURCE_SYSTEM,
+            "inference endpoint failure",
+            r#"{"prompt_id":"prm_inference_5xx","status_code":503,"reason_category":"service_unavailable"}"#,
+        )
+        .expect("inference event inserted");
+    store
+        .append_command(NewCommandRecord {
+            command: "echo keep window nonempty",
+            cwd: None,
+            env_json: None,
+        })
+        .expect("command inserted");
+
+    let now = chrono::Utc::now();
+    let since =
+        (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let until =
+        (now + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let summary = store
+        .metrics_summary(MetricsWindow { since, until })
+        .unwrap();
+
+    assert_eq!(summary.prompt_failures.total, 3);
+    assert_eq!(summary.prompt_failures.inference_5xx, 1);
+    assert_eq!(summary.prompt_failures.agent_process, 1);
+    assert_eq!(summary.prompt_failures.stalled, 1);
+    assert_eq!(
+        summary
+            .prompt_failures
+            .by_class
+            .get(FailureClass::Inference5xx.as_str())
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary.prompt_failures.by_status_code.get("503").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        summary
+            .prompt_failures
+            .by_reason_category
+            .get("service_unavailable")
+            .copied(),
+        Some(1)
+    );
+}
+
+#[test]
 fn metrics_summary_returns_zero_when_window_misses_all_rows() {
     use acp_stack::state::MetricsWindow;
     let (_dir, store) = fresh_state("metrics_empty.sqlite");
@@ -1197,6 +1309,7 @@ fn metrics_summary_returns_zero_when_window_misses_all_rows() {
     // semantically, even when the column counts to 0.
     assert!(summary.usage.tokens_input.is_none());
     assert!(summary.api_connections.request_count.is_none());
+    assert_eq!(summary.prompt_failures.total, 0);
 }
 
 #[test]
@@ -1404,4 +1517,799 @@ fn duplicate_ordinal_within_run_is_rejected() {
         })
         .expect_err("duplicate ordinal should fail UNIQUE");
     assert!(error.to_string().to_lowercase().contains("unique"));
+}
+
+#[test]
+fn prompt_status_helpers_round_trip_stalled() {
+    assert_eq!(PromptStatus::Stalled.as_str(), "stalled");
+    assert_eq!(
+        PromptStatus::from_str("stalled").expect("stalled should parse"),
+        PromptStatus::Stalled,
+    );
+    assert!(PromptStatus::Stalled.terminal());
+    assert!(PromptStatus::Completed.terminal());
+    assert!(PromptStatus::Errored.terminal());
+    assert!(PromptStatus::Cancelled.terminal());
+    assert!(!PromptStatus::Pending.terminal());
+    assert!(!PromptStatus::Running.terminal());
+    assert!(PromptStatus::from_str("not_a_status").is_err());
+}
+
+#[test]
+fn failure_class_round_trips_taxonomy_strings() {
+    let pairs = [
+        (FailureClass::AgentRequest, "agent_request"),
+        (FailureClass::Inference5xx, "inference_5xx"),
+        (FailureClass::Inference4xx, "inference_4xx"),
+        (FailureClass::Vm, "vm"),
+        (FailureClass::Sqlite, "sqlite"),
+        (FailureClass::Daemon, "daemon"),
+        (FailureClass::AgentProcess, "agent_process"),
+        (FailureClass::Stalled, "stalled"),
+    ];
+    for (variant, expected) in pairs {
+        assert_eq!(variant.as_str(), expected);
+        assert_eq!(
+            FailureClass::from_str(expected).expect("taxonomy should parse"),
+            variant,
+        );
+    }
+    assert!(FailureClass::from_str("unknown").is_err());
+}
+
+#[test]
+fn prompt_update_persists_stalled_with_failure_class_and_detail() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_stalled".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/stalled".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_stalled".to_owned(),
+            session_id: "sess_stalled".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+
+    let detail = r#"{"reason":"threshold_exceeded"}"#;
+    store
+        .update_prompt_status(
+            "prm_stalled",
+            PromptStatus::Stalled,
+            None,
+            None,
+            None,
+            Some(FailureClass::Stalled.as_str()),
+            Some(detail),
+        )
+        .expect("prompt status updated to stalled");
+
+    let prompt = store
+        .get_prompt("prm_stalled")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert_eq!(prompt.status, PromptStatus::Stalled.as_str());
+    assert_eq!(prompt.failure_class.as_deref(), Some("stalled"));
+    assert_eq!(prompt.failure_detail_json.as_deref(), Some(detail));
+}
+
+#[test]
+fn prompt_update_persists_inference_5xx_failure_taxonomy() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_5xx".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/5xx".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_5xx".to_owned(),
+            session_id: "sess_5xx".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+
+    let detail = r#"{"upstream_status":502,"provider":"acme"}"#;
+    store
+        .update_prompt_status(
+            "prm_5xx",
+            PromptStatus::Errored,
+            None,
+            Some("inference.upstream"),
+            Some("upstream returned 502"),
+            Some(FailureClass::Inference5xx.as_str()),
+            Some(detail),
+        )
+        .expect("prompt status updated to errored");
+
+    let prompt = store
+        .get_prompt("prm_5xx")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert_eq!(prompt.status, PromptStatus::Errored.as_str());
+    assert_eq!(prompt.failure_class.as_deref(), Some("inference_5xx"));
+    assert_eq!(prompt.failure_detail_json.as_deref(), Some(detail));
+    assert_eq!(prompt.error_code.as_deref(), Some("inference.upstream"));
+}
+
+#[test]
+fn prompt_update_preserves_taxonomy_when_called_with_none() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_preserve".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/preserve".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_preserve".to_owned(),
+            session_id: "sess_preserve".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+
+    // First write (non-terminal) sets the taxonomy; second write transitions
+    // to a terminal status with None on both taxonomy params and must NOT
+    // clobber the existing failure_class / failure_detail_json. The terminal
+    // write is the only one that lands on already-set rows in production —
+    // the supervisor sets a running-state taxonomy and then settles once.
+    store
+        .update_prompt_status(
+            "prm_preserve",
+            PromptStatus::Running,
+            None,
+            Some("vm.boom"),
+            Some("vm crashed"),
+            Some(FailureClass::Vm.as_str()),
+            Some(r#"{"node":"vm-1"}"#),
+        )
+        .expect("first update");
+    store
+        .update_prompt_status(
+            "prm_preserve",
+            PromptStatus::Errored,
+            None,
+            Some("vm.boom"),
+            Some("vm crashed (settle pass)"),
+            None,
+            None,
+        )
+        .expect("second update");
+
+    let prompt = store
+        .get_prompt("prm_preserve")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert_eq!(prompt.status, PromptStatus::Errored.as_str());
+    assert_eq!(prompt.failure_class.as_deref(), Some("vm"));
+    assert_eq!(
+        prompt.failure_detail_json.as_deref(),
+        Some(r#"{"node":"vm-1"}"#)
+    );
+    assert_eq!(
+        prompt.error_message.as_deref(),
+        Some("vm crashed (settle pass)")
+    );
+}
+
+#[test]
+fn prompt_update_clears_taxonomy_with_empty_string_sentinel() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_clear".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/clear".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_clear".to_owned(),
+            session_id: "sess_clear".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+
+    // First write (non-terminal) sets the taxonomy; second write transitions
+    // to terminal with Some("") for both taxonomy params and must clear them.
+    store
+        .update_prompt_status(
+            "prm_clear",
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            Some(FailureClass::Daemon.as_str()),
+            Some(r#"{"k":"v"}"#),
+        )
+        .expect("first update sets taxonomy");
+    store
+        .update_prompt_status(
+            "prm_clear",
+            PromptStatus::Errored,
+            None,
+            None,
+            None,
+            Some(""),
+            Some(""),
+        )
+        .expect("second update clears taxonomy");
+
+    let prompt = store
+        .get_prompt("prm_clear")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert_eq!(prompt.status, PromptStatus::Errored.as_str());
+    assert!(prompt.failure_class.is_none());
+    assert!(prompt.failure_detail_json.is_none());
+}
+
+#[test]
+fn migration_015_accepts_every_lifecycle_status() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_all_statuses".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/all".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    let statuses = [
+        "pending",
+        "running",
+        "completed",
+        "errored",
+        "cancelled",
+        "stalled",
+    ];
+    for status in statuses {
+        let id = format!("prm_{status}");
+        store
+            .insert_prompt(NewPromptRecord {
+                id: id.clone(),
+                session_id: "sess_all_statuses".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+        // insert_prompt always writes 'pending'; flip to the target status
+        // through update_prompt_status. PromptStatus::from_str guards the
+        // matrix and `terminal()` is enforced by callers, not the DB.
+        let prompt_status =
+            PromptStatus::from_str(status).expect("status should round-trip via PromptStatus");
+        if prompt_status != PromptStatus::Pending {
+            store
+                .update_prompt_status(&id, prompt_status, None, None, None, None, None)
+                .unwrap_or_else(|err| panic!("status {status} should be accepted: {err}"));
+        }
+        let prompt = store
+            .get_prompt(&id)
+            .expect("prompt lookup")
+            .expect("prompt exists");
+        assert_eq!(prompt.status, status);
+    }
+}
+
+#[test]
+fn migration_015_preserves_rows_inserted_at_schema_14() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let connection = Connection::open(&path).expect("sqlite should open");
+    // Replay every pre-015 migration so the prompts table matches the
+    // shape callers wrote against before this batch landed.
+    connection
+        .execute_batch(include_str!("../migrations/001_init.sqlite.sql"))
+        .expect("001 schema should apply");
+    connection
+        .execute_batch(include_str!(
+            "../migrations/002_auth_failures_schema.sqlite.sql"
+        ))
+        .expect("002 schema should apply");
+    connection
+        .execute_batch(include_str!(
+            "../migrations/003_agent_capabilities.sqlite.sql"
+        ))
+        .expect("003 schema should apply");
+    connection
+        .execute_batch(include_str!("../migrations/004_sessions.sqlite.sql"))
+        .expect("004 schema should apply");
+    connection
+        .execute_batch(include_str!("../migrations/005_commands_schema.sqlite.sql"))
+        .expect("005 schema should apply");
+    connection
+        .execute_batch(include_str!("../migrations/006_permissions.sqlite.sql"))
+        .expect("006 schema should apply");
+    connection
+        .execute_batch(include_str!("../migrations/007_events_source.sqlite.sql"))
+        .expect("007 schema should apply");
+    connection
+        .execute_batch(include_str!("../migrations/008_sink_outbox.sqlite.sql"))
+        .expect("008 schema should apply");
+    connection
+        .execute_batch(include_str!(
+            "../migrations/009_installer_runs_step.sqlite.sql"
+        ))
+        .expect("009 schema should apply");
+    connection
+        .execute_batch(include_str!(
+            "../migrations/010_installer_runs_version.sqlite.sql"
+        ))
+        .expect("010 schema should apply");
+    connection
+        .execute_batch(include_str!(
+            "../migrations/011_installer_runs_log_dir.sqlite.sql"
+        ))
+        .expect("011 schema should apply");
+    connection
+        .execute_batch(include_str!("../migrations/012_init_runs.sqlite.sql"))
+        .expect("012 schema should apply");
+    connection
+        .execute_batch(include_str!(
+            "../migrations/013_installer_runs_apply_run_id.sqlite.sql"
+        ))
+        .expect("013 schema should apply");
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations (version, name, applied_at) VALUES
+                (1,  'init',                          '2026-05-13T00:00:00Z'),
+                (2,  'auth_failures_schema',          '2026-05-13T00:00:00Z'),
+                (3,  'agent_capabilities',            '2026-05-13T00:00:00Z'),
+                (4,  'sessions',                      '2026-05-13T00:00:00Z'),
+                (5,  'commands_schema',               '2026-05-13T00:00:00Z'),
+                (6,  'permissions',                   '2026-05-13T00:00:00Z'),
+                (7,  'events_source',                 '2026-05-13T00:00:00Z'),
+                (8,  'sink_outbox',                   '2026-05-13T00:00:00Z'),
+                (9,  'installer_runs_step',           '2026-05-13T00:00:00Z'),
+                (10, 'installer_runs_version',        '2026-05-13T00:00:00Z'),
+                (11, 'installer_runs_log_dir',        '2026-05-13T00:00:00Z'),
+                (12, 'init_runs',                     '2026-05-13T00:00:00Z'),
+                (13, 'installer_runs_apply_run_id',   '2026-05-13T00:00:00Z');
+            "#,
+        )
+        .expect("schema_migrations should seed");
+    // Seed a session + two prompts using the pre-015 column set so the
+    // rebuild path has actual data to copy across.
+    connection
+        .execute_batch(
+            r#"
+            INSERT INTO sessions (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+            VALUES ('sess_legacy', '2026-05-13T00:00:00.000000000Z', '2026-05-13T00:00:00.000000000Z',
+                    'active', 'fake', '/tmp/legacy', NULL, '{}');
+            INSERT INTO prompts (id, session_id, created_at, updated_at, status, stop_reason, error_code, error_message, prompt_json)
+            VALUES ('prm_legacy_done', 'sess_legacy', '2026-05-13T00:01:00.000000000Z', '2026-05-13T00:01:30.000000000Z',
+                    'completed', 'end_turn', NULL, NULL, '[]');
+            INSERT INTO prompts (id, session_id, created_at, updated_at, status, stop_reason, error_code, error_message, prompt_json)
+            VALUES ('prm_legacy_err',  'sess_legacy', '2026-05-13T00:02:00.000000000Z', '2026-05-13T00:02:30.000000000Z',
+                    'errored',  NULL, 'agent.protocol_error', 'boom', '[]');
+            "#,
+        )
+        .expect("legacy prompts should seed");
+    drop(connection);
+
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration to 15 should pass");
+    assert_eq!(
+        store.schema_version().expect("schema version should load"),
+        15
+    );
+
+    let done = store
+        .get_prompt("prm_legacy_done")
+        .expect("legacy completed lookup")
+        .expect("legacy completed exists");
+    assert_eq!(done.status, "completed");
+    assert_eq!(done.stop_reason.as_deref(), Some("end_turn"));
+    assert!(done.failure_class.is_none());
+    assert!(done.failure_detail_json.is_none());
+
+    let err = store
+        .get_prompt("prm_legacy_err")
+        .expect("legacy errored lookup")
+        .expect("legacy errored exists");
+    assert_eq!(err.status, "errored");
+    assert_eq!(err.error_code.as_deref(), Some("agent.protocol_error"));
+    assert!(err.failure_class.is_none());
+    assert!(err.failure_detail_json.is_none());
+}
+
+// CONSTANTS for the mark_stalled_prompts tests below.
+const STALE_THRESHOLD_SECS: u64 = 60;
+const STALE_REASON: &str = "test stall reason";
+
+/// Helper: insert a session + one prompt, flip the prompt to running,
+/// then overwrite its `updated_at` directly so the test controls the
+/// "how old is this row" axis without sleeping for minutes.
+fn seed_running_prompt_at(store: &StateStore, session_id: &str, prompt_id: &str, updated_at: &str) {
+    store
+        .insert_session(NewSessionRecord {
+            id: session_id.to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: prompt_id.to_owned(),
+            session_id: session_id.to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    store
+        .update_prompt_status(
+            prompt_id,
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt flipped to running");
+    // Force `updated_at` so the test does not have to wait for the
+    // threshold to actually elapse on wall-clock time.
+    let connection =
+        Connection::open(store.path()).expect("open sqlite directly for updated_at override");
+    connection
+        .execute(
+            "UPDATE prompts SET updated_at = ?1 WHERE id = ?2",
+            params![updated_at, prompt_id],
+        )
+        .expect("force-set updated_at");
+}
+
+#[test]
+fn mark_stalled_prompts_flips_only_aged_rows() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    // Old row: well past the threshold. Fresh row: minted right before
+    // the sweep; its `updated_at` will be roughly "now" so the comparison
+    // against `now - 60s` keeps it as running.
+    let aged = "2020-01-01T00:00:00.000000000Z";
+    seed_running_prompt_at(&store, "sess_aged", "prm_aged", aged);
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_fresh".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_fresh".to_owned(),
+            session_id: "sess_fresh".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    store
+        .update_prompt_status(
+            "prm_fresh",
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt flipped to running");
+
+    let pairs = store
+        .mark_stalled_prompts(
+            std::time::Duration::from_secs(STALE_THRESHOLD_SECS),
+            STALE_REASON,
+        )
+        .expect("mark_stalled_prompts should run");
+
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].0, "prm_aged");
+    assert_eq!(pairs[0].1, "sess_aged");
+
+    let aged_row = store
+        .get_prompt("prm_aged")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert_eq!(aged_row.status, "stalled");
+    assert_eq!(aged_row.failure_class.as_deref(), Some("stalled"));
+    assert_eq!(aged_row.error_code.as_deref(), Some("prompt.stalled"));
+    assert_eq!(aged_row.error_message.as_deref(), Some(STALE_REASON));
+
+    let fresh_row = store
+        .get_prompt("prm_fresh")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert_eq!(fresh_row.status, "running");
+    assert!(fresh_row.failure_class.is_none());
+}
+
+#[test]
+fn mark_stalled_prompts_is_idempotent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let aged = "2020-01-01T00:00:00.000000000Z";
+    seed_running_prompt_at(&store, "sess_aged", "prm_aged", aged);
+
+    let first = store
+        .mark_stalled_prompts(
+            std::time::Duration::from_secs(STALE_THRESHOLD_SECS),
+            STALE_REASON,
+        )
+        .expect("mark_stalled_prompts should run");
+    assert_eq!(first.len(), 1);
+
+    let second = store
+        .mark_stalled_prompts(
+            std::time::Duration::from_secs(STALE_THRESHOLD_SECS),
+            STALE_REASON,
+        )
+        .expect("second mark_stalled_prompts should run");
+    assert!(
+        second.is_empty(),
+        "stalled rows must not be re-flipped on subsequent sweeps, got {second:?}"
+    );
+}
+
+#[test]
+fn mark_stalled_prompts_leaves_terminal_rows_alone() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    // Seed three terminal rows aged past the threshold. The sweep must
+    // not touch any of them — once a prompt is settled, the durable
+    // status (`completed`, `errored`, `cancelled`) is the source of
+    // truth.
+    let aged = "2020-01-01T00:00:00.000000000Z";
+    for (session_id, prompt_id, terminal) in [
+        ("sess_done", "prm_done", PromptStatus::Completed),
+        ("sess_err", "prm_err", PromptStatus::Errored),
+        ("sess_cancel", "prm_cancel", PromptStatus::Cancelled),
+    ] {
+        store
+            .insert_session(NewSessionRecord {
+                id: session_id.to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        store
+            .insert_prompt(NewPromptRecord {
+                id: prompt_id.to_owned(),
+                session_id: session_id.to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+        store
+            .update_prompt_status(prompt_id, terminal, None, None, None, None, None)
+            .expect("prompt flipped to terminal");
+        let connection =
+            Connection::open(store.path()).expect("open sqlite directly for updated_at override");
+        connection
+            .execute(
+                "UPDATE prompts SET updated_at = ?1 WHERE id = ?2",
+                params![aged, prompt_id],
+            )
+            .expect("force-set updated_at");
+    }
+
+    let pairs = store
+        .mark_stalled_prompts(
+            std::time::Duration::from_secs(STALE_THRESHOLD_SECS),
+            STALE_REASON,
+        )
+        .expect("mark_stalled_prompts should run");
+    assert!(
+        pairs.is_empty(),
+        "terminal rows must not be flipped to stalled, got {pairs:?}"
+    );
+
+    for prompt_id in ["prm_done", "prm_err", "prm_cancel"] {
+        let row = store
+            .get_prompt(prompt_id)
+            .expect("prompt lookup")
+            .expect("prompt exists");
+        assert_ne!(row.status, "stalled", "{prompt_id} must not flip");
+    }
+}
+
+#[test]
+fn update_prompt_status_is_noop_on_terminal_rows() {
+    // Regression test for the sweeper/supervisor race: once a prompt is in any
+    // terminal status (`completed | errored | cancelled | stalled`), a later
+    // `update_prompt_status` call from the supervisor settle path must NOT
+    // overwrite it. The WHERE guard inside `update_prompt_status` enforces
+    // this; without it a slow ACP `prompt_session` future returning after the
+    // sweeper had already flipped the row to `stalled` would race-erase the
+    // stalled marker with `completed`/`errored`/`cancelled`.
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_race".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+
+    let cases = [
+        (
+            "prm_stalled_then_completed",
+            PromptStatus::Stalled,
+            PromptStatus::Completed,
+        ),
+        (
+            "prm_stalled_then_errored",
+            PromptStatus::Stalled,
+            PromptStatus::Errored,
+        ),
+        (
+            "prm_stalled_then_cancelled",
+            PromptStatus::Stalled,
+            PromptStatus::Cancelled,
+        ),
+        (
+            "prm_completed_then_errored",
+            PromptStatus::Completed,
+            PromptStatus::Errored,
+        ),
+    ];
+
+    for (prompt_id, first, second) in cases {
+        store
+            .insert_prompt(NewPromptRecord {
+                id: prompt_id.to_owned(),
+                session_id: "sess_race".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+        let first_applied = store
+            .update_prompt_status(
+                prompt_id,
+                first,
+                None,
+                Some("first.code"),
+                Some("first message"),
+                Some(FailureClass::Stalled.as_str()),
+                None,
+            )
+            .expect("first terminal write");
+        assert!(first_applied, "first terminal write should apply");
+        // Second write is the supervisor late-settle. It should not return an
+        // error (the row exists), but it must be a no-op on the data.
+        let second_applied = store
+            .update_prompt_status(
+                prompt_id,
+                second,
+                Some("end_turn"),
+                Some("second.code"),
+                Some("second message"),
+                Some(FailureClass::AgentRequest.as_str()),
+                Some(r#"{"clobber":true}"#),
+            )
+            .expect("second write succeeds without error");
+        assert!(
+            !second_applied,
+            "already-terminal prompt update should report no-op"
+        );
+        let row = store
+            .get_prompt(prompt_id)
+            .expect("prompt lookup")
+            .expect("prompt exists");
+        assert_eq!(
+            row.status,
+            first.as_str(),
+            "{prompt_id} must keep its first terminal status"
+        );
+        assert_eq!(row.error_code.as_deref(), Some("first.code"));
+        assert_eq!(row.error_message.as_deref(), Some("first message"));
+        assert_eq!(
+            row.failure_class.as_deref(),
+            Some(FailureClass::Stalled.as_str())
+        );
+    }
+
+    // PromptNotFound is still surfaced when the row truly does not exist —
+    // the no-op handling must not mask the missing-row case.
+    let missing = store.update_prompt_status(
+        "prm_does_not_exist",
+        PromptStatus::Completed,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    match missing {
+        Err(acp_stack::error::StackError::PromptNotFound { id }) => {
+            assert_eq!(id, "prm_does_not_exist");
+        }
+        other => panic!("expected PromptNotFound, got {other:?}"),
+    }
+}
+
+#[test]
+fn count_stuck_prompts_returns_count_and_oldest_updated_at() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    // No stuck rows yet.
+    let (count, oldest) = store
+        .count_stuck_prompts(std::time::Duration::from_secs(STALE_THRESHOLD_SECS))
+        .expect("count_stuck_prompts should run");
+    assert_eq!(count, 0);
+    assert!(oldest.is_none());
+
+    let aged_older = "2019-01-01T00:00:00.000000000Z";
+    let aged_newer = "2020-01-01T00:00:00.000000000Z";
+    seed_running_prompt_at(&store, "sess_a", "prm_a", aged_older);
+    seed_running_prompt_at(&store, "sess_b", "prm_b", aged_newer);
+
+    let (count, oldest) = store
+        .count_stuck_prompts(std::time::Duration::from_secs(STALE_THRESHOLD_SECS))
+        .expect("count_stuck_prompts should run");
+    assert_eq!(count, 2);
+    assert_eq!(oldest.as_deref(), Some(aged_older));
 }

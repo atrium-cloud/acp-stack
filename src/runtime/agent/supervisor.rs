@@ -60,8 +60,10 @@ use crate::runtime::agent::acp_bridge::{
 };
 use crate::secrets::SecretStore;
 use crate::state::{
-    ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
-    SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id,
+    EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_SYSTEM,
+    FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
+    PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
+    next_prompt_id,
 };
 
 pub struct ServerLifecycle {
@@ -358,8 +360,7 @@ impl AgentSupervisor {
             starting_data,
         );
 
-        let sink: Arc<dyn SessionEventSink> =
-            Arc::new(StateStoreSessionSink::new(state.clone(), event_hub.clone()));
+        let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(state.clone()));
         let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions).await {
             Ok(bridge) => bridge,
             Err(err) => {
@@ -878,6 +879,8 @@ impl AgentSupervisor {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 ) {
                     tracing::warn!(error = %err, prompt_id = %prompt_id_owned, "failed to mark prompt running");
                 }
@@ -889,42 +892,58 @@ impl AgentSupervisor {
                 _ = cancel_inner.cancelled() => Outcome::Cancelled,
             };
 
-            let (status, stop_reason, error_code, error_message) = match outcome {
-                Outcome::Settled(Ok(stop_reason)) => {
-                    let stop_str = stop_reason_str(stop_reason);
-                    let status = if stop_reason == StopReason::Cancelled {
-                        PromptStatus::Cancelled
-                    } else {
-                        PromptStatus::Completed
-                    };
-                    (status, Some(stop_str), None, None)
-                }
-                Outcome::Settled(Err(err)) => {
-                    let code = err.error_code().to_owned();
-                    let msg = err.public_message();
-                    (PromptStatus::Errored, None, Some(code), Some(msg))
-                }
-                Outcome::Cancelled => (
-                    PromptStatus::Cancelled,
-                    Some("cancelled".to_owned()),
-                    None,
-                    None,
-                ),
-            };
+            // Terminal taxonomy: cancellation is not a failure (failure_class
+            // stays None), inference-HTTP failures get their own class and a
+            // structured detail payload, and everything else folds into
+            // `agent_request`. The session-event emit happens after the row
+            // write so subscribers see consistent SQL state.
+            let terminal = build_terminal_outcome_with_prompt_id(outcome, Some(&prompt_id_owned));
 
-            let guard = state_clone.lock().await;
-            if let Err(err) = guard.update_prompt_status(
-                &prompt_id_owned,
-                status,
-                stop_reason.as_deref(),
-                error_code.as_deref(),
-                error_message.as_deref(),
-            ) {
-                tracing::warn!(
-                    error = %err,
-                    prompt_id = %prompt_id_owned,
-                    "failed to record terminal prompt status"
-                );
+            {
+                let guard = state_clone.lock().await;
+                let status_updated = match guard.update_prompt_status(
+                    &prompt_id_owned,
+                    terminal.status,
+                    terminal.stop_reason.as_deref(),
+                    terminal.error_code.as_deref(),
+                    terminal.error_message.as_deref(),
+                    terminal.failure_class,
+                    terminal.failure_detail_json.as_deref(),
+                ) {
+                    Ok(updated) => updated,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            prompt_id = %prompt_id_owned,
+                            "failed to record terminal prompt status"
+                        );
+                        false
+                    }
+                };
+                if !status_updated {
+                    tracing::warn!(
+                        prompt_id = %prompt_id_owned,
+                        terminal_status = %terminal.status.as_str(),
+                        "skipping terminal prompt event because prompt row was already terminal"
+                    );
+                } else if let Some(event) = terminal.session_event.as_ref()
+                    && let Err(err) = guard.append_session_event_with_source(
+                        &session_id_owned,
+                        event.level,
+                        event.kind,
+                        EVENT_SOURCE_SYSTEM,
+                        event.message,
+                        &event.payload_json,
+                    )
+                {
+                    tracing::warn!(
+                        error = %err,
+                        prompt_id = %prompt_id_owned,
+                        session_id = %session_id_owned,
+                        event_kind = event.kind,
+                        "failed to record terminal prompt session event"
+                    );
+                }
             }
         });
 
@@ -1035,6 +1054,171 @@ impl AgentSupervisor {
 enum Outcome {
     Settled(Result<StopReason>),
     Cancelled,
+}
+
+/// Owned fields the spawned prompt task hands to the state store on settle.
+/// Built before the await on the state mutex so we never hold the lock while
+/// constructing JSON payloads.
+struct TerminalOutcome {
+    status: PromptStatus,
+    stop_reason: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    failure_class: Option<&'static str>,
+    failure_detail_json: Option<String>,
+    session_event: Option<TerminalSessionEvent>,
+}
+
+/// Companion session-scoped event emitted alongside the terminal status write.
+/// Cancellation produces no event because cancellation is not a failure.
+struct TerminalSessionEvent {
+    level: &'static str,
+    kind: &'static str,
+    message: &'static str,
+    payload_json: String,
+}
+
+/// Build the persisted taxonomy + session event for a settled prompt task.
+/// The `prompt_id` is threaded through the spawned task and embedded into the
+/// session-event payload so dashboards can join on it; the row itself already
+/// carries the prompt_id, but the event lives in a separate index.
+fn build_terminal_outcome_with_prompt_id(
+    outcome: Outcome,
+    prompt_id_for_event: Option<&str>,
+) -> TerminalOutcome {
+    match outcome {
+        Outcome::Settled(Ok(stop_reason)) => {
+            let stop_str = stop_reason_str(stop_reason);
+            let status = if stop_reason == StopReason::Cancelled {
+                PromptStatus::Cancelled
+            } else {
+                PromptStatus::Completed
+            };
+            TerminalOutcome {
+                status,
+                stop_reason: Some(stop_str),
+                error_code: None,
+                error_message: None,
+                failure_class: None,
+                failure_detail_json: None,
+                session_event: None,
+            }
+        }
+        Outcome::Settled(Err(err)) => {
+            let code = err.error_code().to_owned();
+            let public = err.public_message();
+            match &err {
+                StackError::InferenceRequestFailed {
+                    status_code,
+                    reason_category,
+                } => {
+                    let failure_class = if (400..500).contains(status_code) {
+                        FailureClass::Inference4xx
+                    } else {
+                        FailureClass::Inference5xx
+                    };
+                    let detail = json!({
+                        "status_code": status_code,
+                        "reason_category": reason_category,
+                    })
+                    .to_string();
+                    let payload = json!({
+                        "prompt_id": prompt_id_for_event,
+                        "status_code": status_code,
+                        "reason_category": reason_category,
+                    })
+                    .to_string();
+                    TerminalOutcome {
+                        status: PromptStatus::Errored,
+                        stop_reason: None,
+                        error_code: Some(code),
+                        error_message: Some(public),
+                        failure_class: Some(failure_class.as_str()),
+                        failure_detail_json: Some(detail),
+                        session_event: Some(TerminalSessionEvent {
+                            level: "warn",
+                            kind: EVENT_KIND_PROMPT_INFERENCE_FAILED,
+                            message: "inference endpoint failure",
+                            payload_json: payload,
+                        }),
+                    }
+                }
+                err => {
+                    let Some(failure_class) = failure_class_for_prompt_error(err) else {
+                        // Other terminal errors: persist with no failure_class
+                        // (the taxonomy intentionally has gaps until callers add
+                        // the right entry) but still emit the generic errored
+                        // event so observers see the transition.
+                        let payload = json!({
+                            "prompt_id": prompt_id_for_event,
+                            "error_code": code,
+                        })
+                        .to_string();
+                        return TerminalOutcome {
+                            status: PromptStatus::Errored,
+                            stop_reason: None,
+                            error_code: Some(code),
+                            error_message: Some(public),
+                            failure_class: None,
+                            failure_detail_json: None,
+                            session_event: Some(TerminalSessionEvent {
+                                level: "error",
+                                kind: EVENT_KIND_PROMPT_ERRORED,
+                                message: "prompt failed",
+                                payload_json: payload,
+                            }),
+                        };
+                    };
+                    let payload = json!({
+                        "prompt_id": prompt_id_for_event,
+                        "error_code": code,
+                    })
+                    .to_string();
+                    TerminalOutcome {
+                        status: PromptStatus::Errored,
+                        stop_reason: None,
+                        error_code: Some(code),
+                        error_message: Some(public),
+                        failure_class: Some(failure_class.as_str()),
+                        failure_detail_json: None,
+                        session_event: Some(TerminalSessionEvent {
+                            level: "error",
+                            kind: EVENT_KIND_PROMPT_ERRORED,
+                            message: "prompt failed",
+                            payload_json: payload,
+                        }),
+                    }
+                }
+            }
+        }
+        Outcome::Cancelled => TerminalOutcome {
+            status: PromptStatus::Cancelled,
+            stop_reason: Some("cancelled".to_owned()),
+            error_code: None,
+            error_message: None,
+            failure_class: None,
+            failure_detail_json: None,
+            session_event: None,
+        },
+    }
+}
+
+fn failure_class_for_prompt_error(err: &StackError) -> Option<FailureClass> {
+    match err {
+        StackError::AgentRequestFailed { .. } => Some(FailureClass::AgentRequest),
+        StackError::State(_) => Some(FailureClass::Sqlite),
+        StackError::AgentSpawnFailed { .. }
+        | StackError::AgentAlreadyRunning
+        | StackError::AgentNotRunning
+        | StackError::AgentInitializeFailed { .. }
+        | StackError::AgentNotInitialized
+        | StackError::AgentUnsupportedCapability { .. }
+        | StackError::AgentApiRequest { .. }
+        | StackError::AgentApiStatus { .. }
+        | StackError::AgentTestFailed { .. } => Some(FailureClass::AgentProcess),
+        StackError::ServeIo { .. } | StackError::ServeBind { .. } => Some(FailureClass::Daemon),
+        _ => None,
+    }
 }
 
 fn stop_reason_str(reason: StopReason) -> String {
@@ -1150,4 +1334,41 @@ fn resolve_agent_cwd(agent: &AgentConfig, workspace_root: &str) -> PathBuf {
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(workspace_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_outcome_classifies_agent_process_failures() {
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Err(StackError::AgentNotRunning)),
+            Some("prm_process"),
+        );
+
+        assert_eq!(terminal.status, PromptStatus::Errored);
+        assert_eq!(
+            terminal.failure_class,
+            Some(FailureClass::AgentProcess.as_str())
+        );
+        let event = terminal.session_event.expect("errored event");
+        assert_eq!(event.kind, EVENT_KIND_PROMPT_ERRORED);
+        assert!(event.payload_json.contains("prm_process"));
+    }
+
+    #[test]
+    fn terminal_outcome_classifies_sqlite_failures() {
+        let terminal = build_terminal_outcome_with_prompt_id(
+            Outcome::Settled(Err(StackError::State(rusqlite::Error::InvalidQuery))),
+            Some("prm_sqlite"),
+        );
+
+        assert_eq!(terminal.status, PromptStatus::Errored);
+        assert_eq!(terminal.failure_class, Some(FailureClass::Sqlite.as_str()));
+        assert_eq!(
+            terminal.session_event.expect("errored event").kind,
+            EVENT_KIND_PROMPT_ERRORED
+        );
+    }
 }

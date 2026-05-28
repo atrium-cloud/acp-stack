@@ -34,3 +34,9 @@ GOOSE_DISABLE_SESSION_NAMING: true
 API key values are not written into Goose YAML; Goose reads them from the provider-native env var directly. For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var.
 
 Models are not persisted as `GOOSE_MODEL`. `acps` applies the configured model through ACP `session/set_config_option` on each new session.
+
+## Session Resume
+
+`session/load`, `session/resume`, and `session/list` are discovered from the Goose `initialize` reply at runtime; `data/agents.toml` does not pin a value. End-to-end resume behavior against `acp-stack` is not currently confirmed.
+
+If a live ACP connection to `goose acp` drops, the agent enters a failed state and stays there until an admin restart (`acps agent restart` or the equivalent admin route — agent start/stop/restart are admin operations per `docs/specs/runtime.md`). Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect by calling `GET /v1/sessions/{id}/snapshot` to see the failed state and any stalled prompts. After an admin relaunch, `POST /v1/sessions/{id}/resume` is dispatched only when the new Goose advertises `sessionCapabilities.resume`. Otherwise the practical recovery is a fresh session, with durable event history preserved.

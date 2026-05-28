@@ -29,3 +29,9 @@ Agent, Ask, and Plan modes are supported via:
 ```sh
 acps agent set --mode <agent|ask|plan>
 ```
+
+## Session Resume
+
+`session/load`, `session/resume`, and `session/list` are discovered from the Cursor CLI `initialize` reply at runtime; `data/agents.toml` does not pin a value. End-to-end resume behavior against `acp-stack` is not currently confirmed.
+
+If a live ACP connection to `cursor-agent` drops, the agent enters a failed state and stays there until an admin restart (`acps agent restart` or the equivalent admin route — agent start/stop/restart are admin operations per `docs/specs/runtime.md`). Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect by calling `GET /v1/sessions/{id}/snapshot` to see the failed state and any stalled prompts. After an admin relaunch, whether `POST /v1/sessions/{id}/resume` succeeds depends on whether the new `cursor-agent` advertises `sessionCapabilities.resume`; if not, a fresh `POST /v1/sessions` is the practical recovery path.

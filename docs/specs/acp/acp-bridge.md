@@ -21,7 +21,28 @@ The bridge maps runtime session operations to ACP methods where supported:
 - cancel
 - set model or mode config options
 
-If an agent does not advertise an optional capability, the corresponding runtime operation fails with an explicit unsupported error.
+If an agent does not advertise an optional capability, the corresponding runtime operation fails with `StackError::AgentUnsupportedCapability` (HTTP 501, `error_code = "agent.unsupported_capability"`). The bridge gates each optional ACP session method by checking the capability snapshot before dispatching:
+
+- `session/list` requires `supports_list_sessions`
+- `session/load` requires `supports_load_session`
+- `session/resume` requires `supports_resume_session`
+
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,close}` for the rest. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+
+### Session Resume Capability Matrix
+
+`data/agents.toml` does not declare per-agent overrides for these capabilities; every value below is discovered at runtime from the agent's `initialize` reply. A value listed as "untested" has not been confirmed end-to-end against the agent in question.
+
+| Agent      | `session/list` | `session/load` | `session/resume` |
+| ---------- | -------------- | -------------- | ---------------- |
+| OpenCode   | discovered     | discovered     | discovered       |
+| Cursor CLI | discovered     | discovered     | discovered       |
+| Amp Code   | discovered     | discovered     | discovered       |
+| Pi Agent   | discovered     | discovered     | discovered       |
+| Goose      | discovered     | discovered     | discovered       |
+| Codex      | discovered     | discovered     | discovered       |
+
+"Discovered" means the runtime trusts the value advertised by the agent's `initialize` response. When an agent reports `false` (or omits the flag), the matching `POST /v1/sessions/{id}/{load,resume}` route returns HTTP 501 `agent.unsupported_capability` and the operator-facing alternative is to create a fresh session. The per-agent live behavior of these capabilities — what the agent actually does after a live ACP connection drop — is captured in `docs/agents/{agent}.md`.
 
 ## Streaming
 

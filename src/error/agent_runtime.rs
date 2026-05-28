@@ -19,6 +19,14 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentApiRequest { .. } => "agent.api_request_failed",
         AgentApiStatus { .. } => "agent.api_status_failed",
         AgentRequestFailed { .. } => "agent.request_failed",
+        InferenceRequestFailed { status_code, .. } => {
+            if (400..500).contains(status_code) {
+                "agent.inference_4xx"
+            } else {
+                // 5xx and the 529-overloaded variant share this code.
+                "agent.inference_5xx"
+            }
+        }
         AgentTestFailed { .. } => "agent.test_failed",
         _ => return None,
     })
@@ -38,6 +46,10 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("agent API request to {path} failed with status {status}")
         }
         AgentRequestFailed { method, .. } => format!("agent rejected `{method}` request"),
+        InferenceRequestFailed {
+            status_code,
+            reason_category,
+        } => format!("inference endpoint returned {status_code} ({reason_category})"),
         AgentTestFailed { stage, reason } => format!("agent test failed at {stage}: {reason}"),
         _ => return None,
     })
@@ -54,6 +66,16 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
             StatusCode::INTERNAL_SERVER_ERROR
         }
         AgentRequestFailed { .. } | AgentTestFailed { .. } => StatusCode::BAD_GATEWAY,
+        InferenceRequestFailed { status_code, .. } => {
+            // 4xx variants are surfaced as "failed dependency": the upstream
+            // accepted the request but rejected it on its own terms. 5xx (and
+            // 529-overloaded) become 502 because the upstream itself failed.
+            if (400..500).contains(status_code) {
+                StatusCode::FAILED_DEPENDENCY
+            } else {
+                StatusCode::BAD_GATEWAY
+            }
+        }
         _ => return None,
     })
 }

@@ -4,15 +4,15 @@
 //! Extracted from `acp_bridge.rs` so the bridge file can focus on the live
 //! ACP connection lifecycle. The trait and the writer plumbing have no
 //! dependency on the bridge struct itself — they only need a `StateStore`
-//! handle and the runtime `EventHub`.
+//! handle; the runtime `EventHub` is reached transitively through the store.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
-use crate::events::EventHub;
-use crate::state::StateStore;
+use crate::state::{PromptStatus, StateStore};
 
 /// Sink for ACP `session/update` notifications. The bridge writes through this
 /// trait instead of holding a `StateStore` directly, so tests can substitute
@@ -127,6 +127,26 @@ fn locate_usage_object(value: &serde_json::Value) -> Option<&serde_json::Value> 
     None
 }
 
+/// Bump `updated_at` on the oldest `pending`/`running` prompt for the
+/// session so the stale-prompt sweeper does not flag an actively
+/// streaming prompt. ACP `session/update` carries no `prompt_id`, so the
+/// session-scoped lookup is the best precision available; the oldest
+/// in-flight prompt is the one currently producing updates. A session
+/// with no in-flight prompts is a benign no-op.
+fn touch_running_prompt(store: &StateStore, session_id: &str) -> crate::error::Result<()> {
+    let prompts = store.in_flight_prompts_for_session(session_id)?;
+    let Some(prompt) = prompts.into_iter().next() else {
+        return Ok(());
+    };
+    // `update_prompt_status` advances `updated_at` regardless of the
+    // status value. Passing the existing status (Running/Pending) plus
+    // None for every other field keeps every other column intact.
+    let status = PromptStatus::from_str(&prompt.status)?;
+    store
+        .update_prompt_status(&prompt.id, status, None, None, None, None, None)
+        .map(|_| ())
+}
+
 fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
     let raw = usage.get(key)?;
     if let Some(n) = raw.as_i64() {
@@ -145,9 +165,11 @@ fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
 pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
 
 impl StateStoreSessionSink {
-    pub fn new(state: Arc<TokioMutex<StateStore>>, event_hub: EventHub) -> Self {
+    pub fn new(state: Arc<TokioMutex<StateStore>>) -> Self {
+        // Session-update fanout now happens inside
+        // `append_session_event_with_source` itself because `StateStore` owns
+        // the live `EventHub`; the sink no longer needs its own handle.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionEventRow>(SESSION_EVENT_BUFFER);
-        let writer_event_hub = event_hub.clone();
         let writer = tokio::spawn(async move {
             while let Some(row) = rx.recv().await {
                 let guard = state.lock().await;
@@ -159,12 +181,25 @@ impl StateStoreSessionSink {
                     "ACP session update",
                     &row.payload_json,
                 ) {
-                    Ok(event) => {
-                        writer_event_hub.publish_session_update(
-                            &row.session_id,
-                            &event,
-                            &row.payload_json,
-                        );
+                    Ok(_event) => {
+                        // Re-touch the in-flight prompt's `updated_at` so the
+                        // stale-prompt sweeper does not flip an actively
+                        // streaming prompt to `Stalled`. ACP notifications
+                        // carry only `session_id`, so we pick the oldest
+                        // running prompt for the session (the one the agent
+                        // is currently driving) and bump it via the
+                        // status-preserving update path. Failures are
+                        // logged but do not block the event write.
+                        if let Err(err) = touch_running_prompt(&guard, &row.session_id) {
+                            tracing::warn!(
+                                error = %err,
+                                session_id = %row.session_id,
+                                "failed to re-touch running prompt on session update"
+                            );
+                        }
+                        // `append_session_event_with_source` now fans the
+                        // persisted event out to both the `logs` topic and
+                        // `sessions.{id}` itself; no explicit republish here.
                         // Best-effort token / context usage capture. ACP does
                         // not standardize a usage shape, but Claude (and
                         // others) emit it on `update.usage.*` or on prompt
@@ -303,5 +338,94 @@ mod tests {
         // Negative tokens were dropped; output tokens preserved.
         assert!(usage.get("input_tokens").is_none());
         assert_eq!(usage["output_tokens"].as_i64(), Some(3));
+    }
+
+    use crate::state::{NewPromptRecord, NewSessionRecord, PromptStatus, StateStore};
+    use rusqlite::params;
+
+    #[test]
+    fn touch_running_prompt_advances_updated_at_on_in_flight_row() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&path).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_touch".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        store
+            .insert_prompt(NewPromptRecord {
+                id: "prm_touch".to_owned(),
+                session_id: "sess_touch".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+        store
+            .update_prompt_status(
+                "prm_touch",
+                PromptStatus::Running,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("prompt flipped to running");
+
+        // Force `updated_at` into the past so the re-touch is visible
+        // even at sub-second resolution. Without this the wall-clock
+        // delta between insert and touch is too small for the string
+        // comparison to be reliable.
+        let aged = "2020-01-01T00:00:00.000000000Z";
+        let connection =
+            rusqlite::Connection::open(store.path()).expect("open sqlite for age override");
+        connection
+            .execute(
+                "UPDATE prompts SET updated_at = ?1 WHERE id = ?2",
+                params![aged, "prm_touch"],
+            )
+            .expect("force-set updated_at");
+        drop(connection);
+
+        super::touch_running_prompt(&store, "sess_touch").expect("re-touch should succeed");
+
+        let prompt = store
+            .get_prompt("prm_touch")
+            .expect("prompt lookup")
+            .expect("prompt exists");
+        assert_ne!(
+            prompt.updated_at, aged,
+            "touch_running_prompt must advance updated_at"
+        );
+        assert_eq!(
+            prompt.status, "running",
+            "touch must preserve the running status"
+        );
+    }
+
+    #[test]
+    fn touch_running_prompt_is_noop_when_no_in_flight_prompt() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&path).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_empty".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+
+        // No prompt rows — re-touch must succeed without an error so the
+        // ACP session sink never blocks on a benign no-op.
+        super::touch_running_prompt(&store, "sess_empty").expect("noop succeeds");
     }
 }

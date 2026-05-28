@@ -1314,3 +1314,71 @@ fn rejects_secret_ref_looking_like_jwt_value() {
         "got: {error}"
     );
 }
+
+#[test]
+fn parses_prompts_block_with_overrides() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"10m\"\n\
+         sweep_interval = \"45s\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("config with [prompts] should parse");
+    assert_eq!(config.prompts.stale_threshold, "10m");
+    assert_eq!(config.prompts.sweep_interval, "45s");
+    assert_eq!(
+        config.prompts.effective_stale_threshold(),
+        std::time::Duration::from_secs(600)
+    );
+    assert_eq!(
+        config.prompts.effective_sweep_interval(),
+        std::time::Duration::from_secs(45)
+    );
+}
+
+#[test]
+fn omitted_prompts_block_falls_back_to_defaults() {
+    let config = load_config_from_str(VALID_CONFIG).expect("default config should parse");
+    assert_eq!(config.prompts.stale_threshold, "5m");
+    assert_eq!(config.prompts.sweep_interval, "30s");
+    assert_eq!(
+        config.prompts.effective_stale_threshold(),
+        std::time::Duration::from_secs(300)
+    );
+    assert_eq!(
+        config.prompts.effective_sweep_interval(),
+        std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn rejects_prompts_with_zero_duration() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"0s\"\n\
+         sweep_interval = \"30s\"\n"
+    );
+    let err =
+        load_config_from_str(&config_text).expect_err("zero stale_threshold must be rejected");
+    assert!(
+        err.to_string().contains("prompts.stale_threshold"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_prompts_with_unparsable_duration() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"not-a-duration\"\n\
+         sweep_interval = \"30s\"\n"
+    );
+    let err =
+        load_config_from_str(&config_text).expect_err("garbage stale_threshold must be rejected");
+    assert!(
+        err.to_string().contains("prompts.stale_threshold"),
+        "got: {err}"
+    );
+}

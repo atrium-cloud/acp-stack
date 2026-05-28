@@ -20,10 +20,12 @@ pub use self::schema::{
     AgentProviderConfig, AgentSubagentConfig, ApiConfig, AuthConfig, CloudflareEdgeConfig,
     CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_CUSTOM_MODEL_CONTEXT,
     DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
-    DEFAULT_PERMISSION_TIMEOUT_ACTION, DataSourceConfig, DependenciesConfig, DependencyEntry,
+    DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
+    DEFAULT_PROMPTS_SWEEP_INTERVAL, DataSourceConfig, DependenciesConfig, DependencyEntry,
     DependencyInstallAction, DependencyInstallScope, EdgeConfig, HttpHeaderRef, LoggingConfig,
     McpConfig, McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction,
-    PermissionsConfig, SecurityConfig, SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig,
+    PermissionsConfig, PromptsConfig, SecurityConfig, SecurityHttpConfig, SupabaseLoggingConfig,
+    WorkspaceConfig,
 };
 pub use self::validate::primitives::{
     compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,
@@ -47,6 +49,8 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     #[serde(default)]
     pub commands: CommandsConfig,
+    #[serde(default)]
+    pub prompts: PromptsConfig,
     #[serde(default)]
     pub dependencies: DependenciesConfig,
     #[serde(default)]
@@ -92,6 +96,8 @@ struct RawConfig {
     permissions: Option<PermissionsConfig>,
     #[serde(default)]
     commands: Option<CommandsConfig>,
+    #[serde(default)]
+    prompts: Option<PromptsConfig>,
     #[serde(default)]
     dependencies: Option<DependenciesConfig>,
     #[serde(default)]
@@ -196,6 +202,7 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
             .ok_or(StackError::MissingSection { section: "agent" })?,
         permissions: raw.permissions.unwrap_or_default(),
         commands: raw.commands.unwrap_or_default(),
+        prompts: raw.prompts.unwrap_or_default(),
         dependencies: raw.dependencies.unwrap_or_default(),
         mcp: raw.mcp.unwrap_or_default(),
         acpctl: raw.acpctl.unwrap_or_default(),

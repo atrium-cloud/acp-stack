@@ -3710,7 +3710,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success()
         .stdout(predicates::str::contains("config:    ok ("))
         .stdout(predicates::str::contains("state:     ok ("))
-        .stdout(predicates::str::contains("schema=14"))
+        .stdout(predicates::str::contains("schema=15"))
         .stdout(predicates::str::contains("latest_event="))
         .stdout(predicates::str::contains(format!(
             "workspace: ok ({workspace_str})"
@@ -4389,6 +4389,10 @@ fn agent_test_reports_prompt_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--prompt-error"]);
 
+    // Phase 2 sanitization: the prompt-failure path now drops the raw upstream
+    // message (which could embed URLs, headers, or secrets) and surfaces a
+    // fixed `"prompt request failed"` string instead. Assert on the sanitized
+    // form rather than the agent-supplied text.
     Command::cargo_bin("acps")
         .expect("binary should build")
         .env("HOME", tempdir.path())
@@ -4398,7 +4402,7 @@ fn agent_test_reports_prompt_failure_stage() {
         .stderr(predicates::str::contains(
             "agent test failed at prompt completion",
         ))
-        .stderr(predicates::str::contains("fake prompt failure"));
+        .stderr(predicates::str::contains("prompt request failed"));
 }
 
 #[test]

@@ -72,6 +72,7 @@ pub struct HealthReport {
     pub agent: AgentHealth,
     pub sink: SinkHealth,
     pub deps: DepsHealth,
+    pub prompts: PromptsHealth,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +121,25 @@ pub struct SinkHealth {
     pub probe_error: Option<String>,
 }
 
+/// Stuck-prompt signal driven by the `[prompts]` config block. A prompt
+/// is "stuck" when its row is still `pending`/`running` and the most
+/// recent `updated_at` is older than `now - threshold`. Surfacing the
+/// count here lets `/v1/health/ready` flip to `failing: ["prompts"]`
+/// before the sweeper has a chance to flip the row, so the operator
+/// notices stalled traffic without waiting for one sweep cadence.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptsHealth {
+    pub stuck_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_stuck_age_secs: Option<i64>,
+    pub threshold_secs: i64,
+    /// Set when the prompts probe query itself errored (corrupt or
+    /// missing table). Distinct from `stuck_count` so a probe failure
+    /// promotes the subsystem to `failing` regardless of the count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DepsHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,6 +175,7 @@ impl HealthReport {
         let sqlite;
         let sink;
         let deps;
+        let prompts;
         {
             let store = state.state.lock().await;
             sqlite = collect_sqlite(&store);
@@ -166,6 +187,7 @@ impl HealthReport {
                 .is_some_and(|sb| sb.enabled);
             sink = collect_sink(&store, supabase_enabled);
             deps = collect_deps(&store);
+            prompts = collect_prompts(&store, state.config.prompts.effective_stale_threshold());
         }
         let workspace = collect_workspace(&state.config.workspace.root);
         let agent = collect_agent(state).await;
@@ -186,6 +208,9 @@ impl HealthReport {
         if deps.probe_error.is_some() || deps.cluster_has_failure {
             failing.push("deps".to_owned());
         }
+        if prompts.probe_error.is_some() || prompts.stuck_count > 0 {
+            failing.push("prompts".to_owned());
+        }
         Self {
             ok: failing.is_empty(),
             failing,
@@ -194,6 +219,7 @@ impl HealthReport {
             agent,
             sink,
             deps,
+            prompts,
         }
     }
 }
@@ -281,6 +307,39 @@ fn collect_sink(store: &StateStore, enabled: bool) -> SinkHealth {
         latest_error,
         probe_error: probe_error_from_count.or(probe_error_from_summary),
     }
+}
+
+fn collect_prompts(store: &StateStore, threshold: std::time::Duration) -> PromptsHealth {
+    let threshold_secs = i64::try_from(threshold.as_secs()).unwrap_or(i64::MAX);
+    let (count, oldest_at) = match store.count_stuck_prompts(threshold) {
+        Ok(pair) => pair,
+        Err(err) => {
+            return PromptsHealth {
+                stuck_count: 0,
+                oldest_stuck_age_secs: None,
+                threshold_secs,
+                probe_error: Some(err.to_string()),
+            };
+        }
+    };
+    let oldest_stuck_age_secs = oldest_at.as_deref().and_then(prompt_age_seconds);
+    PromptsHealth {
+        stuck_count: count,
+        oldest_stuck_age_secs,
+        threshold_secs,
+        probe_error: None,
+    }
+}
+
+/// Convert an RFC3339 timestamp to "seconds since now", clamped to >= 0
+/// so a clock skew on the database side does not surface as a negative
+/// age. `None` when the timestamp does not parse (corrupt row); the
+/// caller surfaces that as a missing `oldest_stuck_age_secs`, not as a
+/// probe error, because the COUNT side of the query already succeeded.
+fn prompt_age_seconds(raw: &str) -> Option<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+    Some(age.num_seconds().max(0))
 }
 
 fn collect_deps(store: &StateStore) -> DepsHealth {

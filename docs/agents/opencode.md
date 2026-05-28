@@ -64,3 +64,9 @@ Usage:
 - `acps subagent disable` sets model ID to an invalid string to ensure that OpenCode `small_model` requests cannot be executed. This is a tried-and-true workaround that will remain until PR#21184 is merged.
 
 When no subagent model is configured, OpenCode configured through `acp-stack` defaults to inheriting the main model for the small model.
+
+## Session Resume
+
+`session/load`, `session/resume`, and `session/list` are discovered from the OpenCode `initialize` reply at runtime; `data/agents.toml` does not pin a value. End-to-end resume behavior against `acp-stack` is not currently confirmed.
+
+If a live ACP connection to OpenCode drops, the agent enters a failed state and stays there until an admin restart (`acps agent restart` or the equivalent admin route — agent start/stop/restart are admin operations per `docs/specs/runtime.md`). Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect by calling `GET /v1/sessions/{id}/snapshot` to see the failed state and any stalled prompts. After an admin relaunch, whether `POST /v1/sessions/{id}/resume` succeeds depends on whether the new OpenCode advertises `sessionCapabilities.resume`. If it does not, a fresh `POST /v1/sessions` is the recovery path and the prior prompt history remains as durable events.

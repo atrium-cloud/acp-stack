@@ -533,6 +533,16 @@ pub enum StackError {
         message: String,
     },
 
+    /// Agent's upstream inference endpoint surfaced an HTTP failure. Carries
+    /// only the parsed status code and a vetted `'static` reason label, so the
+    /// raw upstream message (URLs, headers, bodies, secrets) never reaches the
+    /// state store or events.
+    #[error("inference endpoint returned {status_code} ({reason_category})")]
+    InferenceRequestFailed {
+        status_code: u16,
+        reason_category: &'static str,
+    },
+
     #[error("agent test failed at {stage}: {reason}")]
     AgentTestFailed { stage: String, reason: String },
 
