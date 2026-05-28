@@ -97,9 +97,22 @@ The `prompt.inference_failed` payload is intentionally sanitized. Only `status_c
 
 ## Logs API
 
-`GET /v1/logs/events` and `acps logs query` return newest-first durable events. Filters include level, kind or kind prefix, source, session id, command id, permission id, time bounds, and keyset cursor.
+`GET /v1/logs/events` and `acps logs query` return newest-first durable events by default. Filters include level, kind or kind prefix, source, session id, command id, permission id, security category, time bounds, sort direction, and keyset cursor. `order=desc` (the default) returns newest-first; `order=asc` returns oldest-first and is the direction used by `acps logs query --follow` for its backfill.
 
-`acps logs tail` follows live WebSocket topics and is not a replacement for the durable event store.
+`acps logs tail` follows live WebSocket topics and is not a replacement for the durable event store. `acps logs query --follow` subscribes to the live `logs` topic, records a durable high-water event, drains matching durable rows through that high-water in ascending pages, then prints matching live frames after it. `--json --follow` emits newline-delimited event objects. The live frame format is set by `EventHub::publish_log_event` in `src/events.rs`.
+
+### Security Categories
+
+The `security_category` filter clusters the flat `security.*` kinds emitted by the runtime into operator-facing buckets. The canonical mapping lives in `src/state/security_category.rs` (`SecurityCategory`):
+
+| Category            | Kinds                                                          |
+| ------------------- | -------------------------------------------------------------- |
+| `rate_limit`        | `security.rate_limited`                                        |
+| `origin_cors`       | `security.cors_origin_denied`, `security.ws_origin_denied`     |
+| `ip_block`          | `security.ip_block_active`, `security.ip_block_applied`        |
+| `oversized_request` | `security.request_oversized`                                   |
+
+Unknown category labels are rejected with a 4xx `invalid_param`.
 
 ## Metrics
 

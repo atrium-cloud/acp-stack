@@ -95,12 +95,20 @@ impl StateStore {
             bindings.push(rusqlite::types::Value::Text(status.to_owned()));
         }
         if let Some(after) = filter.after_id {
-            sql.push_str(
-                " AND (updated_at, id) < (SELECT updated_at, id FROM commands WHERE id = ?)",
-            );
+            match filter.order {
+                super::records::LogOrder::Desc => sql.push_str(
+                    " AND (updated_at, id) < (SELECT updated_at, id FROM commands WHERE id = ?)",
+                ),
+                super::records::LogOrder::Asc => sql.push_str(
+                    " AND (updated_at, id) > (SELECT updated_at, id FROM commands WHERE id = ?)",
+                ),
+            }
             bindings.push(rusqlite::types::Value::Text(after.to_owned()));
         }
-        sql.push_str(" ORDER BY updated_at DESC, id DESC LIMIT ?");
+        let direction = filter.order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY updated_at {direction}, id {direction} LIMIT ?"
+        ));
         bindings.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
         let mut statement = self.connection().prepare(&sql)?;
         let rows =

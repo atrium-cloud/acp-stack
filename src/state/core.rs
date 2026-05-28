@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::events::EventHub;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::sink_outbox;
 
@@ -74,6 +75,14 @@ impl StateStore {
     /// `query_*` / `append_*` methods, not the raw `Connection`.
     pub(super) fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Narrow integration-test hook for concurrent SQLite tests that need a
+    /// non-default busy timeout. Keep this typed instead of exposing the raw
+    /// `Connection`, because rusqlite mutates through `&self`.
+    pub fn set_busy_timeout_for_test(&self, timeout: Duration) -> Result<()> {
+        self.connection.busy_timeout(timeout)?;
+        Ok(())
     }
 
     pub(super) fn event_hub(&self) -> Option<&EventHub> {

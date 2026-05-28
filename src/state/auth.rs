@@ -5,6 +5,7 @@ use rusqlite::{Connection, params};
 
 use super::core::StateStore;
 use super::ids::{current_timestamp, next_auth_failure_id};
+use super::records::LogOrder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthFailure {
@@ -23,6 +24,7 @@ pub struct AuthFailureFilter<'a> {
     pub after_id: Option<&'a str>,
     pub since: Option<&'a str>,
     pub until: Option<&'a str>,
+    pub order: LogOrder,
 }
 
 pub(super) fn row_to_auth_failure(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthFailure> {
@@ -107,12 +109,20 @@ impl StateStore {
             bindings.push(rusqlite::types::Value::Text(until.to_owned()));
         }
         if let Some(after) = filter.after_id {
-            sql.push_str(
-                " AND (created_at, id) < (SELECT created_at, id FROM auth_failures WHERE id = ?)",
-            );
+            match filter.order {
+                LogOrder::Desc => sql.push_str(
+                    " AND (created_at, id) < (SELECT created_at, id FROM auth_failures WHERE id = ?)",
+                ),
+                LogOrder::Asc => sql.push_str(
+                    " AND (created_at, id) > (SELECT created_at, id FROM auth_failures WHERE id = ?)",
+                ),
+            }
             bindings.push(rusqlite::types::Value::Text(after.to_owned()));
         }
-        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        let direction = filter.order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY created_at {direction}, id {direction} LIMIT ?"
+        ));
         bindings.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
         let mut statement = self.connection().prepare(&sql)?;
         let rows = statement.query_map(
