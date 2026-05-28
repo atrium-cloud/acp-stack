@@ -407,6 +407,65 @@ impl Default for CommandsConfig {
     }
 }
 
+// PROMPTS
+
+/// Defaults for the stale-prompt sweeper. Tuned for an idle long-running
+/// agent: 5 minutes without an ACP `session/update` is well past any
+/// reasonable single-token latency, and a 30-second sweep cadence keeps
+/// the worst-case "stuck and still listed as running" window bounded
+/// without thrashing SQLite. Both values are operator-overridable through
+/// `[prompts]` if a deployment streams tokens slowly enough to need a
+/// larger threshold.
+pub const DEFAULT_PROMPTS_STALE_THRESHOLD: &str = "5m";
+pub const DEFAULT_PROMPTS_SWEEP_INTERVAL: &str = "30s";
+
+/// Configuration for the stale-prompt sweeper background task. When no
+/// ACP `session/update` notification has touched a `pending`/`running`
+/// prompt row for `stale_threshold`, the sweeper flips it to terminal
+/// `Stalled` so polling clients always see the row settle. The sweep
+/// runs every `sweep_interval` from `acps serve`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptsConfig {
+    pub stale_threshold: String,
+    pub sweep_interval: String,
+}
+
+impl Default for PromptsConfig {
+    fn default() -> Self {
+        Self {
+            stale_threshold: DEFAULT_PROMPTS_STALE_THRESHOLD.to_owned(),
+            sweep_interval: DEFAULT_PROMPTS_SWEEP_INTERVAL.to_owned(),
+        }
+    }
+}
+
+impl PromptsConfig {
+    /// Parsed `stale_threshold`. Falls back to the schema default rather
+    /// than panicking — validation already rejected unparsable values at
+    /// load time, so this guard only fires for programmatically
+    /// constructed configs that bypass `validate_config`.
+    pub fn effective_stale_threshold(&self) -> std::time::Duration {
+        super::validate::primitives::parse_duration_string(&self.stale_threshold).unwrap_or_else(
+            || {
+                super::validate::primitives::parse_duration_string(DEFAULT_PROMPTS_STALE_THRESHOLD)
+                    .unwrap_or(std::time::Duration::from_secs(300))
+            },
+        )
+    }
+
+    /// Parsed `sweep_interval`. See `effective_stale_threshold` for the
+    /// fallback contract.
+    pub fn effective_sweep_interval(&self) -> std::time::Duration {
+        super::validate::primitives::parse_duration_string(&self.sweep_interval).unwrap_or_else(
+            || {
+                super::validate::primitives::parse_duration_string(DEFAULT_PROMPTS_SWEEP_INTERVAL)
+                    .unwrap_or(std::time::Duration::from_secs(30))
+            },
+        )
+    }
+}
+
 // DEPENDENCIES
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

@@ -176,6 +176,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/014_security_runs.sqlite.sql"),
         postgres: include_str!("../../migrations/014_security_runs.postgres.sql"),
     },
+    Migration {
+        id: 15,
+        name: "prompts_lifecycle_extension",
+        sqlite_file: "015_prompts_lifecycle_extension.sqlite.sql",
+        postgres_file: "015_prompts_lifecycle_extension.postgres.sql",
+        sqlite: include_str!("../../migrations/015_prompts_lifecycle_extension.sqlite.sql"),
+        postgres: include_str!("../../migrations/015_prompts_lifecycle_extension.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including bundled Postgres

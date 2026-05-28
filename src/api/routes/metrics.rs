@@ -21,6 +21,7 @@ pub(crate) struct MetricsSummaryResponse {
     counts: MetricsCountsJson,
     sessions: MetricsSessionsJson,
     turns: MetricsTurnsJson,
+    prompt_failures: MetricsPromptFailuresJson,
     commands: MetricsCommandsJson,
     permissions: MetricsPermissionsJson,
     security: MetricsSecurityJson,
@@ -63,6 +64,22 @@ pub(crate) struct MetricsTurnsJson {
     total: i64,
     by_status: std::collections::BTreeMap<String, i64>,
     average_per_session: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct MetricsPromptFailuresJson {
+    total: i64,
+    inference_5xx: i64,
+    inference_4xx: i64,
+    agent_request: i64,
+    vm: i64,
+    sqlite: i64,
+    daemon: i64,
+    agent_process: i64,
+    stalled: i64,
+    by_class: std::collections::BTreeMap<String, i64>,
+    by_status_code: std::collections::BTreeMap<String, i64>,
+    by_reason_category: std::collections::BTreeMap<String, i64>,
 }
 
 #[derive(Serialize)]
@@ -193,6 +210,20 @@ impl From<crate::state::MetricsSummary> for MetricsSummaryResponse {
                 total: summary.turns.total,
                 by_status: summary.turns.by_status,
                 average_per_session: summary.turns.average_per_session,
+            },
+            prompt_failures: MetricsPromptFailuresJson {
+                total: summary.prompt_failures.total,
+                inference_5xx: summary.prompt_failures.inference_5xx,
+                inference_4xx: summary.prompt_failures.inference_4xx,
+                agent_request: summary.prompt_failures.agent_request,
+                vm: summary.prompt_failures.vm,
+                sqlite: summary.prompt_failures.sqlite,
+                daemon: summary.prompt_failures.daemon,
+                agent_process: summary.prompt_failures.agent_process,
+                stalled: summary.prompt_failures.stalled,
+                by_class: summary.prompt_failures.by_class,
+                by_status_code: summary.prompt_failures.by_status_code,
+                by_reason_category: summary.prompt_failures.by_reason_category,
             },
             commands: MetricsCommandsJson {
                 total: summary.commands.total,

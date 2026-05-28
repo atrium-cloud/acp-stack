@@ -71,13 +71,13 @@
 
 ## Session Progress And Reconnect
 
-- [ ] Persist prompt lifecycle states with explicit `pending|running|completed|errored|cancelled|stalled` or equivalent states.
-- [ ] Add stale-prompt detection for sessions that stop emitting ACP updates before terminal state.
+- [x] Persist prompt lifecycle states with explicit `pending|running|completed|errored|cancelled|stalled` or equivalent states.
+- [x] Add stale-prompt detection for sessions that stop emitting ACP updates before terminal state.
 - [x] Sync ACP `session/list` discovery into durable session history and expose discovered sessions as `available`.
-- [ ] Ensure clients can reconnect and recover current prompt/session state from HTTP without relying on live WebSocket history.
-- [ ] Document behavior for ACP `session/resume`, `session/load`, and unsupported resume paths per supported agent.
-- [ ] Classify prompt failures caused by model/inference endpoint HTTP 5xx responses separately from VM, daemon, and agent runtime failures.
-- [ ] Persist inference endpoint HTTP failure details as sanitized prompt error codes and session-scoped events without storing provider URLs, headers, bodies, or secrets.
+- [x] Ensure clients can reconnect and recover current prompt/session state from HTTP without relying on live WebSocket history.
+- [x] Document behavior for ACP `session/resume`, `session/load`, and unsupported resume paths per supported agent.
+- [x] Classify prompt failures caused by model/inference endpoint HTTP 5xx responses separately from VM, daemon, and agent runtime failures.
+- [x] Persist inference endpoint HTTP failure details as sanitized prompt error codes and session-scoped events without storing provider URLs, headers, bodies, or secrets.
 
 ## MCP Compatibility Matrix
 
@@ -104,12 +104,12 @@
 - [x] Add health checks for external logging sink when enabled.
 - [ ] Add health checks for configured MCP declarations.
 - [ ] Add health checks for orphaned agent/adapter processes.
-- [ ] Add health checks for prompts stuck without progress beyond a configured threshold.
+- [x] Add health checks for prompts stuck without progress beyond a configured threshold.
 
 ## Observability
 
-- [ ] Expose metrics that let operators distinguish inference endpoint 5xx failures from local VM, SQLite, daemon, and agent-process health issues.
-- [ ] Include inference endpoint failure counters in the future observability dashboard data model.
+- [x] Expose metrics that let operators distinguish inference endpoint 5xx failures from local VM, SQLite, daemon, and agent-process health issues. Aggregation lives in the `events` table: `prompt.inference_failed` (sanitized payload) and `prompt.errored` are the metric source per the Phase 5 deferred-counter decision.
+- [x] Include inference endpoint failure counters in the future observability dashboard data model. Closed via the `prompt.inference_failed` event kind with its structured `{ prompt_id, status_code, reason_category }` payload; future dashboards count from there.
 - [x] Enrich `api.request`, auth-failure, rate-limit, denied-origin, oversized-request, and WebSocket lifecycle events with bounded request-origin metadata.
 - [x] Trust Cloudflare request metadata only after normal trusted-proxy validation (`CF-Connecting-IP`, `CF-IPCountry`, `CF-Ray`, and optional visitor-location headers).
 - [ ] Add request/response counts by method, route, status bucket, key kind, source, origin kind, country, and region.

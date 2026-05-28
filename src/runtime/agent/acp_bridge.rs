@@ -45,8 +45,10 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_codec::{enqueue_session_notification, resolve_acp_permission};
+use crate::runtime::agent::inference_failure::{self, Classified};
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::runtime::process_runner::{forward_host_env_tokio, kill_tokio_process_group};
+use crate::state::FailureClass;
 
 // External callers (CLI, supervisor, model_discovery, integration tests) wrote
 // `crate::runtime::agent::acp_bridge::{SessionEventSink, StateStoreSessionSink, session_*}`
@@ -654,17 +656,22 @@ impl AcpBridge {
     }
 
     /// `session/prompt`. Awaits the turn's final response.
+    ///
+    /// On error, runs the inference-failure classifier so upstream HTTP
+    /// failures (5xx, 429, etc.) become a typed `InferenceRequestFailed`
+    /// variant; everything else falls back to `AgentRequestFailed`. The raw
+    /// `err.to_string()` is never persisted: 4xx/5xx paths surface only the
+    /// vetted reason label, and the generic fallback uses a sanitized message
+    /// to avoid leaking URLs / headers / bodies / secrets into the state row.
     pub async fn prompt_session(&self, request: PromptRequest) -> Result<StopReason> {
         let connection = self.connection().await?;
-        let response = connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/prompt",
-                message: err.to_string(),
-            })?;
-        Ok(response.stop_reason)
+        match connection.send_request(request).block_task().await {
+            Ok(response) => Ok(response.stop_reason),
+            Err(err) => {
+                let classified = inference_failure::classify(&err);
+                Err(map_prompt_error(classified))
+            }
+        }
     }
 
     /// `session/cancel` is a fire-and-forget notification.
@@ -743,6 +750,32 @@ impl AcpBridge {
         };
 
         Ok(status.and_then(|s| s.code()))
+    }
+}
+
+/// Translate a classified prompt failure into the appropriate `StackError`
+/// variant. Only the classifier's vetted fields (status code + static reason
+/// label) cross into the error; the raw upstream message is dropped so the
+/// state row carries no URLs / headers / bodies / secrets.
+fn map_prompt_error(classified: Classified) -> StackError {
+    match classified.class {
+        FailureClass::Inference5xx | FailureClass::Inference4xx => match classified.status_code {
+            Some(code) if code != 0 => StackError::InferenceRequestFailed {
+                status_code: code,
+                reason_category: classified.reason_category,
+            },
+            // Defensive fallback: classifier returned an inference class but no
+            // status code. Treat as a generic agent failure rather than
+            // persisting `status_code = 0`, which would be a meaningless row.
+            _ => StackError::AgentRequestFailed {
+                method: "session/prompt",
+                message: "prompt request failed".to_owned(),
+            },
+        },
+        _ => StackError::AgentRequestFailed {
+            method: "session/prompt",
+            message: "prompt request failed".to_owned(),
+        },
     }
 }
 

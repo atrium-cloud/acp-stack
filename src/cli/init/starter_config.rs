@@ -143,6 +143,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
         },
         permissions: Default::default(),
         commands: Default::default(),
+        prompts: Default::default(),
         dependencies: Default::default(),
         mcp: Default::default(),
         acpctl: Default::default(),
