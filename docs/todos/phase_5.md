@@ -119,11 +119,12 @@
 
 ## Security Self-Check History
 
-- [ ] Persist each security self-check run.
-- [ ] Track check status, severity, details, and remediation hint.
-- [ ] Add API route for security check history.
-- [ ] Add `acps security history`.
-- [ ] Add remediation text for key, file permission, origin, CORS, proxy, dependency, and sink findings.
+- [x] Persist each security self-check run.
+- [x] Track check status, severity, details, and remediation hint.
+- [x] Add API route for security check history.
+- [x] Add `acps security history`.
+- [x] Add remediation text for key, file permission, origin, CORS, proxy, and sink findings (every currently-emitted finding code carries a non-empty operator hint; category mapping recorded in `docs/specs/security.md`).
+- [ ] Add a dependency self-check finding with remediation (deps posture is currently exposed via the deps subsystem only; no `deps.*` finding exists yet).
 - [x] Add Cloudflare posture findings for public binds in tunnel mode, missing local trusted proxies, unsafe origins, missing `cloudflared`, absent Cloudflare headers after edge traffic, and direct non-Cloudflare public requests.
 
 ## Initial Release Acceptance
