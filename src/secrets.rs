@@ -107,18 +107,21 @@ impl SecretStore {
         ensure_dirs(home)?;
         let key_path = age_key_path(home);
         let store_path = secret_store_path(home);
+        Self::open_or_create_at_paths(&key_path, &store_path)
+    }
 
+    pub fn open_or_create_at_paths(key_path: &Path, store_path: &Path) -> Result<Self> {
         match (key_path.exists(), store_path.exists()) {
             (true, false) => {
                 return Err(StackError::AgeKeyParse {
-                    path: key_path,
+                    path: key_path.to_path_buf(),
                     reason: "age key exists but secret store ciphertext is missing; \
                              run `acps reset --yes` and re-init to recover",
                 });
             }
             (false, true) => {
                 return Err(StackError::SecretStoreRead {
-                    path: store_path,
+                    path: store_path.to_path_buf(),
                     source: std::io::Error::new(
                         std::io::ErrorKind::NotFound,
                         "age key is missing; the encrypted secret store is unreadable. \
@@ -133,26 +136,26 @@ impl SecretStore {
             // Repair owner-only mode before reading. The age key decrypts every
             // stored API key; tolerating a world-readable identity from an
             // older binary or sloppy manual edit would expose all of them.
-            set_owner_only_file(&key_path)?;
-            load_identity(&key_path)?
+            set_owner_only_file(key_path)?;
+            load_identity(key_path)?
         } else {
-            generate_identity(&key_path)?
+            generate_identity(key_path)?
         };
 
         let secrets = if store_path.exists() {
-            set_owner_only_file(&store_path)?;
-            decrypt_store(&identity, &store_path)?
+            set_owner_only_file(store_path)?;
+            decrypt_store(&identity, store_path)?
         } else {
             let plaintext = StorePlaintext::default();
             let ciphertext = encrypt_plaintext(&identity.to_public(), &plaintext)?;
-            atomic_write_owner_only(&store_path, &ciphertext)?;
+            atomic_write_owner_only(store_path, &ciphertext)?;
             plaintext.secrets
         };
 
         Ok(Self {
             identity,
             secrets,
-            store_path,
+            store_path: store_path.to_path_buf(),
         })
     }
 
@@ -161,20 +164,27 @@ impl SecretStore {
     pub fn open(home: &Path) -> Result<Self> {
         let key_path = age_key_path(home);
         let store_path = secret_store_path(home);
+        Self::open_at_paths(&key_path, &store_path)
+    }
 
+    /// Open an existing store from explicit runtime-managed paths. The daemon
+    /// uses this for health checks because tests and embedded runtimes can pass
+    /// non-default `RuntimePaths` while still keeping the standard `age.key` /
+    /// `secrets.age` filenames beside config and state.
+    pub fn open_at_paths(key_path: &Path, store_path: &Path) -> Result<Self> {
         if key_path.exists() {
-            set_owner_only_file(&key_path)?;
+            set_owner_only_file(key_path)?;
         }
-        let identity = load_identity(&key_path)?;
+        let identity = load_identity(key_path)?;
         if store_path.exists() {
-            set_owner_only_file(&store_path)?;
+            set_owner_only_file(store_path)?;
         }
-        let secrets = decrypt_store(&identity, &store_path)?;
+        let secrets = decrypt_store(&identity, store_path)?;
 
         Ok(Self {
             identity,
             secrets,
-            store_path,
+            store_path: store_path.to_path_buf(),
         })
     }
 

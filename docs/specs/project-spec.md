@@ -60,4 +60,4 @@ Out of scope for the initial release:
 - [ACP bridge](acp/acp-bridge.md)
 - [Agent support](agents/support.md)
 - [Agent provider config](agents/config.md)
-- [MCP example](mcp.md)
+- [MCP compatibility](mcp.md)
