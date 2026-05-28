@@ -13,6 +13,7 @@ pub mod edge;
 pub mod mcp;
 pub mod permissions;
 pub mod primitives;
+pub mod prompts;
 pub mod sources;
 
 use std::collections::HashSet;
@@ -36,6 +37,7 @@ use self::primitives::{
     validate_expected_sha256, validate_no_parent_dir_segments, validate_nonzero,
     validate_optional_config_path, validate_secret_ref_name_value, validate_socket_address,
 };
+use self::prompts::validate_prompts;
 use self::sources::{validate_code_sources, validate_data_sources};
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
@@ -136,6 +138,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     }
     validate_permissions(&config.permissions)?;
     validate_commands(&config.commands)?;
+    validate_prompts(&config.prompts)?;
     validate_trusted_proxies(&config.security.http)?;
     validate_edge(&config.edge)?;
     validate_dependencies(&config.dependencies)?;

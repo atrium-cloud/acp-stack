@@ -81,3 +81,9 @@ id = 14
 name = "security_runs"
 sqlite_file = "014_security_runs.sqlite.sql"
 postgres_file = "014_security_runs.postgres.sql"
+
+[[migration]]
+id = 15
+name = "prompts_lifecycle_extension"
+sqlite_file = "015_prompts_lifecycle_extension.sqlite.sql"
+postgres_file = "015_prompts_lifecycle_extension.postgres.sql"
