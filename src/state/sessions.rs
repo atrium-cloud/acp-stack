@@ -283,12 +283,20 @@ impl StateStore {
             bindings.push(rusqlite::types::Value::Text(status.to_owned()));
         }
         if let Some(after) = filter.after_id {
-            sql.push_str(
-                " AND (updated_at, id) < (SELECT updated_at, id FROM sessions WHERE id = ?)",
-            );
+            match filter.order {
+                super::records::LogOrder::Desc => sql.push_str(
+                    " AND (updated_at, id) < (SELECT updated_at, id FROM sessions WHERE id = ?)",
+                ),
+                super::records::LogOrder::Asc => sql.push_str(
+                    " AND (updated_at, id) > (SELECT updated_at, id FROM sessions WHERE id = ?)",
+                ),
+            }
             bindings.push(rusqlite::types::Value::Text(after.to_owned()));
         }
-        sql.push_str(" ORDER BY updated_at DESC, id DESC LIMIT ?");
+        let direction = filter.order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY updated_at {direction}, id {direction} LIMIT ?"
+        ));
         bindings.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
         let mut statement = self.connection().prepare(&sql)?;
         let rows =
@@ -603,6 +611,7 @@ impl StateStore {
             message: message.to_owned(),
             payload_json: payload_json.to_owned(),
             source: source.to_owned(),
+            session_id: Some(session_id.to_owned()),
         };
 
         self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
@@ -653,7 +662,7 @@ impl StateStore {
                 // pagination across a clock tick.
                 let mut statement = self.connection().prepare(
                     r#"
-                    SELECT e.id, e.created_at, e.level, e.kind, e.message, e.payload_json, e.source
+                    SELECT e.id, e.created_at, e.level, e.kind, e.message, e.payload_json, e.source, e.session_id
                     FROM events e
                     JOIN events cursor ON cursor.id = ?2
                     WHERE e.session_id = ?1
@@ -669,7 +678,7 @@ impl StateStore {
             None => {
                 let mut statement = self.connection().prepare(
                     r#"
-                    SELECT id, created_at, level, kind, message, payload_json, source
+                    SELECT id, created_at, level, kind, message, payload_json, source, session_id
                     FROM events
                     WHERE session_id = ?1
                     ORDER BY created_at ASC, id ASC
@@ -691,7 +700,7 @@ impl StateStore {
         let limit = i64::from(limit);
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, created_at, level, kind, message, payload_json, source
+            SELECT id, created_at, level, kind, message, payload_json, source, session_id
             FROM events
             WHERE session_id = ?1
             ORDER BY created_at DESC, id DESC

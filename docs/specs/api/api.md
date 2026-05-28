@@ -189,17 +189,17 @@ The runtime never invents package-manager commands. Only install actions declare
 | `GET /v1/status/connections` | session | returns active HTTP request count                |
 | `GET /v1/health/live`        | session | process liveness                                 |
 | `GET /v1/health/ready`       | session | subsystem readiness summary; `503` when degraded |
-| `GET /v1/security/check`     | admin   | runs the self-check, persists the run, returns findings |
-| `GET /v1/security/history`   | admin   | lists persisted self-check runs newest-first     |
-| `GET /v1/security/history/{run_id}` | admin | returns a single self-check run with findings |
-| `GET /v1/logs/events`        | session | returns durable event rows                       |
-| `GET /v1/logs/commands`      | session | returns command history                          |
-| `GET /v1/logs/permissions`   | session | returns permission history                       |
-| `GET /v1/logs/security`      | admin   | returns security events                          |
-| `GET /v1/logs/sessions`      | session | returns session-scoped history                   |
-| `GET /v1/metrics/summary`    | session | returns aggregate metrics for a time window      |
+| `GET /v1/security/check`     | admin   | runs the self-check, persists the run, returns findings       |
+| `GET /v1/security/history`   | admin   | lists persisted self-check runs newest-first                  |
+| `GET /v1/security/history/{run_id}` | admin | returns a single self-check run with findings          |
+| `GET /v1/logs/events`        | session | returns durable event rows; supports `category=` and `order=` |
+| `GET /v1/logs/commands`      | session | returns command history; supports `order=`                    |
+| `GET /v1/logs/permissions`   | session | returns permission history; supports `order=`                 |
+| `GET /v1/logs/security`      | admin   | returns security events; `order=` applies to both result streams |
+| `GET /v1/logs/sessions`      | session | returns session-scoped history; supports `order=`             |
+| `GET /v1/metrics/summary`    | session | returns aggregate metrics for a time window                   |
 
-Log query filters include `limit`, `level`, `kind`, `source`, `session_id`, `command_id`, `permission_id`, `since`, `until`, and `after`.
+Log query filters include `limit`, `level`, `kind`, `source`, `session_id`, `command_id`, `permission_id`, `category`, `since`, `until`, `after`, and `order`. `order` accepts `asc` or `desc` (default `desc`). On `/v1/logs/security`, `order` applies to both `auth_failures` and `events`; `category` accepts the security-category labels documented in `docs/specs/state-logging.md` and constrains only the `events` stream.
 
 ## WebSocket
 

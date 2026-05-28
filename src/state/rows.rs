@@ -11,7 +11,7 @@ use crate::error::{Result, StackError};
 use rusqlite::{Connection, params};
 
 use super::events::Event;
-use super::records::LogFilter;
+use super::records::{LogFilter, LogOrder};
 
 pub(super) fn validate_json_payload(connection: &Connection, payload_json: &str) -> Result<()> {
     let is_valid: i64 =
@@ -83,6 +83,21 @@ pub(super) fn push_event_predicates(
         bindings.push(rusqlite::types::Value::Text(permission_id.to_owned()));
         bindings.push(rusqlite::types::Value::Text(permission_id.to_owned()));
     }
+    if let Some(category) = filter.security_category {
+        let kinds = category.kinds();
+        // The kinds list is closed and small; emit an `IN (?, ?, ...)` clause
+        // sized exactly to it so SQLite can evaluate against the kind index
+        // without a temp table.
+        sql.push_str(" AND kind IN (");
+        for (index, kind) in kinds.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('?');
+            bindings.push(rusqlite::types::Value::Text((*kind).to_owned()));
+        }
+        sql.push(')');
+    }
     if let Some(since) = filter.since {
         sql.push_str(" AND created_at >= ?");
         bindings.push(rusqlite::types::Value::Text(since.to_owned()));
@@ -92,7 +107,17 @@ pub(super) fn push_event_predicates(
         bindings.push(rusqlite::types::Value::Text(until.to_owned()));
     }
     if let Some(after) = filter.after_id {
-        sql.push_str(" AND (created_at, id) < (SELECT created_at, id FROM events WHERE id = ?)");
+        // Flip the keyset cursor comparison with sort direction so an ASC walk
+        // advances forward through history while a DESC walk continues to step
+        // backwards. The cursor row itself is excluded by strict inequality.
+        match filter.order {
+            LogOrder::Desc => sql.push_str(
+                " AND (created_at, id) < (SELECT created_at, id FROM events WHERE id = ?)",
+            ),
+            LogOrder::Asc => sql.push_str(
+                " AND (created_at, id) > (SELECT created_at, id FROM events WHERE id = ?)",
+            ),
+        }
         bindings.push(rusqlite::types::Value::Text(after.to_owned()));
     }
 }
