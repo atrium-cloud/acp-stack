@@ -37,13 +37,13 @@
 
 ## Command Output Streaming
 
-- [ ] Improve stdout/stderr chunk framing.
-- [ ] Include stream name, sequence number, timestamp, and command ID in output chunks.
-- [ ] Persist command output chunks durably.
-- [ ] Support command cancellation with final status event.
-- [ ] Ensure WebSocket consumers can resume querying persisted output after disconnect.
-- [ ] Emit periodic running/progress events for long-running commands even when stdout/stderr are quiet.
-- [ ] Persist enough command-progress state for clients to distinguish quiet work from a stalled runtime.
+- [x] Improve stdout/stderr chunk framing.
+- [x] Include stream name, sequence number, timestamp, and command ID in output chunks.
+- [x] Persist command output chunks durably.
+- [x] Support command cancellation with final status event.
+- [x] Ensure WebSocket consumers can resume querying persisted output after disconnect.
+- [x] Emit periodic running/progress events for long-running commands even when stdout/stderr are quiet.
+- [x] Persist enough command-progress state for clients to distinguish quiet work from a stalled runtime.
 
 ## Session Progress And Reconnect
 

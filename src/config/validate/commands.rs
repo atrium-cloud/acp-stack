@@ -18,6 +18,16 @@ pub(crate) fn validate_commands(commands: &CommandsConfig) -> Result<()> {
     parse_duration_string(&commands.cancel_grace).ok_or(StackError::InvalidDurationField {
         field: "commands.cancel_grace",
     })?;
+    let progress_interval = parse_duration_string(&commands.progress_interval).ok_or(
+        StackError::InvalidDurationField {
+            field: "commands.progress_interval",
+        },
+    )?;
+    if progress_interval.is_zero() {
+        return Err(StackError::NonZeroRequired {
+            field: "commands.progress_interval",
+        });
+    }
     if commands.max_output_bytes == 0 {
         return Err(StackError::NonZeroRequired {
             field: "commands.max_output_bytes",

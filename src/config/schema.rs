@@ -386,14 +386,22 @@ pub enum PermissionTimeoutAction {
 
 // COMMANDS
 
+pub const DEFAULT_COMMAND_PROGRESS_INTERVAL: &str = "30s";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandsConfig {
     pub default_timeout: String,
     pub cancel_grace: String,
+    #[serde(default = "default_command_progress_interval")]
+    pub progress_interval: String,
     #[serde(default)]
     pub env_allowlist: Vec<String>,
     pub max_output_bytes: u64,
+}
+
+fn default_command_progress_interval() -> String {
+    DEFAULT_COMMAND_PROGRESS_INTERVAL.to_owned()
 }
 
 impl Default for CommandsConfig {
@@ -401,6 +409,7 @@ impl Default for CommandsConfig {
         Self {
             default_timeout: "10m".to_owned(),
             cancel_grace: "5s".to_owned(),
+            progress_interval: default_command_progress_interval(),
             env_allowlist: Vec::new(),
             max_output_bytes: 1_048_576,
         }
