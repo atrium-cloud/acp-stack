@@ -6,13 +6,16 @@ use crate::fs_util::{
 use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 use crate::state::{StateStore, default_state_path};
+use serde::Serialize;
 
 use super::install::operator_registry_override;
+use crate::cli::core::{OutputFormat, print_json};
 
 /// Result of comparing the installed managed-agent version against upstream.
 /// Carried as a typed enum so the CLI printer and test cases can pattern-match
 /// the four states deterministically.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
 pub(super) enum AgentCheckStatus {
     /// Installed and upstream agree on a non-empty version.
     UpToDate { version: String },
@@ -124,7 +127,7 @@ fn normalize_version(value: &str) -> &str {
         .unwrap_or_else(|| value.trim())
 }
 
-pub(super) fn run_agent_check() -> Result<()> {
+pub(super) fn run_agent_check(output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
@@ -147,27 +150,43 @@ pub(super) fn run_agent_check() -> Result<()> {
     let report = build_agent_check_report(entry, &installed_rows, &resolver);
     let has_failure = agent_check_has_failure(&report);
 
-    println!("agent check: {}", config.agent.id);
+    if output.is_json() {
+        let steps = report
+            .iter()
+            .map(|(step, status)| serde_json::json!({ "step": step, "result": status }))
+            .collect::<Vec<_>>();
+        print_json(&serde_json::json!({
+            "agent": config.agent.id,
+            "ok": !has_failure,
+            "steps": steps,
+        }))?;
+    } else {
+        println!("agent check: {}", config.agent.id);
+    }
     if report.is_empty() {
-        println!(
-            "no installer runs recorded for `{}`; run `acps agent install` first",
-            config.agent.id
-        );
+        if !output.is_json() {
+            println!(
+                "no installer runs recorded for `{}`; run `acps agent install` first",
+                config.agent.id
+            );
+        }
         return Ok(());
     }
-    for (step, status) in &report {
-        match status {
-            AgentCheckStatus::UpToDate { version } => {
-                println!("{step}: up-to-date ({version})");
-            }
-            AgentCheckStatus::Stale { installed, latest } => {
-                println!("{step}: stale (installed {installed}, latest {latest})");
-            }
-            AgentCheckStatus::Unknown { reason } => {
-                println!("{step}: unknown ({reason})");
-            }
-            AgentCheckStatus::NotInstalled => {
-                println!("{step}: not installed");
+    if !output.is_json() {
+        for (step, status) in &report {
+            match status {
+                AgentCheckStatus::UpToDate { version } => {
+                    println!("{step}: up-to-date ({version})");
+                }
+                AgentCheckStatus::Stale { installed, latest } => {
+                    println!("{step}: stale (installed {installed}, latest {latest})");
+                }
+                AgentCheckStatus::Unknown { reason } => {
+                    println!("{step}: unknown ({reason})");
+                }
+                AgentCheckStatus::NotInstalled => {
+                    println!("{step}: not installed");
+                }
             }
         }
     }

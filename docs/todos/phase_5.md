@@ -14,8 +14,8 @@
 - [x] Add generated Cloudflare Tunnel artifact output for `cloudflared` config and systemd/Docker snippets.
 - [ ] Add optional managed Cloudflare provisioning mode using secret refs for Cloudflare API credentials.
 - [x] Improve `acps status` with daemon, agent, workspace, dependency, and sink health.
-- [ ] Add human-readable and JSON output modes for common commands.
-- [ ] Add consistent `--format text|json` support.
+- [x] Add human-readable and JSON output modes for common commands.
+- [x] Add consistent `--format text|json` support.
 - [ ] Add clearer command errors with remediation hints.
 - [ ] Add progress output for long-running installer, dependency, import, and export operations.
 - [ ] Add richer init selection UX for code sources, data sources, MCP presets, custom MCP declarations, and required secrets.
@@ -23,8 +23,8 @@
 - [ ] Add provider/model selection UX on top of the Phase 4 `models.dev` resolver, including clear filtering by available secret refs.
 - [x] Add `acps agent switch` UX with target install preview, compatible provider reuse, secret-ref migration, and model follow-up gating.
 - [ ] Add retry/reporting polish for failed init, dependency, ingestion, and testflight steps.
-- [ ] Add shell completion generation.
-- [ ] Add help examples for common workflows.
+- [x] Add shell completion generation.
+- [x] Add help examples for common workflows.
 
 ## Log Query Polish
 

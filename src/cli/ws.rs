@@ -4,7 +4,9 @@ use crate::fs_util::home_dir;
 use clap::{Args, Subcommand};
 use serde_json::Value;
 
-use super::core::{CliKey, CliMethod, daemon_base_url, daemon_request, open_cli_key};
+use super::core::{
+    CliKey, CliMethod, OutputFormat, daemon_base_url, daemon_request, open_cli_key, print_json,
+};
 
 #[derive(Debug, Subcommand)]
 pub enum WsCommand {
@@ -26,7 +28,7 @@ pub struct WsDisconnectArgs {
     session_id: Vec<String>,
 }
 
-pub(super) fn run_ws_command(command: WsCommand) -> Result<()> {
+pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let key_kind = match command {
@@ -45,12 +47,22 @@ pub(super) fn run_ws_command(command: WsCommand) -> Result<()> {
                 let body =
                     daemon_request(&base_url, CliMethod::Get, "/v1/ws/connections", &key, None)
                         .await?;
-                print_connections(body.get("data").unwrap_or(&body));
+                let data = body.get("data").unwrap_or(&body);
+                if output.is_json() {
+                    print_json(data)?;
+                } else {
+                    print_connections(data);
+                }
             }
             WsCommand::Sessions => {
                 let body = daemon_request(&base_url, CliMethod::Get, "/v1/ws/sessions", &key, None)
                     .await?;
-                print_sessions(body.get("data").unwrap_or(&body));
+                let data = body.get("data").unwrap_or(&body);
+                if output.is_json() {
+                    print_json(data)?;
+                } else {
+                    print_sessions(data);
+                }
             }
             WsCommand::Disconnect(args) => {
                 if args.connection_id.is_empty() && args.session_id.is_empty() {
@@ -76,7 +88,11 @@ pub(super) fn run_ws_command(command: WsCommand) -> Result<()> {
                     .and_then(|data| data.get("requested"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                println!("disconnect_requested: {requested}");
+                if output.is_json() {
+                    print_json(body.get("data").unwrap_or(&body))?;
+                } else {
+                    println!("disconnect_requested: {requested}");
+                }
             }
         }
         Ok(())

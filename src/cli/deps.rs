@@ -11,6 +11,8 @@ use crate::runtime::dependencies::deps_apply::{
 };
 use crate::state::{StateStore, default_state_path};
 
+use super::core::{OutputFormat, print_json};
+
 #[derive(Debug, Subcommand)]
 pub enum DepsCommand {
     /// Print declared dependency status.
@@ -30,16 +32,24 @@ pub struct DepsApplyArgs {
     feature: Option<String>,
 }
 
-pub(super) fn run_deps_command(command: DepsCommand) -> Result<()> {
+pub(super) fn run_deps_command(command: DepsCommand, output: OutputFormat) -> Result<()> {
     match command {
-        DepsCommand::Check => run_check(),
-        DepsCommand::Apply(args) => run_apply(args),
+        DepsCommand::Check => run_check(output),
+        DepsCommand::Apply(args) => run_apply(args, output),
     }
 }
 
-fn run_check() -> Result<()> {
+fn run_check(output: OutputFormat) -> Result<()> {
     let config = Config::load_from_default_path()?;
     let report = crate::runtime::dependencies::deps::check_dependencies(&config);
+    if output.is_json() {
+        print_json(
+            &serde_json::to_value(&report).map_err(|source| StackError::ServeIo {
+                source: std::io::Error::other(format!("serialize deps report: {source}")),
+            })?,
+        )?;
+        return Ok(());
+    }
     if report.dependencies.is_empty() {
         println!("no dependencies declared in [dependencies]");
         return Ok(());
@@ -65,11 +75,17 @@ fn run_check() -> Result<()> {
     Ok(())
 }
 
-fn run_apply(args: DepsApplyArgs) -> Result<()> {
+fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     let config = Config::load_from_default_path()?;
     let candidates = candidates_for(&config, args.feature.as_deref());
     if candidates.is_empty() {
-        if args.feature.is_some() {
+        if output.is_json() {
+            print_json(&serde_json::json!({
+                "candidates": [],
+                "results": [],
+                "feature": args.feature,
+            }))?;
+        } else if args.feature.is_some() {
             println!(
                 "no actionable dependencies match --feature {filter:?}",
                 filter = args.feature.as_deref().unwrap_or(""),
@@ -83,16 +99,24 @@ fn run_apply(args: DepsApplyArgs) -> Result<()> {
     }
 
     let (count, any_system) = summarize_candidates(&candidates);
-    println!("`acps deps apply` will run {count} install action(s):");
-    for candidate in &candidates {
-        println!("  - {}", candidate_summary_line(candidate));
-    }
-    if any_system {
-        println!("WARNING: one or more actions declare scope=system; they require root privilege.");
+    if !output.is_json() {
+        println!("`acps deps apply` will run {count} install action(s):");
+        for candidate in &candidates {
+            println!("  - {}", candidate_summary_line(candidate));
+        }
+        if any_system {
+            println!(
+                "WARNING: one or more actions declare scope=system; they require root privilege."
+            );
+        }
     }
 
     if !confirm(args.yes)? {
-        println!("aborted (no confirmation)");
+        if output.is_json() {
+            print_json(&serde_json::json!({ "aborted": true, "confirmed": false }))?;
+        } else {
+            println!("aborted (no confirmation)");
+        }
         return Ok(());
     }
 
@@ -122,36 +146,39 @@ fn run_apply(args: DepsApplyArgs) -> Result<()> {
     store.migrate()?;
     let shell = &config.workspace.default_shell;
     let report = apply_dependencies(&config, args.feature.as_deref(), Some(&store), shell)?;
-
-    println!("---");
-    print_apply_status_section("before", &report.before);
-    println!("---");
-    println!("results:");
-    for result in &report.results {
-        let line = match &result.outcome {
-            DepApplyOutcome::Installed => format!("installed   {}", result.name),
-            DepApplyOutcome::AlreadyPresent => format!("already     {}", result.name),
-            DepApplyOutcome::PrivilegeRequired { uid } => {
-                format!("privreq     {} (uid={uid}; needs root)", result.name)
-            }
-            DepApplyOutcome::Failed {
-                exit_code,
-                stderr_tail,
-            } => {
-                let code = exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "?".to_owned());
-                format!(
-                    "failed      {} (exit={code}, stderr_tail={tail:?})",
-                    result.name,
-                    tail = stderr_tail,
-                )
-            }
-        };
-        println!("  {line}");
+    if output.is_json() {
+        print_json(&deps_apply_report_json(&report)?)?;
+    } else {
+        println!("---");
+        print_apply_status_section("before", &report.before);
+        println!("---");
+        println!("results:");
+        for result in &report.results {
+            let line = match &result.outcome {
+                DepApplyOutcome::Installed => format!("installed   {}", result.name),
+                DepApplyOutcome::AlreadyPresent => format!("already     {}", result.name),
+                DepApplyOutcome::PrivilegeRequired { uid } => {
+                    format!("privreq     {} (uid={uid}; needs root)", result.name)
+                }
+                DepApplyOutcome::Failed {
+                    exit_code,
+                    stderr_tail,
+                } => {
+                    let code = exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_owned());
+                    format!(
+                        "failed      {} (exit={code}, stderr_tail={tail:?})",
+                        result.name,
+                        tail = stderr_tail,
+                    )
+                }
+            };
+            println!("  {line}");
+        }
+        println!("---");
+        print_apply_status_section("after", &report.after);
     }
-    println!("---");
-    print_apply_status_section("after", &report.after);
 
     // Surface any non-success as a non-zero exit so automation can
     // gate on it. Without this, `acps deps apply --yes` in a CI
@@ -183,6 +210,50 @@ fn run_apply(args: DepsApplyArgs) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn deps_apply_report_json(
+    report: &crate::runtime::dependencies::deps_apply::DepsApplyReport,
+) -> Result<serde_json::Value> {
+    let before = serde_json::to_value(&report.before).map_err(|source| StackError::ServeIo {
+        source: std::io::Error::other(format!("serialize deps apply before status: {source}")),
+    })?;
+    let after = serde_json::to_value(&report.after).map_err(|source| StackError::ServeIo {
+        source: std::io::Error::other(format!("serialize deps apply after status: {source}")),
+    })?;
+    let results = report
+        .results
+        .iter()
+        .map(|result| {
+            let outcome = match &result.outcome {
+                DepApplyOutcome::Installed => serde_json::json!({ "kind": "installed" }),
+                DepApplyOutcome::AlreadyPresent => {
+                    serde_json::json!({ "kind": "alreadypresent" })
+                }
+                DepApplyOutcome::PrivilegeRequired { uid } => {
+                    serde_json::json!({ "kind": "privilegerequired", "uid": uid })
+                }
+                DepApplyOutcome::Failed { exit_code, .. } => {
+                    serde_json::json!({
+                        "kind": "failed",
+                        "exit_code": exit_code,
+                        "stderr_tail_omitted": true,
+                    })
+                }
+            };
+            serde_json::json!({
+                "name": &result.name,
+                "outcome": outcome,
+                "post_status": &result.post_status,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(serde_json::json!({
+        "before": before,
+        "after": after,
+        "results": results,
+    }))
 }
 
 fn print_apply_status_section(

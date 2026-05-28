@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::str::FromStr;
 
-use super::core::{CliKey, daemon_base_url, open_cli_key};
+use super::core::{CliKey, OutputFormatChoice, daemon_base_url, open_cli_key};
 
 // === CONSTANTS ===
 
@@ -163,14 +163,18 @@ impl Watermark {
     }
 }
 
-pub(super) fn run_logs_command(command: LogsCommand) -> Result<()> {
+pub(super) fn run_logs_command(command: LogsCommand, output: OutputFormatChoice) -> Result<()> {
     match command {
-        LogsCommand::Query(args) => run_logs_query(*args),
-        LogsCommand::Tail(args) => run_logs_tail(args),
+        LogsCommand::Query(args) => run_logs_query(*args, output),
+        LogsCommand::Tail(args) => {
+            output.reject_json("logs tail")?;
+            run_logs_tail(args)
+        }
     }
 }
 
-fn run_logs_query(args: LogsQueryArgs) -> Result<()> {
+fn run_logs_query(args: LogsQueryArgs, output: OutputFormatChoice) -> Result<()> {
+    let format = output.resolve_json_alias(args.json, "json")?;
     let security_category = match args.category.as_deref() {
         None => None,
         Some(value) => Some(SecurityCategory::from_str(value)?),
@@ -228,7 +232,7 @@ fn run_logs_query(args: LogsQueryArgs) -> Result<()> {
             &store,
             live_filter,
             args.limit,
-            args.json,
+            format.is_json(),
         ));
     }
 
@@ -252,7 +256,7 @@ fn run_logs_query(args: LogsQueryArgs) -> Result<()> {
 
     let next_cursor = next_cursor_from(&events, args.limit);
 
-    if args.json {
+    if format.is_json() {
         let output = LogsQueryOutput {
             events: events.iter().map(EventJson::from).collect(),
             next_cursor: next_cursor.clone(),
