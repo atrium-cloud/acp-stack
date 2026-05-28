@@ -7,6 +7,8 @@ use base64::Engine;
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
+use super::core::{OutputFormat, print_json};
+
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     Validate(ConfigValidateArgs),
@@ -42,36 +44,65 @@ pub struct ConfigImportArgs {
     dry_run: bool,
 }
 
-pub(super) fn run_config_command(command: ConfigCommand) -> Result<()> {
+pub(super) fn run_config_command(
+    command: ConfigCommand,
+    output_format: OutputFormat,
+) -> Result<()> {
     match command {
         ConfigCommand::Validate(args) => {
+            let path = args.path.clone();
             load_config(args.path)?;
-            println!("config is valid");
+            if output_format.is_json() {
+                print_json(&serde_json::json!({
+                    "valid": true,
+                    "path": path.map(|value| value.display().to_string()),
+                }))?;
+            } else {
+                println!("config is valid");
+            }
             Ok(())
         }
         ConfigCommand::Export(args) => {
             let config = Config::load_from_default_path()?;
             let canonical = config.to_canonical_toml()?;
-            let output = if args.base64 {
+            let rendered = if args.base64 {
                 base64::engine::general_purpose::STANDARD.encode(canonical)
             } else {
                 canonical
             };
 
             if let Some(path) = args.output {
-                std::fs::write(&path, output)
-                    .map_err(|source| StackError::ConfigWrite { path, source })?;
+                std::fs::write(&path, &rendered).map_err(|source| StackError::ConfigWrite {
+                    path: path.clone(),
+                    source,
+                })?;
+                if output_format.is_json() {
+                    print_json(&serde_json::json!({
+                        "format": if args.base64 { "base64" } else { "toml" },
+                        "output_path": path.display().to_string(),
+                        "bytes": rendered.len(),
+                    }))?;
+                }
             } else {
-                println!("{output}");
+                if output_format.is_json() {
+                    let bytes = rendered.len();
+                    print_json(&serde_json::json!({
+                        "format": if args.base64 { "base64" } else { "toml" },
+                        "value": rendered,
+                        "bytes": bytes,
+                    }))?;
+                } else {
+                    println!("{rendered}");
+                }
             }
 
             Ok(())
         }
-        ConfigCommand::Import(args) => run_config_import(args),
+        ConfigCommand::Import(args) => run_config_import(args, output_format),
     }
 }
 
-fn run_config_import(args: ConfigImportArgs) -> Result<()> {
+fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()> {
     let raw_toml = match (args.path.as_deref(), args.base64.as_deref()) {
         (None, None) => {
             return Err(StackError::MissingField {
@@ -115,19 +146,31 @@ fn run_config_import(args: ConfigImportArgs) -> Result<()> {
     let target = config::default_config_path()?;
 
     if args.dry_run {
-        println!("import dry-run complete");
-        println!("  config_version: {}", config.config_version);
-        println!("  canonical TOML size: {} bytes", canonical.len());
-        println!("  input size: {} bytes", raw_toml.len());
         let auth_refs_ok = if target.exists() {
             let current = Config::load_from_path(&target)?;
             config::compare_auth_refs(&current.auth, &config.auth).is_ok()
         } else {
             true
         };
-        println!("  auth refs unchanged: {auth_refs_ok}");
-        println!("  would write to: {}", target.display());
-        println!("  target exists: {}", target.exists());
+        if output.is_json() {
+            print_json(&serde_json::json!({
+                "dry_run": true,
+                "config_version": config.config_version,
+                "canonical_toml_bytes": canonical.len(),
+                "input_bytes": raw_toml.len(),
+                "auth_refs_unchanged": auth_refs_ok,
+                "target_path": target.display().to_string(),
+                "target_exists": target.exists(),
+            }))?;
+        } else {
+            println!("import dry-run complete");
+            println!("  config_version: {}", config.config_version);
+            println!("  canonical TOML size: {} bytes", canonical.len());
+            println!("  input size: {} bytes", raw_toml.len());
+            println!("  auth refs unchanged: {auth_refs_ok}");
+            println!("  would write to: {}", target.display());
+            println!("  target exists: {}", target.exists());
+        }
         return Ok(());
     }
 
@@ -143,10 +186,28 @@ fn run_config_import(args: ConfigImportArgs) -> Result<()> {
         let current = Config::load_from_path(&target)?;
         config::compare_auth_refs(&current.auth, &config.auth)?;
         atomic_write_owner_only(&target, canonical.as_bytes())?;
-        println!("imported config (replaced): {}", target.display());
+        if output.is_json() {
+            print_json(&serde_json::json!({
+                "imported": true,
+                "replaced": true,
+                "path": target.display().to_string(),
+                "bytes": canonical.len(),
+            }))?;
+        } else {
+            println!("imported config (replaced): {}", target.display());
+        }
     } else {
         write_new_file_owner_only(&target, canonical.as_bytes())?;
-        println!("imported config: {}", target.display());
+        if output.is_json() {
+            print_json(&serde_json::json!({
+                "imported": true,
+                "replaced": false,
+                "path": target.display().to_string(),
+                "bytes": canonical.len(),
+            }))?;
+        } else {
+            println!("imported config: {}", target.display());
+        }
     }
 
     Ok(())
@@ -168,12 +229,15 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD
             .encode("x".repeat(config::IMPORT_SIZE_LIMIT + 1));
 
-        let error = run_config_import(ConfigImportArgs {
-            path: None,
-            base64: Some(encoded),
-            force: false,
-            dry_run: true,
-        })
+        let error = run_config_import(
+            ConfigImportArgs {
+                path: None,
+                base64: Some(encoded),
+                force: false,
+                dry_run: true,
+            },
+            OutputFormat::Text,
+        )
         .expect_err("decoded payload over the import limit must fail");
 
         assert!(matches!(

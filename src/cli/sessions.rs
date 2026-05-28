@@ -6,7 +6,8 @@ use chrono::{SecondsFormat, Utc};
 use clap::{Args, Subcommand};
 
 use super::core::{
-    CliKey, CliMethod, daemon_base_url, daemon_request, encode_path_segment, open_cli_key,
+    CliKey, CliMethod, OutputFormat, daemon_base_url, daemon_request, encode_path_segment,
+    open_cli_key, print_json,
 };
 
 const DEFAULT_SESSION_LIST_LIMIT: u32 = 50;
@@ -81,7 +82,7 @@ pub struct SessionsTargetArgs {
     session_id: String,
 }
 
-pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
+pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let session_key = open_cli_key(&config, &home, CliKey::Session)?;
@@ -104,7 +105,13 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
                 if truncated {
                     sessions.truncate(args.limit as usize);
                 }
-                if sessions.is_empty() && !truncated {
+                if output.is_json() {
+                    print_json(&serde_json::json!({
+                        "sessions": sessions,
+                        "truncated": truncated,
+                        "limit": args.limit,
+                    }))?;
+                } else if sessions.is_empty() && !truncated {
                     println!("(no sessions)");
                 } else {
                     for session in sessions {
@@ -132,7 +139,9 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
-                if sessions.is_empty() {
+                if output.is_json() {
+                    print_json(&serde_json::json!({ "sessions": sessions }))?;
+                } else if sessions.is_empty() {
                     println!("No active session.");
                 } else {
                     for session in sessions {
@@ -175,21 +184,32 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
                 .await?;
                 let id = response["data"]["id"].as_str().unwrap_or("?");
                 let cwd = response["data"]["cwd"].as_str().unwrap_or("");
-                println!("session: {id}");
-                if !cwd.is_empty() {
-                    println!("cwd: {cwd}");
+                if output.is_json() {
+                    print_json(response.get("data").unwrap_or(&response))?;
+                } else {
+                    println!("session: {id}");
+                    if !cwd.is_empty() {
+                        println!("cwd: {cwd}");
+                    }
                 }
                 Ok(())
             }
             SessionsCommand::Prompt(args) => {
-                run_sessions_prompt(&base_url, &session_key, args).await
+                run_sessions_prompt(&base_url, &session_key, args, output).await
             }
             SessionsCommand::Cancel(args) => {
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}/cancel");
                 daemon_request(&base_url, CliMethod::Post, &path, &session_key, None).await?;
-                println!("session cancel: requested");
-                println!("session: {}", args.session_id);
+                if output.is_json() {
+                    print_json(&serde_json::json!({
+                        "status": "requested",
+                        "session_id": args.session_id,
+                    }))?;
+                } else {
+                    println!("session cancel: requested");
+                    println!("session: {}", args.session_id);
+                }
                 Ok(())
             }
             SessionsCommand::Close(args) => {
@@ -198,8 +218,12 @@ pub(super) fn run_sessions_command(command: SessionsCommand) -> Result<()> {
                 let response =
                     daemon_request(&base_url, CliMethod::Delete, &path, &session_key, None).await?;
                 let status = response["data"]["status"].as_str().unwrap_or("closed");
-                println!("session close: {status}");
-                println!("session: {}", args.session_id);
+                if output.is_json() {
+                    print_json(response.get("data").unwrap_or(&response))?;
+                } else {
+                    println!("session close: {status}");
+                    println!("session: {}", args.session_id);
+                }
                 Ok(())
             }
         }
@@ -306,6 +330,7 @@ async fn run_sessions_prompt(
     base_url: &str,
     session_key: &str,
     args: SessionsPromptArgs,
+    output: OutputFormat,
 ) -> Result<()> {
     let prompt_text = match args.text {
         Some(text) => text,
@@ -328,8 +353,15 @@ async fn run_sessions_prompt(
         })?
         .to_owned();
     if args.no_wait {
-        println!("prompt: pending");
-        println!("prompt_id: {prompt_id}");
+        if output.is_json() {
+            print_json(&serde_json::json!({
+                "status": "pending",
+                "prompt_id": prompt_id,
+            }))?;
+        } else {
+            println!("prompt: pending");
+            println!("prompt_id: {prompt_id}");
+        }
         return Ok(());
     }
 
@@ -352,9 +384,13 @@ async fn run_sessions_prompt(
         match status {
             "completed" => {
                 let stop = poll["data"]["stop_reason"].as_str().unwrap_or("end_turn");
-                println!("prompt: completed");
-                println!("prompt_id: {prompt_id}");
-                println!("stop_reason: {stop}");
+                if output.is_json() {
+                    print_json(poll.get("data").unwrap_or(&poll))?;
+                } else {
+                    println!("prompt: completed");
+                    println!("prompt_id: {prompt_id}");
+                    println!("stop_reason: {stop}");
+                }
                 return Ok(());
             }
             "errored" => {
@@ -366,8 +402,12 @@ async fn run_sessions_prompt(
                 });
             }
             "cancelled" => {
-                println!("prompt: cancelled");
-                println!("prompt_id: {prompt_id}");
+                if output.is_json() {
+                    print_json(poll.get("data").unwrap_or(&poll))?;
+                } else {
+                    println!("prompt: cancelled");
+                    println!("prompt_id: {prompt_id}");
+                }
                 return Ok(());
             }
             _ => {

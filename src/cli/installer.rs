@@ -13,6 +13,8 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only};
 use crate::state::{InstallerRun, StateStore, default_state_path};
 
+use super::core::{OutputFormat, print_json};
+
 const DEFAULT_HISTORY_LIMIT: u32 = 20;
 const MAX_HISTORY_LIMIT: u32 = 500;
 
@@ -32,13 +34,13 @@ pub struct InstallerHistoryArgs {
     limit: u32,
 }
 
-pub(super) fn run_installer_command(command: InstallerCommand) -> Result<()> {
+pub(super) fn run_installer_command(command: InstallerCommand, output: OutputFormat) -> Result<()> {
     match command {
-        InstallerCommand::History(args) => run_installer_history(args),
+        InstallerCommand::History(args) => run_installer_history(args, output),
     }
 }
 
-fn run_installer_history(args: InstallerHistoryArgs) -> Result<()> {
+fn run_installer_history(args: InstallerHistoryArgs, output: OutputFormat) -> Result<()> {
     if args.limit == 0 || args.limit > MAX_HISTORY_LIMIT {
         return Err(StackError::InvalidParam {
             field: "limit",
@@ -54,6 +56,28 @@ fn run_installer_history(args: InstallerHistoryArgs) -> Result<()> {
     store.migrate()?;
 
     let rows = store.query_installer_runs_filtered(args.agent.as_deref(), args.limit)?;
+    if output.is_json() {
+        let rows_json = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "id": &row.id,
+                    "agent_id": &row.agent_id,
+                    "started_at": &row.started_at,
+                    "finished_at": &row.finished_at,
+                    "status": &row.status,
+                    "exit_status": row.exit_status,
+                    "step": &row.step,
+                    "version": &row.version,
+                    "log_dir": &row.log_dir,
+                    "apply_run_id": &row.apply_run_id,
+                    "duration_ms": duration_ms(row),
+                })
+            })
+            .collect::<Vec<_>>();
+        print_json(&serde_json::json!({ "runs": rows_json }))?;
+        return Ok(());
+    }
     if rows.is_empty() {
         if let Some(agent) = args.agent.as_deref() {
             println!("no installer runs recorded for agent `{agent}`");

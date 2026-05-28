@@ -8,8 +8,9 @@ use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::state::{StateStore, default_state_path};
 
 use super::install::operator_registry_override;
+use crate::cli::core::{OutputFormat, print_json};
 
-pub(super) fn run_agent_status() -> Result<()> {
+pub(super) fn run_agent_status(output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
@@ -22,13 +23,72 @@ pub(super) fn run_agent_status() -> Result<()> {
     store.migrate()?;
     set_owner_only_file(&state_path)?;
 
+    let installed_versions = store.latest_successful_installer_runs_for_agent(&config.agent.id)?;
+    let capabilities_record = store.latest_agent_capabilities(&config.agent.id)?;
+    let lifecycle = store.query_agent_lifecycle(10)?;
+
+    if output.is_json() {
+        let params = agent_status_params(&config, registry_entry)
+            .into_iter()
+            .map(|param| match param {
+                AgentStatusParamState::Configured(name, value) => {
+                    serde_json::json!({ "name": name, "state": "configured", "value": value })
+                }
+                AgentStatusParamState::Unset(name) => {
+                    serde_json::json!({ "name": name, "state": "unset" })
+                }
+                AgentStatusParamState::Unavailable(name) => {
+                    serde_json::json!({ "name": name, "state": "unavailable" })
+                }
+            })
+            .collect::<Vec<_>>();
+        let installed_versions = installed_versions
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "step": &row.step,
+                    "label": installed_version_label(&row.step),
+                    "version": &row.version,
+                    "started_at": &row.started_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        let capabilities = capabilities_record.as_ref().map(|record| {
+            serde_json::json!({
+                "agent_id": &record.agent_id,
+                "captured_at": &record.captured_at,
+                "capabilities": serde_json::from_str::<serde_json::Value>(&record.capabilities_json)
+                    .unwrap_or_else(|_| serde_json::Value::String(record.capabilities_json.clone())),
+            })
+        });
+        let lifecycle = lifecycle
+            .iter()
+            .map(|event| {
+                serde_json::json!({
+                    "id": &event.id,
+                    "created_at": &event.created_at,
+                    "event_kind": &event.event_kind,
+                    "message": &event.message,
+                })
+            })
+            .collect::<Vec<_>>();
+        print_json(&serde_json::json!({
+            "agent": config.agent.id,
+            "command": config.agent.command,
+            "params": params,
+            "installed_versions": installed_versions,
+            "latest_capabilities": capabilities,
+            "recent_lifecycle": lifecycle,
+        }))?;
+        return Ok(());
+    }
+
     println!("agent: {}", config.agent.id);
     print_agent_status_params(&config, registry_entry);
-    let installed_versions = store.latest_successful_installer_runs_for_agent(&config.agent.id)?;
     print_installed_versions(&installed_versions);
     println!("command: {}", config.agent.command);
 
-    match store.latest_agent_capabilities(&config.agent.id)? {
+    match capabilities_record {
         Some(record) => {
             if let Ok(capabilities) = serde_json::from_str::<
                 crate::runtime::agent::acp_bridge::AgentCapabilitiesDto,
@@ -42,7 +102,6 @@ pub(super) fn run_agent_status() -> Result<()> {
         None => println!("latest capabilities: none recorded yet"),
     }
 
-    let lifecycle = store.query_agent_lifecycle(10)?;
     if lifecycle.is_empty() {
         println!("recent lifecycle: (no rows)");
     } else {

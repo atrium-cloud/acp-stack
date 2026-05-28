@@ -3,7 +3,9 @@ use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use clap::{Args, Subcommand};
 
-use super::core::{CliKey, CliMethod, daemon_base_url, daemon_request, open_cli_key};
+use super::core::{
+    CliKey, CliMethod, OutputFormat, daemon_base_url, daemon_request, open_cli_key, print_json,
+};
 
 #[derive(Debug, Subcommand)]
 pub enum MetricsCommand {
@@ -22,7 +24,7 @@ pub struct MetricsSummaryArgs {
     until: Option<String>,
 }
 
-pub(super) fn run_metrics_command(command: MetricsCommand) -> Result<()> {
+pub(super) fn run_metrics_command(command: MetricsCommand, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let session_key = open_cli_key(&config, &home, CliKey::Session)?;
@@ -51,12 +53,14 @@ pub(super) fn run_metrics_command(command: MetricsCommand) -> Result<()> {
                 };
                 let body =
                     daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
-                // Pretty-print: full JSON is sufficient for the operator; the
-                // shape is documented and stable.
                 if let Some(data) = body.get("data") {
-                    let rendered =
-                        serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
-                    println!("{rendered}");
+                    if output.is_json() {
+                        print_json(data)?;
+                    } else {
+                        let rendered =
+                            serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+                        println!("{rendered}");
+                    }
                 } else {
                     println!("{body}");
                 }

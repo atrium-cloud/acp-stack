@@ -4,7 +4,10 @@ use crate::fs_util::home_dir;
 use clap::{Args, Subcommand};
 use serde_json::Value;
 
-use super::core::{CliKey, CliMethod, daemon_base_url, daemon_request, open_cli_key};
+use super::core::{
+    CliKey, CliMethod, OutputFormatChoice, daemon_base_url, daemon_request, open_cli_key,
+    print_json,
+};
 
 const DEFAULT_HISTORY_LIMIT: u32 = 20;
 const MAX_HISTORY_LIMIT: u32 = 500;
@@ -41,7 +44,20 @@ pub struct SecurityShowArgs {
     json: bool,
 }
 
-pub(super) fn run_security_command(command: SecurityCommand) -> Result<()> {
+pub(super) fn run_security_command(
+    command: SecurityCommand,
+    output: OutputFormatChoice,
+) -> Result<()> {
+    match &command {
+        SecurityCommand::Check => {}
+        SecurityCommand::History(args) => {
+            output.resolve_json_alias(args.json, "json")?;
+        }
+        SecurityCommand::Show(args) => {
+            output.resolve_json_alias(args.json, "json")?;
+        }
+    }
+
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let admin_key = open_cli_key(&config, &home, CliKey::Admin)?;
@@ -53,6 +69,7 @@ pub(super) fn run_security_command(command: SecurityCommand) -> Result<()> {
     runtime.block_on(async move {
         match command {
             SecurityCommand::Check => {
+                let format = output.effective();
                 let body = daemon_request(
                     &base_url,
                     CliMethod::Get,
@@ -61,20 +78,30 @@ pub(super) fn run_security_command(command: SecurityCommand) -> Result<()> {
                     None,
                 )
                 .await?;
-                if let Some(data) = body.get("data") {
+                if format.is_json() {
+                    print_json(body.get("data").unwrap_or(&body))?;
+                } else if let Some(data) = body.get("data") {
                     format_security(data);
                 } else {
                     println!("{body}");
                 }
                 Ok(())
             }
-            SecurityCommand::History(args) => run_history(&base_url, &admin_key, args).await,
-            SecurityCommand::Show(args) => run_show(&base_url, &admin_key, args).await,
+            SecurityCommand::History(args) => {
+                run_history(&base_url, &admin_key, args, output).await
+            }
+            SecurityCommand::Show(args) => run_show(&base_url, &admin_key, args, output).await,
         }
     })
 }
 
-async fn run_history(base_url: &str, admin_key: &str, args: SecurityHistoryArgs) -> Result<()> {
+async fn run_history(
+    base_url: &str,
+    admin_key: &str,
+    args: SecurityHistoryArgs,
+    output: OutputFormatChoice,
+) -> Result<()> {
+    let format = output.resolve_json_alias(args.json, "json")?;
     if args.limit == 0 || args.limit > MAX_HISTORY_LIMIT {
         return Err(StackError::InvalidParam {
             field: "limit",
@@ -91,27 +118,27 @@ async fn run_history(base_url: &str, admin_key: &str, args: SecurityHistoryArgs)
     }
     let body = daemon_request(base_url, CliMethod::Get, &path, admin_key, None).await?;
     let data = body.get("data").unwrap_or(&body);
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
-        );
+    if format.is_json() {
+        print_json(data)?;
         return Ok(());
     }
     print_history_table(data);
     Ok(())
 }
 
-async fn run_show(base_url: &str, admin_key: &str, args: SecurityShowArgs) -> Result<()> {
+async fn run_show(
+    base_url: &str,
+    admin_key: &str,
+    args: SecurityShowArgs,
+    output: OutputFormatChoice,
+) -> Result<()> {
+    let format = output.resolve_json_alias(args.json, "json")?;
     validate_run_id(&args.run_id, "run_id")?;
     let path = format!("/v1/security/history/{}", args.run_id);
     let body = daemon_request(base_url, CliMethod::Get, &path, admin_key, None).await?;
     let data = body.get("data").unwrap_or(&body);
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
-        );
+    if format.is_json() {
+        print_json(data)?;
         return Ok(());
     }
     format_show(data);

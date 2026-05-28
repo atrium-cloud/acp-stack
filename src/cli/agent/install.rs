@@ -11,9 +11,13 @@ use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 
-use crate::cli::core::daemon_base_url;
+use crate::cli::core::{OutputFormat, daemon_base_url, print_json};
 
-pub(super) fn run_agent_daemon_post(path: &'static str, label: &'static str) -> Result<()> {
+pub(super) fn run_agent_daemon_post(
+    path: &'static str,
+    label: &'static str,
+    output: OutputFormat,
+) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let store = SecretStore::open(&home)?;
@@ -24,12 +28,16 @@ pub(super) fn run_agent_daemon_post(path: &'static str, label: &'static str) -> 
         .build()
         .map_err(|source| StackError::ServeIo { source })?;
     let body = runtime.block_on(post_agent_daemon(&base_url, path, &admin_key))?;
-    if label == "start" {
+    if output.is_json() {
+        print_json(body.get("data").unwrap_or(&body))?;
+        return Ok(());
+    }
+    if label == "start" || label == "restart" {
         let pid = body["data"]["pid"]
             .as_u64()
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "unknown".to_owned());
-        println!("agent start: running");
+        println!("agent {label}: running");
         println!("pid: {pid}");
     } else {
         let exit_status = body["data"]["exit_status"]
@@ -67,7 +75,7 @@ async fn post_agent_daemon(
     })
 }
 
-pub(super) fn run_agent_install() -> Result<()> {
+pub(super) fn run_agent_install(output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
 
@@ -117,9 +125,17 @@ pub(super) fn run_agent_install() -> Result<()> {
         )?
     };
 
-    println!("agent install: {}", outcome.label());
-    println!("path: {}", outcome.path().display());
-    println!("sha256: {}", outcome.sha256());
+    if output.is_json() {
+        print_json(&serde_json::json!({
+            "status": outcome.label(),
+            "path": outcome.path().display().to_string(),
+            "sha256": outcome.sha256(),
+        }))?;
+    } else {
+        println!("agent install: {}", outcome.label());
+        println!("path: {}", outcome.path().display());
+        println!("sha256: {}", outcome.sha256());
+    }
     Ok(())
 }
 
