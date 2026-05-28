@@ -119,7 +119,7 @@ acps sessions close <session-id>
 
 `acps status` validates local config and state, prints workspace and agent status, and probes daemon readiness when the daemon is reachable.
 
-`acps logs query` reads durable events. Filters include level, kind or kind prefix, source, session id, command id, permission id, time bounds, and cursor.
+`acps logs query` reads durable events. Filters include level, kind or kind prefix, source, session id, command id, permission id, security category, time bounds, and cursor. `--order <asc|desc>` flips sort direction (default `desc`). `--json` emits the `{ events, next_cursor }` envelope to stdout and suppresses the human "more rows" hint. `--category <rate_limit|origin_cors|ip_block|oversized_request>` scopes to one security category. `--follow` subscribes to the daemon's `logs` WebSocket topic, drains matching durable backlog in ascending pages, then continues with live events. With `--json --follow`, stdout is newline-delimited `EventJson` objects rather than the non-follow envelope.
 
 `acps logs tail` opens a WebSocket subscription to the running daemon.
 

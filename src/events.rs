@@ -151,11 +151,34 @@ impl EventHub {
 
     /// Fan out every `events` row on the `logs` topic so `acps logs tail` and
     /// any other generic log consumer can see the same stream the SQLite
-    /// query routes serve. Payload mirrors `Event` rather than parsing
-    /// `payload_json`, so a malformed payload anywhere upstream still reaches
-    /// subscribers verbatim instead of being dropped on the floor.
+    /// query routes serve. `payload_json` was validated by
+    /// `validate_json_payload` before write, so a parse failure here means
+    /// downstream corruption — we keep the wire shape stable (Null payload)
+    /// and surface the anomaly via `tracing::warn!` rather than swallowing it.
+    /// `session_id` is included only when the row was scoped via
+    /// `append_session_event_with_source`; absence means a global write.
     pub fn publish_log_event(&self, event: &Event) {
-        let data: Value = serde_json::from_str(&event.payload_json).unwrap_or(Value::Null);
+        let data: Value = match serde_json::from_str(&event.payload_json) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    event_id = %event.id,
+                    %error,
+                    "publish_log_event: payload_json failed to parse after validation; \
+                     emitting Null payload to keep wire shape stable"
+                );
+                Value::Null
+            }
+        };
+        let mut data_object = serde_json::Map::new();
+        data_object.insert("level".to_owned(), Value::String(event.level.clone()));
+        data_object.insert("kind".to_owned(), Value::String(event.kind.clone()));
+        data_object.insert("source".to_owned(), Value::String(event.source.clone()));
+        data_object.insert("message".to_owned(), Value::String(event.message.clone()));
+        data_object.insert("payload".to_owned(), data);
+        if let Some(session_id) = event.session_id.as_ref() {
+            data_object.insert("session_id".to_owned(), Value::String(session_id.clone()));
+        }
         self.publish(LiveEvent {
             event_type: "event",
             id: event.id.clone(),
@@ -163,12 +186,7 @@ impl EventHub {
             created_at: event.created_at.clone(),
             payload: json!({
                 "kind": event.kind,
-                "data": {
-                    "level": event.level,
-                    "kind": event.kind,
-                    "message": event.message,
-                    "payload": data,
-                },
+                "data": Value::Object(data_object),
             }),
         });
     }
@@ -187,6 +205,7 @@ mod tests {
             message: String::new(),
             payload_json: "{}".to_owned(),
             source: "system".to_owned(),
+            session_id: None,
         }
     }
 

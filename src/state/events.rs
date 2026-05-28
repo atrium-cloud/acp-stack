@@ -37,6 +37,12 @@ pub struct Event {
     /// Origin label (`system`, `api`, `acp`, `command`, `permission`, `cli`,
     /// `local`). Added in migration 007; pre-007 rows default to `system`.
     pub source: String,
+    /// Session scope when written via `append_session_event_with_source`. The
+    /// `events.session_id` column has existed since migration 004; rows from
+    /// unscoped `append_event` / `append_event_with_source` leave it `None`.
+    /// `LogFilter::matches` and `GET /v1/logs/events?session_id=` both rely on
+    /// this column being projected into the struct.
+    pub session_id: Option<String>,
 }
 
 pub(super) fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
@@ -48,6 +54,7 @@ pub(super) fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         message: row.get(4)?,
         payload_json: row.get(5)?,
         source: row.get(6)?,
+        session_id: row.get(7)?,
     })
 }
 
@@ -82,6 +89,7 @@ impl StateStore {
             message: message.to_owned(),
             payload_json: payload_json.to_owned(),
             source: source.to_owned(),
+            session_id: None,
         };
 
         self.persist_with_outbox("events", &event.id, &event.created_at, |conn| {
@@ -117,11 +125,14 @@ impl StateStore {
     /// direction.
     pub fn query_events(&self, filter: LogFilter<'_>) -> Result<Vec<Event>> {
         let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source FROM events WHERE 1=1",
+            "SELECT id, created_at, level, kind, message, payload_json, source, session_id FROM events WHERE 1=1",
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
         push_event_predicates(&mut sql, &mut bindings, &filter);
-        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        let direction = filter.order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY created_at {direction}, id {direction} LIMIT ?"
+        ));
         bindings.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
         let mut statement = self.connection().prepare(&sql)?;
         let rows =
@@ -134,7 +145,7 @@ impl StateStore {
     /// `GET /v1/logs/permissions`.
     pub fn query_permission_events(&self, mut filter: LogFilter<'_>) -> Result<Vec<Event>> {
         let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source FROM events \
+            "SELECT id, created_at, level, kind, message, payload_json, source, session_id FROM events \
              WHERE (kind LIKE 'permission.%' OR kind LIKE 'permissions.%')",
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
@@ -152,7 +163,10 @@ impl StateStore {
             filter
         };
         push_event_predicates(&mut sql, &mut bindings, &filter_for_pushers);
-        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        let direction = filter.order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY created_at {direction}, id {direction} LIMIT ?"
+        ));
         bindings.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
         let mut statement = self.connection().prepare(&sql)?;
         let rows =
@@ -165,12 +179,15 @@ impl StateStore {
     /// the dedicated `auth_failures` table.
     pub fn query_security_events(&self, filter: LogFilter<'_>) -> Result<Vec<Event>> {
         let mut sql = String::from(
-            "SELECT id, created_at, level, kind, message, payload_json, source FROM events \
+            "SELECT id, created_at, level, kind, message, payload_json, source, session_id FROM events \
              WHERE kind LIKE 'security.%'",
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
         push_event_predicates(&mut sql, &mut bindings, &filter);
-        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+        let direction = filter.order.sql_keyword();
+        sql.push_str(&format!(
+            " ORDER BY created_at {direction}, id {direction} LIMIT ?"
+        ));
         bindings.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
         let mut statement = self.connection().prepare(&sql)?;
         let rows =

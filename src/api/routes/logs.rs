@@ -1,15 +1,22 @@
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
-use crate::state::{AuthFailureFilter, EventFilter};
+use crate::state::{AuthFailureFilter, EventFilter, LogOrder, SecurityCategory};
+
+// === CONSTANTS ===
 
 /// Per-request cap on `GET /v1/logs/events?limit=`. An authenticated session
 /// could otherwise request billions of rows and turn a log query into a
 /// memory-pressure attack. Operators with longer-tail queries should page.
 pub(super) const MAX_LOGS_LIMIT: u32 = 1000;
+
+/// Accepted operator-facing values for the `order=` query parameter.
+const ORDER_ASC: &str = "asc";
+const ORDER_DESC: &str = "desc";
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -22,9 +29,11 @@ pub(crate) struct LogsEventsParams {
     session_id: Option<String>,
     command_id: Option<String>,
     permission_id: Option<String>,
+    category: Option<String>,
     since: Option<String>,
     until: Option<String>,
     after: Option<String>,
+    order: Option<String>,
 }
 
 pub(super) fn default_logs_limit() -> u32 {
@@ -39,6 +48,34 @@ pub(super) fn split_kind_filter(kind: Option<&str>) -> (Option<&str>, Option<&st
         Some(k) if k.ends_with('.') => (None, Some(k)),
         Some(k) => (Some(k), None),
         None => (None, None),
+    }
+}
+
+/// Parse the `?order=` query parameter. Absent value defaults to `Desc` to
+/// preserve the pre-existing newest-first contract; unknown labels surface as
+/// 4xx so clients learn about typos instead of silently getting the default.
+pub(super) fn parse_order(raw: Option<&str>) -> Result<LogOrder, StackError> {
+    match raw {
+        None => Ok(LogOrder::Desc),
+        Some(value) => match value {
+            ORDER_DESC => Ok(LogOrder::Desc),
+            ORDER_ASC => Ok(LogOrder::Asc),
+            other => Err(StackError::InvalidParam {
+                field: "order",
+                reason: format!("expected `{ORDER_ASC}` or `{ORDER_DESC}`; got `{other}`"),
+            }),
+        },
+    }
+}
+
+/// Parse the `?category=` query parameter when present, returning `None` when
+/// absent so callers can leave the filter unconstrained.
+pub(super) fn parse_security_category(
+    raw: Option<&str>,
+) -> Result<Option<SecurityCategory>, StackError> {
+    match raw {
+        None => Ok(None),
+        Some(value) => SecurityCategory::from_str(value).map(Some),
     }
 }
 
@@ -79,6 +116,8 @@ pub(crate) async fn logs_events_handler(
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
+    let order = parse_order(params.order.as_deref())?;
+    let security_category = parse_security_category(params.category.as_deref())?;
     let store = state.state.lock().await;
     let events = store.query_events(EventFilter {
         limit,
@@ -89,9 +128,11 @@ pub(crate) async fn logs_events_handler(
         session_id: params.session_id.as_deref(),
         command_id: params.command_id.as_deref(),
         permission_id: params.permission_id.as_deref(),
+        security_category,
         since: params.since.as_deref(),
         until: params.until.as_deref(),
         after_id: params.after.as_deref(),
+        order,
     })?;
     drop(store);
     let next_cursor = paging_cursor(&events, limit);
@@ -165,6 +206,7 @@ pub(crate) struct LogsSessionsParams {
     until: Option<String>,
     status: Option<String>,
     after: Option<String>,
+    order: Option<String>,
 }
 
 pub(crate) async fn logs_sessions_handler(
@@ -172,6 +214,7 @@ pub(crate) async fn logs_sessions_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsSessionsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let order = parse_order(params.order.as_deref())?;
     let store = state.state.lock().await;
     let sessions = store.query_sessions(crate::state::SessionFilter {
         limit,
@@ -179,6 +222,7 @@ pub(crate) async fn logs_sessions_handler(
         until: params.until.as_deref(),
         status: params.status.as_deref(),
         after_id: params.after.as_deref(),
+        order,
     })?;
     drop(store);
     let next_cursor = paging_cursor(&sessions, limit);
@@ -212,6 +256,7 @@ pub(crate) struct LogsCommandsParams {
     until: Option<String>,
     status: Option<String>,
     after: Option<String>,
+    order: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -235,6 +280,7 @@ pub(crate) async fn logs_commands_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsCommandsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let order = parse_order(params.order.as_deref())?;
     let store = state.state.lock().await;
     let commands = store.query_commands(crate::state::CommandFilter {
         limit,
@@ -242,6 +288,7 @@ pub(crate) async fn logs_commands_handler(
         until: params.until.as_deref(),
         status: params.status.as_deref(),
         after_id: params.after.as_deref(),
+        order,
     })?;
     drop(store);
     let next_cursor = paging_cursor(&commands, limit);
@@ -272,6 +319,7 @@ pub(crate) struct LogsPermissionsParams {
     until: Option<String>,
     after: Option<String>,
     permission_id: Option<String>,
+    order: Option<String>,
 }
 
 pub(crate) async fn logs_permissions_handler(
@@ -280,6 +328,7 @@ pub(crate) async fn logs_permissions_handler(
 ) -> std::result::Result<ApiSuccess<LogsEventsResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let (kind_exact, kind_prefix) = split_kind_filter(params.kind.as_deref());
+    let order = parse_order(params.order.as_deref())?;
     let store = state.state.lock().await;
     let events = store.query_permission_events(EventFilter {
         limit,
@@ -290,9 +339,11 @@ pub(crate) async fn logs_permissions_handler(
         session_id: None,
         command_id: None,
         permission_id: params.permission_id.as_deref(),
+        security_category: None,
         since: params.since.as_deref(),
         until: params.until.as_deref(),
         after_id: params.after.as_deref(),
+        order,
     })?;
     drop(store);
     let next_cursor = paging_cursor(&events, limit);
@@ -321,6 +372,8 @@ pub(crate) struct LogsSecurityParams {
     after: Option<String>,
     auth_failures_after: Option<String>,
     events_after: Option<String>,
+    category: Option<String>,
+    order: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -339,11 +392,17 @@ struct AuthFailureJson {
 /// with `security.*` (rate-limit hits, IP blocks, denied origins, oversized
 /// requests, etc.). Two independent streams keep their existing schemas;
 /// clients merge them on `created_at` for a unified timeline.
+///
+/// `category=` filters only the events stream (the rate_limit / origin_cors /
+/// ip_block / oversized_request buckets are properties of the events table
+/// only; auth_failures has its own reason taxonomy via its dedicated columns).
 pub(crate) async fn logs_security_handler(
     Query(params): Query<LogsSecurityParams>,
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<LogsSecurityResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
+    let order = parse_order(params.order.as_deref())?;
+    let security_category = parse_security_category(params.category.as_deref())?;
     let auth_failures_after = params
         .auth_failures_after
         .as_deref()
@@ -355,12 +414,15 @@ pub(crate) async fn logs_security_handler(
         since: params.since.as_deref(),
         until: params.until.as_deref(),
         after_id: auth_failures_after,
+        order,
     })?;
     let security_events = store.query_security_events(EventFilter {
         limit,
         since: params.since.as_deref(),
         until: params.until.as_deref(),
         after_id: events_after,
+        security_category,
+        order,
         ..EventFilter::default()
     })?;
     drop(store);

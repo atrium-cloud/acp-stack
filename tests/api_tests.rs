@@ -523,6 +523,113 @@ async fn logs_events_pagination_cursor_advances_page() {
 }
 
 #[tokio::test]
+async fn logs_events_category_filters_security_kinds_via_route() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_event("warn", "security.cors_origin_denied", "denied", "{}")
+            .expect("seed cors");
+        guard
+            .append_event("warn", "security.ws_origin_denied", "denied", "{}")
+            .expect("seed ws cors");
+        guard
+            .append_event("warn", "security.rate_limited", "rate", "{}")
+            .expect("seed rate");
+    }
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?category=origin_cors&limit=10",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let events = body["data"]["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 2, "only origin_cors kinds must match");
+    for event in events {
+        let kind = event["kind"].as_str().expect("kind");
+        assert!(
+            kind == "security.cors_origin_denied" || kind == "security.ws_origin_denied",
+            "unexpected kind: {kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn logs_events_order_asc_returns_oldest_first_via_route() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        for index in 0..3 {
+            guard
+                .append_event("info", "test.ordered", &format!("row-{index}"), "{}")
+                .expect("seed");
+        }
+    }
+    let first = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?kind=test.ordered&order=asc&limit=2",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let first_events = first["data"]["events"].as_array().expect("events");
+    assert_eq!(first_events.len(), 2);
+    assert_eq!(first_events[0]["message"], "row-0");
+    assert_eq!(first_events[1]["message"], "row-1");
+    let next_cursor = first["data"]["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_owned();
+
+    let second = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?kind=test.ordered&order=asc&limit=2&after={next_cursor}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let second_events = second["data"]["events"].as_array().expect("events");
+    assert_eq!(second_events.len(), 1);
+    assert_eq!(second_events[0]["message"], "row-2");
+}
+
+#[tokio::test]
+async fn logs_events_invalid_category_returns_400() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/events?category=nonsense",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("category"),
+        "error message should mention `category`: {message}"
+    );
+}
+
+#[tokio::test]
 async fn api_request_middleware_records_event_with_status_and_duration() {
     let harness = ServerHarness::spawn().await;
     let response = reqwest::Client::new()
@@ -1782,6 +1889,54 @@ async fn logs_security_pages_auth_failures_and_events_independently() {
         first_event_id,
         "event cursor should advance security events"
     );
+}
+
+#[tokio::test]
+async fn logs_security_order_asc_applies_to_auth_failures_and_events() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        guard
+            .append_auth_failure("unknown", "missing", None, Some("/v1/a"), "{}")
+            .expect("append auth failure");
+        guard
+            .append_auth_failure("unknown", "invalid", None, Some("/v1/b"), "{}")
+            .expect("append auth failure");
+        guard
+            .append_event_with_source("warn", "security.first", "api", "", "{}")
+            .expect("append security event");
+        guard
+            .append_event_with_source("warn", "security.second", "api", "", "{}")
+            .expect("append security event");
+    }
+
+    let body: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/logs/security?limit=10&order=asc",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let auth_reasons = body["data"]["auth_failures"]
+        .as_array()
+        .expect("auth failures")
+        .iter()
+        .map(|row| row["reason"].as_str().expect("reason"))
+        .collect::<Vec<_>>();
+    assert_eq!(auth_reasons, ["missing", "invalid"]);
+
+    let event_kinds = body["data"]["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|row| row["kind"].as_str().expect("kind"))
+        .collect::<Vec<_>>();
+    assert_eq!(event_kinds, ["security.first", "security.second"]);
 }
 
 #[tokio::test]
