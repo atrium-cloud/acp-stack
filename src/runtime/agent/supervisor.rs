@@ -40,6 +40,16 @@ use std::time::{Duration, Instant};
 /// next attempted ACP send.
 const PROMPT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
+/// Small fixed delay before an `on-crash` restart. This keeps a fast-crashing
+/// harness from tight-looping while preserving the current single-retry
+/// restart-policy shape (`never` vs `on-crash`).
+const AGENT_CRASH_RESTART_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Poll cadence for child-process exit detection. The ACP SDK task can remain
+/// parked waiting for orderly shutdown after stdio EOF, so the supervisor also
+/// observes the subprocess directly.
+const AGENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 use agent_client_protocol::schema::{
     ContentBlock, McpServer, PromptRequest, SessionId as AcpSessionId, StopReason,
 };
@@ -54,8 +64,9 @@ use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AgentCapabilitiesDto, AgentSessionConfigCategory, AgentSessionModelSelection,
-    SessionEventSink, StateStoreSessionSink, resolve_command_path, session_config_id_for_value,
+    AcpBridge, AcpBridgeExit, AcpBridgeExitReason, AgentCapabilitiesDto,
+    AgentSessionConfigCategory, AgentSessionModelSelection, SessionEventSink,
+    StateStoreSessionSink, resolve_command_path, session_config_id_for_value,
     session_model_selection_for_value,
 };
 use crate::secrets::SecretStore;
@@ -218,14 +229,31 @@ struct PromptHandle {
 /// shutdown). Methods are async because handlers may await across the
 /// initialize handshake while holding state.
 pub struct AgentSupervisor {
-    state: TokioMutex<AgentState>,
-    capabilities: RwLock<Option<AgentCapabilitiesDto>>,
-    last_pid: RwLock<Option<u32>>,
+    state: Arc<TokioMutex<AgentState>>,
+    capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
+    last_pid: Arc<RwLock<Option<u32>>>,
     /// In-flight prompt registry. Each entry is a fire-and-forget background
     /// task plus its cancellation token. We never block on these from
     /// session-tier handlers — the durable `prompts` row is the source of
     /// truth for clients polling status.
-    prompts: TokioMutex<HashMap<String, PromptHandle>>,
+    prompts: Arc<TokioMutex<HashMap<String, PromptHandle>>>,
+}
+
+#[derive(Clone)]
+struct SupervisorShared {
+    state: Arc<TokioMutex<AgentState>>,
+    capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
+    last_pid: Arc<RwLock<Option<u32>>>,
+}
+
+#[derive(Clone)]
+struct RestartContext {
+    agent: AgentConfig,
+    workspace_root: String,
+    env: HashMap<String, String>,
+    state_store: Arc<TokioMutex<StateStore>>,
+    event_hub: EventHub,
+    permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
 }
 
 impl Default for AgentSupervisor {
@@ -237,10 +265,18 @@ impl Default for AgentSupervisor {
 impl AgentSupervisor {
     pub fn new() -> Self {
         Self {
-            state: TokioMutex::new(AgentState::Stopped),
-            capabilities: RwLock::new(None),
-            last_pid: RwLock::new(None),
-            prompts: TokioMutex::new(HashMap::new()),
+            state: Arc::new(TokioMutex::new(AgentState::Stopped)),
+            capabilities: Arc::new(RwLock::new(None)),
+            last_pid: Arc::new(RwLock::new(None)),
+            prompts: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+
+    fn shared(&self) -> SupervisorShared {
+        SupervisorShared {
+            state: Arc::clone(&self.state),
+            capabilities: Arc::clone(&self.capabilities),
+            last_pid: Arc::clone(&self.last_pid),
         }
     }
 
@@ -289,16 +325,28 @@ impl AgentSupervisor {
             }
         }
 
+        let restart_context = RestartContext {
+            agent: agent.clone(),
+            workspace_root: workspace_root.to_owned(),
+            env: env.clone(),
+            state_store: state.clone(),
+            event_hub: event_hub.clone(),
+            permissions: permissions.clone(),
+        };
         match self
             .do_start(agent, workspace_root, env, state, event_hub, permissions)
             .await
         {
             Ok((capabilities, bridge)) => {
+                let pid = bridge.pid();
+                let bridge = Arc::new(bridge);
                 {
                     let mut guard = self.state.lock().await;
-                    *guard = AgentState::Running(Arc::new(bridge));
+                    *guard = AgentState::Running(Arc::clone(&bridge));
                 }
                 *self.capabilities.write().await = Some(capabilities.clone());
+                *self.last_pid.write().await = pid;
+                spawn_bridge_exit_monitor(self.shared(), bridge, restart_context);
                 Ok(capabilities)
             }
             Err(err) => {
@@ -327,118 +375,7 @@ impl AgentSupervisor {
         event_hub: EventHub,
         permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
-        let cwd = resolve_agent_cwd(agent, workspace_root);
-
-        // Enforce the optional integrity guard BEFORE spawning. The installer
-        // already hashes `[agent.install].creates`, but `[agent].command` may
-        // resolve to a different binary (different path, or replaced on
-        // disk between install and start). If `expected_sha256` is
-        // configured, hash the resolved command — relative to the same cwd
-        // that will be used for spawn — and refuse to start on mismatch.
-        if let Some(expected) = agent.expected_sha256.as_deref() {
-            verify_agent_binary_sha256(&agent.command, &cwd, expected)?;
-        }
-
-        let starting_data = json!({
-            "agent_id": agent.id,
-            "command": agent.command,
-            "adapter": agent.adapter,
-        });
-        let starting_payload = starting_data.to_string();
-        let starting_row = {
-            let guard = state.lock().await;
-            guard.append_agent_lifecycle(
-                "agent.starting",
-                "starting acp agent",
-                &starting_payload,
-            )?
-        };
-        event_hub.publish_agent_event(
-            &starting_row.id,
-            &starting_row.created_at,
-            "agent.starting",
-            starting_data,
-        );
-
-        let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(state.clone()));
-        let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions).await {
-            Ok(bridge) => bridge,
-            Err(err) => {
-                let failure_data = json!({
-                    "agent_id": agent.id,
-                    "reason": err.to_string(),
-                });
-                let failure_payload = failure_data.to_string();
-                let row_result = {
-                    let guard = state.lock().await;
-                    guard.append_agent_lifecycle(
-                        "agent.spawn_failed",
-                        "agent spawn failed",
-                        &failure_payload,
-                    )
-                };
-                if let Ok(row) = row_result {
-                    event_hub.publish_agent_event(
-                        &row.id,
-                        &row.created_at,
-                        "agent.spawn_failed",
-                        failure_data,
-                    );
-                }
-                return Err(err);
-            }
-        };
-
-        let capabilities = bridge.capabilities().clone();
-        let pid = bridge.pid();
-        let caps_json = capabilities.to_json()?;
-
-        // Persist capabilities and the started event AFTER the bridge is
-        // live. If any write fails, shut the bridge down before returning
-        // so a failed start never leaks the child.
-        let started_data = json!({
-            "agent_id": agent.id,
-            "pid": pid,
-            "adapter": agent.adapter,
-        });
-        let started_row_result: Result<crate::state::AgentLifecycleEvent> = {
-            let guard = state.lock().await;
-            (|| {
-                guard.upsert_agent_capabilities(&agent.id, &caps_json)?;
-                let started_payload = started_data.to_string();
-                let row = guard.append_agent_lifecycle(
-                    "agent.started",
-                    "agent initialized",
-                    &started_payload,
-                )?;
-                Ok(row)
-            })()
-        };
-        let persist_result: Result<()> = match started_row_result {
-            Ok(row) => {
-                event_hub.publish_agent_event(
-                    &row.id,
-                    &row.created_at,
-                    "agent.started",
-                    started_data,
-                );
-                Ok(())
-            }
-            Err(err) => Err(err),
-        };
-
-        if let Err(err) = persist_result {
-            if let Err(shutdown_err) = bridge.shutdown().await {
-                tracing::warn!(
-                    error = %shutdown_err,
-                    "agent bridge shutdown after persist failure also failed"
-                );
-            }
-            return Err(err);
-        }
-
-        *self.last_pid.write().await = pid;
-        Ok((capabilities, bridge))
+        spawn_agent_bridge(agent, workspace_root, env, state, event_hub, permissions).await
     }
 
     /// Tear down the running agent. Returns the agent's exit status if
@@ -1049,6 +986,308 @@ impl AgentSupervisor {
         let mut prompts = self.prompts.lock().await;
         prompts.retain(|_, handle| !handle.join.is_finished());
     }
+}
+
+async fn spawn_agent_bridge(
+    agent: &AgentConfig,
+    workspace_root: &str,
+    env: HashMap<String, String>,
+    state: &Arc<TokioMutex<StateStore>>,
+    event_hub: EventHub,
+    permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
+) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
+    let cwd = resolve_agent_cwd(agent, workspace_root);
+
+    // Enforce the optional integrity guard BEFORE spawning. The installer
+    // already hashes `[agent.install].creates`, but `[agent].command` may
+    // resolve to a different binary (different path, or replaced on disk
+    // between install and start).
+    if let Some(expected) = agent.expected_sha256.as_deref() {
+        verify_agent_binary_sha256(&agent.command, &cwd, expected)?;
+    }
+
+    append_and_publish_agent_lifecycle(
+        state,
+        &event_hub,
+        "agent.starting",
+        "starting acp agent",
+        json!({
+            "agent_id": agent.id,
+            "command": agent.command,
+            "adapter": agent.adapter,
+        }),
+    )
+    .await?;
+
+    let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(state.clone()));
+    let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions).await {
+        Ok(bridge) => bridge,
+        Err(err) => {
+            let data = json!({
+                "agent_id": agent.id,
+                "reason": err.to_string(),
+            });
+            if let Err(persist_err) = append_and_publish_agent_lifecycle(
+                state,
+                &event_hub,
+                "agent.spawn_failed",
+                "agent spawn failed",
+                data,
+            )
+            .await
+            {
+                tracing::warn!(error = %persist_err, "failed to record agent.spawn_failed lifecycle row");
+            }
+            return Err(err);
+        }
+    };
+
+    let capabilities = bridge.capabilities().clone();
+    let pid = bridge.pid();
+    let caps_json = capabilities.to_json()?;
+
+    let started_data = json!({
+        "agent_id": agent.id,
+        "pid": pid,
+        "adapter": agent.adapter,
+    });
+    let started_row_result: Result<crate::state::AgentLifecycleEvent> = {
+        let guard = state.lock().await;
+        (|| {
+            guard.upsert_agent_capabilities(&agent.id, &caps_json)?;
+            guard.append_agent_lifecycle(
+                "agent.started",
+                "agent initialized",
+                &started_data.to_string(),
+            )
+        })()
+    };
+    match started_row_result {
+        Ok(row) => {
+            event_hub.publish_agent_event(&row.id, &row.created_at, "agent.started", started_data);
+        }
+        Err(err) => {
+            if let Err(shutdown_err) = bridge.shutdown().await {
+                tracing::warn!(
+                    error = %shutdown_err,
+                    "agent bridge shutdown after persist failure also failed"
+                );
+            }
+            return Err(err);
+        }
+    }
+
+    Ok((capabilities, bridge))
+}
+
+fn spawn_bridge_exit_monitor(
+    shared: SupervisorShared,
+    bridge: Arc<AcpBridge>,
+    restart_context: RestartContext,
+) {
+    tokio::spawn(async move {
+        if let Err(err) = monitor_bridge_exit(shared, bridge, restart_context).await {
+            tracing::warn!(error = %err, "agent supervisor: bridge exit monitor failed");
+        }
+    });
+}
+
+async fn monitor_bridge_exit(
+    shared: SupervisorShared,
+    bridge: Arc<AcpBridge>,
+    restart_context: RestartContext,
+) -> Result<()> {
+    let Some(exit) = wait_for_bridge_exit(&bridge).await else {
+        return Ok(());
+    };
+    if exit.planned {
+        return Ok(());
+    }
+
+    let was_current_running_bridge = {
+        let mut guard = shared.state.lock().await;
+        match &*guard {
+            AgentState::Running(current) if Arc::ptr_eq(current, &bridge) => {
+                *guard = AgentState::Stopped;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !was_current_running_bridge {
+        return Ok(());
+    }
+    *shared.last_pid.write().await = None;
+
+    let exit_status = match bridge.shutdown().await {
+        Ok(status) => status,
+        Err(err) => {
+            tracing::warn!(error = %err, "agent supervisor: failed to reap crashed agent bridge");
+            None
+        }
+    };
+    let restart_policy = restart_context.agent.restart.as_str();
+    append_and_publish_agent_lifecycle(
+        &restart_context.state_store,
+        &restart_context.event_hub,
+        "agent.exited",
+        "agent exited unexpectedly",
+        bridge_exit_payload(
+            &restart_context.agent.id,
+            restart_policy,
+            &exit,
+            exit_status,
+        ),
+    )
+    .await?;
+
+    if restart_policy != "on-crash" {
+        append_and_publish_agent_lifecycle(
+            &restart_context.state_store,
+            &restart_context.event_hub,
+            "agent.restart_skipped",
+            "agent restart skipped",
+            json!({
+                "agent_id": restart_context.agent.id,
+                "restart": restart_policy,
+                "reason": "restart policy is not on-crash",
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let backoff_ms = u64::try_from(AGENT_CRASH_RESTART_BACKOFF.as_millis()).unwrap_or(u64::MAX);
+    append_and_publish_agent_lifecycle(
+        &restart_context.state_store,
+        &restart_context.event_hub,
+        "agent.restart_scheduled",
+        "agent restart scheduled",
+        json!({
+            "agent_id": restart_context.agent.id,
+            "restart": restart_policy,
+            "backoff_ms": backoff_ms,
+        }),
+    )
+    .await?;
+    tokio::time::sleep(AGENT_CRASH_RESTART_BACKOFF).await;
+
+    {
+        let mut guard = shared.state.lock().await;
+        match &*guard {
+            AgentState::Stopped => {
+                *guard = AgentState::Starting;
+            }
+            AgentState::Starting | AgentState::Running(_) | AgentState::Stopping => {
+                tracing::debug!(
+                    agent_id = %restart_context.agent.id,
+                    "agent supervisor: automatic restart abandoned because state changed"
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    match spawn_agent_bridge(
+        &restart_context.agent,
+        &restart_context.workspace_root,
+        restart_context.env.clone(),
+        &restart_context.state_store,
+        restart_context.event_hub.clone(),
+        restart_context.permissions.clone(),
+    )
+    .await
+    {
+        Ok((capabilities, new_bridge)) => {
+            let pid = new_bridge.pid();
+            let new_bridge = Arc::new(new_bridge);
+            {
+                let mut guard = shared.state.lock().await;
+                *guard = AgentState::Running(Arc::clone(&new_bridge));
+            }
+            *shared.capabilities.write().await = Some(capabilities);
+            *shared.last_pid.write().await = pid;
+            spawn_bridge_exit_monitor(shared, new_bridge, restart_context);
+        }
+        Err(err) => {
+            {
+                let mut guard = shared.state.lock().await;
+                *guard = AgentState::Stopped;
+            }
+            *shared.last_pid.write().await = None;
+            append_and_publish_agent_lifecycle(
+                &restart_context.state_store,
+                &restart_context.event_hub,
+                "agent.restart_failed",
+                "agent restart failed",
+                json!({
+                    "agent_id": restart_context.agent.id,
+                    "reason": err.to_string(),
+                }),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn wait_for_bridge_exit(bridge: &AcpBridge) -> Option<AcpBridgeExit> {
+    let exit_rx = bridge.subscribe_exit();
+    loop {
+        if let Some(exit) = exit_rx.borrow().clone() {
+            return Some(exit);
+        }
+        match bridge.try_wait_child().await {
+            Ok(Some(exit_status)) => {
+                return Some(AcpBridgeExit {
+                    pid: bridge.pid(),
+                    planned: bridge.planned_shutdown(),
+                    reason: AcpBridgeExitReason::ProcessExited,
+                    message: None,
+                    exit_status: Some(exit_status),
+                });
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "agent supervisor: child exit poll failed");
+            }
+        }
+        tokio::time::sleep(AGENT_EXIT_POLL_INTERVAL).await;
+    }
+}
+
+fn bridge_exit_payload(
+    agent_id: &str,
+    restart_policy: &str,
+    exit: &AcpBridgeExit,
+    exit_status: Option<i32>,
+) -> Value {
+    json!({
+        "agent_id": agent_id,
+        "pid": exit.pid,
+        "planned": exit.planned,
+        "reason": exit.reason.as_str(),
+        "message": exit.message,
+        "exit_status": exit.exit_status.or(exit_status),
+        "restart": restart_policy,
+    })
+}
+
+async fn append_and_publish_agent_lifecycle(
+    state: &Arc<TokioMutex<StateStore>>,
+    event_hub: &EventHub,
+    event_kind: &str,
+    message: &str,
+    data: Value,
+) -> Result<()> {
+    let payload = data.to_string();
+    let row = {
+        let guard = state.lock().await;
+        guard.append_agent_lifecycle(event_kind, message, &payload)?
+    };
+    event_hub.publish_agent_event(&row.id, &row.created_at, event_kind, data);
+    Ok(())
 }
 
 enum Outcome {
