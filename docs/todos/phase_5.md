@@ -57,16 +57,16 @@
 
 ## MCP Compatibility Matrix
 
-- [ ] Define compatibility matrix format.
-- [ ] Include curated MCP preset compatibility notes.
-- [ ] Document tested stdio MCP server behavior.
-- [ ] Document tested HTTP MCP server behavior.
-- [ ] Include Slack MCP compatibility notes.
-- [ ] Include Linear MCP compatibility notes.
-- [ ] Include generic HTTP MCP compatibility notes.
-- [ ] Document whether MCP declarations are runtime-wide or session-scoped in the initial release.
-- [ ] Record per-session MCP as future/unsupported unless added deliberately.
-- [ ] Record known unsupported MCP features and workarounds.
+- [x] Define compatibility matrix format.
+- [x] Include curated MCP preset compatibility notes.
+- [x] Document tested stdio MCP server behavior.
+- [x] Document tested HTTP MCP server behavior.
+- [x] Include Slack MCP compatibility notes.
+- [x] Include Linear MCP compatibility notes.
+- [x] Include generic HTTP MCP compatibility notes.
+- [x] Document whether MCP declarations are runtime-wide or session-scoped in the initial release.
+- [x] Record per-session MCP as future/unsupported unless added deliberately.
+- [x] Record known unsupported MCP features and workarounds.
 - [x] Add a centralized agent skills catalog after identifying trusted official sources.
 
 ## Operational Health
@@ -78,7 +78,7 @@
 - [x] Add health checks for SQLite access.
 - [x] Add health checks for workspace access.
 - [x] Add health checks for external logging sink when enabled.
-- [ ] Add health checks for configured MCP declarations.
+- [x] Add health checks for configured MCP declarations.
 - [ ] Add health checks for orphaned agent/adapter processes.
 - [x] Add health checks for prompts stuck without progress beyond a configured threshold.
 
@@ -100,7 +100,7 @@
 - [x] Add API route for security check history.
 - [x] Add `acps security history`.
 - [x] Add remediation text for key, file permission, origin, CORS, proxy, and sink findings (every currently-emitted finding code carries a non-empty operator hint; category mapping recorded in `docs/specs/security.md`).
-- [ ] Add a dependency self-check finding with remediation (deps posture is currently exposed via the deps subsystem only; no `deps.*` finding exists yet).
+- [x] Add a dependency self-check finding with remediation.
 - [x] Add Cloudflare posture findings for public binds in tunnel mode, missing local trusted proxies, unsafe origins, missing `cloudflared`, absent Cloudflare headers after edge traffic, and direct non-Cloudflare public requests.
 
 ## Initial Release Acceptance
@@ -110,7 +110,7 @@
 - [ ] A user can configure one ACP agent that accepts direct API keys.
 - [ ] A user can add secrets without writing plaintext to disk.
 - [ ] A user can export and import reusable TOML config.
-- [ ] A user can validate dependency and MCP declarations.
+- [x] A user can validate dependency and MCP declarations.
 - [ ] A user can start the daemon.
 - [ ] A user can create an agent session through CLI or HTTP.
 - [ ] A user can send a prompt and stream updates over WebSocket.

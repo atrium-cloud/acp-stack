@@ -77,7 +77,10 @@ fn check_command(entry: &DependencyEntry) -> DepStatus {
             available: false,
             path: None,
             feature: entry.feature.clone(),
-            reason: Some(format!("`{}` not found on PATH", entry.name)),
+            reason: Some(format!(
+                "`{}` not found or not executable on PATH",
+                entry.name
+            )),
         },
     }
 }
@@ -121,10 +124,10 @@ fn check_mcp(entry: &DependencyEntry, config: &Config) -> DepStatus {
     }
 }
 
-fn resolve_command_path(command: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_command_path(command: &str) -> Option<PathBuf> {
     if command.contains('/') {
         let candidate = PathBuf::from(command);
-        if candidate.is_file() {
+        if executable_file(&candidate) {
             return Some(candidate);
         }
         return None;
@@ -132,11 +135,28 @@ fn resolve_command_path(command: &str) -> Option<PathBuf> {
     let path_env = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_env) {
         let candidate = dir.join(command);
-        if candidate.is_file() {
+        if executable_file(&candidate) {
             return Some(candidate);
         }
     }
     None
+}
+
+fn executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +207,40 @@ mod tests {
         assert!(!entry.available);
         assert!(entry.reason.as_deref().unwrap_or("").contains("not found"));
         assert_eq!(entry.feature.as_deref(), Some("test"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_command_reports_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let command_path = tempdir.path().join("not-executable");
+        std::fs::write(&command_path, "#!/bin/sh\n").expect("write marker");
+        std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod marker");
+        let deps = DependenciesConfig {
+            commands: vec![DependencyEntry {
+                name: command_path.to_string_lossy().into_owned(),
+                required: true,
+                feature: None,
+                install: None,
+            }],
+            ..Default::default()
+        };
+        let report = check_dependencies(&minimal_config(deps, McpConfig::default()));
+        let entry = &report.dependencies[0];
+        assert!(
+            !entry.available,
+            "non-executable file must not satisfy command dep"
+        );
+        assert!(
+            entry
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not executable")),
+            "{entry:?}"
+        );
     }
 
     #[test]

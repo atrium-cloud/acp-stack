@@ -7,6 +7,7 @@
 mod bind;
 mod cloudflare;
 mod cors;
+mod deps;
 mod keys;
 mod paths;
 mod proxy;
@@ -15,6 +16,7 @@ mod runtime_user;
 pub(super) use bind::check_bind;
 pub(super) use cloudflare::check_cloudflare;
 pub(super) use cors::check_cors;
+pub(super) use deps::check_deps;
 pub(super) use keys::check_keys;
 pub(super) use paths::check_paths;
 pub(super) use proxy::check_proxy;

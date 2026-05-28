@@ -118,6 +118,8 @@ Dependency declarations report whether expected tools, packages, runtimes, and M
 
 MCP server declarations are resolved at ACP session creation, load, or resume. Secret refs for stdio env vars and HTTP headers are resolved from the encrypted secret store at attach time.
 
+Readiness reports MCP declaration health. Stdio declarations check executable command availability and referenced secrets; HTTP declarations check referenced secrets without probing remote endpoints.
+
 ## Self-Hosting
 
 The supported deployment shapes are Docker and systemd. Public exposure should go through Cloudflare Tunnel, Nginx, or Caddy while runtime hardening remains enabled behind the edge.
