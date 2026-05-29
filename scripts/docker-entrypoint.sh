@@ -13,17 +13,18 @@ fi
 
 if [ "${railway_platform}" = "1" ]; then
   export ACP_STACK_AUTO_INIT="${ACP_STACK_AUTO_INIT:-1}"
-  if [ "$(id -u)" = "0" ]; then
-    export ACP_STACK_ALLOW_ROOT="${ACP_STACK_ALLOW_ROOT:-1}"
-  fi
 fi
 
 if [ "${ACP_STACK_AUTO_INIT:-0}" = "1" ] && [ ! -f "${config_path}" ]; then
-  echo "acp-stack: config missing; running acps init --no-install-agent" >&2
+  if [ -z "${ACP_STACK_INIT_AGENT:-}" ]; then
+    echo "acp-stack: ACP_STACK_AUTO_INIT requires ACP_STACK_INIT_AGENT=<agent-id>" >&2
+    exit 1
+  fi
+  echo "acp-stack: config missing; running acps init" >&2
   mkdir -p /workspace /workspace/uploads \
     "${home}/.config/acp-stack" \
     "${home}/.local/share/acp-stack"
-  acps init --no-install-agent
+  acps init --non-interactive --agent "${ACP_STACK_INIT_AGENT}"
 fi
 
 exec "$@"

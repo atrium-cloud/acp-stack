@@ -11,14 +11,14 @@ use super::agent::AgentCommand;
 use super::auth::AuthCommand;
 use super::config::ConfigCommand;
 use super::deps::DepsCommand;
-use super::init::InitArgs;
+use super::init::{InitArgs, InitMode};
 use super::installer::InstallerCommand;
 use super::logs::LogsCommand;
 use super::metrics::MetricsCommand;
 use super::reset::ResetArgs;
 use super::secrets::SecretsCommand;
 use super::security::SecurityCommand;
-use super::serve::ServeArgs;
+use super::serve::{ServeArgs, ServeMode};
 use super::sessions::SessionsCommand;
 use super::subagent::SubagentCommand;
 use super::ws::WsCommand;
@@ -61,6 +61,13 @@ enum Command {
     },
     /// Initialize local config, secrets, workspace, and agent files.
     Init(Box<InitArgs>),
+    /// Run development-only workflows.
+    #[command(after_help = "Examples:
+  acps dev init --skip-workspace-init --agent opencode --skip-testflight")]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
     /// Print daemon health and runtime status.
     Status,
     Reset(ResetArgs),
@@ -153,6 +160,16 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum DevCommand {
+    /// Initialize with development-only flags enabled.
+    #[command(mut_arg("skip_workspace_init", |arg| arg.hide(false)))]
+    Init(Box<InitArgs>),
+    /// Run the daemon with development-only flags enabled.
+    #[command(mut_arg("allow_root", |arg| arg.hide(false)))]
+    Serve(ServeArgs),
+}
+
 pub fn run() -> Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -178,7 +195,14 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Command::Init(args) => {
             output.reject_json("init")?;
-            super::init::run_init(*args)
+            super::init::run_init(*args, InitMode::Operator)
+        }
+        Command::Dev { command } => {
+            output.reject_json("dev")?;
+            match command {
+                DevCommand::Init(args) => super::init::run_init(*args, InitMode::Dev),
+                DevCommand::Serve(args) => super::serve::run_serve(args, ServeMode::Dev),
+            }
         }
         Command::Status => super::status::run_status(output.effective()),
         Command::Reset(args) => {
@@ -187,7 +211,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Command::Serve(args) => {
             output.reject_json("serve")?;
-            super::serve::run_serve(args)
+            super::serve::run_serve(args, ServeMode::Operator)
         }
         Command::Auth { command } => {
             output.reject_json("auth")?;

@@ -29,17 +29,22 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
 
-/// Env-overridable base URL for the GitHub Releases API. Tests bind a
+/// Debug-build-only base URL override for the GitHub Releases API. Tests bind a
 /// local axum mock to `127.0.0.1:0` and set this var so the same
-/// install machinery exercised in production drives against the mock,
+/// install machinery drives against the mock,
 /// rather than reaching out to the live api.github.com (which would
 /// rate-limit CI and is not deterministic). The empty/unset case falls
 /// back to the upstream constant.
 fn github_api_base() -> String {
-    match std::env::var("ACP_STACK_GITHUB_API_BASE") {
-        Ok(value) if !value.trim().is_empty() => value.trim_end_matches('/').to_owned(),
-        _ => GITHUB_API_BASE.to_owned(),
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(value) = std::env::var("ACP_STACK_GITHUB_API_BASE")
+            && !value.trim().is_empty()
+        {
+            return value.trim_end_matches('/').to_owned();
+        }
     }
+    GITHUB_API_BASE.to_owned()
 }
 
 /// True when the resolved base URL is the canonical `api.github.com`.

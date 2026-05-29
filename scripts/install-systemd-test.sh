@@ -19,6 +19,7 @@ readonly STATUS_URL="http://127.0.0.1:${HOST_PORT}/v1/status"
 readonly RUNTIME_USER="${ACP_STACK_SYSTEMD_TEST_USER:-acp_test}"
 readonly HOME_DIR="/home/${RUNTIME_USER}"
 readonly WORKSPACE_ROOT="${ACP_STACK_SYSTEMD_TEST_WORKSPACE:-/srv/acp-stack}"
+readonly INIT_AGENT="${ACP_STACK_SYSTEMD_TEST_AGENT:-}"
 readonly CONFIG_PATH="${HOME_DIR}/.config/acp-stack/acp-stack.toml"
 readonly UNIT_PATH="/etc/systemd/system/acp-stack.service"
 
@@ -44,6 +45,7 @@ Env knobs:
                                  (default ubuntu:24.04)
   ACP_STACK_SYSTEMD_TEST_IMAGE  Prebuilt systemd-capable image to use instead
                                  of building acp-stack-systemd-test:ubuntu-24.04
+  ACP_STACK_SYSTEMD_TEST_AGENT  Real supported agent id to initialize
 USAGE
 }
 
@@ -126,6 +128,10 @@ for _ in $(seq 1 30); do
 done
 
 echo "install-systemd-test: running install-systemd.sh inside container..."
+if [[ -z "${INIT_AGENT}" ]]; then
+  echo "install-systemd-test: ACP_STACK_SYSTEMD_TEST_AGENT is required; choose a real supported agent id." >&2
+  exit 1
+fi
 stdout_capture="$(mktemp)"
 docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
@@ -135,6 +141,7 @@ docker exec "${CONTAINER_NAME}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
     --bind 0.0.0.0:7700 \
+    --agent "${INIT_AGENT}" \
     --no-os-deps \
   >"${stdout_capture}" 2>&1
 cat "${stdout_capture}"
@@ -163,6 +170,7 @@ docker exec "${CONTAINER_NAME}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
     --bind 0.0.0.0:7700 \
+    --agent "${INIT_AGENT}" \
     --no-os-deps \
   >/dev/null
 
@@ -175,6 +183,7 @@ if docker exec "${CONTAINER_NAME}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}-drift" \
     --bind 0.0.0.0:7700 \
+    --agent "${INIT_AGENT}" \
     --no-os-deps \
     --force; then
   echo "install-systemd-test: installer unexpectedly allowed --force to drift workspace config." >&2
@@ -191,6 +200,7 @@ if docker exec "${CONTAINER_NAME}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
     --bind 0.0.0.0:7700 \
+    --agent "${INIT_AGENT}" \
     --no-os-deps; then
   echo "install-systemd-test: installer unexpectedly accepted a drifted unit without --force." >&2
   exit 1
@@ -203,6 +213,7 @@ docker exec "${CONTAINER_NAME}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
     --bind 0.0.0.0:7700 \
+    --agent "${INIT_AGENT}" \
     --no-init \
     --no-os-deps \
     --force \

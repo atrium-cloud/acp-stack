@@ -87,6 +87,7 @@ Workspace paths are resolved under `[workspace].root`. The runtime rejects absol
 Production deployments should:
 
 - run as an unprivileged runtime user
+- configure `[workspace].runtime_user` to a local user that resolves on the host
 - keep config and state directories owner-only
 - bind the daemon to loopback unless a trusted platform requires otherwise
 - terminate TLS at a reverse proxy or Cloudflare Tunnel

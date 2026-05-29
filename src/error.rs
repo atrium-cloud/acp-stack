@@ -373,9 +373,7 @@ pub enum StackError {
         source: std::io::Error,
     },
 
-    #[error(
-        "refusing to run as root; pass --allow-root or set ACP_STACK_ALLOW_ROOT=1 only for disposable/dev profiles"
-    )]
+    #[error("refusing to run as root; use `acps dev serve --allow-root` only for development")]
     ServeRefusedAsRoot,
 
     #[error(

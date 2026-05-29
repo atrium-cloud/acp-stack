@@ -60,6 +60,10 @@ pub struct InitArgs {
     /// Select the configured agent non-interactively from the registry.
     #[arg(long)]
     pub(super) agent: Option<String>,
+    /// Confirm that init is running without prompts. Non-interactive first
+    /// runs must also pass `--agent <id>`.
+    #[arg(long)]
+    pub(super) non_interactive: bool,
     /// Select the initial provider id for agents that support provider setup.
     #[arg(long)]
     pub(super) provider: Option<String>,
@@ -97,12 +101,6 @@ pub struct InitArgs {
     /// Maximum output tokens for a custom model.
     #[arg(long = "output-max-tokens", requires = "custom_provider")]
     pub(super) output_max_tokens: Option<String>,
-    /// Install the selected or already configured agent during init.
-    #[arg(long, conflicts_with = "no_install_agent")]
-    pub(super) install_agent: bool,
-    /// Skip the install prompt in interactive runs.
-    #[arg(long)]
-    pub(super) no_install_agent: bool,
     /// Skills marketplace/source: openai, anthropic, or github:<owner>.
     #[arg(
         long = "skills-source",
@@ -156,7 +154,7 @@ pub struct InitArgs {
     pub(super) data_from: Vec<String>,
     /// Skip the workspace materializer; useful for tests and dev loops that
     /// do not need actual content fetched/cloned.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub(super) skip_workspace_init: bool,
     /// Run the real-prompt agent testflight at the end of init. Warns about
     /// provider credit consumption. Mutually exclusive with `--skip-testflight`.
@@ -176,6 +174,12 @@ pub struct InitArgs {
     /// Target a specific init run id when resuming. Implies `--resume`.
     #[arg(long, value_name = "ID", requires = "resume")]
     pub(super) run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitMode {
+    Operator,
+    Dev,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -279,7 +283,14 @@ fn configure_subagent_inherit_for_init(
     Ok(true)
 }
 
-pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
+pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
+    if args.skip_workspace_init && mode != InitMode::Dev {
+        return Err(StackError::InvalidParam {
+            field: "--skip-workspace-init",
+            reason: "development-only flag; use `acps dev init --skip-workspace-init`".to_owned(),
+        });
+    }
+
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
     let state_path = default_state_path(&home);
@@ -288,11 +299,28 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
 
     create_dir_owner_only(config_dir)?;
     create_dir_owner_only(state_dir)?;
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
 
-    // Preflight (untracked): config + state migration must succeed before we
-    // have anywhere to record init steps. Both are idempotent and cheap, so
-    // a partial failure here will be re-attempted on the next `acps init`
-    // without needing resume semantics.
+    // Preflight (untracked): new configs must start with a real registry
+    // agent. This runs before writing the starter config so a declined or
+    // missing first-run selection never leaves `agent.id = "placeholder"` on
+    // disk.
+    let creating_config = !config_path.exists();
+    if creating_config && !args.resume && args.agent.is_none() {
+        if !io::stdin().is_terminal() {
+            return Err(StackError::InvalidParam {
+                field: "--agent",
+                reason: "non-interactive init requires selecting a real agent; run `acps init` in a TTY or pass `--non-interactive --agent <id>`".to_owned(),
+            });
+        }
+        let selected =
+            select_agent_for_init(&args, &registry)?.ok_or_else(|| StackError::InvalidParam {
+                field: "--agent",
+                reason: "initializing a new config requires selecting a real agent".to_owned(),
+            })?;
+        args.agent = Some(selected.id.clone());
+    }
+
     let config_status = if config_path.exists() {
         // Repair perms before validation so a failure to parse the file does not
         // leave a permissive config on disk; matches the behavior of `acps status`.
@@ -302,7 +330,19 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         "validated existing config"
     } else {
         let starter_config = starter_config(&args)?;
-        write_new_file_owner_only(&config_path, starter_config.as_bytes())?;
+        let mut new_config = config::load_config_from_str(&starter_config)?;
+        if let Some(agent_id) = args.agent.as_deref() {
+            let entry =
+                registry
+                    .lookup(agent_id)
+                    .ok_or_else(|| StackError::AgentRegistryMissing {
+                        id: agent_id.to_owned(),
+                    })?;
+            entry.ensure_supported()?;
+            apply_registry_entry_to_config(&mut new_config, entry);
+        }
+        let canonical = new_config.to_canonical_toml()?;
+        write_new_file_owner_only(&config_path, canonical.as_bytes())?;
         Config::load_from_path(&config_path)?;
         "created starter config"
     };
@@ -342,7 +382,6 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
             });
     }
 
-    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let mut config = Config::load_from_path(&config_path)?;
     let selected_agent = select_agent_for_init(&args, &registry)?;
     if let Some(entry) = selected_agent {
@@ -355,6 +394,11 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     }
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
     prompt_init_skills_if_needed(&mut args, &config, &registry)?;
+    if selected_agent.is_some() || edge_requested {
+        let canonical = config.to_canonical_toml()?;
+        config = config::load_config_from_str(&canonical)?;
+        atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+    }
 
     if resumed
         && !args.no_skills
@@ -486,7 +530,7 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     // -----------------------------------------------------------------
     // Step 2: agent_install — install the configured agent if requested.
     // -----------------------------------------------------------------
-    let install_requested = should_install_agent(&args, selected_agent.is_some())?;
+    let install_requested = should_install_agent(&config, &registry)?;
     let mut install_outcome: Option<InstallerOutcome> = None;
     let install_step_needs_resume = step_needs_resume(&prior_init_steps, step_kind::AGENT_INSTALL);
     if install_requested || install_step_needs_resume {
@@ -692,6 +736,8 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         if let Err(error) = result {
             return finalize_with_error(&store, &init_run, error);
         }
+    } else {
+        println!("workspace: skipped (--skip-workspace-init)");
     }
 
     // -----------------------------------------------------------------
@@ -830,6 +876,8 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
         println!("{}: {}", artifact.label, artifact.path.display());
     }
     if let Some(materialize) = &materialize_report {
+        println!("workspace root: {}", materialize.root.display());
+        println!("workspace uploads: {}", materialize.uploads.display());
         for entry in &materialize.code {
             println!(
                 "code source ({:?}): {}",
@@ -893,8 +941,7 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
 
     // Resume-aware finalization. If a prior step in this run is still
     // `pending`, `running`, or `failed` (because the current invocation's
-    // flags skipped over it — e.g. `--resume --run-id <id>` without
-    // `--install-agent` after the original run failed at `agent_install`),
+    // flags skipped over it),
     // the aggregate run status must NOT settle to `succeeded`. We mark
     // it `failed` instead and surface a clear error so the operator
     // knows to re-run with the original flags.

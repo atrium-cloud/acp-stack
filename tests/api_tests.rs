@@ -48,6 +48,11 @@ impl ServerHarness {
             .join("uploads")
             .to_string_lossy()
             .into_owned();
+        if let Some(user) = acp_stack::ownership::current_username()
+            .expect("resolve current username for security fixture")
+        {
+            config.workspace.runtime_user = user;
+        }
         std::fs::create_dir_all(workspace_root.join("uploads")).expect("create uploads");
         Self::spawn_with_prepared_config(config, tempdir).await
     }

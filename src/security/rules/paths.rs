@@ -3,10 +3,7 @@
 //! Walks `inputs.path_postures` to emit `runtime.path_ownership` and
 //! `runtime.path_mode_loose` findings, then walks `inputs.path_issues` to
 //! emit `runtime.path_uninspectable` for paths that could not be stat'd at
-//! all. The Railway root-volume profile (process running as uid 0 on
-//! Railway's managed runtime) suppresses the `WorkspaceRoot` ownership
-//! finding when the root posture matches Railway's published `acp` uid
-//! 1000 — the platform owns that path.
+//! all.
 
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::{SecurityFinding, shell_quote};
@@ -15,8 +12,6 @@ pub(in crate::security) fn check_paths(
     inputs: &SecurityCheckInputs<'_>,
     findings: &mut Vec<SecurityFinding>,
 ) {
-    let railway_root_volume_profile = inputs.railway_platform && inputs.process_euid == 0;
-
     for posture in inputs.path_postures {
         // Render the path through `shell_quote` so spaces, single quotes, or
         // other shell metacharacters in the runtime-managed path (which can
@@ -26,12 +21,7 @@ pub(in crate::security) fn check_paths(
         // uses `symlink_metadata`, so a symlinked runtime path reports its
         // own posture and that's what we want to fix.
         let path_quoted = shell_quote(&posture.path.display().to_string());
-        let railway_workspace_root_ownership = railway_root_volume_profile
-            && posture.kind == crate::ownership::PathKind::WorkspaceRoot
-            && posture.path == std::path::Path::new("/workspace")
-            && inputs.workspace_root == "/workspace"
-            && posture.uid == 1000;
-        if posture.uid != inputs.process_euid && !railway_workspace_root_ownership {
+        if posture.uid != inputs.process_euid {
             findings.push(
                 SecurityFinding::critical(
                     "runtime.path_ownership",
@@ -56,7 +46,7 @@ pub(in crate::security) fn check_paths(
                 // the operator picks one side to fix). We only suggest
                 // `chown`, never "relaunch under {actual}": the path could be
                 // owned by root and `acps serve` explicitly refuses root
-                // execution outside the disposable/dev profile.
+                // execution.
                 // `--` terminates option parsing so a path that happens to
                 // start with `-` is not interpreted as a chown flag.
                 .with_remediation(format!(

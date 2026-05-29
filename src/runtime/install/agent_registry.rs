@@ -15,13 +15,23 @@
 //! replaces the embedded entry; new `id`s are added.
 
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::error::{Result, StackError};
 
 const EMBEDDED_REGISTRY: &str = include_str!("../../../data/agents.toml");
+#[cfg(debug_assertions)]
+const DEV_PLACEBO_REGISTRY_ENV: &str = "ACP_STACK_DEV_PLACEBO_REGISTRY";
+#[cfg(debug_assertions)]
+pub const DEV_PLACEBO_MODEL_OPTION: &str = "placebo-model";
+
+#[cfg(debug_assertions)]
+pub fn development_placebo_registry_path() -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os(DEV_PLACEBO_REGISTRY_ENV)?);
+    path.is_file().then_some(path)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryCatalog {
@@ -42,6 +52,8 @@ impl RegistryCatalog {
     /// an error — it is the common case for fresh installs.
     pub fn load_with_override(override_path: &Path) -> Result<Self> {
         let mut catalog = Self::load_embedded()?;
+        #[cfg(debug_assertions)]
+        catalog.apply_development_placebo_registry();
         if override_path.exists() {
             let body =
                 fs::read_to_string(override_path).map_err(|source| StackError::RegistryLoad {
@@ -54,6 +66,31 @@ impl RegistryCatalog {
             catalog.merge(overlay);
         }
         Ok(catalog)
+    }
+
+    #[cfg(debug_assertions)]
+    fn apply_development_placebo_registry(&mut self) {
+        let Some(path) = development_placebo_registry_path() else {
+            return;
+        };
+        let placebo_path = path.display().to_string();
+        let install = InstallSet {
+            shell: Some(ShellInstall {
+                script: format!("test -x {}", shell_quote_str(&placebo_path)),
+                creates: placebo_path.clone(),
+            }),
+            npm: None,
+            github: None,
+        };
+        for entry in &mut self.agents {
+            entry.kind = RegistryKind::Native;
+            entry.github = None;
+            entry.adapter = None;
+            entry.harness = Some(HarnessSpec {
+                id: placebo_path.clone(),
+                install: install.clone(),
+            });
+        }
     }
 
     pub fn from_toml(body: &str) -> Result<Self> {
@@ -548,6 +585,11 @@ fn github_path_from_value<'a>(agent_id: &str, field: &str, value: &'a str) -> Re
         });
     }
     Ok(value)
+}
+
+#[cfg(debug_assertions)]
+fn shell_quote_str(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

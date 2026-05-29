@@ -44,6 +44,18 @@ pub const FIXTURE_NEW_SESSION_RESPONSE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_
 /// advertising config options.
 pub const DEFAULT_MODELS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub fn development_fixture_path(name: &str) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os(name).map(PathBuf::from)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = name;
+        None
+    }
+}
+
 /// Spawn the configured agent, open one provisional ACP session, and
 /// return the raw `session/new` response. Honors the two fixture env
 /// vars first so tests don't have to spawn the real binary.
@@ -68,8 +80,7 @@ pub async fn fetch_session_config_with_timeout(
     config: &Config,
     timeout_duration: Duration,
 ) -> Result<NewSessionResponse> {
-    if let Some(path) = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV) {
-        let path = PathBuf::from(path);
+    if let Some(path) = development_fixture_path(FIXTURE_CONFIG_OPTIONS_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,
@@ -82,8 +93,7 @@ pub async fn fetch_session_config_with_timeout(
         return Ok(NewSessionResponse::new("fixture").config_options(options));
     }
 
-    if let Some(path) = std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV) {
-        let path = PathBuf::from(path);
+    if let Some(path) = development_fixture_path(FIXTURE_NEW_SESSION_RESPONSE_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,

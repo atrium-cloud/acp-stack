@@ -35,7 +35,9 @@ use crate::error::{Result, StackError};
 use crate::secrets::SecretStore;
 
 use self::code_git::materialize_code_source;
-use self::common::{ensure_lane_root, ensure_workspace_log_dir, sanitize_segment};
+use self::common::{
+    ensure_lane_root, ensure_workspace_base_dir, ensure_workspace_log_dir, sanitize_segment,
+};
 use self::https::materialize_https;
 use self::local::materialize_local;
 use self::s3::materialize_s3;
@@ -118,6 +120,8 @@ pub struct SourceReport {
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterializeReport {
+    pub root: PathBuf,
+    pub uploads: PathBuf,
     pub code: Vec<SourceReport>,
     pub data: Vec<SourceReport>,
     /// Root capture directory shared by every source in this run.
@@ -134,6 +138,9 @@ pub struct MaterializeReport {
 /// to compute names or stat the lane root return `Err`, which the caller
 /// treats as a verifier miss (forces re-execution).
 pub fn all_sources_have_sentinel(workspace: &WorkspaceConfig) -> Result<bool> {
+    if !workspace_base_dirs_exist(workspace) {
+        return Ok(false);
+    }
     if workspace.code_sources.is_empty() && workspace.data_sources.is_empty() {
         return Ok(true);
     }
@@ -162,8 +169,12 @@ pub fn all_sources_have_sentinel(workspace: &WorkspaceConfig) -> Result<bool> {
     Ok(true)
 }
 
-/// Materialize every declared code and data source. No-op when both
-/// vectors are empty. When `log_paths` is `Some(...)`, every source
+fn workspace_base_dirs_exist(workspace: &WorkspaceConfig) -> bool {
+    Path::new(&workspace.root).is_dir() && Path::new(&workspace.uploads).is_dir()
+}
+
+/// Prepare the workspace root/uploads directories and materialize every
+/// declared code and data source. When `log_paths` is `Some(...)`, every source
 /// operation writes capture pairs under
 /// `log_paths.run_dir/<source-tag>/<operation>.{stdout,stderr}`. Git
 /// operations persist the child-process streams; Rust-native data
@@ -187,8 +198,11 @@ pub fn materialize_workspace(
 
     let code_root = root.join(CODE_LANE_DIR);
     let data_root = root.join(DATA_LANE_DIR);
+    let uploads = Path::new(&workspace.uploads);
 
     let mut report = MaterializeReport {
+        root: root.to_path_buf(),
+        uploads: uploads.to_path_buf(),
         log_dir: log_paths.map(|p| p.run_dir.clone()),
         ..MaterializeReport::default()
     };
@@ -196,6 +210,9 @@ pub fn materialize_workspace(
     if let Some(paths) = log_paths {
         ensure_workspace_log_dir(&paths.run_dir)?;
     }
+
+    ensure_workspace_base_dir(root, "workspace.root")?;
+    ensure_workspace_base_dir(uploads, "workspace.uploads")?;
 
     for (index, source) in workspace.code_sources.iter().enumerate() {
         ensure_lane_root(&code_root)?;
@@ -357,12 +374,18 @@ mod tests {
     #[test]
     fn no_op_when_both_lanes_empty() {
         let root_dir = tempdir().expect("root");
-        let workspace = workspace_with(root_dir.path());
+        let root = root_dir.path().join("workspace");
+        let workspace = workspace_with(&root);
         let secrets = empty_secret_store();
         let report = materialize_workspace(&workspace, &secrets, None).expect("ok");
+        assert_eq!(report.root, root);
+        assert_eq!(report.uploads, root.join("uploads"));
         assert!(report.code.is_empty());
         assert!(report.data.is_empty());
-        assert!(!root_dir.path().join("usr").exists());
+        assert!(root.is_dir());
+        assert!(root.join("uploads").is_dir());
+        assert!(!root.join("usr").exists());
+        assert!(all_sources_have_sentinel(&workspace).expect("prepared"));
     }
 
     #[test]

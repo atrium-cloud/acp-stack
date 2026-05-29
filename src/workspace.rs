@@ -100,12 +100,18 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
         }
     }
 
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|source| StackError::WorkspaceIo {
-            requested: requested.to_owned(),
-            source,
-        })?;
+    let canonical_root = root.canonicalize().map_err(|source| {
+        if source.kind() == ErrorKind::NotFound {
+            StackError::WorkspaceNotFound {
+                requested: requested.to_owned(),
+            }
+        } else {
+            StackError::WorkspaceIo {
+                requested: requested.to_owned(),
+                source,
+            }
+        }
+    })?;
     let joined = canonical_root.join(requested_path);
 
     match intent {
@@ -860,6 +866,18 @@ mod tests {
         assert!(matches!(
             error,
             StackError::WorkspaceParentNotFound { requested } if requested == "note.md"
+        ));
+    }
+
+    #[test]
+    fn resolve_workspace_path_reports_missing_root_as_not_found() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let missing_root = root.path().join("missing-root");
+        let error = resolve_workspace_path(&missing_root, "notes/x.txt", PathIntent::WriteOrCreate)
+            .expect_err("missing root");
+        assert!(matches!(
+            error,
+            StackError::WorkspaceNotFound { requested } if requested == "notes/x.txt"
         ));
     }
 

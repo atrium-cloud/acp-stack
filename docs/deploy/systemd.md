@@ -30,6 +30,7 @@ During first initialization, the installer prints the session and admin API keys
 | `--home <dir>`           | `/home/<user>`                          | runtime home                            |
 | `--workspace <dir>`      | `/workspace`                            | workspace root                          |
 | `--bind <addr>`          | `127.0.0.1:7700`                        | daemon bind address                     |
+| `--agent <id>`           | required when init runs                 | agent id selected for init              |
 | `--unit-path <path>`     | `/etc/systemd/system/acp-stack.service` | unit destination                        |
 | `--no-init`              | off                                     | install files but skip `acps init`      |
 | `--no-os-deps`           | off                                     | skip OS dependency installation         |
@@ -48,7 +49,7 @@ sudo bash scripts/install-systemd.sh \
   --no-init
 
 sudo -u acp -H /usr/local/bin/acps init \
-  --no-install-agent \
+  --agent <agent-id> \
   --workspace-root /workspace \
   --workspace-uploads /workspace/uploads \
   --runtime-user acp

@@ -4,6 +4,7 @@ set -euo pipefail
 readonly BUILD_CONTEXT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly HOST_PORT="${ACP_STACK_DOCKER_TEST_PORT:-7700}"
 readonly STATUS_URL="http://127.0.0.1:${HOST_PORT}/v1/status"
+readonly INIT_AGENT="${ACP_STACK_DOCKER_TEST_AGENT:-}"
 
 persistent=false
 rebuild=false
@@ -33,6 +34,7 @@ Persistent mode reuses:
   volumes:   acp-stack-test-workspace/config/state
 
 Set ACP_STACK_DOCKER_TEST_PORT to override the host port, default 7700.
+Set ACP_STACK_DOCKER_TEST_AGENT to the real agent id to initialize.
 USAGE
 }
 
@@ -187,6 +189,10 @@ load_persistent_session_key() {
 }
 
 run_init() {
+  if [[ -z "${INIT_AGENT}" ]]; then
+    echo "ACP_STACK_DOCKER_TEST_AGENT is required; choose a real supported agent id" >&2
+    exit 1
+  fi
   echo "Running one-shot init..." >&2
   local init_output
   init_output="$(
@@ -196,7 +202,7 @@ run_init() {
       -v "${config_volume}:/home/acp/.config/acp-stack" \
       -v "${state_volume}:/home/acp/.local/share/acp-stack" \
       "${image_tag}" \
-      acps init --no-install-agent
+      acps init --non-interactive --agent "${INIT_AGENT}"
   )"
 
   local session_key

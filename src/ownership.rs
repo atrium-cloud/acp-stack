@@ -158,6 +158,53 @@ pub fn resolve_runtime_user_uid(_name: &str) -> std::io::Result<Option<u32>> {
     Ok(None)
 }
 
+#[cfg(unix)]
+pub fn current_username() -> std::io::Result<Option<String>> {
+    let uid = process_euid();
+    let mut buf: Vec<u8> = vec![0; 1024];
+    loop {
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let ret = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut pwd,
+                buf.as_mut_ptr().cast::<libc::c_char>(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        match ret {
+            0 => {
+                if result.is_null() {
+                    return Ok(None);
+                }
+                let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+                    .to_string_lossy()
+                    .into_owned();
+                return Ok((!name.is_empty()).then_some(name));
+            }
+            libc::ERANGE => {
+                if buf.len() >= 1 << 20 {
+                    return Err(std::io::Error::other(
+                        "getpwuid_r buffer would exceed 1 MiB",
+                    ));
+                }
+                buf.resize(buf.len() * 2, 0);
+            }
+            errno => return Err(std::io::Error::from_raw_os_error(errno)),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn current_username() -> std::io::Result<Option<String>> {
+    Ok(std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty()))
+}
+
 /// Probe writability by trying to create a temp file inside `path`. Cleans up
 /// on drop (`NamedTempFile`), so this leaves no artifact. Returns `false` if
 /// the directory does not exist or the daemon cannot write into it.

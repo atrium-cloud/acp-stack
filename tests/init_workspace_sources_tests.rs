@@ -111,18 +111,56 @@ fn prepare_upstream() -> tempfile::TempDir {
 }
 
 fn acps_init(home: &Path, workspace_root: &Path, extra: &[&str]) -> assert_cmd::Command {
+    write_test_agent_registry(home);
     let mut cmd = Command::cargo_bin("acps").expect("acps");
     cmd.env("HOME", home)
         .arg("init")
+        .arg("--agent")
+        .arg("workspace-test")
         .arg("--workspace-root")
         .arg(workspace_root.as_os_str())
         .arg("--workspace-uploads")
-        .arg(workspace_root.join("uploads").as_os_str())
-        .arg("--no-install-agent");
+        .arg(workspace_root.join("uploads").as_os_str());
     for value in extra {
         cmd.arg(value);
     }
     cmd
+}
+
+fn write_test_agent_registry(home: &Path) {
+    let config_dir = home.join(".config/acp-stack");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    let binary = home.join(".local/bin/workspace-test-agent");
+    let script = format!(
+        "mkdir -p {bin} && printf workspace-test > {binary} && chmod 755 {binary}",
+        bin = shell_quote(binary.parent().expect("binary parent")),
+        binary = shell_quote(&binary),
+    );
+    std::fs::write(
+        config_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "workspace-test"
+name = "Workspace Test"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/workspace-test.md"
+
+[agents.harness]
+id = "workspace-test-agent"
+
+[agents.harness.install.shell]
+script = {script:?}
+creates = "workspace-test-agent"
+"#
+        ),
+    )
+    .expect("agent registry");
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
 fn capture_names(dir: &Path) -> Vec<String> {
