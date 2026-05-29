@@ -2,7 +2,7 @@
 //! prompt (fire-and-forget + polling), cancel, load, close, plus auth-tier
 //! enforcement and `session/update` persistence.
 //!
-//! The fake-agent gate in the `acps` binary stands in for a real ACP agent;
+//! The placebo ACP fixture stands in for a real ACP agent;
 //! `tests/acp_bridge_tests.rs` exercises the lower-level bridge layer.
 
 use std::sync::Arc;
@@ -96,8 +96,8 @@ impl Drop for Harness {
 fn test_config() -> Config {
     let toml_text = include_str!("fixtures/valid-acp-stack.toml");
     let mut config = load_config_from_str(toml_text).expect("config parses");
-    config.agent.command = env!("CARGO_BIN_EXE_acps").to_owned();
-    config.agent.args = vec!["__acps-test-fake-agent".into()];
+    config.agent.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
+    config.agent.args = vec!["acp".into()];
     config.agent.env = vec![];
     config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
     config.agent.expected_sha256 = None;
@@ -394,7 +394,7 @@ async fn sessions_list_syncs_agent_discovered_sessions() {
     assert_eq!(listed["title"], "listed session");
     let metadata: Value =
         serde_json::from_str(listed["metadata_json"].as_str().unwrap()).expect("metadata json");
-    assert_eq!(metadata["agent_meta"]["origin"], "fake-agent");
+    assert_eq!(metadata["agent_meta"]["origin"], "placebo-agent");
 }
 
 #[tokio::test]
@@ -992,7 +992,7 @@ async fn session_update_notifications_land_in_events_table() {
 #[tokio::test]
 async fn sessions_snapshot_returns_session_in_flight_prompts_and_recent_events() {
     let harness = Harness::spawn_with(|config| {
-        // Disable the bridge's `session/list` capability so the fake-agent
+        // Disable the bridge's `session/list` capability so the placebo agent
         // path leaves the state untouched after start; we want a clean slate
         // to seed deterministic snapshot fixtures.
         config.agent.args.push("--no-cap-list-session".into());
