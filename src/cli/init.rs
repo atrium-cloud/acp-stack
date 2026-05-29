@@ -312,20 +312,6 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     store.migrate()?;
     set_owner_only_file(&state_path)?;
 
-    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    let mut config = Config::load_from_path(&config_path)?;
-    let selected_agent = select_agent_for_init(&args, &registry)?;
-    if let Some(entry) = selected_agent {
-        // Fail fast on agents the runtime cannot drive headlessly (browser
-        // OAuth, terminal-only adapters, etc.). Without this check init would
-        // happily install the binary and only fail at first session spawn,
-        // wasting bandwidth and operator time.
-        entry.ensure_supported()?;
-        apply_registry_entry_to_config(&mut config, entry);
-    }
-    let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
-    prompt_init_skills_if_needed(&mut args, &config, &registry)?;
-
     // Pick the run row: either resume an existing one (explicit `--resume` or
     // auto-detected non-terminal latest) or start fresh. Recording every
     // tracked phase as a step lets `acps init resume` continue from the first
@@ -344,6 +330,32 @@ pub(super) fn run_init(mut args: InitArgs) -> Result<()> {
     } else {
         None
     };
+    if resumed && args.agent.is_none() {
+        args.agent = recorded_args
+            .as_ref()
+            .and_then(|recorded| recorded.agent.clone())
+            .or_else(|| {
+                init_run
+                    .agent_id
+                    .clone()
+                    .filter(|agent| agent != STARTER_AGENT_ID)
+            });
+    }
+
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    let mut config = Config::load_from_path(&config_path)?;
+    let selected_agent = select_agent_for_init(&args, &registry)?;
+    if let Some(entry) = selected_agent {
+        // Fail fast on agents the runtime cannot drive headlessly (browser
+        // OAuth, terminal-only adapters, etc.). Without this check init would
+        // happily install the binary and only fail at first session spawn,
+        // wasting bandwidth and operator time.
+        entry.ensure_supported()?;
+        apply_registry_entry_to_config(&mut config, entry);
+    }
+    let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
+    prompt_init_skills_if_needed(&mut args, &config, &registry)?;
+
     if resumed
         && !args.no_skills
         && args.skills_source.is_none()
