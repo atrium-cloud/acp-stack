@@ -154,21 +154,6 @@ enum Command {
 }
 
 pub fn run() -> Result<()> {
-    // Test fixture, debug builds only: an internal argv sentinel makes this
-    // binary behave as a minimal ACP agent for integration tests instead of
-    // parsing CLI args. Production release builds compile this branch out.
-    #[cfg(debug_assertions)]
-    {
-        let mut args = std::env::args_os();
-        let _program = args.next();
-        if args.next().as_deref() == Some(std::ffi::OsStr::new("__acps-test-fake-agent")) {
-            let fake_args = args
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>();
-            return super::serve::run_fake_agent(fake_args);
-        }
-    }
-
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {

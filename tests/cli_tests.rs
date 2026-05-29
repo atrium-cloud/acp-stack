@@ -74,8 +74,8 @@ impl AgentCliHarness {
         let config_path = create_runtime_files(tempdir.path(), &path);
         let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
         let mut config = load_config_from_str(VALID_CONFIG).expect("config parses");
-        config.agent.command = env!("CARGO_BIN_EXE_acps").to_owned();
-        config.agent.args = vec!["__acps-test-fake-agent".into()];
+        config.agent.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
+        config.agent.args = vec!["acp".into()];
         config.agent.env = vec![];
         config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
         config.agent.expected_sha256 = None;
@@ -182,7 +182,7 @@ fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
     let workspace = home.join("workspace");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::create_dir_all(&workspace).expect("workspace should be created");
-    let mut args = vec!["__acps-test-fake-agent"];
+    let mut args = vec!["acp"];
     args.extend_from_slice(fake_args);
     let args_toml = args
         .iter()
@@ -200,7 +200,10 @@ fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
         )
         .replace(
             r#"command = "opencode""#,
-            &format!("command = {}", toml_string(env!("CARGO_BIN_EXE_acps"))),
+            &format!(
+                "command = {}",
+                toml_string(env!("CARGO_BIN_EXE_placebo-agent"))
+            ),
         )
         .replace(r#"args = ["acp"]"#, &format!("args = [{args_toml}]"))
         .replace(

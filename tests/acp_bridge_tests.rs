@@ -1,7 +1,6 @@
-//! Drives `AcpBridge::spawn` against the fake-agent gate baked into the
-//! `acps` binary. The fake responds to `initialize` with hardcoded
-//! capabilities so we can verify the spawn + handshake path end-to-end
-//! without depending on a third-party agent.
+//! Drives `AcpBridge::spawn` against the standalone placebo ACP fixture so the
+//! spawn + handshake path is exercised end-to-end without depending on a
+//! third-party agent.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,8 +46,8 @@ fn fake_agent_config() -> AgentConfig {
     AgentConfig {
         id: "fake".into(),
         name: "fake".into(),
-        command: env!("CARGO_BIN_EXE_acps").into(),
-        args: vec!["__acps-test-fake-agent".into()],
+        command: env!("CARGO_BIN_EXE_placebo-agent").into(),
+        args: vec!["acp".into()],
         cwd: None,
         env: vec![],
         expected_sha256: None,
@@ -84,7 +83,7 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
     .expect("bridge spawns");
     let caps = bridge.capabilities();
     assert_eq!(caps.protocol_version, 1);
-    assert_eq!(caps.agent_name.as_deref(), Some("acps-fake-agent"));
+    assert_eq!(caps.agent_name.as_deref(), Some("placebo-agent"));
     bridge.shutdown().await.expect("shutdown ok");
 }
 
