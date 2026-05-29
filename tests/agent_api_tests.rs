@@ -2,9 +2,7 @@
 //! capabilities, stop, and the session/admin tier enforcement on those.
 //!
 //! All tests drive a real `acps` HTTP server against a `Config` whose
-//! `[agent].command` is the current test binary with an internal debug-only
-//! fake-agent argv sentinel, which makes it speak ACP just well enough to
-//! satisfy `initialize`.
+//! `[agent].command` is the standalone placebo ACP fixture.
 
 use std::{sync::Arc, time::Duration};
 
@@ -235,7 +233,7 @@ creates = "registry-agent"
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["data"]["outcome"], "installed");
     assert_eq!(body["data"]["path"], binary_path.to_string_lossy().as_ref());
-    assert_eq!(command, env!("CARGO_BIN_EXE_acps"));
+    assert_eq!(command, env!("CARGO_BIN_EXE_placebo-agent"));
 }
 
 impl Drop for AgentHarness {
@@ -244,14 +242,14 @@ impl Drop for AgentHarness {
     }
 }
 
-/// Build a test config that points `[agent].command` at the test binary in
-/// fake-agent mode. Empty `[agent].env` so the handlers don't try to open
-/// a secret store that doesn't exist in the test tempdir.
+/// Build a test config that points `[agent].command` at the placebo ACP
+/// fixture. Empty `[agent].env` so the handlers don't try to open a secret
+/// store that doesn't exist in the test tempdir.
 fn test_config() -> Config {
     let toml_text = include_str!("fixtures/valid-acp-stack.toml");
     let mut config = load_config_from_str(toml_text).expect("config parses");
-    config.agent.command = env!("CARGO_BIN_EXE_acps").to_owned();
-    config.agent.args = vec!["__acps-test-fake-agent".into()];
+    config.agent.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
+    config.agent.args = vec!["acp".into()];
     config.agent.env = vec![];
     config.agent.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
     config.agent.expected_sha256 = None;
@@ -1197,10 +1195,10 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
 async fn model_discovery_timeout_shuts_down_provisional_agent() {
     let _fixture_guard = EnvVarGuard::unset("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH");
     let tempdir = TempDir::new().expect("tempdir");
-    let pid_path = tempdir.path().join("fake-agent.pid");
+    let pid_path = tempdir.path().join("placebo-agent.pid");
     let mut config = test_config();
     config.agent.args = vec![
-        "__acps-test-fake-agent".into(),
+        "acp".into(),
         "--session-new-stall".into(),
         "--write-pid".into(),
         pid_path.to_string_lossy().into_owned(),
@@ -1225,7 +1223,7 @@ async fn model_discovery_timeout_shuts_down_provisional_agent() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("fake-agent process {pid} still alive after discovery timeout");
+        panic!("placebo-agent process {pid} still alive after discovery timeout");
     }
 }
 
@@ -1318,7 +1316,7 @@ async fn create_session_for_crash_test(client: &reqwest::Client, base_url: &str)
 #[tokio::test]
 async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
     let tempdir = TempDir::new().expect("tempdir");
-    let pid_path = tempdir.path().join("fake-agent.pid");
+    let pid_path = tempdir.path().join("placebo-agent.pid");
     let mut config = test_config();
     config.agent.restart = "on-crash".to_owned();
     config.agent.args.extend([
@@ -1384,7 +1382,7 @@ async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
 #[tokio::test]
 async fn never_policy_does_not_restart_after_agent_crash() {
     let tempdir = TempDir::new().expect("tempdir");
-    let pid_path = tempdir.path().join("fake-agent.pid");
+    let pid_path = tempdir.path().join("placebo-agent.pid");
     let mut config = test_config();
     config.agent.restart = "never".to_owned();
     config.agent.args.extend([
@@ -1482,7 +1480,7 @@ async fn agent_restart_picks_up_config_written_after_daemon_start() {
     // cached `state.config`, restart would succeed with the original
     // valid binary path and this assertion would fail.
     let mutated = initial.replace(
-        &format!("command = \"{}\"", env!("CARGO_BIN_EXE_acps")),
+        &format!("command = \"{}\"", env!("CARGO_BIN_EXE_placebo-agent")),
         "command = \"/nonexistent/absolutely-not-a-binary\"",
     );
     std::fs::write(&harness.config_path, &mutated).expect("write mutated config");
@@ -1520,7 +1518,7 @@ async fn agent_start_picks_up_config_written_after_daemon_start() {
     let initial = std::fs::read_to_string(&harness.config_path).expect("read initial config");
 
     let mutated = initial.replace(
-        &format!("command = \"{}\"", env!("CARGO_BIN_EXE_acps")),
+        &format!("command = \"{}\"", env!("CARGO_BIN_EXE_placebo-agent")),
         "command = \"/nonexistent/absolutely-not-a-binary\"",
     );
     std::fs::write(&harness.config_path, &mutated).expect("write mutated config");

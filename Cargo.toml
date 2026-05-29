@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "acpctl"
 path = "src/bin/acpctl/main.rs"
 
+[[bin]]
+name = "placebo-agent"
+path = "src/bin/placebo_agent/main.rs"
+
 # Dev-only: diffs upstream ACP registry.json against data/registry.toml so the
 # maintainer can keep the embedded catalog in sync. Not installed by
 # `cargo install` consumers in the normal sense — invoked via `cargo run --bin
