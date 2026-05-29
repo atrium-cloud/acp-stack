@@ -48,6 +48,7 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
 
 #[derive(Default, Deserialize)]
 pub(super) struct RecordedInitArgs {
+    pub(super) agent: Option<String>,
     pub(super) provider: Option<String>,
     pub(super) model: Option<String>,
     pub(super) mode: Option<String>,

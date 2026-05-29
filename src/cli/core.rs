@@ -37,7 +37,7 @@ use super::ws::WsCommand;
   acps deps check --format json
   acps security history --format json
   acps config export --output acp-stack.toml
-  acps config import --path acp-stack.toml --dry-run
+  acps config import acp-stack.toml --dry-run
   acps completion zsh > _acps",
 )]
 pub struct Cli {
@@ -59,28 +59,34 @@ enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Initialize local config, secrets, workspace, and agent files.
     Init(Box<InitArgs>),
+    /// Print daemon health and runtime status.
     Status,
     Reset(ResetArgs),
     /// Run the HTTP daemon in the foreground. Blocks until SIGTERM or SIGINT.
     Serve(ServeArgs),
+    /// Rotate or inspect configured API key references.
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Manage encrypted local secret values.
     Secrets {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    /// Validate, export, or import runtime config.
     #[command(after_help = "Examples:
   acps config validate
   acps config export --output acp-stack.toml
   acps config export --format json
-  acps config import --path acp-stack.toml --dry-run")]
+  acps config import acp-stack.toml --dry-run")]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Query durable runtime logs.
     #[command(after_help = "Examples:
   acps logs query --since 1h --kind prompt.
   acps logs query --follow --format json
@@ -89,6 +95,7 @@ enum Command {
         #[command(subcommand)]
         command: LogsCommand,
     },
+    /// Install, control, test, or configure the agent.
     #[command(after_help = "Examples:
   acps agent status --format json
   acps agent check
@@ -98,6 +105,7 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Configure OpenCode small-model behavior.
     Subagent {
         #[command(subcommand)]
         command: SubagentCommand,
@@ -107,6 +115,7 @@ enum Command {
         #[command(subcommand)]
         command: InstallerCommand,
     },
+    /// List, create, prompt, or close sessions.
     #[command(after_help = "Examples:
   acps sessions list --range week
   acps sessions new --format json
@@ -377,7 +386,79 @@ fn static_path_label(path: &str) -> &'static str {
     // Strip the query string before bucketing so callers passing `?limit=` etc.
     // still resolve to the canonical path label.
     let bare = path.split('?').next().unwrap_or(path);
-    if bare == "/v1/security/check" {
+    if bare == "/v1/status" {
+        "/v1/status"
+    } else if bare == "/v1/status/agent" {
+        "/v1/status/agent"
+    } else if bare == "/v1/agent/status" {
+        "/v1/agent/status"
+    } else if bare == "/v1/status/connections" {
+        "/v1/status/connections"
+    } else if bare == "/v1/health/live" {
+        "/v1/health/live"
+    } else if bare == "/v1/health/ready" {
+        "/v1/health/ready"
+    } else if bare == "/v1/config/export" {
+        "/v1/config/export"
+    } else if bare == "/v1/config/validate" {
+        "/v1/config/validate"
+    } else if bare == "/v1/agent/capabilities" {
+        "/v1/agent/capabilities"
+    } else if bare == "/v1/agent/install" {
+        "/v1/agent/install"
+    } else if bare == "/v1/agent/start" {
+        "/v1/agent/start"
+    } else if bare == "/v1/agent/stop" {
+        "/v1/agent/stop"
+    } else if bare == "/v1/agent/restart" {
+        "/v1/agent/restart"
+    } else if bare == "/v1/agent/switch" {
+        "/v1/agent/switch"
+    } else if bare == "/v1/logs/events" {
+        "/v1/logs/events"
+    } else if bare == "/v1/logs/commands" {
+        "/v1/logs/commands"
+    } else if bare == "/v1/logs/permissions" {
+        "/v1/logs/permissions"
+    } else if bare == "/v1/logs/security" {
+        "/v1/logs/security"
+    } else if bare == "/v1/logs/sessions" {
+        "/v1/logs/sessions"
+    } else if bare == "/v1/metrics/summary" {
+        "/v1/metrics/summary"
+    } else if bare == "/v1/workspace" {
+        "/v1/workspace"
+    } else if bare == "/v1/files" {
+        "/v1/files"
+    } else if bare == "/v1/files/content" {
+        "/v1/files/content"
+    } else if bare == "/v1/files/upload" {
+        "/v1/files/upload"
+    } else if bare == "/v1/files/download" {
+        "/v1/files/download"
+    } else if bare == "/v1/commands" {
+        "/v1/commands"
+    } else if bare.starts_with("/v1/commands/") && bare.ends_with("/output") {
+        "/v1/commands/{id}/output"
+    } else if bare.starts_with("/v1/commands/") && bare.ends_with("/cancel") {
+        "/v1/commands/{id}/cancel"
+    } else if bare.starts_with("/v1/commands/") {
+        "/v1/commands/{id}"
+    } else if bare == "/v1/deps" {
+        "/v1/deps"
+    } else if bare == "/v1/deps/check" {
+        "/v1/deps/check"
+    } else if bare == "/v1/providers" {
+        "/v1/providers"
+    } else if bare == "/v1/models" {
+        "/v1/models"
+    } else if bare == "/v1/permissions/pending" {
+        "/v1/permissions/pending"
+    } else if bare.starts_with("/v1/permissions/") && bare.ends_with("/approve") {
+        "/v1/permissions/{id}/approve"
+    } else if bare.starts_with("/v1/permissions/") && bare.ends_with("/deny") {
+        "/v1/permissions/{id}/deny"
+    } else if bare == "/v1/security/check" {
         "/v1/security/check"
     } else if bare == "/v1/security/history" {
         "/v1/security/history"
@@ -407,6 +488,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/sessions/{id}/prompts/{prompt_id}"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/events") {
         "/v1/sessions/{id}/events"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/snapshot") {
+        "/v1/sessions/{id}/snapshot"
     } else if bare.starts_with("/v1/sessions/") {
         "/v1/sessions/{id}"
     } else {
@@ -513,7 +596,7 @@ fn strip_ansi(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_base_url, strip_ansi};
+    use super::{daemon_base_url, static_path_label, strip_ansi};
 
     #[test]
     fn strip_ansi_removes_csi_sequences() {
@@ -561,5 +644,27 @@ mod tests {
             daemon_base_url(None, "127.0.0.1:7700").expect("url"),
             "http://127.0.0.1:7700"
         );
+    }
+
+    #[test]
+    fn static_path_label_covers_cli_daemon_routes() {
+        let cases = [
+            ("/v1/metrics/summary?range=day", "/v1/metrics/summary"),
+            ("/v1/logs/events?limit=10", "/v1/logs/events"),
+            ("/v1/files/content?path=README.md", "/v1/files/content"),
+            ("/v1/commands/cmd_123/output", "/v1/commands/{id}/output"),
+            (
+                "/v1/permissions/pending?limit=10",
+                "/v1/permissions/pending",
+            ),
+            (
+                "/v1/sessions/sess_123/snapshot",
+                "/v1/sessions/{id}/snapshot",
+            ),
+            ("/v1/agent/restart", "/v1/agent/restart"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(static_path_label(input), expected);
+        }
     }
 }

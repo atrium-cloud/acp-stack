@@ -238,6 +238,57 @@ fn security_check_is_listed_in_help() {
 }
 
 #[test]
+fn top_level_help_describes_common_subcommands() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Initialize local config, secrets, workspace, and agent files",
+        ))
+        .stdout(predicates::str::contains(
+            "Print daemon health and runtime status",
+        ))
+        .stdout(predicates::str::contains(
+            "Rotate or inspect configured API key references",
+        ))
+        .stdout(predicates::str::contains(
+            "Manage encrypted local secret values",
+        ))
+        .stdout(predicates::str::contains(
+            "Validate, export, or import runtime config",
+        ))
+        .stdout(predicates::str::contains("Query durable runtime logs"))
+        .stdout(predicates::str::contains(
+            "Install, control, test, or configure the agent",
+        ))
+        .stdout(predicates::str::contains(
+            "Configure OpenCode small-model behavior",
+        ))
+        .stdout(predicates::str::contains(
+            "List, create, prompt, or close sessions",
+        ))
+        .stdout(predicates::str::contains(
+            "acps config import acp-stack.toml --dry-run",
+        ))
+        .stdout(predicates::str::contains("config import --path").not());
+}
+
+#[test]
+fn config_help_uses_positional_import_path() {
+    Command::cargo_bin("acps")
+        .expect("binary should build")
+        .args(["config", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "acps config import acp-stack.toml --dry-run",
+        ))
+        .stdout(predicates::str::contains("config import --path").not());
+}
+
+#[test]
 fn validates_explicit_config_path() {
     let mut command = Command::cargo_bin("acps").expect("binary should build");
 
@@ -901,10 +952,7 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
 // explicit `--model`/`--mode` against the harness's advertised values
 // (L86) and surface the list when non-interactive callers omit `--model`
 // (L87). The fixture env var short-circuits the actual spawn so these
-// tests don't depend on a real opencode binary being installed; the
-// guard in `configure_model_and_mode_for_init` checks workspace.root +
-// agent.command exist first, hence the workspace setup + pointing
-// `command` at `/bin/true`.
+// tests don't depend on a real opencode binary being installed.
 fn write_workspace_init_config(home: &std::path::Path) {
     let config_dir = home.join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir");
@@ -927,6 +975,14 @@ fn write_workspace_init_config(home: &std::path::Path) {
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config");
 }
 
+fn acps_with_empty_path(home: &std::path::Path) -> Command {
+    let empty_bin = home.join("empty-bin");
+    fs::create_dir_all(&empty_bin).expect("empty PATH dir");
+    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    command.env("PATH", empty_bin);
+    command
+}
+
 #[test]
 fn init_explicit_model_validates_against_acp_advertised_values() {
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -934,8 +990,7 @@ fn init_explicit_model_validates_against_acp_advertised_values() {
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -991,8 +1046,7 @@ fn init_rejected_model_restores_prior_headless_config() {
 
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1024,8 +1078,7 @@ fn init_explicit_model_rejects_value_not_in_advertised_list() {
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1062,8 +1115,7 @@ fn init_noninteractive_missing_model_prints_advertised_values_without_mutating_c
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5", "openai/o4-mini"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1101,8 +1153,7 @@ fn init_explicit_mode_validates_against_acp_advertised_values() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1135,8 +1186,7 @@ fn init_explicit_mode_rejects_value_not_in_advertised_list() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1174,8 +1224,7 @@ fn init_mode_only_does_not_print_model_picker() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1219,8 +1268,7 @@ fn init_provider_change_without_model_clears_stale_opencode_model() {
 
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1258,8 +1306,7 @@ fn init_same_provider_without_model_preserves_existing_model() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5", "openai/o4-mini"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1277,8 +1324,7 @@ fn init_same_provider_without_model_preserves_existing_model() {
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1343,8 +1389,7 @@ fn init_custom_provider_still_validates_mode_against_acp_advertised_values() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -7253,6 +7298,50 @@ fn init_resume_retries_failed_agent_install_even_without_install_flag() {
         .find(|step| step.kind == "agent_install")
         .expect("agent install step");
     assert_eq!(install_step.status, acp_stack::state::INIT_STEP_FAILED);
+}
+
+#[test]
+fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--workspace-root",
+            workspace.to_str().expect("workspace UTF-8"),
+            "--no-install-agent",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("OPENAI_API_KEY"));
+
+    let config_before = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config_before.contains(r#"id = "placeholder""#));
+
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: OpenCode (opencode)"));
+
+    let config_after = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config_after.contains(r#"id = "opencode""#));
+    assert!(config_after.contains(r#"id = "openai""#));
 }
 
 #[test]

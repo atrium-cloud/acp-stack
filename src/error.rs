@@ -581,6 +581,9 @@ pub enum StackError {
     #[error("workspace path `{requested}` was not found")]
     WorkspaceNotFound { requested: String },
 
+    #[error("workspace parent directory for `{requested}` was not found")]
+    WorkspaceParentNotFound { requested: String },
+
     #[error("workspace file exceeds the {limit}-byte size limit")]
     WorkspaceTooLarge { limit: u64 },
 
