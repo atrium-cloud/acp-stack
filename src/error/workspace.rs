@@ -9,7 +9,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     Some(match err {
         WorkspacePathInvalid { .. } => "workspace.path_invalid",
         WorkspaceSymlinkEscape { .. } => "workspace.symlink_escape",
-        WorkspaceNotFound { .. } => "workspace.not_found",
+        WorkspaceNotFound { .. } | WorkspaceParentNotFound { .. } => "workspace.not_found",
         WorkspaceTooLarge { .. } => "workspace.too_large",
         WorkspaceUploadInvalid { .. } => "workspace.upload_invalid",
         WorkspaceIo { .. } => "workspace.io_failed",
@@ -26,6 +26,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             "workspace path resolves outside the workspace root".to_owned()
         }
         WorkspaceNotFound { requested } => format!("workspace path `{requested}` was not found"),
+        WorkspaceParentNotFound { requested } => {
+            format!("workspace parent directory for `{requested}` was not found")
+        }
         WorkspaceTooLarge { limit } => {
             format!("workspace file exceeds the {limit}-byte size limit")
         }
@@ -45,7 +48,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | WorkspaceSymlinkEscape { .. }
         | WorkspaceUploadInvalid { .. }
         | WorkspaceEncodingInvalid { .. } => StatusCode::BAD_REQUEST,
-        WorkspaceNotFound { .. } => StatusCode::NOT_FOUND,
+        WorkspaceNotFound { .. } | WorkspaceParentNotFound { .. } => StatusCode::NOT_FOUND,
         WorkspaceTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         WorkspaceIo { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         _ => return None,

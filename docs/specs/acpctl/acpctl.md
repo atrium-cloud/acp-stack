@@ -46,7 +46,7 @@ Denied capabilities:
 - disconnect WebSocket clients
 - disable permissions, rate limits, origin checks, or security logging
 
-Every local operation is logged with `source = "local"`. Workspace and command operations still pass through the same policy and audit paths as public API requests.
+Every local operation is logged with `source = "local"`. Workspace and command operations still pass through the same policy and audit paths as public API requests. `workspace write` does not create parent directories.
 
 ## Allowlisted Routes
 

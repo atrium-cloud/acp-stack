@@ -355,6 +355,13 @@ pub fn write_file_atomic(absolute_path: &Path, content: &[u8]) -> Result<FileMet
             requested: display_relative(absolute_path),
         });
     }
+    if let Some(parent) = absolute_path.parent()
+        && !parent.is_dir()
+    {
+        return Err(StackError::WorkspaceParentNotFound {
+            requested: display_relative(absolute_path),
+        });
+    }
     atomic_write_owner_only(absolute_path, content).map_err(translate_atomic_write_error)?;
     let metadata = std::fs::metadata(absolute_path).map_err(|source| StackError::WorkspaceIo {
         requested: display_relative(absolute_path),
@@ -417,10 +424,15 @@ pub fn delete_file(absolute_path: &Path) -> Result<()> {
 /// Canonicalize a path and translate `std::io` errors into the workspace
 /// domain so client-shaped errors (missing path, intermediate non-directory)
 /// surface as 4xx instead of falling through to generic 500 `WorkspaceIo`.
-fn canonicalize_or_translate(path: &Path, requested: &str, _intent: PathIntent) -> Result<PathBuf> {
+fn canonicalize_or_translate(path: &Path, requested: &str, intent: PathIntent) -> Result<PathBuf> {
     match path.canonicalize() {
         Ok(canonical) => Ok(canonical),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if matches!(intent, PathIntent::WriteOrCreate) {
+                return Err(StackError::WorkspaceParentNotFound {
+                    requested: requested.to_owned(),
+                });
+            }
             Err(StackError::WorkspaceNotFound {
                 requested: requested.to_owned(),
             })
@@ -465,7 +477,12 @@ fn open_no_follow(absolute_path: &Path) -> std::io::Result<std::fs::File> {
         // race-substituted non-regular file is rejected here.
         let metadata = file.metadata()?;
         let mode = metadata.mode();
-        if mode & (libc::S_IFMT as u32) != (libc::S_IFREG as u32) {
+        // libc exposes these constants with target-specific integer types.
+        #[allow(clippy::unnecessary_cast)]
+        let file_type_mask = libc::S_IFMT as u32;
+        #[allow(clippy::unnecessary_cast)]
+        let regular_file_mode = libc::S_IFREG as u32;
+        if mode & file_type_mask != regular_file_mode {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "workspace open refused non-regular file after race-check",
@@ -673,7 +690,7 @@ mod tests {
         let error =
             resolve_workspace_path(root.path(), "nested/new.txt", PathIntent::WriteOrCreate)
                 .expect_err("missing parent should 404");
-        assert!(matches!(error, StackError::WorkspaceNotFound { .. }));
+        assert!(matches!(error, StackError::WorkspaceParentNotFound { .. }));
     }
 
     #[test]
@@ -833,6 +850,17 @@ mod tests {
             .filter(|entry| entry.file_name() != "note.md")
             .collect();
         assert!(leftover.is_empty(), "leftover entries: {leftover:?}");
+    }
+
+    #[test]
+    fn write_file_atomic_reports_missing_parent() {
+        let root = workspace_root();
+        let target = root.path().join("missing").join("note.md");
+        let error = write_file_atomic(&target, b"hello").expect_err("missing parent");
+        assert!(matches!(
+            error,
+            StackError::WorkspaceParentNotFound { requested } if requested == "note.md"
+        ));
     }
 
     #[test]

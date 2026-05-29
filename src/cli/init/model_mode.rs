@@ -5,7 +5,8 @@ use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
-    advertised_values_for_category, fetch_session_config, validate_advertised_value,
+    FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, advertised_values_for_category,
+    fetch_session_config, validate_advertised_value,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
@@ -162,17 +163,22 @@ pub(super) fn configure_model_and_mode_for_init(
     // config they can finish off with a follow-up `acps init --model`.
     // For explicit `--model`/`--mode` we fail loudly so they're never
     // silently accepted without validation.
+    let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
+        || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
     let spawn_cwd: PathBuf = config
         .agent
         .cwd
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
-    let binary_missing =
-        crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
-            .is_none();
-    let cwd_missing = !spawn_cwd.is_dir();
-    if binary_missing || cwd_missing {
+    let binary_missing = !fixture_discovery
+        && crate::runtime::agent::acp_bridge::resolve_command_path(
+            &config.agent.command,
+            &spawn_cwd,
+        )
+        .is_none();
+    let cwd_missing = !fixture_discovery && !spawn_cwd.is_dir();
+    if !fixture_discovery && (binary_missing || cwd_missing) {
         if explicit {
             let reason = match (binary_missing, cwd_missing) {
                 (true, true) => format!(

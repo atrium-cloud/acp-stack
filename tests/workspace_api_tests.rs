@@ -453,6 +453,27 @@ async fn write_rejects_invalid_encoding() {
 }
 
 #[tokio::test]
+async fn write_to_missing_parent_returns_clear_not_found() {
+    let harness = Harness::spawn().await;
+    let response = auth(session_client().put(format!("{}/v1/files/content", harness.base_url)))
+        .json(&serde_json::json!({
+            "path": "missing/notes/x.txt",
+            "encoding": "utf8",
+            "content": "hello"
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "workspace.not_found");
+    assert_eq!(
+        body["error"]["message"],
+        "workspace parent directory for `missing/notes/x.txt` was not found"
+    );
+}
+
+#[tokio::test]
 async fn uploads_multipart_lands_at_resolved_path() {
     let harness = Harness::spawn().await;
     let bytes = vec![1u8, 2, 3, 4];
