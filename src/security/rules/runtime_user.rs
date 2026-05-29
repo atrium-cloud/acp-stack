@@ -5,10 +5,7 @@
 //! workspace setup. The user-mismatch check compares `process_euid` against
 //! the uid resolved from `workspace.runtime_user`; the workspace-writable
 //! check probes whether that running uid can actually create files in the
-//! configured workspace root. The Railway root-volume profile suppresses
-//! the default user-mismatch (root euid + default `acp` runtime_user) so
-//! Railway deploys don't get a noisy warning for an expected platform
-//! posture.
+//! configured workspace root.
 
 use crate::security::SecurityCheckInputs;
 use crate::security::findings::{SecurityFinding, shell_quote};
@@ -17,22 +14,15 @@ pub(in crate::security) fn check_runtime_user(
     inputs: &SecurityCheckInputs<'_>,
     findings: &mut Vec<SecurityFinding>,
 ) {
-    let railway_root_volume_profile = inputs.railway_platform && inputs.process_euid == 0;
-
     if let Some(uid) = inputs.runtime_user_uid {
-        let railway_runtime_user_mismatch =
-            railway_root_volume_profile && inputs.runtime_user_name == "acp" && uid != 0;
-        if uid != inputs.process_euid && !railway_runtime_user_mismatch {
-            // `[workspace].runtime_user = "root"` (uid 0) is permitted only
-            // for the disposable/dev profile via `--allow-root` /
-            // `ACP_STACK_ALLOW_ROOT=1`; production deploys must run as an
-            // unprivileged user. The remediation reflects that — we never
-            // tell an operator to "relaunch as root" to fix the mismatch.
+        if uid != inputs.process_euid {
+            // Root execution is dev-only, so remediation never tells an
+            // operator to relaunch the production daemon as root.
             let remediation = if uid == 0 {
                 format!(
                     "Update `[workspace].runtime_user` to an unprivileged \
                      user that matches the launching uid {euid}; root \
-                     execution is reserved for the disposable/dev profile.",
+                     execution is reserved for development.",
                     euid = inputs.process_euid,
                 )
             } else {
@@ -58,6 +48,21 @@ pub(in crate::security) fn check_runtime_user(
                 .with_remediation(remediation),
             );
         }
+    } else {
+        findings.push(
+            SecurityFinding::warning(
+                "runtime.user_unresolved",
+                &format!(
+                    "configured runtime_user '{}' does not resolve to a local uid",
+                    inputs.runtime_user_name,
+                ),
+            )
+            .with_remediation(format!(
+                "Create the configured user '{name}', or update `[workspace].runtime_user` \
+                 to the user that launches the daemon.",
+                name = inputs.runtime_user_name,
+            )),
+        );
     }
 
     if !inputs.workspace_writable {

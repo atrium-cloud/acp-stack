@@ -14,6 +14,7 @@ bind_address="127.0.0.1:7700"
 unit_path="/etc/systemd/system/acp-stack.service"
 unit_template="${DEFAULT_UNIT_TEMPLATE}"
 do_init=true
+agent_id=""
 install_os_deps=true
 force=false
 current_step="startup"
@@ -36,6 +37,7 @@ Options:
   --home <dir>             Runtime user homedir (default: /home/<user>)
   --workspace <dir>        Workspace root (default: /workspace)
   --bind <addr>            ExecStart bind address (default: 127.0.0.1:7700)
+  --agent <id>             Agent id to configure during init
   --unit-path <path>       Systemd unit destination (default:
                            /etc/systemd/system/acp-stack.service)
   --unit-template <path>   Source unit file (default:
@@ -98,6 +100,11 @@ while [[ $# -gt 0 ]]; do
     --bind)
       [[ $# -ge 2 ]] || { usage >&2; exit 1; }
       bind_address="$2"
+      shift 2
+      ;;
+    --agent)
+      [[ $# -ge 2 ]] || { usage >&2; exit 1; }
+      agent_id="$2"
       shift 2
       ;;
     --unit-path)
@@ -247,17 +254,21 @@ if [[ "${do_init}" == true ]]; then
   if [[ -f "${config_file}" && "${force}" != true ]]; then
     log "config already present at ${config_file}; skipping acps init (pass --force to re-run)."
   else
+    if [[ -z "${agent_id}" ]]; then
+      fail "acps init requires a real agent id; pass --agent <id> or use --no-init and run acps init later"
+    fi
     log "running acps init as ${user_name} (output below contains generated API keys -- save them now)."
     printf -- '----- acps init begin -----\n' >&2
     runuser -u "${user_name}" -- env HOME="${home_dir}" /usr/local/bin/acps init \
-      --no-install-agent \
+      --non-interactive \
+      --agent "${agent_id}" \
       --workspace-root "${workspace_root}" \
       --workspace-uploads "${workspace_root}/uploads" \
       --runtime-user "${user_name}"
     printf -- '----- acps init end -----\n' >&2
   fi
 else
-  log "skipping acps init (--no-init); run later with: sudo -u ${user_name} -H acps init --no-install-agent --workspace-root ${workspace_root} --workspace-uploads ${workspace_root}/uploads --runtime-user ${user_name}"
+  log "skipping acps init (--no-init); run later with: sudo -u ${user_name} -H acps init --agent <id> --workspace-root ${workspace_root} --workspace-uploads ${workspace_root}/uploads --runtime-user ${user_name}"
 fi
 
 current_step="install_unit"

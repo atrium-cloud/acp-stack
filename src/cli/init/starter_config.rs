@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::Path;
 
 use crate::config::{
@@ -72,10 +73,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
             config::DEFAULT_WORKSPACE_UPLOADS.to_owned()
         }
     });
-    let runtime_user = args
-        .runtime_user
-        .clone()
-        .unwrap_or_else(|| config::DEFAULT_RUNTIME_USER.to_owned());
+    let runtime_user = starter_runtime_user(args)?;
 
     let starter = Config {
         config_version: config::SUPPORTED_CONFIG_VERSION,
@@ -152,6 +150,23 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
     let canonical = starter.to_canonical_toml()?;
     config::load_config_from_str(&canonical)?;
     Ok(canonical)
+}
+
+fn starter_runtime_user(args: &InitArgs) -> Result<String> {
+    if let Some(runtime_user) = args.runtime_user.clone() {
+        return Ok(runtime_user);
+    }
+    if std::io::stdin().is_terminal()
+        && crate::ownership::resolve_runtime_user_uid(config::DEFAULT_RUNTIME_USER)
+            .map_err(|source| StackError::ServeIo { source })?
+            .is_none()
+        && crate::ownership::process_euid() != 0
+        && let Some(current_user) =
+            crate::ownership::current_username().map_err(|source| StackError::ServeIo { source })?
+    {
+        return Ok(current_user);
+    }
+    Ok(config::DEFAULT_RUNTIME_USER.to_owned())
 }
 
 fn code_sources_from_args(args: &InitArgs) -> Vec<CodeSourceConfig> {

@@ -205,6 +205,45 @@ async fn read_missing_returns_not_found() {
 }
 
 #[tokio::test]
+async fn missing_workspace_root_returns_not_found_for_file_operations() {
+    let harness = Harness::spawn().await;
+    std::fs::remove_dir_all(&harness.workspace_root).expect("remove workspace root");
+    let client = session_client();
+
+    let list_response = auth(client.get(format!("{}/v1/files?path=.", harness.base_url)))
+        .send()
+        .await
+        .expect("list send");
+    assert_eq!(list_response.status(), StatusCode::NOT_FOUND);
+    let list_body: Value = list_response.json().await.expect("list json");
+    assert_eq!(list_body["error"]["code"], "workspace.not_found");
+
+    let read_response = auth(client.get(format!(
+        "{}/v1/files/content?path=notes/x.txt",
+        harness.base_url
+    )))
+    .send()
+    .await
+    .expect("read send");
+    assert_eq!(read_response.status(), StatusCode::NOT_FOUND);
+    let read_body: Value = read_response.json().await.expect("read json");
+    assert_eq!(read_body["error"]["code"], "workspace.not_found");
+
+    let write_response = auth(client.put(format!("{}/v1/files/content", harness.base_url)))
+        .json(&serde_json::json!({
+            "path": "notes/x.txt",
+            "encoding": "utf8",
+            "content": "hello"
+        }))
+        .send()
+        .await
+        .expect("write send");
+    assert_eq!(write_response.status(), StatusCode::NOT_FOUND);
+    let write_body: Value = write_response.json().await.expect("write json");
+    assert_eq!(write_body["error"]["code"], "workspace.not_found");
+}
+
+#[tokio::test]
 async fn download_streams_bytes_with_disposition_header() {
     let harness = Harness::spawn().await;
     let bytes = vec![1u8, 2, 3, 4, 5];

@@ -46,7 +46,7 @@
 - [x] Validate ownership of workspace, config, state, age key, and encrypted secret store.
 - [x] Add remediation hints for incorrect ownership.
 - [x] Ensure daemon, agent, MCP servers, and mediated commands run as the runtime user.
-- [x] Keep root execution limited to explicit disposable/dev profile behavior.
+- [x] Keep root execution limited to explicit development behavior.
 
 ## Config Import/Export Hardening
 

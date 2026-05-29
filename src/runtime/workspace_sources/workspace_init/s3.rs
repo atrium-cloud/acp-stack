@@ -94,13 +94,13 @@ pub(super) fn materialize_s3(
             secret_key,
         },
     )?;
-    if let Ok(endpoint) = std::env::var("ACP_STACK_S3_ENDPOINT_OVERRIDE")
-        && !endpoint.is_empty()
+    #[cfg(debug_assertions)]
     {
-        // Test/operator escape hatch for hitting a local MinIO mock or a
-        // VPC-internal endpoint without baking it into TOML. Production
-        // deployments leave the env var unset.
-        client = client.with_endpoint_base(endpoint);
+        if let Ok(endpoint) = std::env::var("ACP_STACK_S3_ENDPOINT_OVERRIDE")
+            && !endpoint.is_empty()
+        {
+            client = client.with_endpoint_base(endpoint);
+        }
     }
 
     let outcome = download_s3_objects(&client, bucket, prefix.as_deref(), dest, max_total_bytes);

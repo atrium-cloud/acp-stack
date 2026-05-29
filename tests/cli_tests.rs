@@ -19,6 +19,19 @@ const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
 const SESSION_KEY: &str = "acps_session_cccccccccccccccccccccccccccccccccccccccccccc";
 const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd";
 
+fn acps_command() -> Command {
+    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    command.env(
+        "ACP_STACK_DEV_PLACEBO_REGISTRY",
+        env!("CARGO_BIN_EXE_placebo-agent"),
+    );
+    command
+}
+
+fn acps_command_without_placebo() -> Command {
+    Command::cargo_bin("acps").expect("binary should build")
+}
+
 struct AgentCliHarness {
     base_url: String,
     state_path: std::path::PathBuf,
@@ -220,7 +233,7 @@ fn toml_string(value: &str) -> String {
 
 #[test]
 fn prints_version() {
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .arg("--version")
@@ -231,8 +244,7 @@ fn prints_version() {
 
 #[test]
 fn security_check_is_listed_in_help() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["security", "--help"])
         .assert()
         .success()
@@ -242,8 +254,7 @@ fn security_check_is_listed_in_help() {
 
 #[test]
 fn top_level_help_describes_common_subcommands() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .arg("--help")
         .assert()
         .success()
@@ -272,6 +283,7 @@ fn top_level_help_describes_common_subcommands() {
         .stdout(predicates::str::contains(
             "List, create, prompt, or close sessions",
         ))
+        .stdout(predicates::str::contains("Run development-only workflows"))
         .stdout(predicates::str::contains(
             "acps config import acp-stack.toml --dry-run",
         ))
@@ -280,8 +292,7 @@ fn top_level_help_describes_common_subcommands() {
 
 #[test]
 fn config_help_uses_positional_import_path() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["config", "--help"])
         .assert()
         .success()
@@ -293,7 +304,7 @@ fn config_help_uses_positional_import_path() {
 
 #[test]
 fn validates_explicit_config_path() {
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .args(["config", "validate", "tests/fixtures/valid-acp-stack.toml"])
@@ -312,7 +323,7 @@ fn validate_failure_exits_nonzero_with_specific_error() {
     )
     .expect("invalid config should be written");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .args([
@@ -334,7 +345,7 @@ fn exports_default_home_config_to_stdout() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .env("HOME", tempdir.path())
@@ -355,7 +366,7 @@ fn exports_base64_default_home_config() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
     let output = command
         .env("HOME", tempdir.path())
         .args(["config", "export", "--base64"])
@@ -383,7 +394,7 @@ fn exports_default_home_config_to_output_path() {
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
     let output_path = tempdir.path().join("exported.toml");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .env("HOME", tempdir.path())
@@ -406,11 +417,17 @@ fn exports_default_home_config_to_output_path() {
 fn init_creates_config_and_state() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("initialized acp-stack"));
@@ -436,12 +453,12 @@ fn init_creates_config_and_state() {
 fn init_rejects_private_drive_file_viewer_url_as_data_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
-            "--no-install-agent",
+            "--agent",
+            "opencode",
             "--skip-testflight",
             "--data-from",
             "https://drive.google.com/file/d/abc123/view",
@@ -454,12 +471,13 @@ fn init_rejects_private_drive_file_viewer_url_as_data_source() {
 #[test]
 fn init_accepts_drive_uc_export_download_url_as_data_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
-            "--no-install-agent",
+            "--agent",
+            "opencode",
             "--skip-testflight",
             "--skip-workspace-init",
             "--data-from",
@@ -473,12 +491,12 @@ fn init_accepts_drive_uc_export_download_url_as_data_source() {
 fn init_rejects_drive_folder_url_as_data_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
-            "--no-install-agent",
+            "--agent",
+            "opencode",
             "--skip-testflight",
             "--data-from",
             "https://drive.google.com/drive/folders/abc123",
@@ -492,12 +510,12 @@ fn init_rejects_drive_folder_url_as_data_source() {
 fn init_rejects_dropbox_preview_url_without_dl_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
-            "--no-install-agent",
+            "--agent",
+            "opencode",
             "--skip-testflight",
             "--data-from",
             "https://www.dropbox.com/scl/fi/abc123/file.zip?dl=0",
@@ -511,12 +529,13 @@ fn init_rejects_dropbox_preview_url_without_dl_flag() {
 fn init_accepts_dropbox_url_with_dl_one() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
-            "--no-install-agent",
+            "--agent",
+            "opencode",
             "--skip-testflight",
             "--skip-workspace-init",
             "--data-from",
@@ -534,10 +553,15 @@ fn init_default_skips_testflight_under_non_interactive_runs() {
     // why testflight was not run.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args(["init", "--agent", "opencode", "--no-install-agent"])
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains(
@@ -549,15 +573,15 @@ fn init_default_skips_testflight_under_non_interactive_runs() {
 fn init_skip_testflight_flag_is_acknowledged_in_output() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
-            "--no-install-agent",
             "--skip-testflight",
+            "--skip-workspace-init",
         ])
         .assert()
         .success()
@@ -567,17 +591,165 @@ fn init_skip_testflight_flag_is_acknowledged_in_output() {
 }
 
 #[test]
-fn init_no_skills_flag_skips_skill_install_prompt() {
+fn init_creates_workspace_root_and_uploads_without_sources() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let workspace_root = tempdir.path().join("workspace");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
             "--agent",
             "opencode",
-            "--no-install-agent",
+            "--no-skills",
+            "--skip-testflight",
+            "--workspace-root",
+            workspace_root.to_str().expect("workspace UTF-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("workspace root:"))
+        .stdout(predicates::str::contains("workspace uploads:"));
+
+    assert!(workspace_root.is_dir());
+    assert!(workspace_root.join("uploads").is_dir());
+}
+
+#[test]
+fn init_skip_workspace_init_is_acknowledged_in_output() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let workspace_root = tempdir.path().join("workspace");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--no-skills",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--workspace-root",
+            workspace_root.to_str().expect("workspace UTF-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "workspace: skipped (--skip-workspace-init)",
+        ));
+
+    assert!(!workspace_root.exists());
+}
+
+#[test]
+fn init_rejects_skip_workspace_init_outside_dev_mode() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--skip-workspace-init"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--skip-workspace-init"))
+        .stderr(predicates::str::contains(
+            "acps dev init --skip-workspace-init",
+        ));
+}
+
+#[test]
+fn init_noninteractive_without_agent_fails_before_writing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--non-interactive"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "non-interactive init requires selecting a real agent",
+        ));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acp-stack.toml")
+            .exists(),
+        "failed non-interactive init without --agent must not write starter config"
+    );
+}
+
+#[test]
+fn init_help_hides_dev_only_workspace_skip() {
+    acps_command()
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--skip-workspace-init").not());
+}
+
+#[test]
+fn dev_init_help_shows_workspace_skip() {
+    acps_command()
+        .args(["dev", "init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--skip-workspace-init"));
+}
+
+#[test]
+fn serve_help_hides_allow_root_outside_dev_command() {
+    acps_command()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--allow-root").not());
+}
+
+#[test]
+fn dev_serve_help_shows_allow_root() {
+    acps_command()
+        .args(["dev", "serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--allow-root"));
+}
+
+#[test]
+fn serve_rejects_dev_only_root_overrides() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["serve", "--allow-root"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "development-only flag; use `acps dev serve --allow-root`",
+        ));
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_ALLOW_ROOT", "1")
+        .args(["serve"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "development-only environment override; use `acps dev serve`",
+        ));
+}
+
+#[test]
+fn init_no_skills_flag_skips_skill_install_prompt() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
             "--no-skills",
             "--skip-testflight",
             "--skip-workspace-init",
@@ -591,8 +763,7 @@ fn init_no_skills_flag_skips_skill_install_prompt() {
 fn init_rejects_skills_without_source() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["init", "--skills", "repo-map"])
         .assert()
@@ -604,8 +775,7 @@ fn init_rejects_skills_without_source() {
 fn init_rejects_source_without_skills() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["init", "--skills-source", "openai"])
         .assert()
@@ -617,14 +787,13 @@ fn init_rejects_source_without_skills() {
 fn init_validates_skill_names_before_download() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
-            "--no-install-agent",
             "--skip-testflight",
             "--skip-workspace-init",
             "--skills-source",
@@ -642,15 +811,9 @@ fn init_rejects_combining_testflight_and_skip_testflight() {
     // clap conflicts_with should fail at parse time, so init never starts.
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "init",
-            "--no-install-agent",
-            "--testflight",
-            "--skip-testflight",
-        ])
+        .args(["init", "--testflight", "--skip-testflight"])
         .assert()
         .failure();
 }
@@ -659,14 +822,13 @@ fn init_rejects_combining_testflight_and_skip_testflight() {
 fn init_explicit_testflight_prints_provider_credit_warning() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
-            "--no-install-agent",
             "--testflight",
             "--skip-workspace-init",
         ])
@@ -681,18 +843,20 @@ fn init_explicit_testflight_prints_provider_credit_warning() {
 fn init_writes_deployment_controlled_workspace_defaults() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
+            "--agent",
+            "opencode",
             "--workspace-root",
             "/srv/acp",
             "--workspace-uploads",
             "/srv/acp/uploads",
             "--runtime-user",
             "svc-acp",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .success();
@@ -710,15 +874,19 @@ fn init_writes_deployment_controlled_workspace_defaults() {
 fn init_rejects_conflicting_deployment_overrides_for_existing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["init", "--workspace-root", "/srv/acp"])
         .assert()
@@ -738,10 +906,15 @@ fn init_skips_opencode_config_without_configured_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("OpenCode config:").not());
@@ -759,10 +932,10 @@ fn init_provider_sets_opencode_auth_config_without_model() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
@@ -770,7 +943,7 @@ fn init_provider_sets_opencode_auth_config_without_model() {
             "openai",
             "--api-key-ref",
             "OPENAI_API_KEY",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .success()
@@ -805,16 +978,16 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 fn init_provider_fails_noninteractive_when_default_secret_is_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
             "--provider",
             "openai",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .failure()
@@ -828,16 +1001,16 @@ fn init_provider_succeeds_noninteractive_when_default_secret_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
             "--provider",
             "openai",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .success()
@@ -854,10 +1027,10 @@ fn init_custom_opencode_provider_writes_generated_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test-custom-key")]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
@@ -872,7 +1045,7 @@ fn init_custom_opencode_provider_writes_generated_config() {
             "CUSTOM_API_KEY",
             "--model",
             "my-model",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .success()
@@ -910,10 +1083,10 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
         &[("ANTHROPIC_API_KEY", "test-anthropic-key")],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "codex",
@@ -928,7 +1101,7 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
             "ANTHROPIC_API_KEY",
             "--model",
             "claude-custom",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .success()
@@ -981,7 +1154,7 @@ fn write_workspace_init_config(home: &std::path::Path) {
 fn acps_with_empty_path(home: &std::path::Path) -> Command {
     let empty_bin = home.join("empty-bin");
     fs::create_dir_all(&empty_bin).expect("empty PATH dir");
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
     command.env("PATH", empty_bin);
     command
 }
@@ -1006,7 +1179,6 @@ fn init_explicit_model_validates_against_acp_advertised_values() {
             "OPENAI_API_KEY",
             "--model",
             "openai/gpt-5.5",
-            "--no-install-agent",
         ])
         .assert()
         .success();
@@ -1062,7 +1234,6 @@ fn init_rejected_model_restores_prior_headless_config() {
             "OPENAI_API_KEY",
             "--model",
             "definitely-not-advertised",
-            "--no-install-agent",
         ])
         .assert()
         .failure();
@@ -1094,7 +1265,6 @@ fn init_explicit_model_rejects_value_not_in_advertised_list() {
             "OPENAI_API_KEY",
             "--model",
             "made-up-model",
-            "--no-install-agent",
         ])
         .assert()
         .failure()
@@ -1129,7 +1299,6 @@ fn init_noninteractive_missing_model_prints_advertised_values_without_mutating_c
             "openai",
             "--api-key-ref",
             "OPENAI_API_KEY",
-            "--no-install-agent",
         ])
         .assert()
         .success()
@@ -1171,7 +1340,6 @@ fn init_explicit_mode_validates_against_acp_advertised_values() {
             "openai/gpt-5.5",
             "--mode",
             "plan",
-            "--no-install-agent",
         ])
         .assert()
         .success();
@@ -1204,7 +1372,6 @@ fn init_explicit_mode_rejects_value_not_in_advertised_list() {
             "openai/gpt-5.5",
             "--mode",
             "executor",
-            "--no-install-agent",
         ])
         .assert()
         .failure()
@@ -1230,14 +1397,7 @@ fn init_mode_only_does_not_print_model_picker() {
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args([
-            "init",
-            "--agent",
-            "opencode",
-            "--mode",
-            "plan",
-            "--no-install-agent",
-        ])
+        .args(["init", "--agent", "opencode", "--mode", "plan"])
         .assert()
         .success()
         .stdout(predicates::str::contains("advertised models").not())
@@ -1282,7 +1442,6 @@ fn init_provider_change_without_model_clears_stale_opencode_model() {
             "openai",
             "--api-key-ref",
             "OPENAI_API_KEY",
-            "--no-install-agent",
         ])
         .assert()
         .success();
@@ -1322,7 +1481,6 @@ fn init_same_provider_without_model_preserves_existing_model() {
             "OPENAI_API_KEY",
             "--model",
             "openai/gpt-5.5",
-            "--no-install-agent",
         ])
         .assert()
         .success();
@@ -1338,7 +1496,6 @@ fn init_same_provider_without_model_preserves_existing_model() {
             "openai",
             "--api-key-ref",
             "OPENAI_API_KEY",
-            "--no-install-agent",
         ])
         .assert()
         .success();
@@ -1359,8 +1516,7 @@ fn init_rejects_mode_for_agents_without_set_mode_before_discovery() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(tempdir.path(), &[("ANTHROPIC_API_KEY", "test")]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
@@ -1372,7 +1528,6 @@ fn init_rejects_mode_for_agents_without_set_mode_before_discovery() {
             "ANTHROPIC_API_KEY",
             "--mode",
             "plan",
-            "--no-install-agent",
         ])
         .assert()
         .failure()
@@ -1412,7 +1567,6 @@ fn init_custom_provider_still_validates_mode_against_acp_advertised_values() {
             "my-freeform-model",
             "--mode",
             "executor",
-            "--no-install-agent",
         ])
         .assert()
         .failure()
@@ -1440,10 +1594,10 @@ fn init_goose_custom_provider_provision_failure_removes_sidecar() {
         .join("custom_providers")
         .join("myprovider.json");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "goose",
@@ -1458,8 +1612,8 @@ fn init_goose_custom_provider_provision_failure_removes_sidecar() {
             "CUSTOM_API_KEY",
             "--model",
             "my-freeform-model",
-            "--no-install-agent",
             "--skip-testflight",
+            "--skip-workspace-init",
         ])
         .assert()
         .failure()
@@ -1485,10 +1639,10 @@ fn init_pi_custom_provider_provision_failure_removes_models_json() {
 
     let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "pi",
@@ -1503,8 +1657,8 @@ fn init_pi_custom_provider_provision_failure_removes_models_json() {
             "CUSTOM_API_KEY",
             "--model",
             "my-freeform-model",
-            "--no-install-agent",
             "--skip-testflight",
+            "--skip-workspace-init",
         ])
         .assert()
         .failure()
@@ -1524,17 +1678,9 @@ fn init_rejects_model_for_agents_without_set_model_before_discovery() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test")]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "init",
-            "--agent",
-            "amp",
-            "--model",
-            "anything",
-            "--no-install-agent",
-        ])
+        .args(["init", "--agent", "amp", "--model", "anything"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -1550,10 +1696,10 @@ fn init_custom_codex_provider_allows_openai_provider_id() {
         &[("CUSTOM_OPENAI_API_KEY", "test-custom-openai-key")],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "codex",
@@ -1568,7 +1714,7 @@ fn init_custom_codex_provider_allows_openai_provider_id() {
             "CUSTOM_OPENAI_API_KEY",
             "--model",
             "custom-responses-model",
-            "--no-install-agent",
+            "--skip-workspace-init",
         ])
         .assert()
         .success()
@@ -1584,8 +1730,7 @@ fn init_custom_codex_provider_allows_openai_provider_id() {
 fn init_custom_provider_fails_noninteractive_when_required_fields_are_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
@@ -1594,7 +1739,6 @@ fn init_custom_provider_fails_noninteractive_when_required_fields_are_missing() 
             "--provider",
             "myprovider",
             "--custom-provider",
-            "--no-install-agent",
         ])
         .assert()
         .failure()
@@ -1607,8 +1751,7 @@ fn init_custom_provider_fails_noninteractive_when_required_fields_are_missing() 
 fn init_codex_openai_rejects_api_key_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "init",
@@ -1618,7 +1761,6 @@ fn init_codex_openai_rejects_api_key_ref() {
             "openai",
             "--api-key-ref",
             "OPENAI_API_KEY",
-            "--no-install-agent",
         ])
         .assert()
         .failure()
@@ -1628,23 +1770,15 @@ fn init_codex_openai_rejects_api_key_ref() {
 }
 
 #[test]
-fn init_provider_failure_does_not_persist_selected_agent() {
+fn init_provider_failure_persists_selected_agent_for_resume() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "init",
-            "--agent",
-            "amp",
-            "--provider",
-            "openai",
-            "--no-install-agent",
-        ])
+        .args(["init", "--agent", "amp", "--provider", "openai"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -1653,8 +1787,8 @@ fn init_provider_failure_does_not_persist_selected_agent() {
 
     let config =
         fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
-    assert!(config.contains(r#"id = "opencode""#));
-    assert!(!config.contains(r#"id = "amp""#));
+    assert!(config.contains(r#"id = "amp""#));
+    assert!(!config.contains(r#"id = "opencode""#));
     assert!(!config.contains("[agent.provider]"));
 }
 
@@ -1679,10 +1813,15 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("Pi settings:").not());
@@ -1703,8 +1842,7 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1758,8 +1896,7 @@ fn agent_set_uses_agent_native_provider_id_for_collapsed_provider() {
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["vercel/test-model"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1803,8 +1940,7 @@ fn agent_set_custom_opencode_provider_writes_generated_config() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -1874,8 +2010,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
         &[],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -1924,8 +2059,7 @@ fn subagent_status_prints_provider_model_and_key_ref() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "status"])
         .assert()
@@ -1948,8 +2082,7 @@ fn subagent_status_prints_inherited_main_model() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "status"])
         .assert()
@@ -1977,8 +2110,7 @@ fn subagent_match_clears_explicit_provider_and_uses_main_model() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "match"])
         .assert()
@@ -2020,8 +2152,7 @@ fn subagent_match_reenables_inherit_after_disable() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "match"])
         .assert()
@@ -2053,8 +2184,7 @@ fn subagent_match_rejects_unsupported_agents() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-        Command::cargo_bin("acps")
-            .expect("binary should build")
+        acps_command()
             .env("HOME", tempdir.path())
             .args(["subagent", "match"])
             .assert()
@@ -2074,8 +2204,7 @@ fn subagent_match_requires_configured_main_model_without_mutating_config() {
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
     let before = fs::read_to_string(&config_path).expect("config should be readable");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "match"])
         .assert()
@@ -2102,8 +2231,7 @@ fn subagent_disable_writes_invalid_opencode_small_model() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "disable"])
         .assert()
@@ -2145,8 +2273,7 @@ fn subagent_free_infers_openrouter_from_main_provider() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2182,8 +2309,7 @@ fn subagent_free_can_use_opencode_big_pickle() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2212,8 +2338,7 @@ fn subagent_free_prefers_current_opencode_provider_over_stale_openrouter_env() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2241,8 +2366,7 @@ fn subagent_free_rejects_provider_without_free_support() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2266,8 +2390,7 @@ fn subagent_free_rejects_unsupported_main_provider_despite_stale_free_env() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2291,8 +2414,7 @@ fn subagent_free_resolves_opencode_go_alias_with_custom_main_api_key_ref() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2320,8 +2442,7 @@ fn subagent_free_preserves_custom_main_api_key_ref_when_provider_matches() {
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "free"])
         .assert()
@@ -2354,8 +2475,7 @@ fn subagent_set_inherits_provider_and_api_key_ref_from_main_when_omitted() {
         &[],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["subagent", "set", "--model", "openai/gpt-5.5-mini"])
@@ -2380,8 +2500,7 @@ fn subagent_set_requires_main_provider_when_provider_omitted() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["subagent", "set", "--model", "openai/gpt-5.5-mini"])
         .assert()
@@ -2402,8 +2521,7 @@ fn subagent_set_rejects_unsupported_agents() {
         .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#);
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "subagent",
@@ -2430,8 +2548,7 @@ fn subagent_set_rejects_codex_and_goose() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-        Command::cargo_bin("acps")
-            .expect("binary should build")
+        acps_command()
             .env("HOME", tempdir.path())
             .args([
                 "subagent",
@@ -2459,8 +2576,7 @@ fn subagent_status_rejects_codex_and_goose() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-        Command::cargo_bin("acps")
-            .expect("binary should build")
+        acps_command()
             .env("HOME", tempdir.path())
             .args(["subagent", "status"])
             .assert()
@@ -2507,8 +2623,7 @@ creates = "goose"
     )
     .expect("registry override should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "subagent",
@@ -2532,8 +2647,7 @@ fn agent_set_custom_provider_rejects_comma_token_limits() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -2585,8 +2699,7 @@ creates = "opencode"
     let options_path =
         write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -2638,8 +2751,7 @@ fn agent_set_codex_openrouter_writes_responses_provider_config() {
     let options_path =
         write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -2717,8 +2829,7 @@ wire_api = "responses"
         .expect("existing backup should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
@@ -2762,8 +2873,7 @@ fn agent_set_codex_openai_rejects_api_key_ref() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -2793,8 +2903,7 @@ fn agent_set_codex_openai_requires_model() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "set", "--provider", "openai"])
         .assert()
@@ -2815,8 +2924,7 @@ fn agent_set_codex_rejects_unsupported_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -2840,8 +2948,7 @@ fn agent_set_codex_custom_provider_defaults_to_responses() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -2884,8 +2991,7 @@ fn agent_set_codex_rejects_chat_completions_custom_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), codex_config()).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -2940,8 +3046,7 @@ creates = "opencode"
         &[],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--model", "gpt-5.5"])
@@ -2983,8 +3088,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), &config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
         .assert()
@@ -3020,8 +3124,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -3052,8 +3155,7 @@ fn agent_set_opencode_rejects_model_without_provider() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "set", "--model", "gpt-5.5"])
         .assert()
@@ -3084,8 +3186,7 @@ api_key_ref = "OPENAI_API_KEY""#,
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--model", "gpt-5.5"])
@@ -3107,8 +3208,7 @@ fn agent_set_rejects_provider_not_supported_by_agent() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -3136,8 +3236,7 @@ fn agent_set_rejects_providers_without_api_key_mapping() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -3186,8 +3285,7 @@ creates = "opencode"
         &[],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -3225,8 +3323,7 @@ fn agent_set_opencode_cloudflare_gateway_uses_token_ref() {
         &[],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -3285,8 +3382,7 @@ fn agent_set_without_model_lists_choices_without_mutating_config() {
         &[],
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--provider", "cloudflare-workers-ai"])
@@ -3314,8 +3410,7 @@ fn agent_set_does_not_partially_write_main_config_when_provisioning_fails() {
     fs::write(opencode_dir.join("opencode.json"), "[]")
         .expect("invalid opencode config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -3346,8 +3441,7 @@ fn agent_set_validates_model_against_acp_config_options() {
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
@@ -3392,8 +3486,7 @@ creates = "opencode"
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &[], &["smart", "rush", "deep"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "smart"])
@@ -3419,8 +3512,7 @@ fn agent_set_opencode_accepts_mode_only() {
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &[], &["build", "plan"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "plan"])
@@ -3463,8 +3555,7 @@ creates = "opencode"
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
     let options_path = write_acp_config_options(tempdir.path(), &[], &["agent", "ask", "plan"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "plan"])
@@ -3491,8 +3582,7 @@ fn agent_set_codex_accepts_mode_only() {
     let options_path =
         write_acp_config_options(tempdir.path(), &[], &["read-only", "auto", "full-access"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args(["agent", "set", "--mode", "full-access"])
@@ -3531,8 +3621,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "set", "--mode", "plan"])
         .assert()
@@ -3564,8 +3653,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -3645,8 +3733,7 @@ creates = "cli-registry-agent"
     )
     .expect("registry should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "install"])
         .assert()
@@ -3662,10 +3749,15 @@ creates = "cli-registry-agent"
 fn init_creates_owner_only_config_and_state_paths() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
@@ -3688,11 +3780,11 @@ fn init_does_not_overwrite_existing_config() {
     let config_path = config_dir.join("acp-stack.toml");
     fs::write(&config_path, VALID_CONFIG).expect("config should be written");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args(["dev", "init", "--skip-workspace-init"])
         .assert()
         .success()
         .stdout(predicates::str::contains("validated existing config"));
@@ -3712,11 +3804,17 @@ fn init_fails_when_existing_config_is_invalid() {
     )
     .expect("invalid config should be written");
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
 
     command
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -3738,10 +3836,15 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
     let uploads_dir = workspace_dir.join("uploads");
     std::fs::create_dir_all(&uploads_dir).expect("uploads dir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .arg("--workspace-root")
         .arg(&workspace_dir)
         .arg("--workspace-uploads")
@@ -3750,7 +3853,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success();
 
     let workspace_str = workspace_dir.display().to_string();
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
     command
         .env("HOME", tempdir.path())
         .arg("status")
@@ -3777,10 +3880,15 @@ fn status_format_json_reports_same_top_level_sections() {
     let uploads_dir = workspace_dir.join("uploads");
     std::fs::create_dir_all(&uploads_dir).expect("uploads dir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .arg("--workspace-root")
         .arg(&workspace_dir)
         .arg("--workspace-uploads")
@@ -3788,8 +3896,7 @@ fn status_format_json_reports_same_top_level_sections() {
         .assert()
         .success();
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["status", "--format", "json"])
         .assert()
@@ -3847,8 +3954,7 @@ fn status_reports_sink_open_failures_when_supabase_configured() {
         .expect("mark outbox failure");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
@@ -3874,8 +3980,7 @@ async fn status_reports_ready_daemon_when_health_probe_is_healthy() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &probe.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .arg("status")
         .assert()
@@ -3899,8 +4004,7 @@ async fn status_reports_degraded_daemon_without_failing_command() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &probe.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .arg("status")
         .assert()
@@ -3913,8 +4017,7 @@ async fn status_reports_unavailable_daemon_without_failing_command() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .arg("status")
         .assert()
@@ -3931,8 +4034,7 @@ fn agent_check_reports_no_runs_when_state_is_empty() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command_without_placebo()
         .env("HOME", tempdir.path())
         .args(["agent", "check"])
         .assert()
@@ -3947,8 +4049,7 @@ fn agent_check_format_json_reports_steps() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "check", "--format", "json"])
         .assert()
@@ -3992,8 +4093,7 @@ fn agent_check_reports_missing_adapter_step() {
         .expect("seed harness row");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command_without_placebo()
         .env("HOME", tempdir.path())
         .args(["agent", "check"])
         .assert()
@@ -4013,8 +4113,7 @@ fn installer_history_reports_empty_state_when_nothing_recorded() {
     )
     .expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history"])
         .assert()
@@ -4071,8 +4170,7 @@ fn installer_history_renders_rows_with_filter() {
     drop(store);
 
     // No filter: both rows visible, newest (codex) first.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history"])
         .assert()
@@ -4084,8 +4182,7 @@ fn installer_history_renders_rows_with_filter() {
         .stdout(predicates::str::contains("failed"));
 
     // Filter to opencode: only the harness row should appear.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history", "--agent", "opencode"])
         .assert()
@@ -4128,8 +4225,7 @@ fn installer_history_format_json_renders_runs() {
         .expect("seed row");
     drop(store);
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history", "--format", "json"])
         .assert()
@@ -4177,8 +4273,7 @@ fn installer_history_renders_log_dir_continuation_line() {
         .expect("seed row with log_dir");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history"])
         .assert()
@@ -4199,8 +4294,7 @@ fn installer_history_rejects_zero_limit() {
     )
     .expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["installer", "history", "--limit", "0"])
         .assert()
@@ -4247,8 +4341,7 @@ creates = {}
     store.migrate().expect("migration should pass");
     drop(store);
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["deps", "apply", "--yes", "--feature", feature])
         .assert()
@@ -4291,8 +4384,7 @@ required = true
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["deps", "check", "--format", "json"])
         .assert()
@@ -4339,8 +4431,7 @@ creates = {}
     store.migrate().expect("migration should pass");
     drop(store);
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["deps", "apply", "--yes", "--format", "json"])
         .assert()
@@ -4407,8 +4498,7 @@ creates = {}
     store.migrate().expect("migration should pass");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["deps", "apply", "--yes"])
         .assert()
@@ -4509,8 +4599,7 @@ fn agent_status_surfaces_installed_versions_from_state() {
         .expect("adapter row should append");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status"])
         .assert()
@@ -4544,8 +4633,7 @@ fn agent_status_format_json_omits_lifecycle_payloads() {
         .expect("lifecycle row should append");
     drop(store);
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status", "--format", "json"])
         .assert()
@@ -4567,8 +4655,7 @@ fn agent_test_succeeds_with_prompt() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test", "--prompt", "hello from cli"])
         .assert()
@@ -4586,8 +4673,7 @@ fn agent_test_uses_default_prompt_when_omitted() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &[]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test"])
         .assert()
@@ -4621,8 +4707,7 @@ fn agent_test_applies_configured_model_before_prompt() {
     )
     .expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
@@ -4635,8 +4720,7 @@ fn agent_test_reports_initialize_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--initialize-error"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
@@ -4652,8 +4736,7 @@ fn agent_test_reports_session_creation_failure_stage() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--session-new-error"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
@@ -4673,8 +4756,7 @@ fn agent_test_reports_prompt_failure_stage() {
     // message (which could embed URLs, headers, or secrets) and surfaces a
     // fixed `"prompt request failed"` string instead. Assert on the sanitized
     // form rather than the agent-supplied text.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "test", "--prompt", "hello"])
         .assert()
@@ -4690,8 +4772,7 @@ fn agent_test_reports_progress_timeout_after_stall() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     write_fake_agent_home(tempdir.path(), &["--prompt-stall-after-update"]);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
@@ -4721,8 +4802,7 @@ fn agent_status_reports_provider_with_unset_model_and_mode() {
     let config = format!("{}\n[agent.provider]\nid = \"openai\"\n", codex_config());
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status"])
         .assert()
@@ -4750,8 +4830,7 @@ api_key_ref = "OPENCODE_API_KEY""#,
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status"])
         .assert()
@@ -4793,8 +4872,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status"])
         .assert()
@@ -4832,8 +4910,7 @@ creates = "opencode"
         );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status"])
         .assert()
@@ -4850,8 +4927,7 @@ fn agent_status_reports_all_supported_params_unset() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acp-stack.toml"), VALID_CONFIG).expect("config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["agent", "status"])
         .assert()
@@ -4867,8 +4943,7 @@ async fn agent_start_and_stop_call_running_daemon() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
@@ -4876,8 +4951,7 @@ async fn agent_start_and_stop_call_running_daemon() {
         .stdout(predicates::str::contains("agent start: running"))
         .stdout(predicates::str::contains("pid: "));
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", home.path())
         .args(["agent", "restart", "--format", "json"])
         .assert()
@@ -4890,8 +4964,7 @@ async fn agent_start_and_stop_call_running_daemon() {
     assert!(body["stopped_at"].as_str().is_some(), "{body}");
     assert!(body["capabilities"].is_object(), "{body}");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "stop"])
         .assert()
@@ -4901,8 +4974,7 @@ async fn agent_start_and_stop_call_running_daemon() {
 
 #[test]
 fn agent_switch_noninteractive_requires_admin_key() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["agent", "switch", "opencode"])
         .assert()
         .failure()
@@ -4911,8 +4983,7 @@ fn agent_switch_noninteractive_requires_admin_key() {
 
 #[test]
 fn agent_switch_accepts_drop_flag() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["agent", "switch", "opencode", "--drop"])
         .assert()
         .failure()
@@ -4926,8 +4997,7 @@ async fn security_check_calls_running_daemon_with_admin_key() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "check"])
         .assert()
@@ -4947,8 +5017,7 @@ async fn security_check_renders_hint_line_for_each_finding() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "check"])
         .assert()
@@ -4966,8 +5035,7 @@ async fn security_check_uses_admin_key_not_session_key() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "check"])
         .assert()
@@ -4985,8 +5053,7 @@ async fn security_history_renders_table_and_next_page_cursor() {
     let _first_run_id = run_security_check_and_extract_run_id(home.path());
     let second_run_id = run_security_check_and_extract_run_id(home.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "history", "--limit", "1"])
         .assert()
@@ -5012,8 +5079,7 @@ async fn security_history_json_renders_runs_and_cursor() {
     let _first_run_id = run_security_check_and_extract_run_id(home.path());
     let second_run_id = run_security_check_and_extract_run_id(home.path());
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", home.path())
         .args(["security", "history", "--limit", "1", "--json"])
         .assert()
@@ -5039,8 +5105,7 @@ async fn security_history_global_format_json_matches_json_alias() {
 
     let run_id = run_security_check_and_extract_run_id(home.path());
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", home.path())
         .args(["security", "history", "--format", "json"])
         .assert()
@@ -5059,8 +5124,7 @@ async fn security_history_json_alias_conflicts_with_explicit_text_format() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "history", "--json", "--format", "text"])
         .assert()
@@ -5074,8 +5138,7 @@ async fn security_history_json_alias_conflicts_with_explicit_text_format() {
 fn security_history_json_alias_conflict_precedes_config_load() {
     let home = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "history", "--json", "--format", "text"])
         .assert()
@@ -5096,8 +5159,7 @@ async fn security_show_renders_run_findings_hints_and_details() {
 
     let run_id = run_security_check_and_extract_run_id(home.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "show", &run_id])
         .assert()
@@ -5120,8 +5182,7 @@ fn security_show_rejects_invalid_run_id_before_daemon_request() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "show", "srun/not-safe"])
         .assert()
@@ -5136,8 +5197,7 @@ async fn security_history_uses_admin_key_not_session_key() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "history"])
         .assert()
@@ -5152,8 +5212,7 @@ async fn security_show_uses_admin_key_not_session_key() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["security", "show", "srun_does_not_exist"])
         .assert()
@@ -5163,8 +5222,7 @@ async fn security_show_uses_admin_key_not_session_key() {
 }
 
 fn run_security_check_and_extract_run_id(home: &std::path::Path) -> String {
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", home)
         .args(["security", "check"])
         .assert()
@@ -5187,8 +5245,7 @@ async fn metrics_summary_format_json_returns_summary() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", home.path())
         .args(["metrics", "summary", "--format", "json"])
         .assert()
@@ -5207,8 +5264,7 @@ async fn ws_common_commands_format_json() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    let connections_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let connections_output = acps_command()
         .env("HOME", home.path())
         .args(["ws", "connections", "--format", "json"])
         .assert()
@@ -5223,8 +5279,7 @@ async fn ws_common_commands_format_json() {
         "{connections_body}",
     );
 
-    let sessions_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let sessions_output = acps_command()
         .env("HOME", home.path())
         .args(["ws", "sessions", "--format", "json"])
         .assert()
@@ -5239,8 +5294,7 @@ async fn ws_common_commands_format_json() {
         "{sessions_body}"
     );
 
-    let disconnect_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let disconnect_output = acps_command()
         .env("HOME", home.path())
         .args([
             "ws",
@@ -5267,15 +5321,13 @@ async fn sessions_new_list_prompt_close_round_trip() {
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
     // Start the agent first so /v1/sessions has a live ACP connection.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
         .success();
 
-    let new_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let new_output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "new"])
         .assert()
@@ -5291,16 +5343,14 @@ async fn sessions_new_list_prompt_close_round_trip() {
         .trim()
         .to_owned();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["sessions", "list"])
         .assert()
         .success()
         .stdout(predicates::str::contains(session_id.as_str()));
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["sessions", "prompt", &session_id, "hello"])
         .timeout(std::time::Duration::from_secs(30))
@@ -5309,8 +5359,7 @@ async fn sessions_new_list_prompt_close_round_trip() {
         .stdout(predicates::str::contains("prompt: completed"))
         .stdout(predicates::str::contains("stop_reason: end_turn"));
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["sessions", "close", &session_id])
         .assert()
@@ -5324,15 +5373,13 @@ async fn sessions_new_format_json_returns_session_object() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
         .success();
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "new", "--format", "json"])
         .assert()
@@ -5351,15 +5398,13 @@ async fn sessions_common_commands_format_json() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
         .success();
 
-    let new_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let new_output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "new", "--format", "json"])
         .assert()
@@ -5370,8 +5415,7 @@ async fn sessions_common_commands_format_json() {
     let new_body: Value = serde_json::from_slice(&new_output).expect("new json parses");
     let session_id = new_body["id"].as_str().expect("session id").to_owned();
 
-    let list_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let list_output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "list", "--range", "all", "--format", "json"])
         .assert()
@@ -5390,8 +5434,7 @@ async fn sessions_common_commands_format_json() {
         "{list_body}",
     );
 
-    let status_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let status_output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "status", "--format", "json"])
         .assert()
@@ -5405,8 +5448,7 @@ async fn sessions_common_commands_format_json() {
         "{status_body}"
     );
 
-    let prompt_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let prompt_output = acps_command()
         .env("HOME", home.path())
         .arg("sessions")
         .arg("prompt")
@@ -5422,8 +5464,7 @@ async fn sessions_common_commands_format_json() {
     assert_eq!(prompt_body["status"], "pending");
     assert!(prompt_body["prompt_id"].as_str().is_some(), "{prompt_body}");
 
-    let cancel_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let cancel_output = acps_command()
         .env("HOME", home.path())
         .arg("sessions")
         .arg("cancel")
@@ -5438,8 +5479,7 @@ async fn sessions_common_commands_format_json() {
     assert_eq!(cancel_body["status"], "requested");
     assert_eq!(cancel_body["session_id"], session_id);
 
-    let close_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let close_output = acps_command()
         .env("HOME", home.path())
         .arg("sessions")
         .arg("close")
@@ -5461,8 +5501,7 @@ async fn sessions_status_reports_no_active_session() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["sessions", "status"])
         .assert()
@@ -5476,15 +5515,13 @@ async fn sessions_status_renders_recent_active_session() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
         .success();
 
-    let new_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let new_output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "new"])
         .assert()
@@ -5500,8 +5537,7 @@ async fn sessions_status_renders_recent_active_session() {
         .trim()
         .to_owned();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["sessions", "status"])
         .assert()
@@ -5518,15 +5554,13 @@ async fn sessions_prompt_no_wait_returns_immediately() {
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
         .success();
 
-    let new_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let new_output = acps_command()
         .env("HOME", home.path())
         .args(["sessions", "new"])
         .assert()
@@ -5542,8 +5576,7 @@ async fn sessions_prompt_no_wait_returns_immediately() {
         .trim()
         .to_owned();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["sessions", "prompt", &session_id, "ping", "--no-wait"])
         .assert()
@@ -5562,8 +5595,7 @@ async fn agent_start_reports_daemon_auth_failure() {
         "acps_admin_wrongwrongwrongwrongwrongwrongwrongwrongwrong",
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home.path())
         .args(["agent", "start"])
         .assert()
@@ -5586,8 +5618,7 @@ fn status_creates_owner_only_state_when_config_exists_without_state() {
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))
         .expect("config file permissions should be set");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
@@ -5618,8 +5649,7 @@ fn status_repairs_config_permissions_before_validation_failure() {
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))
         .expect("config file permissions should be set");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
@@ -5636,14 +5666,19 @@ fn status_repairs_config_permissions_before_validation_failure() {
 fn logs_query_shows_init_event() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
-    let mut command = Command::cargo_bin("acps").expect("binary should build");
+    let mut command = acps_command();
     command
         .env("HOME", tempdir.path())
         .args(["logs", "query"])
@@ -5659,8 +5694,7 @@ fn logs_query_shows_init_event() {
 fn logs_query_creates_owner_only_empty_state_when_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query"])
         .assert()
@@ -5677,20 +5711,24 @@ fn logs_query_creates_owner_only_empty_state_when_missing() {
 fn logs_query_supports_limit_and_level_filter() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
         .success();
 
-    let mut limit_command = Command::cargo_bin("acps").expect("binary should build");
+    let mut limit_command = acps_command();
     limit_command
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--limit", "1"])
@@ -5698,7 +5736,7 @@ fn logs_query_supports_limit_and_level_filter() {
         .success()
         .stdout(predicates::str::contains("status.checked").count(1));
 
-    let mut level_command = Command::cargo_bin("acps").expect("binary should build");
+    let mut level_command = acps_command();
     level_command
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
@@ -5711,21 +5749,24 @@ fn logs_query_supports_limit_and_level_filter() {
 fn logs_query_json_emits_envelope_with_cursor() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
         .success();
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--limit", "1", "--json"])
         .output()
@@ -5781,15 +5822,19 @@ fn logs_query_json_emits_envelope_with_cursor() {
 fn logs_query_global_format_json_matches_json_alias() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--limit", "1", "--format", "json"])
         .assert()
@@ -5804,8 +5849,7 @@ fn logs_query_global_format_json_matches_json_alias() {
 
 #[test]
 fn logs_query_json_alias_conflicts_with_explicit_text_format() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["logs", "query", "--json", "--format", "text"])
         .assert()
         .failure()
@@ -5816,8 +5860,7 @@ fn logs_query_json_alias_conflicts_with_explicit_text_format() {
 
 #[test]
 fn logs_tail_rejects_format_json_before_loading_config() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["logs", "tail", "--format", "json"])
         .assert()
         .failure()
@@ -5828,8 +5871,7 @@ fn logs_tail_rejects_format_json_before_loading_config() {
 
 #[test]
 fn text_only_commands_reject_format_json_before_loading_config() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["subagent", "status", "--format", "json"])
         .assert()
         .failure()
@@ -5841,8 +5883,7 @@ fn text_only_commands_reject_format_json_before_loading_config() {
 #[test]
 fn completion_scripts_include_root_and_common_commands() {
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
-        let output = Command::cargo_bin("acps")
-            .expect("binary should build")
+        let output = acps_command()
             .args(["completion", shell])
             .assert()
             .success()
@@ -5867,8 +5908,7 @@ fn completion_scripts_include_root_and_common_commands() {
 
 #[test]
 fn completion_rejects_format_json() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .args(["completion", "bash", "--format", "json"])
         .assert()
         .failure()
@@ -5881,10 +5921,15 @@ fn completion_rejects_format_json() {
 fn failed_cli_command_records_error_after_state_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
@@ -5895,14 +5940,13 @@ fn failed_cli_command_records_error_after_state_exists() {
     )
     .expect("invalid config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
         .failure();
 
-    let mut logs_command = Command::cargo_bin("acps").expect("binary should build");
+    let mut logs_command = acps_command();
     logs_command
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
@@ -5917,21 +5961,25 @@ fn failed_cli_command_records_error_after_state_exists() {
 fn parse_failure_records_error_after_state_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("unknown-command")
         .assert()
         .failure();
 
-    let mut logs_command = Command::cargo_bin("acps").expect("binary should build");
+    let mut logs_command = acps_command();
     logs_command
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
@@ -5946,43 +5994,43 @@ fn parse_failure_records_error_after_state_exists() {
 fn help_invocations_do_not_record_error_events() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("--help")
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("--version")
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "--help"])
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--help"])
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
@@ -5998,10 +6046,15 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
 
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
@@ -6010,16 +6063,14 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
     // valid JSON payload that survives json_valid() in SQLite.
     let bad_path = OsString::from_vec(b"/tmp/acp\x1b[31m-missing\x07\x08-file.toml".to_vec());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "validate"])
         .arg(&bad_path)
         .assert()
         .failure();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
@@ -6031,10 +6082,15 @@ fn cli_error_payload_handles_control_bytes_in_argument() {
 
 #[test]
 fn empty_home_is_treated_as_unset() {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", "")
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("HOME is not set"));
@@ -6057,10 +6113,15 @@ fn init_repairs_config_permissions_before_validation_failure() {
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644))
         .expect("config file perms should set");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -6083,10 +6144,15 @@ fn init_repairs_existing_permissive_state_file() {
         .expect("permissive perms should set");
     assert_eq!(mode(&state_path), 0o644);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
@@ -6109,8 +6175,7 @@ fn status_repairs_existing_permissive_state_file() {
     fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644))
         .expect("permissive perms should set");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
@@ -6130,8 +6195,7 @@ fn logs_query_repairs_existing_permissive_state_file() {
     fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644))
         .expect("permissive perms should set");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query"])
         .assert()
@@ -6145,10 +6209,15 @@ fn logs_query_repairs_existing_permissive_state_file() {
 fn error_recording_path_repairs_permissive_state_file() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
@@ -6165,8 +6234,7 @@ fn error_recording_path_repairs_permissive_state_file() {
     )
     .expect("invalid config should be written");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("status")
         .assert()
@@ -6178,8 +6246,7 @@ fn error_recording_path_repairs_permissive_state_file() {
         "record_cli_error_message must repair permissive perms before writing the error row",
     );
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
@@ -6317,10 +6384,15 @@ fn write_acp_config_options(
 // ----- 0.0.1 auth/secrets/reset/config-import tests -----
 
 fn run_init_with_home(home: &std::path::Path) {
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", home)
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 }
@@ -6329,10 +6401,9 @@ fn run_init_with_home(home: &std::path::Path) {
 fn init_agent_flag_updates_config_non_interactively() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args(["init", "--agent", "cursor", "--no-install-agent"])
+        .args(["dev", "init", "--agent", "cursor", "--skip-workspace-init"])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: Cursor CLI (cursor)"));
@@ -6340,8 +6411,13 @@ fn init_agent_flag_updates_config_non_interactively() {
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
         .expect("config readable");
     assert!(written.contains(r#"id = "cursor""#));
-    assert!(written.contains(r#"command = "cursor-agent""#));
-    assert!(written.contains(r#"args = ["acp"]"#));
+    assert!(written.contains(&format!(
+        r#"command = "{}""#,
+        env!("CARGO_BIN_EXE_placebo-agent")
+    )));
+    assert!(written.contains(r#""acp""#));
+    assert!(written.contains(r#""--model-config-option""#));
+    assert!(written.contains(r#""placebo-model""#));
     assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
     assert!(!written.contains("[agent.install]"));
 }
@@ -6391,10 +6467,9 @@ creates = "init-test-agent"
     )
     .expect("agents override");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args(["init", "--agent", "init-test", "--install-agent"])
+        .args(["init", "--agent", "init-test"])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent install: installed"));
@@ -6435,10 +6510,15 @@ fn init_age_key_and_store_are_owner_only() {
 #[test]
 fn init_prints_session_and_admin_keys_on_first_run() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .get_output()
@@ -6458,10 +6538,15 @@ fn init_is_idempotent_and_preserves_keys() {
     let store = tempdir.path().join(".local/share/acp-stack/secrets.age");
     let first = fs::read(&store).expect("ciphertext readable");
 
-    let stdout = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let stdout = acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .get_output()
@@ -6501,10 +6586,15 @@ fn init_fails_fast_when_store_exists_with_both_auth_refs_missing() {
     store.delete("ACP_STACK_ADMIN_KEY").expect("delete admin");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -6517,8 +6607,7 @@ fn secrets_set_only_captures_first_line_of_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "set", "MULTILINE_TEST"])
         .write_stdin("first-line\nsecond-line\n")
@@ -6541,10 +6630,15 @@ fn init_fails_fast_when_admin_key_missing_in_existing_store() {
     store.delete("ACP_STACK_ADMIN_KEY").expect("delete admin");
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -6557,8 +6651,7 @@ fn secrets_set_refuses_to_mutate_session_key_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "set", "ACP_STACK_SESSION_KEY"])
         .write_stdin("attacker-supplied")
@@ -6574,8 +6667,7 @@ fn secrets_set_refuses_to_mutate_admin_key_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "set", "ACP_STACK_ADMIN_KEY"])
         .write_stdin("attacker-supplied")
@@ -6591,8 +6683,7 @@ fn secrets_delete_refuses_to_remove_admin_key_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "delete", "ACP_STACK_ADMIN_KEY"])
         .assert()
@@ -6607,8 +6698,7 @@ fn secrets_list_shows_session_and_admin_names_only_after_init() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "list"])
         .assert()
@@ -6623,8 +6713,7 @@ fn secrets_commands_format_json_never_print_values() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let set_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let set_output = acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "set", "OPENCODE_API_KEY", "--format", "json"])
         .write_stdin("super-secret-value\n")
@@ -6638,8 +6727,7 @@ fn secrets_commands_format_json_never_print_values() {
     assert_eq!(set_body["name"], "OPENCODE_API_KEY");
     assert!(!String::from_utf8_lossy(&set_output).contains("super-secret-value"));
 
-    let list_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let list_output = acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "list", "--format", "json"])
         .assert()
@@ -6654,8 +6742,7 @@ fn secrets_commands_format_json_never_print_values() {
     assert!(names.iter().any(|name| name == "OPENCODE_API_KEY"));
     assert!(!String::from_utf8_lossy(&list_output).contains("super-secret-value"));
 
-    let delete_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let delete_output = acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "delete", "OPENCODE_API_KEY", "--format", "json"])
         .assert()
@@ -6673,8 +6760,7 @@ fn secrets_set_reads_value_from_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "set", "OPENCODE_API_KEY"])
         .write_stdin("super-secret-value\n")
@@ -6682,8 +6768,7 @@ fn secrets_set_reads_value_from_stdin() {
         .success()
         .stdout(predicates::str::contains("set secret: OPENCODE_API_KEY"));
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "list"])
         .assert()
@@ -6696,24 +6781,21 @@ fn secrets_delete_removes_named_secret() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "set", "TEMP_VALUE"])
         .write_stdin("abc")
         .assert()
         .success();
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "delete", "TEMP_VALUE"])
         .assert()
         .success()
         .stdout(predicates::str::contains("deleted secret: TEMP_VALUE"));
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["secrets", "delete", "TEMP_VALUE"])
         .assert()
@@ -6724,10 +6806,15 @@ fn secrets_delete_removes_named_secret() {
 #[test]
 fn auth_regenerate_session_key_rotates_only_session() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let first_init_stdout = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let first_init_stdout = acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .get_output()
@@ -6749,8 +6836,7 @@ fn auth_regenerate_session_key_rotates_only_session() {
         .trim_start_matches("session key (ACP_STACK_SESSION_KEY): ")
         .trim();
 
-    let rotate_stdout = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let rotate_stdout = acps_command()
         .env("HOME", tempdir.path())
         .args(["auth", "regenerate-session-key"])
         .assert()
@@ -6787,8 +6873,7 @@ fn reset_without_yes_lists_targets_and_keeps_files() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("reset")
         .assert()
@@ -6814,8 +6899,7 @@ fn reset_dry_run_does_not_write_cli_error_event() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .arg("reset")
         .assert()
@@ -6824,8 +6908,7 @@ fn reset_dry_run_does_not_write_cli_error_event() {
     // The dry-run contract is "exits without touching the filesystem".
     // Recording a `cli.error` event row would touch state.sqlite, so the
     // event log must show no error rows after a dry-run reset.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["logs", "query", "--level", "error"])
         .assert()
@@ -6838,8 +6921,7 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["reset", "--yes"])
         .assert()
@@ -6867,18 +6949,22 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
     );
 
     // Re-running reset is idempotent and does not error on missing files.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["reset", "--yes"])
         .assert()
         .success();
 
     // Fresh init after reset produces a different admin key than the first.
-    let init_after = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let init_after = acps_command()
         .env("HOME", tempdir.path())
-        .arg("init")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .get_output()
@@ -6893,8 +6979,7 @@ fn config_import_refuses_without_force_when_config_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let exported = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let exported = acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "export"])
         .assert()
@@ -6905,8 +6990,7 @@ fn config_import_refuses_without_force_when_config_exists() {
     let import_path = tempdir.path().join("exported.toml");
     fs::write(&import_path, exported).expect("write export");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap()])
         .assert()
@@ -6924,8 +7008,7 @@ fn config_import_with_force_replaces_existing_config() {
     let import_path = tempdir.path().join("alt.toml");
     fs::write(&import_path, &modified).expect("write alt");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap(), "--force"])
         .assert()
@@ -6943,8 +7026,7 @@ fn config_validate_and_import_dry_run_format_json() {
     run_init_with_home(tempdir.path());
     let config_path = tempdir.path().join(".config/acp-stack/acp-stack.toml");
 
-    let validate_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let validate_output = acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "validate", "--format", "json"])
         .assert()
@@ -6957,8 +7039,7 @@ fn config_validate_and_import_dry_run_format_json() {
     assert_eq!(validate_body["valid"], true);
     assert!(validate_body["path"].is_null(), "{validate_body}");
 
-    let import_output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let import_output = acps_command()
         .env("HOME", tempdir.path())
         .arg("config")
         .arg("import")
@@ -6980,8 +7061,7 @@ fn config_export_format_json_wraps_toml_without_leaking_secret_values() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "export", "--format", "json"])
         .assert()
@@ -7005,8 +7085,7 @@ fn config_import_supports_base64_input() {
     let modified = VALID_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7788""#);
     let encoded = base64::engine::general_purpose::STANDARD.encode(modified);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", "--base64", &encoded])
         .assert()
@@ -7033,8 +7112,7 @@ fn config_import_refuses_to_change_auth_refs() {
     let import_path = tempdir.path().join("rotated.toml");
     fs::write(&import_path, &modified).expect("write rotated");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap(), "--force"])
         .assert()
@@ -7056,8 +7134,7 @@ fn config_import_refuses_to_change_session_ref() {
     let import_path = tempdir.path().join("rotated-session.toml");
     fs::write(&import_path, &modified).expect("write rotated session");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap(), "--force"])
         .assert()
@@ -7070,8 +7147,7 @@ fn config_import_refuses_to_change_session_ref() {
 #[test]
 fn config_import_rejects_invalid_base64() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", "--base64", "!!!not-base64!!!"])
         .assert()
@@ -7089,8 +7165,7 @@ fn config_import_dry_run_with_path() {
     let import_path = tempdir.path().join("import.toml");
     fs::write(&import_path, VALID_CONFIG).expect("write config");
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args([
             "config",
@@ -7119,8 +7194,7 @@ fn config_import_dry_run_with_base64() {
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(VALID_CONFIG);
 
-    let output = Command::cargo_bin("acps")
-        .expect("binary should build")
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", "--base64", &encoded, "--dry-run"])
         .assert()
@@ -7149,8 +7223,7 @@ fn config_import_rejects_oversized_path_input() {
     let import_path = tempdir.path().join("big.toml");
     fs::write(&import_path, &big_config).expect("write big config");
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["config", "import", import_path.to_str().unwrap()])
         .assert()
@@ -7216,10 +7289,18 @@ fn init_resume_targets_specific_pending_run_by_id() {
     let pending_id = pending.id.clone();
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
-        .args(["init", "--resume", "--run-id", &pending_id])
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--resume",
+            "--run-id",
+            &pending_id,
+            "--skip-workspace-init",
+        ])
         .assert()
         .success();
 
@@ -7282,8 +7363,7 @@ fn init_resume_retries_failed_agent_install_even_without_install_flag() {
     let failed_id = failed.id.clone();
     drop(store);
 
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["init", "--resume", "--run-id", &failed_id])
         .assert()
@@ -7312,6 +7392,7 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .args([
+            "dev",
             "init",
             "--agent",
             "opencode",
@@ -7321,7 +7402,6 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
             "OPENAI_API_KEY",
             "--workspace-root",
             workspace.to_str().expect("workspace UTF-8"),
-            "--no-install-agent",
             "--skip-workspace-init",
         ])
         .assert()
@@ -7330,7 +7410,7 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
 
     let config_before = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
         .expect("config should be readable");
-    assert!(config_before.contains(r#"id = "placeholder""#));
+    assert!(config_before.contains(r#"id = "opencode""#));
 
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
 
@@ -7351,8 +7431,7 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
 fn init_resume_without_prior_run_errors_clearly() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     // No prior `acps init` — the resume target doesn't exist.
-    Command::cargo_bin("acps")
-        .expect("binary should build")
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["init", "--resume"])
         .assert()
