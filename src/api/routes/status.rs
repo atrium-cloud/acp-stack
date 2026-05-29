@@ -123,8 +123,8 @@ pub(crate) struct HealthLiveResponse {
     server: ServerInfo,
 }
 
-/// `GET /v1/health/live` — always 200 once the daemon is accepting requests.
-/// Per `docs/specs/api/api.md`, this answers "is the process alive and the
+/// `GET /v1/health/live` — session-authenticated liveness. Once the daemon is
+/// accepting authenticated requests, this answers "is the process alive and the
 /// router up?" without touching SQLite, the supervisor, or the workspace.
 /// Readers that want subsystem detail should call `/v1/health/ready`.
 pub(crate) async fn health_live_handler() -> ApiSuccess<HealthLiveResponse> {
