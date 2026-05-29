@@ -30,21 +30,23 @@ Common flags:
 
 ```sh
 acps init \
-  [--agent <id>] [--install-agent|--no-install-agent] \
+  [--agent <id>] [--non-interactive] \
   [--skills-source <openai|anthropic|github:owner>] [--skills <name,name>|--no-skills] \
   [--provider <provider-id>] [--api-key-ref <ref>] [--model <model-id>] [--mode <mode>] \
   [--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>] \
   [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] \
-  [--code-from <repo-url>]... [--data-from <path-or-url>]... [--skip-workspace-init] \
+  [--code-from <repo-url>]... [--data-from <path-or-url>]... \
   [--edge cloudflare --exposure tunnel --hostname <host>] \
   [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
 ```
 
-Interactive init may prompt for missing choices. Non-interactive init requires explicit flags and existing secret refs for provider-backed setup. Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
+Interactive init may prompt for missing choices. Non-interactive first runs require `--agent <id>`; scripts should pass `--non-interactive` with the selected real agent id. Provider-backed setup also requires explicit flags and existing secret refs. Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
 
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
 
-`--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected. Use `--skip-workspace-init` when workspace sources should be applied manually.
+`acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected.
+
+Development-only init flags are under `acps dev init`. For example, `acps dev init --skip-workspace-init` skips workspace materialization for local development.
 
 `--skills-source` and `--skills` install selected Agent Skills before testflight.
 Official sources are `openai` and `anthropic`; custom sources use

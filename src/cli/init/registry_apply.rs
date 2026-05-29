@@ -151,6 +151,15 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
             let harness = entry.harness.as_ref().expect("validated registry harness");
             config.agent.command = harness.id.clone();
             config.agent.args = vec!["acp".to_owned()];
+            #[cfg(debug_assertions)]
+            if crate::runtime::install::agent_registry::development_placebo_registry_path()
+                .is_some_and(|path| path.display().to_string() == harness.id)
+            {
+                config.agent.args.extend([
+                    "--model-config-option".to_owned(),
+                    crate::runtime::install::agent_registry::DEV_PLACEBO_MODEL_OPTION.to_owned(),
+                ]);
+            }
         }
         RegistryKind::Adapter => {
             let adapter = entry.adapter.as_ref().expect("validated registry adapter");

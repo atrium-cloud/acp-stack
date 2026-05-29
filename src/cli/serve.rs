@@ -17,13 +17,16 @@ pub struct ServeArgs {
     /// Override the `api.bind` address from config.
     #[arg(long)]
     bind: Option<String>,
-    /// Opt-in to running the daemon as root. Equivalent to setting
-    /// `ACP_STACK_ALLOW_ROOT=1`. Intended only for disposable/dev profiles
-    /// (e.g. ephemeral containers) — production deployments run as the
-    /// configured `workspace.runtime_user`. Even with this flag set, the
-    /// admin API key must be non-empty.
-    #[arg(long)]
+    /// Development-only opt-in to running the daemon as root. Even with this
+    /// flag set, the admin API key must be non-empty.
+    #[arg(long, hide = true)]
     allow_root: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServeMode {
+    Operator,
+    Dev,
 }
 
 const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
@@ -49,12 +52,24 @@ fn check_root_constraints(euid: u32, allow_root: bool, admin_key_empty: bool) ->
     Ok(())
 }
 
-pub(super) fn run_serve(args: ServeArgs) -> Result<()> {
-    run_serve_with_euid(args, crate::ownership::process_euid())
+pub(super) fn run_serve(args: ServeArgs, mode: ServeMode) -> Result<()> {
+    run_serve_with_euid(args, mode, crate::ownership::process_euid())
 }
 
-fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
-    let allow_root = args.allow_root || allow_root_env_enabled();
+fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> Result<()> {
+    if args.allow_root && mode != ServeMode::Dev {
+        return Err(StackError::InvalidParam {
+            field: "--allow-root",
+            reason: "development-only flag; use `acps dev serve --allow-root`".to_owned(),
+        });
+    }
+    if allow_root_env_enabled() && mode != ServeMode::Dev {
+        return Err(StackError::InvalidParam {
+            field: ALLOW_ROOT_ENV,
+            reason: "development-only environment override; use `acps dev serve`".to_owned(),
+        });
+    }
+    let allow_root = mode == ServeMode::Dev && (args.allow_root || allow_root_env_enabled());
     if process_euid == 0 && !allow_root {
         return Err(StackError::ServeRefusedAsRoot);
     }
@@ -95,16 +110,12 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
     let session_key = secret_store.get(&session_ref)?.to_owned();
     let admin_key = secret_store.get(&admin_ref)?.to_owned();
 
-    // Gate root execution behind an explicit opt-in. The daemon never drops
+    // Gate root execution behind a dev-only opt-in. The daemon never drops
     // privileges itself, so a `User=` directive in the systemd unit or a
-    // non-root `USER` in the Dockerfile is the production path. The CLI flag
-    // / env var exists only for disposable/dev profiles, and even then an
-    // empty admin key is refused — see Phase 4 line 47 of the todo list.
+    // non-root `USER` in the Dockerfile is the production path.
     check_root_constraints(process_euid, allow_root, admin_key.is_empty())?;
     if process_euid == 0 {
-        tracing::warn!(
-            "acps serve running as root with explicit opt-in; intended for disposable/dev profiles only"
-        );
+        tracing::warn!("acps dev serve running as root with explicit development opt-in");
     }
 
     // Resolve the Supabase secret API key only when external logging is
@@ -309,8 +320,8 @@ fn run_serve_with_euid(args: ServeArgs, process_euid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOW_ROOT_ENV, ServeArgs, StackError, allow_root_env_enabled, check_root_constraints,
-        run_serve_with_euid,
+        ALLOW_ROOT_ENV, ServeArgs, ServeMode, StackError, allow_root_env_enabled,
+        check_root_constraints, run_serve_with_euid,
     };
     use std::sync::Mutex;
 
@@ -383,6 +394,7 @@ mod tests {
                 bind: None,
                 allow_root: false,
             },
+            ServeMode::Operator,
             0,
         )
         .expect_err("root without opt-in must fail before reading config or state");

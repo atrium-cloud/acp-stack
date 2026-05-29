@@ -40,6 +40,12 @@ pub(super) fn ensure_workspace_log_dir(path: &Path) -> Result<()> {
     crate::fs_util::create_dir_owner_only(path)
 }
 
+pub(super) fn ensure_workspace_base_dir(path: &Path, label: &str) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|source| StackError::WorkspaceMaterializeFailed {
+        reason: format!("create {label} `{}`: {source}", path.display()),
+    })
+}
+
 /// Persist a subprocess capture to `<log_dir>/<command>.{stdout,stderr}`.
 /// Errors propagate — losing the audit copy on success would mean the
 /// promise of "structured step status + per-step log files" is violated

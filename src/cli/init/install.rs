@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -9,30 +8,28 @@ use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::StateStore;
 
-use super::InitArgs;
-
-pub(super) fn should_install_agent(args: &InitArgs, selected_agent: bool) -> Result<bool> {
-    if args.install_agent {
-        return Ok(true);
+pub(super) fn should_install_agent(config: &Config, registry: &RegistryCatalog) -> Result<bool> {
+    let entry =
+        registry
+            .lookup(&config.agent.id)
+            .ok_or_else(|| StackError::AgentRegistryMissing {
+                id: config.agent.id.clone(),
+            })?;
+    entry.ensure_supported()?;
+    #[cfg(debug_assertions)]
+    if let Some(placebo_path) =
+        crate::runtime::install::agent_registry::development_placebo_registry_path()
+    {
+        let placebo_id = placebo_path.display().to_string();
+        if entry
+            .harness
+            .as_ref()
+            .is_some_and(|harness| harness.id == placebo_id)
+        {
+            return Ok(false);
+        }
     }
-    if args.no_install_agent || !selected_agent || !io::stdin().is_terminal() {
-        return Ok(false);
-    }
-    print!("Install the selected agent now? [y/N]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+    Ok(true)
 }
 
 /// Run the installer for the configured agent. The TTY-only "try the next

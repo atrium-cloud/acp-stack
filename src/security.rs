@@ -88,9 +88,7 @@ pub struct SecurityCheckInputs<'a> {
     /// matches the running user.
     pub process_euid: u32,
     /// Uid resolved from `workspace.runtime_user` via `getpwnam_r`. `None`
-    /// when the user does not exist in the password database (e.g. the
-    /// installer has not run yet). The check skips `runtime.user_mismatch`
-    /// in that case.
+    /// when the user does not exist in the password database.
     pub runtime_user_uid: Option<u32>,
     /// Configured `workspace.runtime_user` string, included verbatim in the
     /// `runtime.user_mismatch` message so operators can correlate with their
@@ -658,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn railway_root_volume_suppresses_workspace_and_default_user_mismatch() {
+    fn railway_root_volume_reports_workspace_and_default_user_mismatch() {
         let http = baseline_http();
         let posture = PathPosture {
             path: std::path::PathBuf::from("/workspace"),
@@ -675,11 +673,11 @@ mod tests {
         inputs.path_postures = &postures;
         let findings = check(inputs);
         assert!(
-            !findings.iter().any(|f| f.code == "runtime.path_ownership"),
+            findings.iter().any(|f| f.code == "runtime.path_ownership"),
             "{findings:?}"
         );
         assert!(
-            !findings.iter().any(|f| f.code == "runtime.user_mismatch"),
+            findings.iter().any(|f| f.code == "runtime.user_mismatch"),
             "{findings:?}"
         );
     }
@@ -822,15 +820,16 @@ mod tests {
     }
 
     #[test]
-    fn runtime_user_mismatch_skipped_when_user_not_resolved() {
+    fn runtime_user_unresolved_warns() {
         let http = baseline_http();
         let mut inputs = baseline_inputs(&http);
         inputs.runtime_user_uid = None;
         let findings = check(inputs);
-        assert!(
-            !findings.iter().any(|f| f.code == "runtime.user_mismatch"),
-            "{findings:?}"
-        );
+        let finding = findings
+            .iter()
+            .find(|f| f.code == "runtime.user_unresolved")
+            .expect("runtime user unresolved finding");
+        assert_eq!(finding.severity, "warning");
     }
 
     #[test]

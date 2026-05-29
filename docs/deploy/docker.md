@@ -46,7 +46,7 @@ docker run --rm \
   -v acp-stack-config:/home/acp/.config/acp-stack \
   -v acp-stack-state:/home/acp/.local/share/acp-stack \
   acp-stack:local \
-  acps init --no-install-agent
+  acps init --agent <agent-id>
 ```
 
 Save both printed API keys immediately. The session key is used for normal API calls. The admin key is used for management actions and is printed only when it is first generated.
@@ -63,18 +63,18 @@ docker run -d \
   acp-stack:local
 ```
 
-Set `ACP_STACK_AUTO_INIT=1` only when you want the entrypoint to initialize a missing config automatically. First-run API keys are printed to container logs in that mode.
+Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. First-run API keys are printed to container logs in that mode.
 
 ## Railway
 
 Use the root `Dockerfile` and attach a persistent Railway volume at `/home/acp`. Railway provides `PORT`; the image binds to that port automatically.
 
-Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`, and `ACP_STACK_ALLOW_ROOT=1` if the volume mount forces root execution.
+Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`.
 
 On the first successful deploy, capture both generated API keys from deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
 
 ## Security Notes
 
-Production Docker deployments should use the image default `USER acp`. `ACP_STACK_ALLOW_ROOT=1` is only for disposable environments and platform shapes that require root-owned mounted volumes.
+Production Docker deployments should use the image default `USER acp`; root daemon execution is reserved for development runs.
 
 For public exposure, put TLS termination and routing at a reverse proxy or Cloudflare Tunnel. Runtime HTTP hardening remains active behind the proxy, including authentication, request limits, origin checks, rate limits, and security logging.
