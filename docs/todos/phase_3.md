@@ -72,6 +72,6 @@
 
 - [x] SQLite remains the local source of truth when external logging is enabled.
 - [x] Supabase logging can be enabled and inspected.
-- [ ] Derived session, turn, token, context, command, duration, permission, API, WebSocket, and security metrics are queryable.
+- [x] Derived session, turn, token, context, command, duration, permission, API, WebSocket, and security metrics are queryable.
 - [x] Agents can use `acpctl` for constrained local inspection.
 - [x] `acpctl mcp serve` exposes the same constrained local interface through MCP.
