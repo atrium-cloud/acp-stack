@@ -128,6 +128,29 @@ pub(crate) enum WorkspaceCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CommandCommand {
+    /// List recent command gateway records.
+    List {
+        /// Maximum number of command rows to return.
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
+    /// Show one command gateway record.
+    Get { id: String },
+    /// Print captured command output chunks.
+    Output {
+        id: String,
+        /// Maximum number of output chunks to return.
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+        /// Cursor returned by a previous output call.
+        #[arg(long)]
+        after: Option<String>,
+        /// Output order: asc or desc.
+        #[arg(long, default_value = "asc")]
+        order: String,
+    },
+    /// Request cancellation for a running command.
+    Cancel { id: String },
     /// Submit a shell command to the command gateway.
     Run {
         command: String,

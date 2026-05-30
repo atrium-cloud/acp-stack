@@ -4,7 +4,9 @@ use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_file,
 };
 use crate::runtime::install::agent_installer::{STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL};
-use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
+use crate::runtime::install::agent_registry::{
+    LEGACY_PLACEHOLDER_AGENT_ID, RegistryCatalog, RegistryEntry,
+};
 use crate::state::{StateStore, default_state_path};
 
 use super::install::operator_registry_override;
@@ -25,6 +27,7 @@ pub(super) fn run_agent_status(output: OutputFormat) -> Result<()> {
 
     let installed_versions = store.latest_successful_installer_runs_for_agent(&config.agent.id)?;
     let capabilities_record = store.latest_agent_capabilities(&config.agent.id)?;
+    let latest_failure = store.latest_agent_failure(&config.agent.id)?;
     let lifecycle = store.query_agent_lifecycle(10)?;
 
     if output.is_json() {
@@ -75,15 +78,26 @@ pub(super) fn run_agent_status(output: OutputFormat) -> Result<()> {
         print_json(&serde_json::json!({
             "agent": config.agent.id,
             "command": config.agent.command,
+            "invalid_config": config.agent.id == LEGACY_PLACEHOLDER_AGENT_ID,
             "params": params,
             "installed_versions": installed_versions,
             "latest_capabilities": capabilities,
+            "latest_failure": latest_failure.as_ref().map(|failure| serde_json::json!({
+                "id": &failure.id,
+                "created_at": &failure.created_at,
+                "event_kind": &failure.event_kind,
+                "message": &failure.message,
+                "reason": &failure.reason,
+            })),
             "recent_lifecycle": lifecycle,
         }))?;
         return Ok(());
     }
 
     println!("agent: {}", config.agent.id);
+    if config.agent.id == LEGACY_PLACEHOLDER_AGENT_ID {
+        println!("invalid config: legacy placeholder agent; select a real supported agent");
+    }
     print_agent_status_params(&config, registry_entry);
     print_installed_versions(&installed_versions);
     println!("command: {}", config.agent.command);
@@ -100,6 +114,11 @@ pub(super) fn run_agent_status(output: OutputFormat) -> Result<()> {
             println!("capabilities_json: {}", record.capabilities_json);
         }
         None => println!("latest capabilities: none recorded yet"),
+    }
+
+    if let Some(failure) = latest_failure {
+        println!("latest failure: {}", failure.reason);
+        println!("latest failure at: {}", failure.created_at);
     }
 
     if lifecycle.is_empty() {

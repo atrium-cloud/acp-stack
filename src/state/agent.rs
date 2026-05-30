@@ -24,6 +24,15 @@ pub struct AgentCapabilitiesRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFailureRecord {
+    pub id: String,
+    pub created_at: String,
+    pub event_kind: String,
+    pub message: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentStartedProcess {
     pub created_at: String,
     pub agent_id: Option<String>,
@@ -141,6 +150,48 @@ impl StateStore {
         )?;
         let rows = statement.query_map(params![limit], row_to_agent_lifecycle)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn latest_agent_failure(&self, agent_id: &str) -> Result<Option<AgentFailureRecord>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT id, created_at, event_kind, message, payload_json
+            FROM agent_lifecycle
+	            WHERE event_kind IN (
+	                'agent.spawn_failed',
+	                'agent.initialize_failed',
+	                'agent.restart_failed'
+	            )
+            ORDER BY created_at DESC, id DESC
+            "#,
+        )?;
+        let rows = statement.query_map([], row_to_agent_lifecycle)?;
+        for row in rows {
+            let event = row?;
+            let payload: serde_json::Value =
+                serde_json::from_str(&event.payload_json).map_err(|source| {
+                    StackError::StateInvalidJson {
+                        field: "agent_lifecycle.payload_json",
+                        reason: source.to_string(),
+                    }
+                })?;
+            if payload.get("agent_id").and_then(serde_json::Value::as_str) != Some(agent_id) {
+                continue;
+            }
+            let reason = payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&event.message)
+                .to_owned();
+            return Ok(Some(AgentFailureRecord {
+                id: event.id,
+                created_at: event.created_at,
+                event_kind: event.event_kind,
+                message: event.message,
+                reason,
+            }));
+        }
+        Ok(None)
     }
 
     pub fn append_agent_lifecycle(

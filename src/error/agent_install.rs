@@ -17,6 +17,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentInstallerTimeout => "agent.installer_timeout",
         AgentInstallerLogPersist { .. } => "agent.installer_log_persist_failed",
         AgentRegistryMissing { .. } => "agent.registry_missing",
+        AgentPlaceholderConfigured => "agent.placeholder_configured",
         InitRunCorrupted { .. } => "init.run_corrupted",
         AgentUnsupported { .. } => "agent.unsupported",
         AgentCheckStale => "agent.check_stale",
@@ -60,6 +61,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("failed to persist installer log at {}", path.display())
         }
         AgentRegistryMissing { id } => format!("ACP registry does not contain agent `{id}`"),
+        AgentPlaceholderConfigured => {
+            "config has legacy placeholder agent; select a real supported agent before starting the runtime".to_owned()
+        }
         InitRunCorrupted { reason } => format!("init run state is corrupted: {reason}"),
         AgentUnsupported { name } => {
             format!("{name} is not currently supported. Please try a different agent.")
@@ -123,6 +127,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     Some(match err {
         AgentConfigProvision { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         AgentNotConfigured => StatusCode::BAD_REQUEST,
+        AgentPlaceholderConfigured => StatusCode::BAD_REQUEST,
         AgentUnsupported { .. } => StatusCode::BAD_REQUEST,
         AgentCheckStale => StatusCode::CONFLICT,
         SkillInstallInvalidSource { .. }

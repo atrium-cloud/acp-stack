@@ -10,6 +10,11 @@ rust-version = "1.95"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+dev-tools = []
+test-fixtures = []
+
 [[bin]]
 name = "acps"
 path = "src/main.rs"
@@ -21,6 +26,7 @@ path = "src/bin/acpctl/main.rs"
 [[bin]]
 name = "placebo-agent"
 path = "src/bin/placebo_agent/main.rs"
+required-features = ["test-fixtures"]
 
 # Dev-only: diffs upstream ACP registry.json against data/registry.toml so the
 # maintainer can keep the embedded catalog in sync. Not installed by
@@ -29,6 +35,7 @@ path = "src/bin/placebo_agent/main.rs"
 [[bin]]
 name = "sync-registry-check"
 path = "src/bin/sync_registry_check.rs"
+required-features = ["dev-tools"]
 
 [dependencies]
 base64 = "0.22.1"

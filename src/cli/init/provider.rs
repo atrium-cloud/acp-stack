@@ -118,12 +118,7 @@ fn apply_provider_to_config(
     config_path: &Path,
     provider_id: String,
 ) -> Result<Vec<String>> {
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
+    let entry = registry.lookup_required(&config.agent.id)?;
     if !entry.set_provider {
         return Err(StackError::AgentConfigProvision {
             path: config_path.to_path_buf(),

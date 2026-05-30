@@ -25,6 +25,7 @@ use std::time::Duration;
 use reqwest::redirect::Policy;
 use sha2::{Digest, Sha256};
 
+use crate::dev_gates::{TEST_INSECURE_HTTPS_ENV, fixture_enabled};
 use crate::error::{Result, StackError};
 
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -36,7 +37,6 @@ const DEFAULT_MAX_REDIRECTS: usize = 3;
 pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024; // 500 MiB
 const STREAM_CHUNK_BYTES: usize = 32 * 1024;
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
-const TEST_INSECURE_HTTPS_ENV: &str = "ACP_STACK_TEST_INSECURE_HTTPS";
 
 /// Options for a single download. Defaults are tuned for archive ingestion
 /// from untrusted hosts; callers tighten via the builder methods.
@@ -177,10 +177,7 @@ fn build_client(opts: &DownloadOpts) -> Result<reqwest::blocking::Client> {
         .connect_timeout(opts.connect_timeout)
         .timeout(opts.read_timeout)
         .redirect(policy);
-    if cfg!(debug_assertions) && std::env::var_os(TEST_INSECURE_HTTPS_ENV).is_some() {
-        // Test-only escape hatch for integration tests that need a local
-        // HTTPS endpoint without depending on public DNS or system trust
-        // store mutation. Release builds ignore this env var.
+    if fixture_enabled(TEST_INSECURE_HTTPS_ENV) {
         builder = builder.danger_accept_invalid_certs(true);
     }
     builder

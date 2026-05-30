@@ -2,11 +2,11 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::dev_gates::{FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
-    FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, advertised_values_for_category,
-    fetch_session_config, validate_advertised_value,
+    advertised_values_for_category, fetch_session_config, validate_advertised_value,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 

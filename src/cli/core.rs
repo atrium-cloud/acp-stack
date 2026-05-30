@@ -62,6 +62,7 @@ enum Command {
     /// Initialize local config, secrets, workspace, and agent files.
     Init(Box<InitArgs>),
     /// Run development-only workflows.
+    #[cfg(feature = "dev-tools")]
     #[command(after_help = "Examples:
   acps dev init --skip-workspace-init --agent opencode --skip-testflight")]
     Dev {
@@ -70,6 +71,7 @@ enum Command {
     },
     /// Print daemon health and runtime status.
     Status,
+    /// Remove local acp-stack config, state, and secrets after confirmation.
     Reset(ResetArgs),
     /// Run the HTTP daemon in the foreground. Blocks until SIGTERM or SIGINT.
     Serve(ServeArgs),
@@ -131,6 +133,7 @@ enum Command {
         #[command(subcommand)]
         command: SessionsCommand,
     },
+    /// Check and apply declared runtime dependencies.
     #[command(after_help = "Examples:
   acps deps check
   acps deps check --format json
@@ -160,6 +163,7 @@ enum Command {
     },
 }
 
+#[cfg(feature = "dev-tools")]
 #[derive(Debug, Subcommand)]
 enum DevCommand {
     /// Initialize with development-only flags enabled.
@@ -197,6 +201,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             output.reject_json("init")?;
             super::init::run_init(*args, InitMode::Operator)
         }
+        #[cfg(feature = "dev-tools")]
         Command::Dev { command } => {
             output.reject_json("dev")?;
             match command {

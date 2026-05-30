@@ -1,3 +1,5 @@
+#![cfg(all(feature = "dev-tools", feature = "test-fixtures"))]
+
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::load_config_from_str;
 use acp_stack::secrets::SecretStore;
@@ -3735,7 +3737,7 @@ creates = "cli-registry-agent"
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["agent", "install"])
+        .args(["agent", "install", "--yes"])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent install: installed"))
