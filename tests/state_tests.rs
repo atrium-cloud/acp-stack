@@ -1452,6 +1452,67 @@ fn metrics_summary_aggregates_within_window() {
 }
 
 #[test]
+fn metrics_summary_exposes_usage_and_websocket_metrics() {
+    use acp_stack::state::MetricsWindow;
+    let (_dir, store) = fresh_state("metrics_usage_ws.sqlite");
+    store
+        .append_event_with_source(
+            "info",
+            "usage.reported",
+            "acp",
+            "",
+            r#"{"input_tokens":123,"output_tokens":45,"context_window_max":8192}"#,
+        )
+        .unwrap();
+    store
+        .append_event_with_source(
+            "info",
+            "usage.reported",
+            "acp",
+            "",
+            r#"{"input_tokens":7,"output_tokens":5,"context_window_max":32768}"#,
+        )
+        .unwrap();
+    store
+        .append_event_with_source("info", "ws.client_connected", "api", "", "{}")
+        .unwrap();
+    store
+        .append_event_with_source(
+            "info",
+            "ws.client_disconnected",
+            "api",
+            "",
+            r#"{"duration_ms":250}"#,
+        )
+        .unwrap();
+    store
+        .append_event_with_source(
+            "info",
+            "ws.client_disconnected",
+            "api",
+            "",
+            r#"{"duration_ms":750}"#,
+        )
+        .unwrap();
+
+    let now = chrono::Utc::now();
+    let since =
+        (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let until =
+        (now + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let summary = store
+        .metrics_summary(MetricsWindow { since, until })
+        .unwrap();
+
+    assert_eq!(summary.usage.tokens_input, Some(130));
+    assert_eq!(summary.usage.tokens_output, Some(50));
+    assert_eq!(summary.usage.context_window_max, Some(32768));
+    assert_eq!(summary.ws_connections.connections_opened, Some(1));
+    assert_eq!(summary.ws_connections.connections_closed, Some(2));
+    assert_eq!(summary.ws_connections.average_duration_ms, Some(500));
+}
+
+#[test]
 fn metrics_summary_exposes_prompt_failure_counters() {
     use acp_stack::state::{MetricsWindow, NewCommandRecord};
     let (_dir, store) = fresh_state("metrics_prompt_failures.sqlite");
