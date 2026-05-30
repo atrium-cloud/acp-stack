@@ -6,8 +6,8 @@ use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::dependencies::deps_apply::{
-    DepApplyOutcome, apply_dependencies, candidate_summary_line, candidates_for,
-    summarize_candidates,
+    DepApplyOutcome, apply_dependencies, apply_dependencies_with_progress, candidate_summary_line,
+    candidates_for, summarize_candidates,
 };
 use crate::state::{StateStore, default_state_path};
 
@@ -145,10 +145,32 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     // effects committed".
     store.migrate()?;
     let shell = &config.workspace.default_shell;
-    if !output.is_json() {
-        println!("running dependency install actions");
-    }
-    let report = apply_dependencies(&config, args.feature.as_deref(), Some(&store), shell)?;
+    let report = if output.is_json() {
+        apply_dependencies(&config, args.feature.as_deref(), Some(&store), shell)?
+    } else {
+        let mut stdout = std::io::stdout();
+        apply_dependencies_with_progress(
+            &config,
+            args.feature.as_deref(),
+            Some(&store),
+            shell,
+            |current, total, name| {
+                writeln!(
+                    stdout,
+                    "progress: applying dependency {current}/{total}: {name}"
+                )
+                .map_err(|source| StackError::AgentInitializeFailed {
+                    reason: format!("write dependency apply progress failed: {source}"),
+                })?;
+                stdout
+                    .flush()
+                    .map_err(|source| StackError::AgentInitializeFailed {
+                        reason: format!("flush dependency apply progress failed: {source}"),
+                    })?;
+                Ok(())
+            },
+        )?
+    };
     if output.is_json() {
         print_json(&deps_apply_report_json(&report)?)?;
     } else {

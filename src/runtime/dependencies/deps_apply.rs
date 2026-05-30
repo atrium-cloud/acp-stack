@@ -135,6 +135,16 @@ pub fn apply_dependencies(
     state: Option<&StateStore>,
     shell_program: &str,
 ) -> Result<DepsApplyReport> {
+    apply_dependencies_with_progress(config, feature, state, shell_program, |_, _, _| Ok(()))
+}
+
+pub fn apply_dependencies_with_progress(
+    config: &Config,
+    feature: Option<&str>,
+    state: Option<&StateStore>,
+    shell_program: &str,
+    mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
+) -> Result<DepsApplyReport> {
     // before/after must honor each dep's `install.creates` (which may
     // be an absolute path), not just PATH on `entry.name`. The plain
     // `check_dependencies` checker resolves `entry.name`, so an
@@ -145,15 +155,23 @@ pub fn apply_dependencies(
     let before = compute_before_after_report(config);
     let mut results = Vec::new();
     let apply_run_id = next_deps_apply_run_id();
-    for entry in &config.dependencies.commands {
-        let Some(install) = entry.install.as_ref() else {
-            continue;
-        };
-        if let Some(filter) = feature
-            && entry.feature.as_deref() != Some(filter)
-        {
-            continue;
-        }
+    let actions: Vec<_> = config
+        .dependencies
+        .commands
+        .iter()
+        .filter_map(|entry| {
+            let install = entry.install.as_ref()?;
+            if let Some(filter) = feature
+                && entry.feature.as_deref() != Some(filter)
+            {
+                return None;
+            }
+            Some((entry, install))
+        })
+        .collect();
+    let total = actions.len();
+    for (index, (entry, install)) in actions.into_iter().enumerate() {
+        progress(index + 1, total, &entry.name)?;
         results.push(apply_one(
             entry,
             install,
