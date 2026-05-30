@@ -792,6 +792,54 @@ impl StackError {
             .expect("StackError variant should be claimed by exactly one error domain")
     }
 
+    pub fn remediation_hint(&self) -> Option<String> {
+        Some(match self {
+            StackError::ConfigRead { .. } => {
+                "verify the config path and file permissions, then retry the command"
+            }
+            StackError::SecretNotFound { .. } | StackError::MissingSupabaseApiKey { .. } => {
+                "store the missing secret with `acps secrets set <name>`"
+            }
+            StackError::MissingSessionKey { name } | StackError::MissingAdminKey { name } => {
+                return Some(format!(
+                    "the auth secret ref `{name}` is missing; restore the secret store or run `acps reset --yes` and re-init"
+                ));
+            }
+            StackError::ConfigExists { .. } => "use `--force` only when replacing the config is intentional",
+            StackError::ResetNotConfirmed => "re-run with `--yes` to confirm reset",
+            StackError::AgentInstallerFailed { .. }
+            | StackError::AgentInstallerCreatesMissing { .. }
+            | StackError::AgentInstallerTimeout => {
+                "inspect `acps installer history`, then retry with `acps agent install`"
+            }
+            StackError::WorkspaceMaterializeFailed { .. } | StackError::WorkspaceCommandFailed { .. } => {
+                "inspect the failed command output and retry after fixing the source or command"
+            }
+            StackError::CloudflareManagedProvision { .. } | StackError::CloudflareApiStatus { .. } => {
+                "verify the Cloudflare API token, account id, tunnel permissions, and hostname, then retry `acps init --resume`"
+            }
+            StackError::AgentTestFailed { .. } | StackError::AgentInitializeFailed { .. } => {
+                "verify agent install, provider secrets, and model selection, then retry the testflight"
+            }
+            StackError::InvalidParam { .. }
+            | StackError::InvalidSocketAddress { .. }
+            | StackError::InvalidCloudflareMode { .. }
+            | StackError::InvalidCloudflareExposure { .. }
+            | StackError::InvalidCloudflaredDeployment { .. }
+            | StackError::InvalidCloudflareHostname { .. }
+            | StackError::InvalidCloudflareTunnelName { .. }
+            | StackError::InvalidCloudflareTunnelId { .. } => {
+                "run the command with `--help` and correct the invalid input"
+            }
+            StackError::MissingField { .. } => {
+                "edit the config or imported TOML to include the required fields"
+            }
+            StackError::ConfigToml(_) => "fix the TOML syntax or field types, then retry",
+            _ => return None,
+        }
+        .to_owned())
+    }
+
     /// HTTP status code for this error when rendered through the API envelope.
     /// Coarse mapping: client-provided invalid input is 4xx; failures the
     /// server hits internally (filesystem, sqlite, age decrypt) are 5xx.

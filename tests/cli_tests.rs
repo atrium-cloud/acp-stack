@@ -337,6 +337,9 @@ fn validate_failure_exits_nonzero_with_specific_error() {
         .failure()
         .stderr(predicates::str::contains(
             "api.bind must be a socket address",
+        ))
+        .stderr(predicates::str::contains(
+            "hint: run the command with `--help` and correct the invalid input",
         ));
 }
 
