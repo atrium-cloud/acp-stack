@@ -36,6 +36,8 @@ acps init \
   [--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>] \
   [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] \
   [--code-from <repo-url>]... [--data-from <path-or-url>]... \
+  [--mcp-preset linear] [--mcp-stdio <name=command>]... [--mcp-stdio-env <server=SECRET_REF>]... \
+  [--mcp-http <name=https://...>]... [--mcp-http-header <server=Header:SECRET_REF>]... \
   [--edge cloudflare --exposure tunnel --hostname <host>] [--cloudflare-mode generated|managed] \
   [--cloudflare-api-token-ref <ref> --cloudflare-account-id-ref <ref>] \
   [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
@@ -46,6 +48,8 @@ Interactive init may prompt for missing choices. Non-interactive first runs requ
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
 
 `acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected.
+
+On new starter configs, `--mcp-preset linear` adds the Linear hosted MCP declaration using `LINEAR_API_KEY`. `--mcp-stdio name=command` and `--mcp-http name=https://...` add custom runtime-wide MCP declarations. `--mcp-stdio-env server=SECRET_REF` and `--mcp-http-header server=Header:SECRET_REF` attach required secret refs to those declarations.
 
 `--skills-source` and `--skills` install selected Agent Skills before testflight.
 Official sources are `openai` and `anthropic`; custom sources use
