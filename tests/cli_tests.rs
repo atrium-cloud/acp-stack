@@ -1,7 +1,7 @@
 #![cfg(all(feature = "dev-tools", feature = "test-fixtures"))]
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::load_config_from_str;
+use acp_stack::config::{McpServerConfig, load_config_from_str};
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{EVENT_SOURCE_CLI, InstallerRunInput, StateStore, default_state_path};
 use assert_cmd::Command;
@@ -448,6 +448,342 @@ fn init_creates_config_and_state() {
         !config.contains("[[workspace.code_sources]]")
             && !config.contains("[[workspace.data_sources]]"),
         "starter config should declare no sources by default"
+    );
+}
+
+#[test]
+fn init_writes_mcp_declarations_to_starter_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--mcp-preset",
+            "linear",
+            "--mcp-stdio",
+            "local=local-mcp",
+            "--mcp-stdio-env",
+            "local=LOCAL_MCP_TOKEN",
+            "--mcp-http",
+            "remote=https://mcp.example/mcp",
+            "--mcp-http-header",
+            "remote=Authorization:REMOTE_MCP_TOKEN",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("starter config should be readable");
+    let config = load_config_from_str(&written).expect("starter config should validate");
+    assert_eq!(config.mcp.servers.len(), 3);
+    let linear = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name() == "linear")
+        .expect("linear preset should be written");
+    let McpServerConfig::Http(linear) = linear else {
+        panic!("linear preset should be an HTTP MCP server");
+    };
+    assert_eq!(linear.url, "https://mcp.linear.app/mcp");
+    assert_eq!(linear.headers.len(), 1);
+    assert_eq!(linear.headers[0].name, "Authorization");
+    assert_eq!(linear.headers[0].value_ref, "LINEAR_API_KEY");
+
+    let local = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name() == "local")
+        .expect("custom stdio server should be written");
+    let McpServerConfig::Stdio(local) = local else {
+        panic!("local MCP server should be stdio");
+    };
+    assert_eq!(local.command, "local-mcp");
+    assert!(local.args.is_empty());
+    assert_eq!(local.env, vec!["LOCAL_MCP_TOKEN"]);
+
+    let remote = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name() == "remote")
+        .expect("custom HTTP server should be written");
+    let McpServerConfig::Http(remote) = remote else {
+        panic!("remote MCP server should be HTTP");
+    };
+    assert_eq!(remote.url, "https://mcp.example/mcp");
+    assert_eq!(remote.headers.len(), 1);
+    assert_eq!(remote.headers[0].name, "Authorization");
+    assert_eq!(remote.headers[0].value_ref, "REMOTE_MCP_TOKEN");
+}
+
+#[test]
+fn init_rejects_invalid_mcp_declarations() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    for (extra_args, expected) in [
+        (
+            &["--mcp-http", "remote=http://mcp.example/mcp"][..],
+            "mcp-http",
+        ),
+        (&["--mcp-http", "remote=https://"], "mcp-http"),
+        (
+            &["--mcp-http", "remote=https://token@mcp.example/mcp"],
+            "credentials",
+        ),
+        (&["--mcp-preset", "unknown"], "mcp-preset"),
+        (&["--mcp-stdio", "local"], "mcp-stdio"),
+        (&["--mcp-stdio", "=local-mcp"], "mcp-stdio"),
+        (&["--mcp-http", "remote="], "mcp-http"),
+        (
+            &[
+                "--mcp-preset",
+                "linear",
+                "--mcp-http",
+                "linear=https://mcp.example/mcp",
+            ],
+            "duplicate name",
+        ),
+        (
+            &[
+                "--mcp-stdio",
+                "local=local-a",
+                "--mcp-stdio",
+                "local=local-b",
+            ],
+            "duplicate name",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp-a.example/mcp",
+                "--mcp-http",
+                "remote=https://mcp-b.example/mcp",
+            ],
+            "duplicate name",
+        ),
+        (
+            &[
+                "--mcp-stdio",
+                "shared=local-mcp",
+                "--mcp-http",
+                "shared=https://mcp.example/mcp",
+            ],
+            "duplicate name",
+        ),
+        (
+            &["--mcp-http-header", "remote=Authorization"],
+            "mcp-http-header",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=:REMOTE_MCP_TOKEN",
+            ],
+            "non-empty header",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=Authorization:",
+            ],
+            "non-empty header",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=Bad Header:REMOTE_MCP_TOKEN",
+            ],
+            "valid HTTP header name",
+        ),
+        (
+            &[
+                "--mcp-http-header",
+                "missing=Authorization:REMOTE_MCP_TOKEN",
+            ],
+            "mcp-http-header",
+        ),
+        (
+            &[
+                "--mcp-stdio",
+                "local=local-mcp",
+                "--mcp-http-header",
+                "local=Authorization:REMOTE_MCP_TOKEN",
+            ],
+            "not an HTTP server",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-stdio-env",
+                "remote=LOCAL_MCP_TOKEN",
+            ],
+            "not a stdio server",
+        ),
+        (
+            &[
+                "--mcp-stdio",
+                "local=local-mcp",
+                "--mcp-stdio-env",
+                "local=BAD REF",
+            ],
+            "secret ref name",
+        ),
+        (
+            &[
+                "--mcp-stdio",
+                "local=local-mcp",
+                "--mcp-stdio-env",
+                "local=ACP_STACK_SESSION_KEY",
+            ],
+            "collides with the configured auth key ref",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=Authorization:BAD REF",
+            ],
+            "secret ref name",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=Authorization:ACP_STACK_ADMIN_KEY",
+            ],
+            "collides with the configured auth key ref",
+        ),
+        (
+            &[
+                "--mcp-stdio",
+                "local=local-mcp",
+                "--mcp-stdio-env",
+                "local=SHARED_MCP_TOKEN",
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=Authorization:SHARED_MCP_TOKEN",
+            ],
+            "declared more than once",
+        ),
+        (
+            &[
+                "--mcp-http",
+                "remote=https://mcp.example/mcp",
+                "--mcp-http-header",
+                "remote=Authorization:FIRST_TOKEN",
+                "--mcp-http-header",
+                "remote=authorization:SECOND_TOKEN",
+            ],
+            "already has header",
+        ),
+        (
+            &["--mcp-stdio-env", "missing=LOCAL_MCP_TOKEN"],
+            "mcp-stdio-env",
+        ),
+    ] {
+        assert_init_mcp_failure(tempdir.path(), extra_args, expected);
+    }
+}
+
+#[test]
+fn init_rejects_mcp_declarations_when_config_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    for (extra_args, expected) in [
+        (&["--mcp-preset", "linear"][..], "--mcp-preset"),
+        (&["--mcp-stdio", "local=local-mcp"], "--mcp-stdio"),
+        (
+            &["--mcp-stdio-env", "local=LOCAL_MCP_TOKEN"],
+            "--mcp-stdio-env",
+        ),
+        (
+            &["--mcp-http", "remote=https://mcp.example/mcp"],
+            "--mcp-http",
+        ),
+        (
+            &["--mcp-http-header", "remote=Authorization:REMOTE_MCP_TOKEN"],
+            "--mcp-http-header",
+        ),
+    ] {
+        assert_init_mcp_failure(tempdir.path(), extra_args, expected);
+    }
+}
+
+fn assert_init_mcp_failure(home: &std::path::Path, extra_args: &[&str], expected: &str) {
+    acps_command()
+        .env("HOME", home)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .args(extra_args)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(expected));
+}
+
+#[test]
+fn init_rejects_mcp_secret_ref_duplicates_after_registry_defaults() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "amp",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--mcp-stdio",
+            "local=local-mcp",
+            "--mcp-stdio-env",
+            "local=AMP_API_KEY",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("declared more than once"));
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acp-stack.toml")
+            .exists(),
+        "invalid post-registry config must not be written"
     );
 }
 

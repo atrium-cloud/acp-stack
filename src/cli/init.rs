@@ -52,7 +52,10 @@ use self::skills::{
     install_init_skills, prompt_init_skills_if_needed, resolve_skill_install_plan,
     skill_install_postcondition_holds,
 };
-use self::starter_config::{starter_config, validate_deployment_overrides_match_existing};
+use self::starter_config::{
+    reject_starter_only_mcp_args_for_existing_config, starter_config,
+    validate_deployment_overrides_match_existing,
+};
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
 
 #[derive(Debug, Args)]
@@ -166,6 +169,21 @@ pub struct InitArgs {
     /// config is being created.
     #[arg(long = "data-from", value_name = "PATH_OR_URL")]
     pub(super) data_from: Vec<String>,
+    /// Add an MCP preset during init. Currently supports `linear`.
+    #[arg(long = "mcp-preset", value_name = "NAME", value_delimiter = ',')]
+    pub(super) mcp_preset: Vec<String>,
+    /// Add a custom stdio MCP server as `name=command`.
+    #[arg(long = "mcp-stdio", value_name = "NAME=COMMAND")]
+    pub(super) mcp_stdio: Vec<String>,
+    /// Add a secret ref to a custom stdio MCP server as `server=SECRET_REF`.
+    #[arg(long = "mcp-stdio-env", value_name = "SERVER=SECRET_REF")]
+    pub(super) mcp_stdio_env: Vec<String>,
+    /// Add a custom HTTP MCP server as `name=https://...`.
+    #[arg(long = "mcp-http", value_name = "NAME=URL")]
+    pub(super) mcp_http: Vec<String>,
+    /// Add a header secret ref to a custom HTTP MCP server as `server=Header:SECRET_REF`.
+    #[arg(long = "mcp-http-header", value_name = "SERVER=HEADER:SECRET_REF")]
+    pub(super) mcp_http_header: Vec<String>,
     /// Skip the workspace materializer; useful for tests and dev loops that
     /// do not need actual content fetched/cloned.
     #[cfg(feature = "dev-tools")]
@@ -370,6 +388,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         set_owner_only_file(&config_path)?;
         let existing_config = Config::load_from_path(&config_path)?;
         validate_deployment_overrides_match_existing(&args, &existing_config)?;
+        reject_starter_only_mcp_args_for_existing_config(&args)?;
         "validated existing config"
     } else {
         let starter_config = starter_config(&args)?;
@@ -380,6 +399,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             apply_registry_entry_to_config(&mut new_config, entry);
         }
         let canonical = new_config.to_canonical_toml()?;
+        config::load_config_from_str(&canonical)?;
         write_new_file_owner_only(&config_path, canonical.as_bytes())?;
         Config::load_from_path(&config_path)?;
         "created starter config"
