@@ -182,6 +182,8 @@ mod tests {
             mode: "generated".to_owned(),
             exposure: "tunnel".to_owned(),
             hostname: "agent.example.com".to_owned(),
+            api_token_ref: None,
+            account_id_ref: None,
             tunnel_name: Some("acp-stack".to_owned()),
             tunnel_id: None,
             cloudflared_deployment: "host".to_owned(),

@@ -76,6 +76,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[commands]`       | mediated shell command limits and env allowlist                      |
 | `[dependencies]`   | expected external programs, runtimes, packages, and MCP declarations |
 | `[[mcp.servers]]`  | MCP servers attached to ACP sessions                                 |
+| `[edge.cloudflare]` | Cloudflare Tunnel edge profile and managed provisioning refs         |
 | `[logging]`        | local logging and optional external sink settings                    |
 
 ## API And Security
@@ -163,6 +164,10 @@ timeout_secs = 600
 ```
 
 Only `commands` entries may declare install actions. `packages`, `runtimes`, and `mcp` entries are declarative checks.
+
+## Edge
+
+Cloudflare Tunnel config lives under `[edge.cloudflare]`. `mode = "generated"` writes local cloudflared artifacts only. `mode = "managed"` also requires `api_token_ref` and `account_id_ref`; init resolves those secret refs in memory, creates the tunnel, writes `tunnel_id` back to config before later provisioning steps, pushes the remote tunnel config, creates or updates the proxied CNAME, and writes an owner-only tunnel token env artifact.
 
 ## MCP Servers
 

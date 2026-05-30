@@ -18,7 +18,7 @@ This profile:
 - trusts only the local tunnel peer for forwarded client metadata
 - writes local `cloudflared` config snippets for the operator to install
 
-`acp-stack` does not create Cloudflare accounts, tunnels, DNS records, or tokens. Provision those in Cloudflare, then apply the generated local tunnel config.
+By default, `acp-stack` writes generated tunnel artifacts for operator-managed Cloudflare setup. With `--cloudflare-mode managed`, init uses configured secret refs to create the tunnel, configure the proxied DNS record, and write an owner-only tunnel token env artifact.
 
 ## Runtime Config
 

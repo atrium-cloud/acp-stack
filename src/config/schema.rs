@@ -81,6 +81,10 @@ pub struct CloudflareEdgeConfig {
     pub exposure: String,
     pub hostname: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_id: Option<String>,

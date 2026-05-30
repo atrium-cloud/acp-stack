@@ -208,10 +208,7 @@ pub enum StackError {
     InvalidSupabaseSchema { schema: String },
 
     // === edge (cloudflare) ===
-    #[error("edge.cloudflare.mode = \"managed\" is not implemented yet; use mode = \"generated\"")]
-    CloudflareManagedNotImplemented,
-
-    #[error("edge.cloudflare.mode must be `generated`; got `{mode}`")]
+    #[error("edge.cloudflare.mode must be one of generated, managed; got `{mode}`")]
     InvalidCloudflareMode { mode: String },
 
     #[error("edge.cloudflare.exposure must be `tunnel`; got `{exposure}`")]
@@ -234,6 +231,19 @@ pub enum StackError {
 
     #[error("edge.cloudflare.tunnel_id must be a Cloudflare tunnel UUID; got `{tunnel_id}`")]
     InvalidCloudflareTunnelId { tunnel_id: String },
+
+    #[error("Cloudflare managed provisioning failed at {operation}: {reason}")]
+    CloudflareManagedProvision {
+        operation: &'static str,
+        reason: String,
+    },
+
+    #[error("Cloudflare API rejected {operation}: HTTP {status} {body}")]
+    CloudflareApiStatus {
+        operation: &'static str,
+        status: u16,
+        body: String,
+    },
 
     // === supabase sink runtime ===
     #[error("Supabase sink rejected upload: {status} {body}")]
