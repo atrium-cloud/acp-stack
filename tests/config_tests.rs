@@ -191,7 +191,34 @@ cloudflared_deployment = "host"
 }
 
 #[test]
-fn rejects_cloudflare_managed_mode_for_now() {
+fn parses_managed_cloudflare_edge_config() {
+    let config_text = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "managed"
+exposure = "tunnel"
+hostname = "agent.example.com"
+api_token_ref = "CLOUDFLARE_API_TOKEN"
+account_id_ref = "CLOUDFLARE_ACCOUNT_ID"
+
+[workspace]"#,
+    );
+    let config = load_config_from_str(&config_text).expect("managed mode should parse");
+    let cloudflare = config.edge.cloudflare.as_ref().expect("cloudflare block");
+    assert_eq!(cloudflare.mode, "managed");
+    assert_eq!(
+        cloudflare.api_token_ref.as_deref(),
+        Some("CLOUDFLARE_API_TOKEN")
+    );
+    assert_eq!(
+        cloudflare.account_id_ref.as_deref(),
+        Some("CLOUDFLARE_ACCOUNT_ID")
+    );
+}
+
+#[test]
+fn rejects_managed_cloudflare_without_credential_refs() {
     let config_text = VALID_CONFIG.replace(
         "[workspace]",
         r#"[edge.cloudflare]
@@ -202,11 +229,56 @@ hostname = "agent.example.com"
 
 [workspace]"#,
     );
-    let error = load_config_from_str(&config_text).expect_err("managed mode should be rejected");
-    assert!(
-        error.to_string().contains("not implemented yet"),
-        "got: {error}"
+    let error = load_config_from_str(&config_text).expect_err("managed mode needs refs");
+    assert!(error.to_string().contains("api_token_ref"), "got: {error}");
+
+    let config_text = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "managed"
+exposure = "tunnel"
+hostname = "agent.example.com"
+api_token_ref = "CLOUDFLARE_API_TOKEN"
+
+[workspace]"#,
     );
+    let error = load_config_from_str(&config_text).expect_err("managed mode needs account ref");
+    assert!(error.to_string().contains("account_id_ref"), "got: {error}");
+}
+
+#[test]
+fn rejects_invalid_managed_cloudflare_credential_refs() {
+    let config_text = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "managed"
+exposure = "tunnel"
+hostname = "agent.example.com"
+api_token_ref = "sk-proj-exampleinlinevalue"
+account_id_ref = "CLOUDFLARE_ACCOUNT_ID"
+
+[workspace]"#,
+    );
+    let error = load_config_from_str(&config_text).expect_err("managed mode rejects inline token");
+    assert!(error.to_string().contains("api_token_ref"), "got: {error}");
+
+    let config_text = VALID_CONFIG.replace(
+        "[workspace]",
+        r#"[edge.cloudflare]
+enabled = true
+mode = "managed"
+exposure = "tunnel"
+hostname = "agent.example.com"
+api_token_ref = "CLOUDFLARE_API_TOKEN"
+account_id_ref = "bad ref"
+
+[workspace]"#,
+    );
+    let error =
+        load_config_from_str(&config_text).expect_err("managed mode rejects invalid account ref");
+    assert!(error.to_string().contains("account_id_ref"), "got: {error}");
 }
 
 #[test]

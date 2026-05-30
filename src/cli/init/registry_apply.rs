@@ -28,6 +28,18 @@ pub(super) fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config)
         })?
         .trim()
         .to_owned();
+    if args.cloudflare_mode.as_config_value() == "managed" {
+        if args.cloudflare_api_token_ref.is_none() {
+            return Err(StackError::MissingField {
+                field: "--cloudflare-api-token-ref",
+            });
+        }
+        if args.cloudflare_account_id_ref.is_none() {
+            return Err(StackError::MissingField {
+                field: "--cloudflare-account-id-ref",
+            });
+        }
+    }
     let public_url = format!("https://{hostname}");
     config.api.bind = "127.0.0.1:7700".to_owned();
     config.api.public_url = Some(public_url.clone());
@@ -37,9 +49,11 @@ pub(super) fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config)
     config.edge = EdgeConfig {
         cloudflare: Some(CloudflareEdgeConfig {
             enabled: true,
-            mode: "generated".to_owned(),
+            mode: args.cloudflare_mode.as_config_value().to_owned(),
             exposure: "tunnel".to_owned(),
             hostname,
+            api_token_ref: args.cloudflare_api_token_ref.clone(),
+            account_id_ref: args.cloudflare_account_id_ref.clone(),
             tunnel_name: Some("acp-stack".to_owned()),
             tunnel_id: None,
             cloudflared_deployment: args.cloudflared_deployment.as_config_value().to_owned(),
