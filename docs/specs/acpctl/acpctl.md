@@ -13,6 +13,10 @@ acpctl workspace list .
 acpctl workspace read README.md
 acpctl workspace write path/to/file
 acpctl command run "rg TODO ."
+acpctl command list
+acpctl command get <id>
+acpctl command output <id>
+acpctl command cancel <id>
 acpctl config export
 acpctl permissions pending
 acpctl ws connections
@@ -62,6 +66,10 @@ Each `acpctl` subcommand maps to exactly one UDS route. Off-allowlist routes ret
 | `workspace read`      | `GET /v1/files/content`       | no              |
 | `workspace write`     | `PUT /v1/files/content`       | no              |
 | `command run`         | `POST /v1/commands`           | mediated        |
+| `command list`        | `GET /v1/commands`            | no              |
+| `command get`         | `GET /v1/commands/{id}`       | no              |
+| `command output`      | `GET /v1/commands/{id}/output` | no             |
+| `command cancel`      | `POST /v1/commands/{id}/cancel` | mediated      |
 | `config export`       | `GET /v1/config/export`       | no (refs only)  |
 | `permissions pending` | `GET /v1/permissions/pending` | no (read-only)  |
 | `ws connections`      | `GET /v1/ws/connections`      | no (read-only)  |
@@ -80,4 +88,4 @@ Hard-blocked routes — absent from the UDS router and not registered by `acpctl
 
 ## MCP Facade
 
-`acpctl mcp serve` exposes the local interface as MCP tools for agents that prefer tool calls over shell commands. The MCP surface mirrors the `acpctl` allowlist and does not register denied capabilities.
+`acpctl mcp serve` exposes the local interface as MCP tools for agents that prefer tool calls over shell commands. The MCP surface mirrors the `acpctl` allowlist, including command run/list/get/output/cancel, and does not register denied capabilities.

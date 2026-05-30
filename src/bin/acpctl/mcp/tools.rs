@@ -20,6 +20,10 @@ pub(crate) const TOOL_NAMES: &[&str] = &[
     "workspace_read",
     "workspace_write",
     "command_run",
+    "command_list",
+    "command_get",
+    "command_output",
+    "command_cancel",
     "config_export",
     "permissions_pending",
     "ws_connections",
@@ -73,11 +77,25 @@ pub(crate) fn build(name: &str) -> Option<Tool> {
         ),
         "command_run" => (
             "Submit a shell command to the mediated command gateway. Returns the submission \
-             envelope (including a command id) before execution completes — the gateway runs \
-             asynchronously. Subsequent output lands as `command.*` events in the local log; \
-             call `logs_query` with `kind = \"command.\"` to fetch them (prefix match)."
+             envelope (including a command id) before execution completes."
                 .to_owned(),
             schema_command_run(),
+        ),
+        "command_list" => (
+            "List recent mediated command records.".to_owned(),
+            schema_limit_arg(),
+        ),
+        "command_get" => (
+            "Get one mediated command record by id.".to_owned(),
+            schema_id_arg(),
+        ),
+        "command_output" => (
+            "Get captured output chunks for one mediated command.".to_owned(),
+            schema_command_output(),
+        ),
+        "command_cancel" => (
+            "Request cancellation for one mediated command.".to_owned(),
+            schema_id_arg(),
         ),
         "config_export" => (
             "Export the current config as TOML with secret references only.".to_owned(),
@@ -155,6 +173,59 @@ fn schema_command_run() -> JsonObject {
             }
         }),
         &["command"],
+    )
+}
+
+fn schema_id_arg() -> JsonObject {
+    object_schema(
+        json!({
+            "id": {
+                "type": "string",
+                "description": "Command id.",
+            }
+        }),
+        &["id"],
+    )
+}
+
+fn schema_limit_arg() -> JsonObject {
+    object_schema(
+        json!({
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "Maximum rows to return. Default 200.",
+            }
+        }),
+        &[],
+    )
+}
+
+fn schema_command_output() -> JsonObject {
+    object_schema(
+        json!({
+            "id": {
+                "type": "string",
+                "description": "Command id.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "Maximum output chunks to return. Default 200.",
+            },
+            "after": {
+                "type": "string",
+                "description": "Pagination cursor; the last seen output event id.",
+            },
+            "order": {
+                "type": "string",
+                "enum": ["asc", "desc"],
+                "description": "Output order. Default is asc.",
+            }
+        }),
+        &["id"],
     )
 }
 

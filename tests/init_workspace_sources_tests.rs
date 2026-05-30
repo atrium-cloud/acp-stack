@@ -12,23 +12,37 @@
 //!   * `--data-from http://...` is rejected by the CLI parser before any
 //!     network IO.
 
+#[cfg(feature = "test-fixtures")]
 use acp_stack::runtime::init_runner::step_kind;
+#[cfg(feature = "test-fixtures")]
 use acp_stack::state::{StateStore, default_state_path};
 use assert_cmd::Command;
+#[cfg(feature = "test-fixtures")]
 use base64::Engine;
+#[cfg(feature = "test-fixtures")]
 use flate2::Compression;
+#[cfg(feature = "test-fixtures")]
 use flate2::write::GzEncoder;
+#[cfg(feature = "test-fixtures")]
 use std::io::Write;
+#[cfg(feature = "test-fixtures")]
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command as StdCommand;
+#[cfg(feature = "test-fixtures")]
 use std::sync::Arc;
+#[cfg(feature = "test-fixtures")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "test-fixtures")]
 use tokio::sync::oneshot;
+#[cfg(feature = "test-fixtures")]
 use tokio_rustls::TlsAcceptor;
+#[cfg(feature = "test-fixtures")]
 use tokio_rustls::rustls::ServerConfig;
+#[cfg(feature = "test-fixtures")]
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
+#[cfg(feature = "test-fixtures")]
 const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDJTCCAg2gAwIBAgIUD3qVKGnq2UkVRwq1dp4nR+gWFjswDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDUxOTE4MDA1NFoXDTM2MDUx
@@ -49,6 +63,7 @@ T5CPc+7VET952HRTKSCRBonEvbanHGL0pxvhGGiVFpocZPUaP0xPdXn5i9hrsh3s
 tUtnDtMcrvKvkGRnBzN9LBb1V3XbSIcc6qlqLAo5XSaBusVEA6g3WQI=
 -----END CERTIFICATE-----"#;
 
+#[cfg(feature = "test-fixtures")]
 const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKMk54YvUSkw9M
 TCmCr753dJhhIkiBK8RT8hA9EXp10Gm13Z2WSH9OJlc+T4FFeO3wTGhrXlH0NnC/
@@ -163,6 +178,7 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
+#[cfg(feature = "test-fixtures")]
 fn capture_names(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir)
         .expect("read capture dir")
@@ -171,24 +187,28 @@ fn capture_names(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(feature = "test-fixtures")]
 fn has_capture(names: &[String], tag: &str, extension: &str) -> bool {
     names
         .iter()
         .any(|name| name.starts_with(&format!("{tag}.")) && name.ends_with(extension))
 }
 
+#[cfg(feature = "test-fixtures")]
 struct HttpsArchiveServer {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "test-fixtures")]
 impl HttpsArchiveServer {
     fn url(&self, path: &str) -> String {
         format!("https://localhost:{}{path}", self.addr.port())
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 impl Drop for HttpsArchiveServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
@@ -200,6 +220,7 @@ impl Drop for HttpsArchiveServer {
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 fn pem_der(pem: &str, label: &str) -> Vec<u8> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
@@ -215,6 +236,7 @@ fn pem_der(pem: &str, label: &str) -> Vec<u8> {
         .expect("decode pem")
 }
 
+#[cfg(feature = "test-fixtures")]
 fn archive_with_file(path: &str, contents: &[u8]) -> Vec<u8> {
     let mut tar_bytes = Vec::new();
     {
@@ -235,6 +257,7 @@ fn archive_with_file(path: &str, contents: &[u8]) -> Vec<u8> {
     archive
 }
 
+#[cfg(feature = "test-fixtures")]
 fn spawn_https_archive_server(body: Vec<u8>) -> HttpsArchiveServer {
     let cert = CertificateDer::from(pem_der(TEST_CERT_PEM, "CERTIFICATE"));
     let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(pem_der(
@@ -348,6 +371,7 @@ fn init_materializes_local_data_source() {
 }
 
 #[test]
+#[cfg(feature = "test-fixtures")]
 fn init_downloads_and_extracts_https_archive_source() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");

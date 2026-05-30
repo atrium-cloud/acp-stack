@@ -2,21 +2,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::error::{Result, StackError};
+use crate::error::Result;
 use crate::runtime::install::agent_installer::{InstallerOutcome, install_resolved, run_installer};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::StateStore;
 
 pub(super) fn should_install_agent(config: &Config, registry: &RegistryCatalog) -> Result<bool> {
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
+    let entry = registry.lookup_required(&config.agent.id)?;
     entry.ensure_supported()?;
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-fixtures")]
     if let Some(placebo_path) =
         crate::runtime::install::agent_registry::development_placebo_registry_path()
     {
@@ -61,12 +56,7 @@ pub(super) fn install_configured_agent(
             Some(&log_base),
         );
     }
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
+    let entry = registry.lookup_required(&config.agent.id)?;
     install_resolved(
         &config.agent,
         entry,

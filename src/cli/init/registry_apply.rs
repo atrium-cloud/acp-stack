@@ -67,10 +67,7 @@ pub(super) fn select_agent_for_init<'a>(
     registry: &'a RegistryCatalog,
 ) -> Result<Option<&'a RegistryEntry>> {
     if let Some(id) = &args.agent {
-        return registry
-            .lookup(id)
-            .ok_or_else(|| StackError::AgentRegistryMissing { id: id.clone() })
-            .map(Some);
+        return registry.lookup_required(id).map(Some);
     }
     if !io::stdin().is_terminal() {
         return Ok(None);
@@ -151,7 +148,7 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
             let harness = entry.harness.as_ref().expect("validated registry harness");
             config.agent.command = harness.id.clone();
             config.agent.args = vec!["acp".to_owned()];
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "test-fixtures")]
             if crate::runtime::install::agent_registry::development_placebo_registry_path()
                 .is_some_and(|path| path.display().to_string() == harness.id)
             {

@@ -205,11 +205,46 @@ pub(crate) fn format_file_mutation(data: &Value) {
 }
 
 pub(crate) fn format_command(data: &Value) {
-    // `/v1/commands` returns the row at submission time only (status is
-    // typically `pending` or `running`); stdout is streamed via WebSocket on
-    // the public API, not via this REST submit. Poll `/v1/commands/{id}` from
-    // a follow-up call to observe completion.
     print_kv(data, &["id", "status", "command", "exit_status"]);
+}
+
+pub(crate) fn format_command_submitted(data: &Value) {
+    format_command(data);
+    if let Some(id) = data.get("id").and_then(Value::as_str) {
+        println!("follow-up status: acpctl command get {id}");
+        println!("follow-up output: acpctl command output {id}");
+    }
+}
+
+pub(crate) fn format_commands_list(data: &Value) {
+    let Some(items) = data.get("items").and_then(Value::as_array) else {
+        println!("(no commands)");
+        return;
+    };
+    if items.is_empty() {
+        println!("(no commands)");
+        return;
+    }
+    for item in items {
+        let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+        let status = item.get("status").and_then(Value::as_str).unwrap_or("");
+        let command = item.get("command").and_then(Value::as_str).unwrap_or("");
+        let updated = item.get("updated_at").and_then(Value::as_str).unwrap_or("");
+        println!("{updated} {id} {status} {command}");
+    }
+}
+
+pub(crate) fn format_command_output(data: &Value) {
+    let Some(chunks) = data.get("chunks").and_then(Value::as_array) else {
+        return;
+    };
+    for chunk in chunks {
+        let text = chunk.get("data").and_then(Value::as_str).unwrap_or("");
+        print!("{text}");
+    }
+    if let Some(cursor) = data.get("next_cursor").and_then(Value::as_str) {
+        eprintln!("\nnext_cursor: {cursor}");
+    }
 }
 
 pub(crate) fn format_config_export(data: &Value) {

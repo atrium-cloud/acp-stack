@@ -912,6 +912,51 @@ fn agent_lifecycle_round_trips_through_sqlite() {
 }
 
 #[test]
+fn latest_agent_failure_filters_by_agent_and_extracts_reason() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .append_agent_lifecycle(
+            "agent.spawn_failed",
+            "agent spawn failed",
+            r#"{"agent_id":"other","reason":"wrong agent"}"#,
+        )
+        .expect("other failure");
+    let failure = store
+        .append_agent_lifecycle(
+            "agent.spawn_failed",
+            "agent spawn failed",
+            r#"{"agent_id":"opencode","reason":"binary not found"}"#,
+        )
+        .expect("target failure");
+    let restart_failure = store
+        .append_agent_lifecycle(
+            "agent.restart_failed",
+            "agent restart failed",
+            r#"{"agent_id":"opencode","reason":"restart binary not found"}"#,
+        )
+        .expect("restart failure");
+
+    let latest = store
+        .latest_agent_failure("opencode")
+        .expect("query latest")
+        .expect("failure row");
+    assert_ne!(latest.id, failure.id);
+    assert_eq!(latest.id, restart_failure.id);
+    assert_eq!(latest.event_kind, "agent.restart_failed");
+    assert_eq!(latest.reason, "restart binary not found");
+    assert!(
+        store
+            .latest_agent_failure("missing")
+            .expect("query missing")
+            .is_none()
+    );
+}
+
+#[test]
 fn agent_lifecycle_rejects_invalid_payload_json() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");

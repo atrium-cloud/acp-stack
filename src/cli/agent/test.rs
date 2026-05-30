@@ -103,12 +103,7 @@ fn run_agent_test_with(
     registry: &RegistryCatalog,
     args: AgentTestArgs,
 ) -> Result<()> {
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
+    let entry = registry.lookup_required(&config.agent.id)?;
     entry.ensure_supported()?;
 
     let prompt_source = if args.prompt.is_some() {

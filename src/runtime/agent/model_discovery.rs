@@ -8,11 +8,7 @@
 //! the agent down — all in-process and synchronous from the caller's
 //! POV.
 //!
-//! This module is the single place that owns that dance. The CLI flow
-//! also honors two fixture env vars (set by the test suite) that let
-//! tests bypass spawning the real agent; the API path uses the same
-//! fixtures so an automated browser/UI driver can mock ACP behavior
-//! without touching the production agent process.
+//! This module is the single place that owns that dance.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +18,9 @@ use std::time::Duration;
 use agent_client_protocol::schema::{NewSessionResponse, SessionConfigOption};
 
 use crate::config::Config;
+use crate::dev_gates::{
+    FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, fixture_path,
+};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
@@ -29,36 +28,14 @@ use crate::runtime::agent::acp_bridge::{
 };
 use crate::secrets::SecretStore;
 
-/// Operator-facing env var for short-circuiting the session/new dance
-/// with a JSON array of `SessionConfigOption`s. Used by tests that
-/// don't want to spawn the real agent binary.
-pub const FIXTURE_CONFIG_OPTIONS_ENV: &str = "ACP_STACK_AGENT_CONFIG_OPTIONS_PATH";
-
-/// Operator-facing env var for short-circuiting the session/new dance
-/// with a full `NewSessionResponse` JSON document.
-pub const FIXTURE_NEW_SESSION_RESPONSE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_RESPONSE_PATH";
-
 /// Default cap for a single provisional model-discovery session.
 /// Healthy ACP agents return `session/new` quickly; this bounds the
 /// process lifetime when an agent accepts initialize but hangs before
 /// advertising config options.
 pub const DEFAULT_MODELS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn development_fixture_path(name: &str) -> Option<PathBuf> {
-    #[cfg(debug_assertions)]
-    {
-        std::env::var_os(name).map(PathBuf::from)
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = name;
-        None
-    }
-}
-
 /// Spawn the configured agent, open one provisional ACP session, and
-/// return the raw `session/new` response. Honors the two fixture env
-/// vars first so tests don't have to spawn the real binary.
+/// return the raw `session/new` response.
 pub fn fetch_session_config(home: &Path, config: &Config) -> Result<NewSessionResponse> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -80,7 +57,7 @@ pub async fn fetch_session_config_with_timeout(
     config: &Config,
     timeout_duration: Duration,
 ) -> Result<NewSessionResponse> {
-    if let Some(path) = development_fixture_path(FIXTURE_CONFIG_OPTIONS_ENV) {
+    if let Some(path) = fixture_path(FIXTURE_CONFIG_OPTIONS_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,
@@ -93,7 +70,7 @@ pub async fn fetch_session_config_with_timeout(
         return Ok(NewSessionResponse::new("fixture").config_options(options));
     }
 
-    if let Some(path) = development_fixture_path(FIXTURE_NEW_SESSION_RESPONSE_ENV) {
+    if let Some(path) = fixture_path(FIXTURE_NEW_SESSION_RESPONSE_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,

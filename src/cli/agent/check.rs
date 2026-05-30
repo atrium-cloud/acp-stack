@@ -131,12 +131,7 @@ pub(super) fn run_agent_check(output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
+    let entry = registry.lookup_required(&config.agent.id)?;
     let state_path = default_state_path(&home);
     let state_dir = parent_dir(&state_path)?;
     create_dir_owner_only(state_dir)?;

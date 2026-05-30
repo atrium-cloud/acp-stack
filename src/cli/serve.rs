@@ -19,6 +19,7 @@ pub struct ServeArgs {
     bind: Option<String>,
     /// Development-only opt-in to running the daemon as root. Even with this
     /// flag set, the admin API key must be non-empty.
+    #[cfg(feature = "dev-tools")]
     #[arg(long, hide = true)]
     allow_root: bool,
 }
@@ -33,6 +34,19 @@ const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
 
 fn allow_root_env_enabled() -> bool {
     std::env::var(ALLOW_ROOT_ENV).is_ok_and(|value| value == "1")
+}
+
+impl ServeArgs {
+    fn allow_root(&self) -> bool {
+        #[cfg(feature = "dev-tools")]
+        {
+            self.allow_root
+        }
+        #[cfg(not(feature = "dev-tools"))]
+        {
+            false
+        }
+    }
 }
 
 /// Refuse to serve as root unless explicitly opted in, and never allow the
@@ -57,7 +71,7 @@ pub(super) fn run_serve(args: ServeArgs, mode: ServeMode) -> Result<()> {
 }
 
 fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> Result<()> {
-    if args.allow_root && mode != ServeMode::Dev {
+    if args.allow_root() && mode != ServeMode::Dev {
         return Err(StackError::InvalidParam {
             field: "--allow-root",
             reason: "development-only flag; use `acps dev serve --allow-root`".to_owned(),
@@ -69,7 +83,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             reason: "development-only environment override; use `acps dev serve`".to_owned(),
         });
     }
-    let allow_root = mode == ServeMode::Dev && (args.allow_root || allow_root_env_enabled());
+    let allow_root = mode == ServeMode::Dev && (args.allow_root() || allow_root_env_enabled());
     if process_euid == 0 && !allow_root {
         return Err(StackError::ServeRefusedAsRoot);
     }
@@ -392,6 +406,7 @@ mod tests {
         let err = run_serve_with_euid(
             ServeArgs {
                 bind: None,
+                #[cfg(feature = "dev-tools")]
                 allow_root: false,
             },
             ServeMode::Operator,

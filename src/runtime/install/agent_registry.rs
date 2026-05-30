@@ -15,21 +15,22 @@
 //! replaces the embedded entry; new `id`s are added.
 
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 
+#[cfg(feature = "test-fixtures")]
+use crate::dev_gates::{DEV_PLACEBO_REGISTRY_ENV, fixture_path};
 use crate::error::{Result, StackError};
 
 const EMBEDDED_REGISTRY: &str = include_str!("../../../data/agents.toml");
-#[cfg(debug_assertions)]
-const DEV_PLACEBO_REGISTRY_ENV: &str = "ACP_STACK_DEV_PLACEBO_REGISTRY";
-#[cfg(debug_assertions)]
+pub const LEGACY_PLACEHOLDER_AGENT_ID: &str = "placeholder";
+#[cfg(feature = "test-fixtures")]
 pub const DEV_PLACEBO_MODEL_OPTION: &str = "placebo-model";
 
-#[cfg(debug_assertions)]
-pub fn development_placebo_registry_path() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os(DEV_PLACEBO_REGISTRY_ENV)?);
+#[cfg(feature = "test-fixtures")]
+pub fn development_placebo_registry_path() -> Option<std::path::PathBuf> {
+    let path = fixture_path(DEV_PLACEBO_REGISTRY_ENV)?;
     path.is_file().then_some(path)
 }
 
@@ -52,7 +53,7 @@ impl RegistryCatalog {
     /// an error — it is the common case for fresh installs.
     pub fn load_with_override(override_path: &Path) -> Result<Self> {
         let mut catalog = Self::load_embedded()?;
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "test-fixtures")]
         catalog.apply_development_placebo_registry();
         if override_path.exists() {
             let body =
@@ -68,7 +69,7 @@ impl RegistryCatalog {
         Ok(catalog)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-fixtures")]
     fn apply_development_placebo_registry(&mut self) {
         let Some(path) = development_placebo_registry_path() else {
             return;
@@ -107,6 +108,14 @@ impl RegistryCatalog {
 
     pub fn lookup(&self, id: &str) -> Option<&RegistryEntry> {
         self.agents.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn lookup_required(&self, id: &str) -> Result<&RegistryEntry> {
+        if id == LEGACY_PLACEHOLDER_AGENT_ID {
+            return Err(StackError::AgentPlaceholderConfigured);
+        }
+        self.lookup(id)
+            .ok_or_else(|| StackError::AgentRegistryMissing { id: id.to_owned() })
     }
 
     pub fn entries(&self) -> &[RegistryEntry] {
@@ -587,7 +596,7 @@ fn github_path_from_value<'a>(agent_id: &str, field: &str, value: &'a str) -> Re
     Ok(value)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "test-fixtures")]
 fn shell_quote_str(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -651,6 +660,15 @@ mod tests {
     fn lookup_returns_none_for_unknown_id() {
         let catalog = RegistryCatalog::load_embedded().expect("registry");
         assert!(catalog.lookup("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn lookup_required_rejects_legacy_placeholder_config() {
+        let catalog = RegistryCatalog::load_embedded().expect("registry");
+        assert!(matches!(
+            catalog.lookup_required(LEGACY_PLACEHOLDER_AGENT_ID),
+            Err(StackError::AgentPlaceholderConfigured)
+        ));
     }
 
     #[test]

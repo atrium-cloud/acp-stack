@@ -386,6 +386,84 @@ async fn command_run_submits_through_gateway() {
 }
 
 #[tokio::test]
+async fn command_routes_cover_list_get_output_and_cancel() {
+    let harness = Harness::spawn().await;
+    let body = serde_json::json!({ "command": "printf routed" }).to_string();
+    let submitted = request(
+        &harness.socket,
+        "POST",
+        "/v1/commands",
+        Some(body.as_bytes()),
+    )
+    .await;
+    assert_eq!(submitted.status, 200, "body: {:?}", submitted.json());
+    let id = submitted.json()["data"]["id"]
+        .as_str()
+        .expect("command id")
+        .to_owned();
+
+    let list = request(&harness.socket, "GET", "/v1/commands?limit=10", None).await;
+    assert_eq!(list.status, 200);
+    assert!(
+        list.json()["data"]["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["id"] == id)
+    );
+
+    let get = request(&harness.socket, "GET", &format!("/v1/commands/{id}"), None).await;
+    assert_eq!(get.status, 200);
+    assert_eq!(get.json()["data"]["id"], id);
+
+    let output = request(
+        &harness.socket,
+        "GET",
+        &format!("/v1/commands/{id}/output?limit=10&order=asc"),
+        None,
+    )
+    .await;
+    assert_eq!(output.status, 200);
+    assert!(output.json()["data"]["chunks"].is_array());
+
+    let slow_body = serde_json::json!({ "command": "sleep 5" }).to_string();
+    let slow = request(
+        &harness.socket,
+        "POST",
+        "/v1/commands",
+        Some(slow_body.as_bytes()),
+    )
+    .await;
+    let slow_id = slow.json()["data"]["id"]
+        .as_str()
+        .expect("slow command id")
+        .to_owned();
+    let cancel = request(
+        &harness.socket,
+        "POST",
+        &format!("/v1/commands/{slow_id}/cancel"),
+        None,
+    )
+    .await;
+    assert_eq!(cancel.status, 200);
+    assert_eq!(cancel.json()["data"]["id"], slow_id);
+}
+
+#[test]
+fn acpctl_command_help_lists_subcommands() {
+    Command::cargo_bin("acpctl")
+        .expect("binary should build")
+        .args(["command", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("list"))
+        .stdout(predicates::str::contains("get"))
+        .stdout(predicates::str::contains("output"))
+        .stdout(predicates::str::contains("cancel"))
+        .stdout(predicates::str::contains("run"));
+}
+
+#[tokio::test]
 async fn config_export_returns_canonical_toml() {
     let harness = Harness::spawn().await;
     let resp = request(&harness.socket, "GET", "/v1/config/export", None).await;

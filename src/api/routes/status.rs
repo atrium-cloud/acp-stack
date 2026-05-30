@@ -47,6 +47,7 @@ pub(crate) struct StatusAgentResponse {
     agent: AgentStatusJson,
     process_state: String,
     pid: Option<u32>,
+    latest_failure: Option<AgentFailureJson>,
     lifecycle_events: Vec<AgentLifecycleJson>,
 }
 
@@ -70,14 +71,24 @@ struct AgentLifecycleJson {
     payload_json: String,
 }
 
+#[derive(Serialize)]
+struct AgentFailureJson {
+    id: String,
+    created_at: String,
+    event_kind: String,
+    message: String,
+    reason: String,
+}
+
 pub(crate) async fn status_agent_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<StatusAgentResponse>, StackError> {
-    let store = state.state.lock().await;
-    let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
-    drop(store);
     let snapshot = state.agent_supervisor.snapshot().await;
     let agent = state.live_agent_config.lock().await.clone();
+    let store = state.state.lock().await;
+    let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
+    let latest_failure = store.latest_agent_failure(&agent.id)?;
+    drop(store);
     Ok(ApiSuccess::new(StatusAgentResponse {
         configured: true,
         agent: AgentStatusJson {
@@ -91,6 +102,13 @@ pub(crate) async fn status_agent_handler(
         },
         process_state: snapshot.state.as_wire_str().to_owned(),
         pid: snapshot.pid,
+        latest_failure: latest_failure.map(|failure| AgentFailureJson {
+            id: failure.id,
+            created_at: failure.created_at,
+            event_kind: failure.event_kind,
+            message: failure.message,
+            reason: failure.reason,
+        }),
         lifecycle_events: lifecycle_events
             .into_iter()
             .map(|event| AgentLifecycleJson {

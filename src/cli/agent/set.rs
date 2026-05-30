@@ -6,6 +6,10 @@ use crate::config::{
     self, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
+use crate::dev_gates::{
+    FIXTURE_CONFIG_OPTIONS_ENV as ACP_CONFIG_OPTIONS_FIXTURE_ENV,
+    FIXTURE_NEW_SESSION_RESPONSE_ENV as ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV, fixture_path,
+};
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::{
@@ -13,11 +17,6 @@ use crate::runtime::agent::acp_bridge::{
     session_config_values, session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
-use crate::runtime::agent::model_discovery::{
-    FIXTURE_CONFIG_OPTIONS_ENV as ACP_CONFIG_OPTIONS_FIXTURE_ENV,
-    FIXTURE_NEW_SESSION_RESPONSE_ENV as ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV,
-    development_fixture_path,
-};
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
     optional_env_refs_for_provider_id, provider_id_is_known, provider_id_supports_agent,
@@ -33,12 +32,7 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     let config_path = config::default_config_path()?;
     let mut config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    let entry =
-        registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?;
+    let entry = registry.lookup_required(&config.agent.id)?;
     if let Some(mode) = args.mode.clone() {
         return run_agent_mode_set(config, config_path, &home, args, entry, mode);
     }
@@ -760,7 +754,7 @@ fn read_agent_new_session_response(
     home: &Path,
     config: &Config,
 ) -> Result<agent_client_protocol::schema::NewSessionResponse> {
-    if let Some(path) = development_fixture_path(ACP_CONFIG_OPTIONS_FIXTURE_ENV) {
+    if let Some(path) = fixture_path(ACP_CONFIG_OPTIONS_FIXTURE_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,
@@ -776,7 +770,7 @@ fn read_agent_new_session_response(
         );
     }
 
-    if let Some(path) = development_fixture_path(ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV) {
+    if let Some(path) = fixture_path(ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV) {
         let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,

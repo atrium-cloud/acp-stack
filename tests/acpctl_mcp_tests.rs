@@ -194,13 +194,17 @@ fn structured(result: &CallToolResult) -> &Value {
 }
 
 #[tokio::test]
-async fn mcp_stdio_lists_exactly_the_twelve_tools() {
+async fn mcp_stdio_lists_exactly_the_sixteen_tools() {
     let harness = Harness::spawn().await;
     let client = spawn_stdio_client(&harness.socket).await;
     let tools: Vec<Tool> = client.peer().list_all_tools().await.expect("list_tools");
     let mut got: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     got.sort();
     let mut expected: Vec<String> = [
+        "command_cancel",
+        "command_get",
+        "command_list",
+        "command_output",
         "command_run",
         "config_export",
         "deps_check",
@@ -319,12 +323,58 @@ async fn mcp_stdio_drives_every_tool_with_source_local() {
     assert_eq!(structured(&ws_sessions)["ok"], true);
     assert!(structured(&ws_sessions)["data"]["sessions"].is_array());
 
-    // command_run — kept last because it is the slowest tool. Use `true`
-    // so we don't depend on shell builtins or working directories.
+    // command_run
     let mut cmd_args = serde_json::Map::new();
-    cmd_args.insert("command".into(), json!("true"));
+    cmd_args.insert("command".into(), json!("printf mcp-command"));
     let cmd = call_tool_value(&client, "command_run", Some(cmd_args)).await;
     assert_eq!(structured(&cmd)["ok"], true);
+    let command_id = structured(&cmd)["data"]["id"]
+        .as_str()
+        .expect("command id")
+        .to_owned();
+
+    let mut command_list_args = serde_json::Map::new();
+    command_list_args.insert("limit".into(), json!(10));
+    let command_list = call_tool_value(&client, "command_list", Some(command_list_args)).await;
+    assert_eq!(structured(&command_list)["ok"], true);
+    assert!(
+        structured(&command_list)["data"]["items"]
+            .as_array()
+            .expect("command items")
+            .iter()
+            .any(|item| item["id"] == command_id)
+    );
+
+    let mut command_get_args = serde_json::Map::new();
+    command_get_args.insert("id".into(), json!(command_id));
+    let command_get = call_tool_value(&client, "command_get", Some(command_get_args.clone())).await;
+    assert_eq!(structured(&command_get)["ok"], true);
+    assert_eq!(
+        structured(&command_get)["data"]["id"],
+        command_get_args["id"]
+    );
+
+    let mut command_output_args = command_get_args.clone();
+    command_output_args.insert("limit".into(), json!(10));
+    command_output_args.insert("order".into(), json!("asc"));
+    let command_output =
+        call_tool_value(&client, "command_output", Some(command_output_args)).await;
+    assert_eq!(structured(&command_output)["ok"], true);
+    assert!(structured(&command_output)["data"]["chunks"].is_array());
+
+    let mut slow_cmd_args = serde_json::Map::new();
+    slow_cmd_args.insert("command".into(), json!("sleep 5"));
+    let slow_cmd = call_tool_value(&client, "command_run", Some(slow_cmd_args)).await;
+    assert_eq!(structured(&slow_cmd)["ok"], true);
+    let slow_command_id = structured(&slow_cmd)["data"]["id"]
+        .as_str()
+        .expect("slow command id")
+        .to_owned();
+    let mut command_cancel_args = serde_json::Map::new();
+    command_cancel_args.insert("id".into(), json!(slow_command_id));
+    let command_cancel =
+        call_tool_value(&client, "command_cancel", Some(command_cancel_args)).await;
+    assert_eq!(structured(&command_cancel)["ok"], true);
 
     let _ = client.cancel().await;
 
@@ -343,6 +393,7 @@ async fn mcp_stdio_drives_every_tool_with_source_local() {
         "/v1/files",
         "/v1/files/content",
         "/v1/commands",
+        "/v1/commands/",
         "/v1/config/export",
         "/v1/permissions/pending",
     ] {

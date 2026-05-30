@@ -7,14 +7,15 @@ use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::api::{
-    self, AppState, commands_submit_handler, config_export_handler, deps_check_handler,
+    self, AppState, commands_cancel_handler, commands_get_handler, commands_list_handler,
+    commands_output_handler, commands_submit_handler, config_export_handler, deps_check_handler,
     files_content_get_handler, files_content_put_handler, files_list_handler, logs_events_handler,
     permissions_pending_handler, security_check_handler, status_handler, ws_connections_handler,
     ws_sessions_handler,
 };
 use crate::auth::KeyKind;
 
-/// Build the Axum router that the UDS listener serves. Mounts only the 10
+/// Build the Axum router that the UDS listener serves. Mounts only the
 /// allowlisted operations exposed to `acpctl`. Anything else over the UDS
 /// returns 404 from the framework fallback, rewrapped by `ensure_envelope`.
 pub fn build_local_router(state: AppState) -> Router {
@@ -30,7 +31,13 @@ pub fn build_local_router(state: AppState) -> Router {
             "/v1/files/content",
             get(files_content_get_handler).put(files_content_put_handler),
         )
-        .route("/v1/commands", post(commands_submit_handler))
+        .route(
+            "/v1/commands",
+            get(commands_list_handler).post(commands_submit_handler),
+        )
+        .route("/v1/commands/{id}", get(commands_get_handler))
+        .route("/v1/commands/{id}/output", get(commands_output_handler))
+        .route("/v1/commands/{id}/cancel", post(commands_cancel_handler))
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/permissions/pending", get(permissions_pending_handler))
         .route("/v1/ws/connections", get(ws_connections_handler))

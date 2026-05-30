@@ -11,6 +11,7 @@ use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 
+use super::AgentInstallArgs;
 use crate::cli::core::{OutputFormat, daemon_base_url, print_json};
 
 pub(super) fn run_agent_daemon_post(
@@ -75,7 +76,7 @@ async fn post_agent_daemon(
     })
 }
 
-pub(super) fn run_agent_install(output: OutputFormat) -> Result<()> {
+pub(super) fn run_agent_install(_args: AgentInstallArgs, output: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
 
@@ -107,12 +108,7 @@ pub(super) fn run_agent_install(output: OutputFormat) -> Result<()> {
         )?
     } else {
         let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-        let entry =
-            registry
-                .lookup(&config.agent.id)
-                .ok_or_else(|| StackError::AgentRegistryMissing {
-                    id: config.agent.id.clone(),
-                })?;
+        let entry = registry.lookup_required(&config.agent.id)?;
         let dest = local_bin_dir(&home);
         install_resolved(
             &config.agent,

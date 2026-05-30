@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::DataSourceConfig;
+use crate::dev_gates::{S3_ENDPOINT_OVERRIDE_ENV, fixture_string};
 use crate::error::{Result, StackError};
 use crate::secrets::SecretStore;
 
@@ -94,13 +95,8 @@ pub(super) fn materialize_s3(
             secret_key,
         },
     )?;
-    #[cfg(debug_assertions)]
-    {
-        if let Ok(endpoint) = std::env::var("ACP_STACK_S3_ENDPOINT_OVERRIDE")
-            && !endpoint.is_empty()
-        {
-            client = client.with_endpoint_base(endpoint);
-        }
+    if let Some(endpoint) = fixture_string(S3_ENDPOINT_OVERRIDE_ENV) {
+        client = client.with_endpoint_base(endpoint);
     }
 
     let outcome = download_s3_objects(&client, bucket, prefix.as_deref(), dest, max_total_bytes);

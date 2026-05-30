@@ -82,6 +82,41 @@ pub(crate) fn build_call(name: &str, args: &Value) -> Result<UdsCall, String> {
             let text = Value::Object(body).to_string();
             Ok(post_json("/v1/commands".to_owned(), text.into_bytes()))
         }
+        "command_list" => {
+            let limit = optional_u32(args, "limit")?.unwrap_or(200);
+            Ok(get(format!("/v1/commands?limit={limit}")))
+        }
+        "command_get" => {
+            let id = require_string(args, "id", "command_get")?;
+            Ok(get(format!("/v1/commands/{}", url_encode(id))))
+        }
+        "command_output" => {
+            let id = require_string(args, "id", "command_output")?;
+            let limit = optional_u32(args, "limit")?.unwrap_or(200);
+            let order = optional_string(args, "order")?.unwrap_or("asc");
+            if order != "asc" && order != "desc" {
+                return Err(format!(
+                    "command_output `order` must be 'asc' or 'desc', got {order:?}"
+                ));
+            }
+            let mut path = format!(
+                "/v1/commands/{}/output?limit={limit}&order={}",
+                url_encode(id),
+                url_encode(order)
+            );
+            if let Some(after) = optional_string(args, "after")? {
+                path.push_str("&after=");
+                path.push_str(&url_encode(after));
+            }
+            Ok(get(path))
+        }
+        "command_cancel" => {
+            let id = require_string(args, "id", "command_cancel")?;
+            Ok(post_json(
+                format!("/v1/commands/{}/cancel", url_encode(id)),
+                b"{}".to_vec(),
+            ))
+        }
         "config_export" => Ok(get("/v1/config/export".to_owned())),
         "permissions_pending" => {
             let limit = optional_u32(args, "limit")?.unwrap_or(200);
@@ -331,6 +366,32 @@ mod tests {
         assert_eq!(body["command"], "ls");
         assert_eq!(body["cwd"], "/tmp");
         assert_eq!(body["timeout"], "5s");
+    }
+
+    #[test]
+    fn build_call_command_status_routes() {
+        let list = build_call("command_list", &json!({"limit": 5})).unwrap();
+        assert_eq!(list.method, "GET");
+        assert_eq!(list.path, "/v1/commands?limit=5");
+
+        let get = build_call("command_get", &json!({"id": "cmd one"})).unwrap();
+        assert_eq!(get.method, "GET");
+        assert_eq!(get.path, "/v1/commands/cmd%20one");
+
+        let output = build_call(
+            "command_output",
+            &json!({"id": "cmd one", "limit": 7, "after": "evt 1", "order": "desc"}),
+        )
+        .unwrap();
+        assert_eq!(output.method, "GET");
+        assert_eq!(
+            output.path,
+            "/v1/commands/cmd%20one/output?limit=7&order=desc&after=evt%201"
+        );
+
+        let cancel = build_call("command_cancel", &json!({"id": "cmd one"})).unwrap();
+        assert_eq!(cancel.method, "POST");
+        assert_eq!(cancel.path, "/v1/commands/cmd%20one/cancel");
     }
 
     #[test]

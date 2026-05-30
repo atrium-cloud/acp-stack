@@ -11,7 +11,16 @@ This document is for maintainers and (future) contributors.
 
 ## Verification Commands
 
-For code changes, use the repository's `cargo` checks (build, test, fmt, clippy) and run the pre-commit hook before commit. For doc-only changes, run the link/leak checks below.
+Use Rust `1.95.0`, matching `rust-toolchain.toml`. Default Cargo commands build the production-shaped target set. Development commands and fixtures require explicit features:
+
+```sh
+cargo test
+cargo test --features dev-tools,test-fixtures
+cargo clippy --all-targets
+cargo clippy --all-targets --features dev-tools,test-fixtures
+```
+
+For code changes, use the repository's `cargo` checks and run the pre-commit hook before commit. For doc-only changes, run the link/leak checks below.
 
 ```sh
 rg -n "tests/|\\.github|Phase [0-9]|migration|src/" README.md docs/specs docs/deploy docs/agents
@@ -29,9 +38,13 @@ Repository test scripts are maintainer tools, not deployment instructions:
 
 ## Placebo Agent
 
-`placebo-agent` is a deterministic ACP fixture for integration tests. Tests invoke it through `CARGO_BIN_EXE_placebo-agent` with the `acp` subcommand, so they do not depend on a locally installed production agent or API key.
+`placebo-agent` is a deterministic ACP fixture for integration tests. It is compiled only with `--features test-fixtures`. Tests invoke it through `CARGO_BIN_EXE_placebo-agent` with the `acp` subcommand, so they do not depend on a locally installed production agent or API key.
 
 The fixture is not a supported agent. Binary release packaging must continue to bundle only the runtime CLIs, `acps` and `acpctl`.
+
+## Dev Commands
+
+`acps dev ...` and hidden bypass flags are compiled only with `--features dev-tools`. Use this path for local maintainer loops such as `acps dev init --skip-workspace-init` or `acps dev serve --allow-root`; those commands must not appear in default builds.
 
 ## Local Interface Coupling
 

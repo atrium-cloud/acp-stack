@@ -46,8 +46,6 @@ Interactive init may prompt for missing choices. Non-interactive first runs requ
 
 `acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected.
 
-Development-only init flags are under `acps dev init`. For example, `acps dev init --skip-workspace-init` skips workspace materialization for local development.
-
 `--skills-source` and `--skills` install selected Agent Skills before testflight.
 Official sources are `openai` and `anthropic`; custom sources use
 `github:<owner>` and expect `<owner>/skills` on branch `main`.
@@ -76,7 +74,7 @@ Export emits canonical TOML with secret references only. Import validates and ca
 
 ## Agent Commands
 
-`acps agent install` installs the configured supported agent from the embedded catalog. Unsupported entries fail before installation.
+`acps agent install [--yes]` installs the configured supported agent from the embedded catalog. Unsupported entries fail before installation. `--yes` is accepted for scripts; install currently runs non-interactively.
 
 `acps agent switch <agent>` migrates to another supported harness through the running daemon:
 

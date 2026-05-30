@@ -22,6 +22,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::dev_gates::{GITHUB_API_BASE_ENV, fixture_string};
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::ArchiveKind;
 
@@ -29,20 +30,9 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
 
-/// Debug-build-only base URL override for the GitHub Releases API. Tests bind a
-/// local axum mock to `127.0.0.1:0` and set this var so the same
-/// install machinery drives against the mock,
-/// rather than reaching out to the live api.github.com (which would
-/// rate-limit CI and is not deterministic). The empty/unset case falls
-/// back to the upstream constant.
 fn github_api_base() -> String {
-    #[cfg(debug_assertions)]
-    {
-        if let Ok(value) = std::env::var("ACP_STACK_GITHUB_API_BASE")
-            && !value.trim().is_empty()
-        {
-            return value.trim_end_matches('/').to_owned();
-        }
+    if let Some(value) = fixture_string(GITHUB_API_BASE_ENV) {
+        return value.trim_end_matches('/').to_owned();
     }
     GITHUB_API_BASE.to_owned()
 }
