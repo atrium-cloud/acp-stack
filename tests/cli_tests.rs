@@ -4997,28 +4997,45 @@ fn deps_apply_prints_before_and_after_status() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
 
-    let dependency_name = "deps-apply-before-after-marker";
+    let dependency_one_name = "deps-apply-before-after-marker-one";
+    let dependency_two_name = "deps-apply-before-after-marker-two";
     let feature = "deps-apply-before-after";
-    let marker = tempdir.path().join("deps-apply-marker");
-    let shell = format!(
+    let marker_one = tempdir.path().join("deps-apply-marker-one");
+    let marker_two = tempdir.path().join("deps-apply-marker-two");
+    let shell_one = format!(
         "printf '#!/bin/sh\\nexit 0\\n' > {marker} && chmod 755 {marker}",
-        marker = shell_quote_path(&marker),
+        marker = shell_quote_path(&marker_one),
+    );
+    let shell_two = format!(
+        "printf '#!/bin/sh\\nexit 0\\n' > {marker} && chmod 755 {marker}",
+        marker = shell_quote_path(&marker_two),
     );
     let config = VALID_CONFIG.replace(
         "[agent]",
         &format!(
             r#"[[dependencies.commands]]
-name = "{dependency_name}"
-required = true
-feature = "{feature}"
+	name = "{dependency_one_name}"
+	required = true
+	feature = "{feature}"
+	
+	[dependencies.commands.install]
+	shell = {}
+	creates = {}
 
-[dependencies.commands.install]
-shell = {}
-creates = {}
-
-[agent]"#,
-            toml_string(&shell),
-            toml_string(&marker.to_string_lossy()),
+[[dependencies.commands]]
+	name = "{dependency_two_name}"
+	required = true
+	feature = "{feature}"
+	
+	[dependencies.commands.install]
+	shell = {}
+	creates = {}
+	
+	[agent]"#,
+            toml_string(&shell_one),
+            toml_string(&marker_one.to_string_lossy()),
+            toml_string(&shell_two),
+            toml_string(&marker_two.to_string_lossy()),
         ),
     );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
@@ -5041,23 +5058,39 @@ creates = {}
     let stdout = String::from_utf8(output).expect("stdout should be utf8");
 
     let before_index = stdout.find("before:\n").expect("before section");
-    let progress_index = stdout
-        .find("running dependency install actions\n")
-        .expect("progress line");
+    let progress_one_index = stdout
+        .find(&format!(
+            "progress: applying dependency 1/2: {dependency_one_name}\n"
+        ))
+        .expect("first progress line");
+    let progress_two_index = stdout
+        .find(&format!(
+            "progress: applying dependency 2/2: {dependency_two_name}\n"
+        ))
+        .expect("second progress line");
     let results_index = stdout.find("results:\n").expect("results section");
     let after_index = stdout.find("after:\n").expect("after section");
     assert!(
-        progress_index < before_index
+        progress_one_index < progress_two_index
+            && progress_two_index < before_index
             && before_index < results_index
             && results_index < after_index,
         "expected before/results/after ordering, got:\n{stdout}",
     );
     assert!(
-        stdout[before_index..results_index].contains(&format!("  MISS {dependency_name}")),
+        stdout[before_index..results_index].contains(&format!("  MISS {dependency_one_name}")),
         "before section must report missing dependency, got:\n{stdout}",
     );
     assert!(
-        stdout[after_index..].contains(&format!("  OK   {dependency_name}")),
+        stdout[before_index..results_index].contains(&format!("  MISS {dependency_two_name}")),
+        "before section must report missing dependency, got:\n{stdout}",
+    );
+    assert!(
+        stdout[after_index..].contains(&format!("  OK   {dependency_one_name}")),
+        "after section must report available dependency, got:\n{stdout}",
+    );
+    assert!(
+        stdout[after_index..].contains(&format!("  OK   {dependency_two_name}")),
         "after section must report available dependency, got:\n{stdout}",
     );
 }
@@ -5135,6 +5168,7 @@ creates = {}
         .clone();
     let stdout = String::from_utf8_lossy(&output);
     assert!(!stdout.contains("running dependency install actions"));
+    assert!(!stdout.contains("progress: applying dependency"));
     assert!(!stdout.contains("sk-test-secret"));
     let body: Value = serde_json::from_slice(&output).expect("deps apply json parses");
     let outcome = &body["results"][0]["outcome"];
