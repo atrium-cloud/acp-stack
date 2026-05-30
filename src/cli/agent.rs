@@ -26,7 +26,7 @@ pub(super) const DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT: &str = "30s";
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// Install the configured ACP agent or adapter.
-    Install,
+    Install(AgentInstallArgs),
     /// Ask the running daemon to start the configured agent.
     Start,
     /// Ask the running daemon to stop the configured agent.
@@ -56,6 +56,13 @@ pub struct AgentTestArgs {
     /// Maximum time to wait for either progress or terminal prompt completion.
     #[arg(long = "progress-timeout", default_value = DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT)]
     pub(super) progress_timeout: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentInstallArgs {
+    /// Accepted for script consistency; install is already non-interactive.
+    #[arg(long)]
+    pub(super) yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -115,7 +122,7 @@ pub struct AgentSwitchArgs {
 
 pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoice) -> Result<()> {
     match command {
-        AgentCommand::Install => self::install::run_agent_install(output.effective()),
+        AgentCommand::Install(args) => self::install::run_agent_install(args, output.effective()),
         AgentCommand::Start => {
             self::install::run_agent_daemon_post("/v1/agent/start", "start", output.effective())
         }

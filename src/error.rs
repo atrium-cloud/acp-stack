@@ -409,6 +409,11 @@ pub enum StackError {
     #[error("ACP registry does not contain agent `{id}`")]
     AgentRegistryMissing { id: String },
 
+    #[error(
+        "config has legacy `agent.id = \"placeholder\"`; select a real agent with `acps init --fresh --agent <id>`"
+    )]
+    AgentPlaceholderConfigured,
+
     #[error("init run state is corrupted: {reason}")]
     InitRunCorrupted { reason: String },
 

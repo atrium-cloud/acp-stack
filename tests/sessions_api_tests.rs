@@ -1,3 +1,5 @@
+#![cfg(feature = "test-fixtures")]
+
 //! End-to-end coverage for the session HTTP routes: create, list, get,
 //! prompt (fire-and-forget + polling), cancel, load, close, plus auth-tier
 //! enforcement and `session/update` persistence.

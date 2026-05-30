@@ -154,6 +154,7 @@ pub struct InitArgs {
     pub(super) data_from: Vec<String>,
     /// Skip the workspace materializer; useful for tests and dev loops that
     /// do not need actual content fetched/cloned.
+    #[cfg(feature = "dev-tools")]
     #[arg(long, hide = true)]
     pub(super) skip_workspace_init: bool,
     /// Run the real-prompt agent testflight at the end of init. Warns about
@@ -205,6 +206,19 @@ impl CloudflaredDeploymentArg {
             Self::Host => "host",
             Self::Docker => "docker",
             Self::External => "external",
+        }
+    }
+}
+
+impl InitArgs {
+    pub(super) fn skip_workspace_init(&self) -> bool {
+        #[cfg(feature = "dev-tools")]
+        {
+            self.skip_workspace_init
+        }
+        #[cfg(not(feature = "dev-tools"))]
+        {
+            false
         }
     }
 }
@@ -284,7 +298,7 @@ fn configure_subagent_inherit_for_init(
 }
 
 pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
-    if args.skip_workspace_init && mode != InitMode::Dev {
+    if args.skip_workspace_init() && mode != InitMode::Dev {
         return Err(StackError::InvalidParam {
             field: "--skip-workspace-init",
             reason: "development-only flag; use `acps dev init --skip-workspace-init`".to_owned(),
@@ -332,12 +346,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         let starter_config = starter_config(&args)?;
         let mut new_config = config::load_config_from_str(&starter_config)?;
         if let Some(agent_id) = args.agent.as_deref() {
-            let entry =
-                registry
-                    .lookup(agent_id)
-                    .ok_or_else(|| StackError::AgentRegistryMissing {
-                        id: agent_id.to_owned(),
-                    })?;
+            let entry = registry.lookup_required(agent_id)?;
             entry.ensure_supported()?;
             apply_registry_entry_to_config(&mut new_config, entry);
         }
@@ -695,7 +704,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // -----------------------------------------------------------------
     let workspace_for_verify = config.workspace.clone();
     let mut materialize_report = None;
-    if !args.skip_workspace_init
+    if !args.skip_workspace_init()
         || step_needs_resume(&prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
     {
         let log_paths =

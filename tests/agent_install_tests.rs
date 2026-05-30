@@ -1,3 +1,5 @@
+#![cfg(feature = "test-fixtures")]
+
 //! End-to-end install flow against a mocked GitHub Releases API.
 //!
 //! Phase 4 / Test Hardening: the `install_resolved_capture` two-step

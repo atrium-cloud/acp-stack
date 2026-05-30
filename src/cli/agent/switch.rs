@@ -30,12 +30,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
             api_key_ref: args.api_key_ref.clone(),
         },
     )?;
-    let target_entry =
-        registry
-            .lookup(&plan.target_agent_id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: plan.target_agent_id.clone(),
-            })?;
+    let target_entry = registry.lookup_required(&plan.target_agent_id)?;
     print_switch_plan(
         &plan.provider_status,
         target_entry,

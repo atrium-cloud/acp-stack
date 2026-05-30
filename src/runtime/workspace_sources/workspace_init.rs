@@ -834,6 +834,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "test-fixtures")]
     fn s3_source_materializes_against_mock_endpoint() {
         // Spin up a small axum server that speaks the S3 wire format we
         // need: a `?list-type=2` GET returns the canned XML, and

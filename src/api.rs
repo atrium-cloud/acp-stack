@@ -8,7 +8,10 @@ pub(crate) mod ws_registry;
 pub(crate) use auth::{ensure_envelope, log_api_request, track_active_requests};
 pub(crate) use core::shutdown_signal;
 pub use core::{AppState, RuntimePaths, build_router, serve};
-pub(crate) use routes::commands::commands_submit_handler;
+pub(crate) use routes::commands::{
+    commands_cancel_handler, commands_get_handler, commands_list_handler, commands_output_handler,
+    commands_submit_handler,
+};
 pub(crate) use routes::config::config_export_handler;
 pub(crate) use routes::deps::deps_check_handler;
 pub(crate) use routes::logs::logs_events_handler;

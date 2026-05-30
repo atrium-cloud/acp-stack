@@ -93,12 +93,7 @@ async fn install_agent_for_config(
         // Registry-resolved install: one row for native, two for adapter-backed.
         let override_path = home.join(".config").join("acp-stack").join("agents.toml");
         let registry = RegistryCatalog::load_with_override(&override_path)?;
-        let entry = registry
-            .lookup(&config.agent.id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: config.agent.id.clone(),
-            })?
-            .clone();
+        let entry = registry.lookup_required(&config.agent.id)?.clone();
         let agent = config.agent.clone();
         let mut result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
             install_resolved_capture(
@@ -432,12 +427,7 @@ pub(crate) async fn agent_switch_handler(
             api_key_ref: body.api_key_ref,
         },
     )?;
-    let target_entry =
-        registry
-            .lookup(&plan.target_agent_id)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: plan.target_agent_id.clone(),
-            })?;
+    let target_entry = registry.lookup_required(&plan.target_agent_id)?;
     let mut candidate_config = plan.config.clone();
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
 

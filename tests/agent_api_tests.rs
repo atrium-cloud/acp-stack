@@ -1,3 +1,5 @@
+#![cfg(feature = "test-fixtures")]
+
 //! End-to-end coverage for the agent HTTP routes: install, start,
 //! capabilities, stop, and the session/admin tier enforcement on those.
 //!

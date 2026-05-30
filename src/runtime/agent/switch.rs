@@ -73,12 +73,7 @@ pub fn plan_agent_switch(
     registry: &RegistryCatalog,
     request: AgentSwitchRequest,
 ) -> Result<AgentSwitchPlan> {
-    let entry =
-        registry
-            .lookup(&request.target_agent)
-            .ok_or_else(|| StackError::AgentRegistryMissing {
-                id: request.target_agent.clone(),
-            })?;
+    let entry = registry.lookup_required(&request.target_agent)?;
     entry.ensure_supported()?;
     if current.agent.id == entry.id {
         return Err(StackError::InvalidParam {

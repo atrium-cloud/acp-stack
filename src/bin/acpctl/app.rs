@@ -13,9 +13,10 @@ use crate::cli_defs::{
 };
 use crate::client::request;
 use crate::formatters::{
-    format_command, format_config_export, format_deps, format_file_mutation, format_files_list,
-    format_logs, format_permissions, format_security, format_status, format_ws_connections,
-    format_ws_sessions, print_response, write_workspace_read,
+    format_command, format_command_output, format_command_submitted, format_commands_list,
+    format_config_export, format_deps, format_file_mutation, format_files_list, format_logs,
+    format_permissions, format_security, format_status, format_ws_connections, format_ws_sessions,
+    print_response, write_workspace_read,
 };
 use crate::helpers::{build_logs_path, resolve_socket_path, url_encode};
 
@@ -143,6 +144,48 @@ async fn run(cli: Cli, socket: &std::path::Path) -> Result<(), String> {
                 Some(body_text.into_bytes()),
             )
             .await?;
+            print_response(&resp, json_mode, format_command_submitted)
+        }
+        Command::Command {
+            action: CommandCommand::List { limit },
+        } => {
+            let path = format!("/v1/commands?limit={limit}");
+            let resp = request(socket, "GET", &path, &[], None).await?;
+            print_response(&resp, json_mode, format_commands_list)
+        }
+        Command::Command {
+            action: CommandCommand::Get { id },
+        } => {
+            let path = format!("/v1/commands/{}", url_encode(&id));
+            let resp = request(socket, "GET", &path, &[], None).await?;
+            print_response(&resp, json_mode, format_command)
+        }
+        Command::Command {
+            action:
+                CommandCommand::Output {
+                    id,
+                    limit,
+                    after,
+                    order,
+                },
+        } => {
+            let mut path = format!(
+                "/v1/commands/{}/output?limit={limit}&order={}",
+                url_encode(&id),
+                url_encode(&order)
+            );
+            if let Some(after) = after {
+                path.push_str("&after=");
+                path.push_str(&url_encode(&after));
+            }
+            let resp = request(socket, "GET", &path, &[], None).await?;
+            print_response(&resp, json_mode, format_command_output)
+        }
+        Command::Command {
+            action: CommandCommand::Cancel { id },
+        } => {
+            let path = format!("/v1/commands/{}/cancel", url_encode(&id));
+            let resp = request(socket, "POST", &path, &[], None).await?;
             print_response(&resp, json_mode, format_command)
         }
         Command::Config {
