@@ -435,6 +435,13 @@ fn init_creates_config_and_state() {
         ])
         .assert()
         .success()
+        .stdout(predicates::str::contains("progress: initializing secrets"))
+        .stdout(predicates::str::contains(
+            "progress: configuring provider and model",
+        ))
+        .stdout(predicates::str::contains(
+            "progress: writing agent headless config",
+        ))
         .stdout(predicates::str::contains("initialized acp-stack"));
 
     let config_path = tempdir.path().join(".config/acp-stack/acp-stack.toml");
@@ -949,11 +956,56 @@ fn init_creates_workspace_root_and_uploads_without_sources() {
         ])
         .assert()
         .success()
+        .stdout(predicates::str::contains(
+            "progress: materializing workspace sources",
+        ))
         .stdout(predicates::str::contains("workspace root:"))
         .stdout(predicates::str::contains("workspace uploads:"));
 
     assert!(workspace_root.is_dir());
     assert!(workspace_root.join("uploads").is_dir());
+}
+
+#[test]
+fn init_edge_profile_prints_edge_artifact_progress() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--no-skills",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--edge",
+            "cloudflare",
+            "--exposure",
+            "tunnel",
+            "--hostname",
+            "agent.example.com",
+            "--cloudflared-deployment",
+            "external",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "progress: preparing Cloudflare edge artifacts",
+        ))
+        .stdout(predicates::str::contains(
+            "workspace: skipped (--skip-workspace-init)",
+        ))
+        .stdout(predicates::str::contains("progress: materializing workspace sources").not());
+
+    assert!(
+        tempdir
+            .path()
+            .join(".config/acp-stack/cloudflared/config.yml")
+            .is_file()
+    );
+    assert!(!tempdir.path().join("workspace").exists());
 }
 
 #[test]
@@ -978,7 +1030,8 @@ fn init_skip_workspace_init_is_acknowledged_in_output() {
         .success()
         .stdout(predicates::str::contains(
             "workspace: skipped (--skip-workspace-init)",
-        ));
+        ))
+        .stdout(predicates::str::contains("progress: materializing workspace sources").not());
 
     assert!(!workspace_root.exists());
 }
@@ -1319,7 +1372,7 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 fn init_provider_fails_noninteractive_when_default_secret_is_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
-    acps_command()
+    let output = acps_command()
         .env("HOME", tempdir.path())
         .args([
             "dev",
@@ -1332,9 +1385,304 @@ fn init_provider_fails_noninteractive_when_default_secret_is_missing() {
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "secret `OPENAI_API_KEY` was not found in the secret store",
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("secret `OPENAI_API_KEY` was not found in the secret store"),
+        "{stderr}"
+    );
+    let run_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("init failed in run "))
+        .expect("stderr should include failed init run id");
+    assert!(
+        stderr.contains(&format!("retry: acps init --resume --run-id {run_id}")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn init_resume_restores_recorded_edge_request_before_edge_step_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--edge",
+            "cloudflare",
+            "--exposure",
+            "tunnel",
+            "--hostname",
+            "agent.example.com",
+            "--cloudflared-deployment",
+            "external",
+            "--no-skills",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    let run_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("init failed in run "))
+        .expect("stderr should include failed init run id");
+
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume", "--run-id", run_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "progress: preparing Cloudflare edge artifacts",
+        ))
+        .stdout(predicates::str::contains(
+            "workspace: skipped (--skip-workspace-init)",
+        ))
+        .stdout(predicates::str::contains("progress: materializing workspace sources").not());
+
+    assert!(
+        tempdir
+            .path()
+            .join(".config/acp-stack/cloudflared/config.yml")
+            .is_file()
+    );
+    assert!(!tempdir.path().join("workspace").exists());
+}
+
+#[test]
+fn init_resume_restores_recorded_provider_args_before_provider_step_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir");
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let local_bin = tempdir.path().join(".local/bin");
+    let managed_opencode = local_bin.join("opencode");
+    fs::write(
+        config_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "opencode"
+name = "OpenCode"
+kind = "native"
+headless_compatible = true
+set_provider = true
+set_model = true
+allow_custom_provider = true
+allow_custom_model = true
+set_mode = true
+support_doc = "docs/agents/opencode.md"
+
+[agents.harness]
+id = "opencode"
+
+[agents.harness.install.shell]
+script = "exit 9"
+creates = {}
+"#,
+            toml_string(&managed_opencode.to_string_lossy()),
+        ),
+    )
+    .expect("agents override");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "MY_PROVIDER_API_KEY",
+            "--model",
+            "my-model",
+            "--model-name",
+            "My Model",
+            "--workspace-root",
+            workspace.to_str().expect("workspace UTF-8"),
+            "--no-skills",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    let run_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("init failed in run "))
+        .expect("stderr should include failed init run id");
+    let config_before =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(!config_before.contains("[agent.provider]"));
+
+    fs::write(
+        config_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "opencode"
+name = "OpenCode"
+kind = "native"
+headless_compatible = true
+set_provider = true
+set_model = true
+allow_custom_provider = true
+allow_custom_model = true
+set_mode = true
+support_doc = "docs/agents/opencode.md"
+
+[agents.harness]
+id = {}
+
+[agents.harness.install.shell]
+script = "true"
+creates = "opencode"
+"#,
+            toml_string(env!("CARGO_BIN_EXE_placebo-agent")),
+        ),
+    )
+    .expect("agents override");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("MY_PROVIDER_API_KEY", "test-provider-key")],
+    );
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume", "--run-id", run_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "workspace: skipped (--skip-workspace-init)",
         ));
+
+    let config_after =
+        fs::read_to_string(config_dir.join("acp-stack.toml")).expect("config should be readable");
+    assert!(config_after.contains("[agent.provider]"));
+    assert!(config_after.contains(r#"id = "myprovider""#));
+    assert!(config_after.contains("[agent.provider.custom]"));
+    assert!(config_after.contains(r#"name = "My Provider""#));
+    assert!(config_after.contains(r#"api_key_ref = "MY_PROVIDER_API_KEY""#));
+    assert!(config_after.contains(r#"base_url = "https://api.myprovider.example/v1""#));
+    assert!(config_after.contains(r#"model_name = "My Model""#));
+}
+
+#[test]
+fn init_resume_restores_recorded_skip_testflight_before_testflight_step_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--no-skills",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    let run_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("init failed in run "))
+        .expect("stderr should include failed init run id");
+
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume", "--run-id", run_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "testflight: skipped (--skip-testflight)",
+        ))
+        .stdout(
+            predicates::str::contains(
+                "testflight: skipped (non-interactive run; pass --testflight to opt in)",
+            )
+            .not(),
+        );
+}
+
+#[test]
+fn init_resume_restores_recorded_testflight_before_testflight_step_exists() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--no-skills",
+            "--skip-workspace-init",
+            "--testflight",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    let run_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("init failed in run "))
+        .expect("stderr should include failed init run id");
+
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume", "--run-id", run_id])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("stdout should be utf8");
+    assert!(
+        stdout.contains("this may consume provider credits."),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("testflight: skipped (non-interactive run; pass --testflight to opt in)"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -4693,10 +5041,15 @@ creates = {}
     let stdout = String::from_utf8(output).expect("stdout should be utf8");
 
     let before_index = stdout.find("before:\n").expect("before section");
+    let progress_index = stdout
+        .find("running dependency install actions\n")
+        .expect("progress line");
     let results_index = stdout.find("results:\n").expect("results section");
     let after_index = stdout.find("after:\n").expect("after section");
     assert!(
-        before_index < results_index && results_index < after_index,
+        progress_index < before_index
+            && before_index < results_index
+            && results_index < after_index,
         "expected before/results/after ordering, got:\n{stdout}",
     );
     assert!(
@@ -4780,7 +5133,9 @@ creates = {}
         .get_output()
         .stdout
         .clone();
-    assert!(!String::from_utf8_lossy(&output).contains("sk-test-secret"));
+    let stdout = String::from_utf8_lossy(&output);
+    assert!(!stdout.contains("running dependency install actions"));
+    assert!(!stdout.contains("sk-test-secret"));
     let body: Value = serde_json::from_slice(&output).expect("deps apply json parses");
     let outcome = &body["results"][0]["outcome"];
     assert_eq!(outcome["kind"], "failed");
@@ -7740,20 +8095,23 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
             "--provider",
             "openai",
             "--api-key-ref",
-            "OPENAI_API_KEY",
+            "CUSTOM_OPENAI_API_KEY",
             "--workspace-root",
             workspace.to_str().expect("workspace UTF-8"),
             "--skip-workspace-init",
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("OPENAI_API_KEY"));
+        .stderr(predicates::str::contains("CUSTOM_OPENAI_API_KEY"));
 
     let config_before = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
         .expect("config should be readable");
     assert!(config_before.contains(r#"id = "opencode""#));
 
-    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    seed_init_secrets(
+        tempdir.path(),
+        &[("CUSTOM_OPENAI_API_KEY", "test-openai-key")],
+    );
 
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
@@ -7766,6 +8124,74 @@ fn init_resume_restores_recorded_agent_after_provider_secret_failure() {
         .expect("config should be readable");
     assert!(config_after.contains(r#"id = "opencode""#));
     assert!(config_after.contains(r#"id = "openai""#));
+    assert!(config_after.contains(r#"api_key_ref = "CUSTOM_OPENAI_API_KEY""#));
+    assert!(!config_after.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
+}
+
+#[test]
+fn init_resume_restores_recorded_custom_provider_args_after_secret_failure() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace");
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--provider-api",
+            "chat-completions",
+            "--api-key-ref",
+            "MY_PROVIDER_API_KEY",
+            "--model",
+            "my-model",
+            "--model-name",
+            "My Model",
+            "--context",
+            "123456",
+            "--output-max-tokens",
+            "12345",
+            "--workspace-root",
+            workspace.to_str().expect("workspace UTF-8"),
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("MY_PROVIDER_API_KEY"));
+
+    seed_init_secrets(
+        tempdir.path(),
+        &[("MY_PROVIDER_API_KEY", "test-provider-key")],
+    );
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: OpenCode (opencode)"));
+
+    let config_after = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config_after.contains(r#"id = "myprovider""#));
+    assert!(config_after.contains("[agent.provider.custom]"));
+    assert!(config_after.contains(r#"name = "My Provider""#));
+    assert!(config_after.contains(r#"api_key_ref = "MY_PROVIDER_API_KEY""#));
+    assert!(config_after.contains(r#"base_url = "https://api.myprovider.example/v1""#));
+    assert!(config_after.contains(r#"api = "chat-completions""#));
+    assert!(config_after.contains(r#"model_name = "My Model""#));
+    assert!(config_after.contains("context = 123456"));
+    assert!(config_after.contains("output_max_tokens = 12345"));
 }
 
 #[test]

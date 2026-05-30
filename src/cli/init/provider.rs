@@ -7,8 +7,9 @@ use crate::config::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
-    env_var_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
-    providers_for_agent, required_env_refs_for_provider_id,
+    AgentProviderSummary, env_var_for_agent_provider_id, provider_id_is_known,
+    provider_id_supports_agent, provider_uses_agent_native_auth, providers_for_agent,
+    required_env_refs_for_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -22,7 +23,7 @@ pub(super) fn configure_provider_for_init(
     config_path: &Path,
     secret_store: &mut SecretStore,
 ) -> Result<bool> {
-    let Some(provider_id) = select_provider_for_init(args, registry, config)? else {
+    let Some(provider_id) = select_provider_for_init(args, registry, config, secret_store)? else {
         return Ok(false);
     };
     let required_refs = apply_provider_to_config(args, registry, config, config_path, provider_id)?;
@@ -34,6 +35,7 @@ fn select_provider_for_init(
     args: &InitArgs,
     registry: &RegistryCatalog,
     config: &Config,
+    secret_store: &SecretStore,
 ) -> Result<Option<String>> {
     if let Some(provider_id) = &args.provider {
         return Ok(Some(provider_id.clone()));
@@ -65,7 +67,10 @@ fn select_provider_for_init(
     }
     println!("providers for {}:", config.agent.id);
     for (index, summary) in providers.iter().enumerate() {
-        println!("  {}. {} ({})", index + 1, summary.name, summary.id);
+        println!(
+            "{}",
+            provider_list_line(index, &config.agent.id, summary, secret_store)
+        );
     }
     print!("select provider [number or id, blank to skip]: ");
     io::stdout()
@@ -109,6 +114,47 @@ fn select_provider_for_init(
         return Ok(Some(summary.id.to_owned()));
     }
     Ok(Some(answer.to_owned()))
+}
+
+fn provider_list_line(
+    index: usize,
+    agent_id: &str,
+    summary: &AgentProviderSummary,
+    secret_store: &SecretStore,
+) -> String {
+    format!(
+        "  {}. {} ({}) [{}]",
+        index + 1,
+        summary.name,
+        summary.id,
+        provider_readiness_label(agent_id, summary, secret_store)
+    )
+}
+
+fn provider_readiness_label(
+    agent_id: &str,
+    summary: &AgentProviderSummary,
+    secret_store: &SecretStore,
+) -> String {
+    let Some(api_key_ref) = summary.default_api_key_ref else {
+        return if provider_uses_agent_native_auth(agent_id, summary.id) {
+            "agent-native auth".to_owned()
+        } else {
+            "custom provider setup required".to_owned()
+        };
+    };
+
+    let required_refs = required_env_refs_for_provider_id(summary.id, api_key_ref);
+    let missing_refs: Vec<_> = required_refs
+        .iter()
+        .filter(|env_ref| !secret_store.contains(env_ref))
+        .map(String::as_str)
+        .collect();
+    if missing_refs.is_empty() {
+        "ready".to_owned()
+    } else {
+        format!("missing {}", missing_refs.join(", "))
+    }
 }
 
 fn apply_provider_to_config(
@@ -468,4 +514,97 @@ fn collect_missing_provider_refs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_for(agent_id: &str, provider_id: &str) -> AgentProviderSummary {
+        providers_for_agent(agent_id)
+            .into_iter()
+            .find(|summary| summary.id == provider_id)
+            .unwrap_or_else(|| panic!("{agent_id}/{provider_id} summary should exist"))
+    }
+
+    #[test]
+    fn provider_readiness_reports_missing_default_secret_ref() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        let summary = summary_for("opencode", "openai");
+
+        assert_eq!(
+            provider_readiness_label("opencode", &summary, &secret_store),
+            "missing OPENAI_API_KEY"
+        );
+    }
+
+    #[test]
+    fn provider_readiness_reports_present_default_secret_ref() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secret_store
+            .set_many([("OPENAI_API_KEY", "test-openai-key")])
+            .expect("secret should be stored");
+        let summary = summary_for("opencode", "openai");
+
+        assert_eq!(
+            provider_readiness_label("opencode", &summary, &secret_store),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn provider_readiness_reports_missing_companion_secret_refs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secret_store
+            .set_many([("CLOUDFLARE_API_TOKEN", "test-cloudflare-token")])
+            .expect("secret should be stored");
+        let summary = summary_for("opencode", "cloudflare-ai-gateway");
+
+        assert_eq!(
+            provider_readiness_label("opencode", &summary, &secret_store),
+            "missing CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID"
+        );
+    }
+
+    #[test]
+    fn provider_readiness_reports_custom_setup_for_provider_without_default_ref() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        let summary = summary_for("opencode", "helicone");
+
+        assert_eq!(
+            provider_readiness_label("opencode", &summary, &secret_store),
+            "custom provider setup required"
+        );
+    }
+
+    #[test]
+    fn provider_readiness_reports_native_auth_only_for_known_native_auth_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        let summary = summary_for("codex", "openai");
+
+        assert_eq!(
+            provider_readiness_label("codex", &summary, &secret_store),
+            "agent-native auth"
+        );
+    }
+
+    #[test]
+    fn provider_list_line_prints_readiness_label() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secret_store
+            .set_many([("OPENAI_API_KEY", "test-openai-key")])
+            .expect("secret should be stored");
+        let summary = summary_for("opencode", "openai");
+
+        assert_eq!(
+            provider_list_line(0, "opencode", &summary, &secret_store),
+            "  1. OpenAI (openai) [ready]"
+        );
+    }
 }
