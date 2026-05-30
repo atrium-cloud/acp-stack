@@ -18,11 +18,27 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
     let args_json = serde_json::json!({
         "agent": args.agent,
         "provider": args.provider,
+        "api_key_ref": args.api_key_ref,
+        "custom_provider": args.custom_provider,
+        "provider_name": args.provider_name,
+        "base_url": args.base_url,
+        "provider_api": args.provider_api,
         "model": args.model,
         "mode": args.mode,
+        "model_name": args.model_name,
+        "context": args.context,
+        "output_max_tokens": args.output_max_tokens,
         "skills_source": args.skills_source,
         "skills": args.skills,
         "no_skills": args.no_skills,
+        "edge": args.edge.map(|value| value.as_config_value()),
+        "exposure": args.exposure.map(|value| value.as_config_value()),
+        "hostname": args.hostname,
+        "cloudflare_mode": args.cloudflare_mode.as_config_value(),
+        "cloudflare_api_token_ref": args.cloudflare_api_token_ref,
+        "cloudflare_account_id_ref": args.cloudflare_account_id_ref,
+        "cloudflared_deployment": args.cloudflared_deployment.as_config_value(),
+        "skip_workspace_init": args.skip_workspace_init(),
         "testflight": args.testflight,
         "skip_testflight": args.skip_testflight,
         "fresh": args.fresh,
@@ -50,13 +66,35 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
 pub(super) struct RecordedInitArgs {
     pub(super) agent: Option<String>,
     pub(super) provider: Option<String>,
+    pub(super) api_key_ref: Option<String>,
+    #[serde(default)]
+    pub(super) custom_provider: bool,
+    pub(super) provider_name: Option<String>,
+    pub(super) base_url: Option<String>,
+    pub(super) provider_api: Option<String>,
     pub(super) model: Option<String>,
     pub(super) mode: Option<String>,
+    pub(super) model_name: Option<String>,
+    pub(super) context: Option<String>,
+    pub(super) output_max_tokens: Option<String>,
     pub(super) skills_source: Option<String>,
     #[serde(default)]
     pub(super) skills: Vec<String>,
     #[serde(default)]
     pub(super) no_skills: bool,
+    pub(super) edge: Option<String>,
+    pub(super) exposure: Option<String>,
+    pub(super) hostname: Option<String>,
+    pub(super) cloudflare_mode: Option<String>,
+    pub(super) cloudflare_api_token_ref: Option<String>,
+    pub(super) cloudflare_account_id_ref: Option<String>,
+    pub(super) cloudflared_deployment: Option<String>,
+    #[serde(default)]
+    pub(super) skip_workspace_init: bool,
+    #[serde(default)]
+    pub(super) testflight: bool,
+    #[serde(default)]
+    pub(super) skip_testflight: bool,
 }
 
 pub(super) fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
@@ -81,6 +119,8 @@ pub(super) fn finalize_with_error(
     error: StackError,
 ) -> Result<()> {
     finalize_run(store, &run.id, INIT_RUN_FAILED)?;
+    eprintln!("init failed in run {}", run.id);
+    eprintln!("retry: acps init --resume --run-id {}", run.id);
     Err(error)
 }
 
