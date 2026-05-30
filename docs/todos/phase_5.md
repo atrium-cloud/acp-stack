@@ -16,7 +16,7 @@
 - [x] Improve `acps status` with daemon, agent, workspace, dependency, and sink health.
 - [x] Add human-readable and JSON output modes for common commands.
 - [x] Add consistent `--format text|json` support.
-- [ ] Add clearer command errors with remediation hints.
+- [x] Add clearer command errors with remediation hints.
 - [ ] Add progress output for long-running installer, dependency, import, and export operations.
 - [ ] Add richer init selection UX for code sources, data sources, MCP presets, custom MCP declarations, and required secrets.
 - [x] Add init-time Agent Skills source and skill selection backed by the trusted skills catalog.
