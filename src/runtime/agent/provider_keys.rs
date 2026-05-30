@@ -12,6 +12,8 @@ use crate::error::{Result, StackError};
 
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
+const CODEX_AGENT_ID: &str = "codex";
+const CODEX_NATIVE_AUTH_PROVIDER_ID: &str = "openai";
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
     ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
@@ -391,6 +393,10 @@ pub fn agent_provider_id_for_provider_id(
         .and_then(|provider| provider.agent_native_provider_id(agent_id))
 }
 
+pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
+    agent_id == CODEX_AGENT_ID && provider_id == CODEX_NATIVE_AUTH_PROVIDER_ID
+}
+
 pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> {
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
@@ -449,7 +455,7 @@ pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
             // CLI then rejects with "Codex OpenAI uses Codex-native
             // auth". Drop the default so clients see "no api_key_ref
             // required" and route through Codex's own login flow.
-            if agent_id == "codex" && id_static == "openai" {
+            if provider_uses_agent_native_auth(agent_id, id_static) {
                 default = None;
             }
             let native = provider.agent_native_provider_id(agent_id).map(static_str);

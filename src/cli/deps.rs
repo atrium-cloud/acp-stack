@@ -145,6 +145,9 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     // effects committed".
     store.migrate()?;
     let shell = &config.workspace.default_shell;
+    if !output.is_json() {
+        println!("running dependency install actions");
+    }
     let report = apply_dependencies(&config, args.feature.as_deref(), Some(&store), shell)?;
     if output.is_json() {
         print_json(&deps_apply_report_json(&report)?)?;

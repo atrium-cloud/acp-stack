@@ -215,14 +215,44 @@ pub(super) enum InitMode {
     Dev,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub(super) enum EdgeProviderArg {
     Cloudflare,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+impl EdgeProviderArg {
+    pub(super) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "cloudflare",
+        }
+    }
+
+    pub(super) fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "cloudflare" => Some(Self::Cloudflare),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub(super) enum EdgeExposureArg {
     Tunnel,
+}
+
+impl EdgeExposureArg {
+    pub(super) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Tunnel => "tunnel",
+        }
+    }
+
+    pub(super) fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "tunnel" => Some(Self::Tunnel),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -236,6 +266,14 @@ impl CloudflareModeArg {
         match self {
             Self::Generated => "generated",
             Self::Managed => "managed",
+        }
+    }
+
+    pub(super) fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "generated" => Some(Self::Generated),
+            "managed" => Some(Self::Managed),
+            _ => None,
         }
     }
 }
@@ -253,6 +291,15 @@ impl CloudflaredDeploymentArg {
             Self::Host => "host",
             Self::Docker => "docker",
             Self::External => "external",
+        }
+    }
+
+    pub(super) fn from_config_value(value: &str) -> Option<Self> {
+        match value {
+            "host" => Some(Self::Host),
+            "docker" => Some(Self::Docker),
+            "external" => Some(Self::External),
+            _ => None,
         }
     }
 }
@@ -439,6 +486,57 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                     .filter(|agent| agent != STARTER_AGENT_ID)
             });
     }
+    #[cfg(feature = "dev-tools")]
+    if resumed && let Some(recorded) = recorded_args.as_ref() {
+        args.skip_workspace_init = args.skip_workspace_init || recorded.skip_workspace_init;
+    }
+    if resumed
+        && args.edge.is_none()
+        && let Some(recorded) = recorded_args.as_ref()
+        && let Some(edge) = recorded.edge.as_deref()
+    {
+        args.edge = Some(EdgeProviderArg::from_config_value(edge).ok_or_else(|| {
+            StackError::InitRunCorrupted {
+                reason: format!("init run {} has invalid edge `{edge}`", init_run.id),
+            }
+        })?);
+        args.exposure = recorded
+            .exposure
+            .as_deref()
+            .map(|exposure| {
+                EdgeExposureArg::from_config_value(exposure).ok_or_else(|| {
+                    StackError::InitRunCorrupted {
+                        reason: format!(
+                            "init run {} has invalid exposure `{exposure}`",
+                            init_run.id
+                        ),
+                    }
+                })
+            })
+            .transpose()?;
+        args.hostname = recorded.hostname.clone();
+        if let Some(mode) = recorded.cloudflare_mode.as_deref() {
+            args.cloudflare_mode = CloudflareModeArg::from_config_value(mode).ok_or_else(|| {
+                StackError::InitRunCorrupted {
+                    reason: format!(
+                        "init run {} has invalid cloudflare_mode `{mode}`",
+                        init_run.id
+                    ),
+                }
+            })?;
+        }
+        args.cloudflare_api_token_ref = recorded.cloudflare_api_token_ref.clone();
+        args.cloudflare_account_id_ref = recorded.cloudflare_account_id_ref.clone();
+        if let Some(deployment) = recorded.cloudflared_deployment.as_deref() {
+            args.cloudflared_deployment = CloudflaredDeploymentArg::from_config_value(deployment)
+                .ok_or_else(|| StackError::InitRunCorrupted {
+                reason: format!(
+                    "init run {} has invalid cloudflared_deployment `{deployment}`",
+                    init_run.id
+                ),
+            })?;
+        }
+    }
 
     let mut config = Config::load_from_path(&config_path)?;
     let selected_agent = select_agent_for_init(&args, &registry)?;
@@ -468,64 +566,76 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         args.skills = recorded.skills.clone();
         args.no_skills = recorded.no_skills;
     }
-    if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE) {
-        // Restore the original `--model`/`--mode` requests
-        // unconditionally so the resumed provider_configure step
-        // re-applies the explicit selection even if `--provider`
-        // is supplied (or omitted) on the resume invocation.
-        // Without this, an operator who corrects an invalid
-        // `--model` by passing it again on resume but also
-        // forgetting `--provider` could either error or drop the
-        // selection.
+    if resumed && let Some(recorded) = recorded_args.as_ref() {
         if args.model.is_none() {
-            args.model = recorded_args
-                .as_ref()
-                .and_then(|recorded| recorded.model.clone());
+            args.model = recorded.model.clone();
         }
         if args.mode.is_none() {
-            args.mode = recorded_args
-                .as_ref()
-                .and_then(|recorded| recorded.mode.clone());
+            args.mode = recorded.mode.clone();
         }
         if args.provider.is_none() {
-            args.provider = recorded_args
-                .as_ref()
-                .and_then(|recorded| recorded.provider.clone())
-                .or_else(|| {
-                    config
-                        .agent
-                        .provider
-                        .as_ref()
-                        .map(|provider| provider.id.clone())
-                });
-            // A failed provider_configure step that owned ONLY
-            // model/mode (no provider was ever set) can legitimately
-            // resume without `--provider` — the model/mode lane will
-            // still re-run via the orchestrator's normal step flow.
-            // Only error when we know provider is required AND
-            // absent: the prior args_json captured provider too, so a
-            // truly corrupt run shows up as "recorded provider was
-            // Some, current is None, config has none". For the
-            // provider-less model-only case (e.g. cursor --model),
-            // continuing is correct.
-            let resume_recorded_provider = recorded_args.as_ref().and_then(|r| r.provider.clone());
-            if args.provider.is_none() && resume_recorded_provider.is_some() {
-                return finalize_with_error(
-                    &store,
-                    &init_run,
-                    StackError::InitRunCorrupted {
-                        reason: format!(
-                            "init run {} has a failed provider_configure step recorded with a provider but no provider id is available now; pass --provider on resume",
-                            init_run.id
-                        ),
-                    },
-                );
+            args.provider = recorded.provider.clone();
+        }
+        if args.provider.as_deref() == recorded.provider.as_deref() {
+            if args.api_key_ref.is_none() {
+                args.api_key_ref = recorded.api_key_ref.clone();
             }
+            args.custom_provider = args.custom_provider || recorded.custom_provider;
+            if args.provider_name.is_none() {
+                args.provider_name = recorded.provider_name.clone();
+            }
+            if args.base_url.is_none() {
+                args.base_url = recorded.base_url.clone();
+            }
+            if args.provider_api.is_none() {
+                args.provider_api = recorded.provider_api.clone();
+            }
+            if args.model_name.is_none() {
+                args.model_name = recorded.model_name.clone();
+            }
+            if args.context.is_none() {
+                args.context = recorded.context.clone();
+            }
+            if args.output_max_tokens.is_none() {
+                args.output_max_tokens = recorded.output_max_tokens.clone();
+            }
+        }
+    }
+    if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE)
+        && args.provider.is_none()
+    {
+        args.provider = config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.clone());
+        // A failed provider_configure step that owned ONLY model/mode (no
+        // provider was ever set) can legitimately resume without `--provider`.
+        // Only error when we know provider is required AND absent.
+        let resume_recorded_provider = recorded_args.as_ref().and_then(|r| r.provider.clone());
+        if args.provider.is_none() && resume_recorded_provider.is_some() {
+            return finalize_with_error(
+                &store,
+                &init_run,
+                StackError::InitRunCorrupted {
+                    reason: format!(
+                        "init run {} has a failed provider_configure step recorded with a provider but no provider id is available now; pass --provider on resume",
+                        init_run.id
+                    ),
+                },
+            );
         }
     }
     if step_needs_resume(&prior_init_steps, step_kind::TESTFLIGHT) {
         args.testflight = true;
         args.skip_testflight = false;
+    } else if resumed
+        && !args.testflight
+        && !args.skip_testflight
+        && let Some(recorded) = recorded_args.as_ref()
+    {
+        args.testflight = recorded.testflight;
+        args.skip_testflight = recorded.skip_testflight;
     }
     let skill_catalog = SkillCatalog::load_embedded()?;
     let skill_install_plan =
@@ -549,6 +659,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let verify_session_ref = session_ref_str.clone();
     let verify_admin_ref = admin_ref_str.clone();
     let verify_home = home.clone();
+    println!("progress: initializing secrets");
     let step_result = record_step(
         &store,
         &init_run,
@@ -592,6 +703,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let mut install_outcome: Option<InstallerOutcome> = None;
     let install_step_needs_resume = step_needs_resume(&prior_init_steps, step_kind::AGENT_INSTALL);
     if install_requested || install_step_needs_resume {
+        println!("progress: installing agent");
         let verify_config = config.clone();
         let verify_workspace_root = PathBuf::from(config.workspace.root.clone());
         let verify_local_bin_dir = local_bin_dir(&home);
@@ -652,6 +764,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let skill_step_needs_resume =
         step_needs_resume(&prior_init_steps, step_kind::AGENT_SKILLS_INSTALL);
     if skill_install_plan.is_some() || skill_step_needs_resume {
+        println!("progress: installing agent skills");
         let Some(plan) = skill_install_plan.clone() else {
             return finalize_with_error(
                 &store,
@@ -691,6 +804,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // Step 3: provider_configure — write provider/model into the config
     // and persist canonical TOML if anything changed.
     // -----------------------------------------------------------------
+    println!("progress: configuring provider and model");
     let result = record_step(
         &store,
         &init_run,
@@ -756,6 +870,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     if !args.skip_workspace_init()
         || step_needs_resume(&prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
     {
+        println!("progress: materializing workspace sources");
         let log_paths =
             crate::runtime::workspace_sources::workspace_init::WorkspaceLogPaths::for_run(
                 &crate::runtime::workspace_sources::workspace_init::default_workspace_init_log_base(
@@ -803,6 +918,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // files so the harness can start without first-run prompts.
     // -----------------------------------------------------------------
     let mut provisioned_agent_configs = Vec::new();
+    println!("progress: writing agent headless config");
     let result = record_step(
         &store,
         &init_run,
@@ -850,6 +966,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // -----------------------------------------------------------------
     let mut provisioned_edge_artifacts = Vec::new();
     if edge_requested || step_needs_resume(&prior_init_steps, step_kind::EDGE_ARTIFACTS) {
+        println!("progress: preparing Cloudflare edge artifacts");
         let result = record_step(
             &store,
             &init_run,
@@ -858,62 +975,62 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             || Ok(false),
             || {
                 let config_dir = parent_dir(&config_path)?;
-                provisioned_edge_artifacts = match config.edge.cloudflare.as_ref() {
-                    Some(cloudflare) if cloudflare.enabled && cloudflare.mode == "managed" => {
-                        let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
-                        let api_token_ref =
-                            cloudflare.api_token_ref.clone().ok_or(StackError::MissingField {
-                                field: "edge.cloudflare.api_token_ref",
-                            })?;
-                        let account_id_ref =
-                            cloudflare.account_id_ref.clone().ok_or(StackError::MissingField {
-                                field: "edge.cloudflare.account_id_ref",
-                            })?;
-                        let api_token = secret_store.get(&api_token_ref)?.to_owned();
-                        let account_id = secret_store.get(&account_id_ref)?.to_owned();
-                        let created_tunnel = {
-                            let cloudflare = config.edge.cloudflare.as_mut().ok_or(
+                provisioned_edge_artifacts =
+                    match config.edge.cloudflare.as_ref() {
+                        Some(cloudflare) if cloudflare.enabled && cloudflare.mode == "managed" => {
+                            let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
+                            let api_token_ref = cloudflare.api_token_ref.clone().ok_or(
+                                StackError::MissingField {
+                                    field: "edge.cloudflare.api_token_ref",
+                                },
+                            )?;
+                            let account_id_ref = cloudflare.account_id_ref.clone().ok_or(
+                                StackError::MissingField {
+                                    field: "edge.cloudflare.account_id_ref",
+                                },
+                            )?;
+                            let api_token = secret_store.get(&api_token_ref)?.to_owned();
+                            let account_id = secret_store.get(&account_id_ref)?.to_owned();
+                            let created_tunnel = {
+                                let cloudflare = config.edge.cloudflare.as_mut().ok_or(
+                                    StackError::MissingField {
+                                        field: "edge.cloudflare",
+                                    },
+                                )?;
+                                crate::edge::ensure_managed_cloudflare_tunnel(
+                                    cloudflare,
+                                    &api_token,
+                                    &account_id,
+                                )?
+                            };
+                            if created_tunnel {
+                                let canonical = config.to_canonical_toml()?;
+                                config = config::load_config_from_str(&canonical)?;
+                                atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+                            }
+                            let cloudflare = config.edge.cloudflare.as_ref().ok_or(
                                 StackError::MissingField {
                                     field: "edge.cloudflare",
                                 },
                             )?;
-                            crate::edge::ensure_managed_cloudflare_tunnel(
+                            crate::edge::finish_managed_cloudflare_provisioning(
+                                config_dir,
                                 cloudflare,
+                                &service_url,
                                 &api_token,
                                 &account_id,
                             )?
-                        };
-                        if created_tunnel {
-                            let canonical = config.to_canonical_toml()?;
-                            config = config::load_config_from_str(&canonical)?;
-                            atomic_write_owner_only(&config_path, canonical.as_bytes())?;
                         }
-                        let cloudflare =
-                            config
-                                .edge
-                                .cloudflare
-                                .as_ref()
-                                .ok_or(StackError::MissingField {
-                                    field: "edge.cloudflare",
-                                })?;
-                        crate::edge::finish_managed_cloudflare_provisioning(
-                            config_dir,
-                            cloudflare,
-                            &service_url,
-                            &api_token,
-                            &account_id,
-                        )?
-                    }
-                    Some(cloudflare) if cloudflare.enabled => {
-                        let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
-                        crate::edge::write_cloudflare_artifacts(
-                            config_dir,
-                            cloudflare,
-                            &service_url,
-                        )?
-                    }
-                    _ => Vec::new(),
-                };
+                        Some(cloudflare) if cloudflare.enabled => {
+                            let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
+                            crate::edge::write_cloudflare_artifacts(
+                                config_dir,
+                                cloudflare,
+                                &service_url,
+                            )?
+                        }
+                        _ => Vec::new(),
+                    };
                 Ok(StepOutcome::empty())
             },
         );
