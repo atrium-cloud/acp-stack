@@ -12,7 +12,7 @@
 
 - [x] Add `acps init --edge cloudflare --exposure tunnel` as the recommended public deployment profile.
 - [x] Add generated Cloudflare Tunnel artifact output for `cloudflared` config and systemd/Docker snippets.
-- [ ] Add optional managed Cloudflare provisioning mode using secret refs for Cloudflare API credentials.
+- [x] Add optional managed Cloudflare provisioning mode using secret refs for Cloudflare API credentials.
 - [x] Improve `acps status` with daemon, agent, workspace, dependency, and sink health.
 - [x] Add human-readable and JSON output modes for common commands.
 - [x] Add consistent `--format text|json` support.

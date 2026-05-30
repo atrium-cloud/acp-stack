@@ -65,9 +65,11 @@ pub fn request_origin(
         };
     };
     let peer_trusted = trusted_proxy_peer(peer, &config.security.http);
-    let cloudflare_enabled = config.edge.cloudflare.as_ref().is_some_and(|cloudflare| {
-        cloudflare.enabled && cloudflare.mode == "generated" && cloudflare.exposure == "tunnel"
-    });
+    let cloudflare_enabled = config
+        .edge
+        .cloudflare
+        .as_ref()
+        .is_some_and(|cloudflare| cloudflare.enabled && cloudflare.exposure == "tunnel");
     if cloudflare_enabled && peer_trusted {
         let cf_ip = parse_header_ip(headers, "cf-connecting-ip");
         let fallback_ip = Some(client_ip(headers, peer, &config.security.http));
@@ -519,6 +521,8 @@ mod tests {
             mode: "generated".to_owned(),
             exposure: "tunnel".to_owned(),
             hostname: "agent.example.com".to_owned(),
+            api_token_ref: None,
+            account_id_ref: None,
             tunnel_name: Some("acp-stack".to_owned()),
             tunnel_id: None,
             cloudflared_deployment: "host".to_owned(),
@@ -564,6 +568,22 @@ mod tests {
         assert_eq!(origin.country_code.as_deref(), Some("US"));
         assert_eq!(origin.region_code.as_deref(), Some("CA"));
         assert_eq!(origin.region_name.as_deref(), Some("California"));
+        assert_eq!(origin.cloudflare_ray_id.as_deref(), Some("abc123-SJC"));
+    }
+
+    #[test]
+    fn managed_cloudflare_origin_uses_cf_headers_from_trusted_peer() {
+        let mut config = cloudflare_config();
+        config.edge.cloudflare.as_mut().unwrap().mode = "managed".to_owned();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.10"));
+        headers.insert("cf-ray", HeaderValue::from_static("abc123-SJC"));
+
+        let origin = request_origin(&headers, Some("127.0.0.1".parse().unwrap()), &config);
+
+        assert_eq!(origin.origin_kind, "cloudflare");
+        assert_eq!(origin.proxy_provider.as_deref(), Some("cloudflare"));
+        assert_eq!(origin.client_ip.as_deref(), Some("203.0.113.10"));
         assert_eq!(origin.cloudflare_ray_id.as_deref(), Some("abc123-SJC"));
     }
 

@@ -36,7 +36,8 @@ acps init \
   [--custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>] \
   [--workspace-root <path>] [--workspace-uploads <path>] [--runtime-user <name>] \
   [--code-from <repo-url>]... [--data-from <path-or-url>]... \
-  [--edge cloudflare --exposure tunnel --hostname <host>] \
+  [--edge cloudflare --exposure tunnel --hostname <host>] [--cloudflare-mode generated|managed] \
+  [--cloudflare-api-token-ref <ref> --cloudflare-account-id-ref <ref>] \
   [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
 ```
 
@@ -49,6 +50,8 @@ Interactive init may prompt for missing choices. Non-interactive first runs requ
 `--skills-source` and `--skills` install selected Agent Skills before testflight.
 Official sources are `openai` and `anthropic`; custom sources use
 `github:<owner>` and expect `<owner>/skills` on branch `main`.
+
+Cloudflare `generated` mode writes tunnel artifacts for operator-managed setup. Cloudflare `managed` mode uses the configured secret refs to create the tunnel, push the ingress config, create or update the proxied CNAME, and emit an owner-only tunnel token env artifact during init.
 
 ## Auth And Reset
 

@@ -36,7 +36,7 @@ flowchart LR
 | Permissions      | durable approval, denial, cancellation, and expiry                |
 | Dependencies     | declaration checks and explicit install actions                   |
 | Logging          | local event history, metrics, and optional external sink          |
-| Edge             | generated reverse-proxy/tunnel config artifacts                   |
+| Edge             | reverse-proxy/tunnel artifacts and optional Cloudflare provisioning |
 
 ## Boundaries
 

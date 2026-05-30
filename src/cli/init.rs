@@ -129,6 +129,20 @@ pub struct InitArgs {
     /// Public hostname for the edge profile, for example agent.example.com.
     #[arg(long, requires = "edge")]
     pub(super) hostname: Option<String>,
+    /// Cloudflare setup mode: generated artifacts only or managed API provisioning.
+    #[arg(
+        long = "cloudflare-mode",
+        value_enum,
+        requires = "edge",
+        default_value_t = CloudflareModeArg::Generated
+    )]
+    pub(super) cloudflare_mode: CloudflareModeArg,
+    /// Secret ref containing a Cloudflare API token for managed provisioning.
+    #[arg(long = "cloudflare-api-token-ref", requires = "edge")]
+    pub(super) cloudflare_api_token_ref: Option<String>,
+    /// Secret ref containing the Cloudflare account id for managed provisioning.
+    #[arg(long = "cloudflare-account-id-ref", requires = "edge")]
+    pub(super) cloudflare_account_id_ref: Option<String>,
     /// How cloudflared is expected to run for generated Cloudflare artifacts.
     #[arg(long, value_enum, default_value_t = CloudflaredDeploymentArg::Host)]
     pub(super) cloudflared_deployment: CloudflaredDeploymentArg,
@@ -191,6 +205,21 @@ pub(super) enum EdgeProviderArg {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub(super) enum EdgeExposureArg {
     Tunnel,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub(super) enum CloudflareModeArg {
+    Generated,
+    Managed,
+}
+
+impl CloudflareModeArg {
+    pub(super) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::Managed => "managed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -810,6 +839,51 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             || {
                 let config_dir = parent_dir(&config_path)?;
                 provisioned_edge_artifacts = match config.edge.cloudflare.as_ref() {
+                    Some(cloudflare) if cloudflare.enabled && cloudflare.mode == "managed" => {
+                        let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
+                        let api_token_ref =
+                            cloudflare.api_token_ref.clone().ok_or(StackError::MissingField {
+                                field: "edge.cloudflare.api_token_ref",
+                            })?;
+                        let account_id_ref =
+                            cloudflare.account_id_ref.clone().ok_or(StackError::MissingField {
+                                field: "edge.cloudflare.account_id_ref",
+                            })?;
+                        let api_token = secret_store.get(&api_token_ref)?.to_owned();
+                        let account_id = secret_store.get(&account_id_ref)?.to_owned();
+                        let created_tunnel = {
+                            let cloudflare = config.edge.cloudflare.as_mut().ok_or(
+                                StackError::MissingField {
+                                    field: "edge.cloudflare",
+                                },
+                            )?;
+                            crate::edge::ensure_managed_cloudflare_tunnel(
+                                cloudflare,
+                                &api_token,
+                                &account_id,
+                            )?
+                        };
+                        if created_tunnel {
+                            let canonical = config.to_canonical_toml()?;
+                            config = config::load_config_from_str(&canonical)?;
+                            atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+                        }
+                        let cloudflare =
+                            config
+                                .edge
+                                .cloudflare
+                                .as_ref()
+                                .ok_or(StackError::MissingField {
+                                    field: "edge.cloudflare",
+                                })?;
+                        crate::edge::finish_managed_cloudflare_provisioning(
+                            config_dir,
+                            cloudflare,
+                            &service_url,
+                            &api_token,
+                            &account_id,
+                        )?
+                    }
                     Some(cloudflare) if cloudflare.enabled => {
                         let service_url = crate::edge::service_url_from_bind(&config.api.bind)?;
                         crate::edge::write_cloudflare_artifacts(

@@ -3,6 +3,8 @@
 use crate::config::schema::EdgeConfig;
 use crate::error::{Result, StackError};
 
+use super::primitives::validate_secret_ref_name_value;
+
 pub(crate) fn validate_edge(edge: &EdgeConfig) -> Result<()> {
     let Some(cloudflare) = &edge.cloudflare else {
         return Ok(());
@@ -10,10 +12,7 @@ pub(crate) fn validate_edge(edge: &EdgeConfig) -> Result<()> {
     if !cloudflare.enabled {
         return Ok(());
     }
-    if cloudflare.mode == "managed" {
-        return Err(StackError::CloudflareManagedNotImplemented);
-    }
-    if cloudflare.mode != "generated" {
+    if !matches!(cloudflare.mode.as_str(), "generated" | "managed") {
         return Err(StackError::InvalidCloudflareMode {
             mode: cloudflare.mode.clone(),
         });
@@ -32,9 +31,29 @@ pub(crate) fn validate_edge(edge: &EdgeConfig) -> Result<()> {
         });
     }
     validate_cloudflare_hostname(&cloudflare.hostname)?;
+    if cloudflare.mode == "managed" {
+        validate_cloudflare_managed_ref(
+            "edge.cloudflare.api_token_ref",
+            cloudflare.api_token_ref.as_deref(),
+        )?;
+        validate_cloudflare_managed_ref(
+            "edge.cloudflare.account_id_ref",
+            cloudflare.account_id_ref.as_deref(),
+        )?;
+    }
     validate_cloudflare_tunnel_name(cloudflare.tunnel_name.as_deref())?;
     validate_cloudflare_tunnel_id(cloudflare.tunnel_id.as_deref())?;
     Ok(())
+}
+
+fn validate_cloudflare_managed_ref(field: &'static str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Err(StackError::MissingField { field });
+    };
+    validate_secret_ref_name_value(value).map_err(|err| StackError::InvalidParam {
+        field,
+        reason: format!("`{value}` is not a valid secret reference: {err}"),
+    })
 }
 
 fn validate_cloudflare_hostname(hostname: &str) -> Result<()> {
