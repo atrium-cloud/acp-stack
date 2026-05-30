@@ -1,10 +1,13 @@
 use std::io::IsTerminal;
 use std::path::Path;
 
+use http::header::HeaderName;
+
 use crate::config::{
     self, AgentConfig, AgentInstallConfig, ApiConfig, AuthConfig, CodeSourceConfig, Config,
-    DataSourceConfig, EdgeConfig, LoggingConfig, SecurityConfig, SecurityHttpConfig,
-    SupabaseLoggingConfig, WorkspaceConfig,
+    DataSourceConfig, EdgeConfig, HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer,
+    McpServerConfig, McpStdioServer, SecurityConfig, SecurityHttpConfig, SupabaseLoggingConfig,
+    WorkspaceConfig,
 };
 use crate::error::{Result, StackError};
 
@@ -37,6 +40,24 @@ pub(super) fn validate_deployment_overrides_match_existing(
         args.runtime_user.as_deref(),
         &config.workspace.runtime_user,
     )
+}
+
+pub(super) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    reject_starter_only_mcp_arg("--mcp-preset", &args.mcp_preset)?;
+    reject_starter_only_mcp_arg("--mcp-stdio", &args.mcp_stdio)?;
+    reject_starter_only_mcp_arg("--mcp-stdio-env", &args.mcp_stdio_env)?;
+    reject_starter_only_mcp_arg("--mcp-http", &args.mcp_http)?;
+    reject_starter_only_mcp_arg("--mcp-http-header", &args.mcp_http_header)
+}
+
+fn reject_starter_only_mcp_arg(field: &'static str, values: &[String]) -> Result<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field,
+        reason: "MCP init declarations apply only when creating a starter config".to_owned(),
+    })
 }
 
 fn reject_conflicting_deployment_override(
@@ -143,7 +164,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
         commands: Default::default(),
         prompts: Default::default(),
         dependencies: Default::default(),
-        mcp: Default::default(),
+        mcp: mcp_from_args(args)?,
         acpctl: Default::default(),
     };
 
@@ -187,6 +208,175 @@ fn data_sources_from_args(args: &InitArgs) -> Result<Vec<DataSourceConfig>> {
         .iter()
         .map(|value| classify_data_from(value))
         .collect()
+}
+
+fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
+    let mut servers = Vec::new();
+    for preset in &args.mcp_preset {
+        match preset.as_str() {
+            "linear" => servers.push(McpServerConfig::Http(McpHttpServer {
+                name: "linear".to_owned(),
+                url: "https://mcp.linear.app/mcp".to_owned(),
+                headers: vec![HttpHeaderRef {
+                    name: "Authorization".to_owned(),
+                    value_ref: "LINEAR_API_KEY".to_owned(),
+                }],
+            })),
+            other => {
+                return Err(StackError::InvalidParam {
+                    field: "mcp-preset",
+                    reason: format!("unsupported MCP preset `{other}`"),
+                });
+            }
+        }
+    }
+    for value in &args.mcp_stdio {
+        let (name, command) = split_mcp_pair("mcp-stdio", value)?;
+        servers.push(McpServerConfig::Stdio(McpStdioServer {
+            name,
+            command,
+            args: Vec::new(),
+            env: Vec::new(),
+        }));
+    }
+    for value in &args.mcp_http {
+        let (name, url) = split_mcp_pair("mcp-http", value)?;
+        validate_mcp_https_url(&name, &url)?;
+        servers.push(McpServerConfig::Http(McpHttpServer {
+            name,
+            url,
+            headers: Vec::new(),
+        }));
+    }
+    apply_mcp_stdio_env_refs(&mut servers, &args.mcp_stdio_env)?;
+    apply_mcp_http_headers(&mut servers, &args.mcp_http_header)?;
+    Ok(McpConfig { servers })
+}
+
+fn apply_mcp_stdio_env_refs(servers: &mut [McpServerConfig], values: &[String]) -> Result<()> {
+    for value in values {
+        let (server_name, env_ref) = split_mcp_pair("mcp-stdio-env", value)?;
+        let server = find_mcp_server_mut(servers, &server_name, "mcp-stdio-env")?;
+        match server {
+            McpServerConfig::Stdio(stdio) => stdio.env.push(env_ref),
+            McpServerConfig::Http(_) => {
+                return Err(StackError::InvalidParam {
+                    field: "mcp-stdio-env",
+                    reason: format!("MCP server `{server_name}` is not a stdio server"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_mcp_http_headers(servers: &mut [McpServerConfig], values: &[String]) -> Result<()> {
+    for value in values {
+        let (server_name, header_ref) = split_mcp_pair("mcp-http-header", value)?;
+        let (header_name, value_ref) = split_mcp_header_ref(&header_ref)?;
+        let server = find_mcp_server_mut(servers, &server_name, "mcp-http-header")?;
+        match server {
+            McpServerConfig::Http(http) => {
+                if http
+                    .headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case(&header_name))
+                {
+                    return Err(StackError::InvalidParam {
+                        field: "mcp-http-header",
+                        reason: format!(
+                            "MCP HTTP server `{server_name}` already has header `{header_name}`"
+                        ),
+                    });
+                }
+                http.headers.push(HttpHeaderRef {
+                    name: header_name,
+                    value_ref,
+                });
+            }
+            McpServerConfig::Stdio(_) => {
+                return Err(StackError::InvalidParam {
+                    field: "mcp-http-header",
+                    reason: format!("MCP server `{server_name}` is not an HTTP server"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_mcp_server_mut<'a>(
+    servers: &'a mut [McpServerConfig],
+    server_name: &str,
+    field: &'static str,
+) -> Result<&'a mut McpServerConfig> {
+    servers
+        .iter_mut()
+        .find(|server| server.name() == server_name)
+        .ok_or_else(|| StackError::InvalidParam {
+            field,
+            reason: format!("MCP server `{server_name}` is not declared"),
+        })
+}
+
+fn split_mcp_pair(field: &'static str, value: &str) -> Result<(String, String)> {
+    let Some((name, target)) = value.split_once('=') else {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!("`{value}` must use NAME=VALUE"),
+        });
+    };
+    let name = name.trim();
+    let target = target.trim();
+    if name.is_empty() || target.is_empty() {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!("`{value}` must include a non-empty name and value"),
+        });
+    }
+    Ok((name.to_owned(), target.to_owned()))
+}
+
+fn split_mcp_header_ref(value: &str) -> Result<(String, String)> {
+    let Some((header_name, value_ref)) = value.split_once(':') else {
+        return Err(StackError::InvalidParam {
+            field: "mcp-http-header",
+            reason: format!("`{value}` must use HEADER:SECRET_REF"),
+        });
+    };
+    let header_name = header_name.trim();
+    let value_ref = value_ref.trim();
+    if header_name.is_empty() || value_ref.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "mcp-http-header",
+            reason: format!("`{value}` must include a non-empty header and secret ref"),
+        });
+    }
+    HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| StackError::InvalidParam {
+        field: "mcp-http-header",
+        reason: format!("`{header_name}` is not a valid HTTP header name"),
+    })?;
+    Ok((header_name.to_owned(), value_ref.to_owned()))
+}
+
+fn validate_mcp_https_url(name: &str, url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| StackError::InvalidParam {
+        field: "mcp-http",
+        reason: format!("MCP HTTP server `{name}` URL is not valid"),
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(StackError::InvalidParam {
+            field: "mcp-http",
+            reason: format!("MCP HTTP server `{name}` must use an https:// URL with a host"),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(StackError::InvalidParam {
+            field: "mcp-http",
+            reason: format!("MCP HTTP server `{name}` URL must not include credentials"),
+        });
+    }
+    Ok(())
 }
 
 fn classify_data_from(value: &str) -> Result<DataSourceConfig> {
