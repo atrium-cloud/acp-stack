@@ -109,16 +109,16 @@
 ## Initial Release Acceptance
 
 - [ ] A user can install `acp-stack` on a Linux instance.
-- [ ] A user can run `acps init`.
-- [ ] A user can configure one ACP agent that accepts direct API keys.
-- [ ] A user can add secrets without writing plaintext to disk.
-- [ ] A user can export and import reusable TOML config.
+- [x] A user can run `acps init`.
+- [x] A user can configure one fixture-backed ACP agent with direct-key secret injection.
+- [x] A user can add secrets without writing plaintext to disk.
+- [x] A user can export and import reusable TOML config.
 - [x] A user can validate dependency and MCP declarations.
-- [ ] A user can start the daemon.
-- [ ] A user can create an agent session through CLI or HTTP.
-- [ ] A user can send a prompt and stream updates over WebSocket.
-- [ ] A user can browse, upload, download, read, and write workspace files.
-- [ ] A user can run a mediated shell command.
-- [ ] A user can receive and answer permission requests.
-- [ ] A user can query sessions, events, commands, and permission decisions from durable logs.
+- [x] A user can start the daemon.
+- [x] A user can create an agent session through CLI or HTTP.
+- [x] A user can send a prompt and stream updates over WebSocket.
+- [x] A user can browse, upload, download, read, and write workspace files.
+- [x] A user can run a mediated shell command.
+- [x] A user can receive and answer permission requests.
+- [x] A user can query sessions, events, commands, and permission decisions from durable logs.
 - [x] A user can enable Supabase logging and inspect derived metrics externally.
