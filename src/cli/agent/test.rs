@@ -442,7 +442,9 @@ async fn run_agent_test_prompt(
             tokio::pin!(progress_timer);
             tokio::select! {
                 result = &mut prompt_future => {
-                    return result.map_err(|err| agent_test_error("prompt completion", err));
+                    return result
+                        .map(|response| response.stop_reason)
+                        .map_err(|err| agent_test_error("prompt completion", err));
                 }
                 _ = sink.wait_for_update_after(observed_updates) => {
                     observed_updates = sink.update_count();

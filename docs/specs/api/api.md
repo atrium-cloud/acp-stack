@@ -80,6 +80,7 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 | `GET /v1/sessions/{id}`                     | session | returns one session                                            |
 | `POST /v1/sessions/{id}/load`               | session | loads an existing agent session                                |
 | `POST /v1/sessions/{id}/resume`             | session | resumes a session                                              |
+| `POST /v1/sessions/{id}/fork`               | session | forks a session through ACP                                    |
 | `POST /v1/sessions/{id}/prompt`             | session | enqueues a prompt and returns a prompt id                      |
 | `POST /v1/sessions/{id}/cancel`             | session | cancels an in-flight prompt                                    |
 | `DELETE /v1/sessions/{id}`                  | session | closes or deletes a session when supported                     |
@@ -88,6 +89,8 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 | `GET /v1/sessions/{id}/snapshot`            | session | returns session row, in-flight prompts, and recent events      |
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
+
+`POST /v1/sessions/{id}/fork` accepts optional `{ "cwd": "<absolute path>", "message_id": "<prompt message id>" }`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
 
 Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. `stalled` is a terminal status reached only when the stale-prompt sweeper observes no ACP `session/update` activity for longer than `[prompts].stale_threshold`. From the client's perspective, a `stalled` prompt is final: it will not transition back to `running`, and recovery means submitting a new prompt. See `docs/specs/runtime.md` for the sweeper contract.
 
