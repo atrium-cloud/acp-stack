@@ -146,6 +146,10 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.
 
+## Logging
+
+`[logging.supabase]` mirrors selected local state rows to Supabase when enabled. `url` is the Supabase project URL, `schema` defaults to `acp_stack`, and `api_key_ref` names the encrypted secret-store entry that contains the Supabase secret key. Fresh headless setup should use `acps init --supabase-url ...` or the matching deployment env vars; initialized instances can use `acps logging supabase ...`.
+
 ## Dependencies
 
 `[dependencies]` declares expected tools and optional operator-provided install actions:

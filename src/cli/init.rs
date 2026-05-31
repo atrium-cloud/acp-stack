@@ -57,6 +57,11 @@ use self::starter_config::{
     validate_deployment_overrides_match_existing,
 };
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
+use super::logging::{
+    SUPABASE_API_KEY_REF_ENV, SUPABASE_DEFAULT_API_KEY_REF, SUPABASE_DEFAULT_SCHEMA,
+    SUPABASE_ENABLED_ENV, SUPABASE_SCHEMA_ENV, SUPABASE_URL_ENV, apply_supabase_config,
+    disabled_supabase_config, enabled_supabase_config, ensure_supabase_secret,
+};
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
@@ -184,6 +189,18 @@ pub struct InitArgs {
     /// Add a header secret ref to a custom HTTP MCP server as `server=Header:SECRET_REF`.
     #[arg(long = "mcp-http-header", value_name = "SERVER=HEADER:SECRET_REF")]
     pub(super) mcp_http_header: Vec<String>,
+    /// Enable Supabase external logging during init.
+    #[arg(long = "supabase-url", conflicts_with = "no_supabase")]
+    pub(super) supabase_url: Option<String>,
+    /// Supabase schema exposed through the Data API.
+    #[arg(long = "supabase-schema", conflicts_with = "no_supabase")]
+    pub(super) supabase_schema: Option<String>,
+    /// Secret ref containing the Supabase secret API key.
+    #[arg(long = "supabase-api-key-ref", conflicts_with = "no_supabase")]
+    pub(super) supabase_api_key_ref: Option<String>,
+    /// Leave Supabase external logging disabled during init.
+    #[arg(long = "no-supabase")]
+    pub(super) no_supabase: bool,
     /// Skip the workspace materializer; useful for tests and dev loops that
     /// do not need actual content fetched/cloned.
     #[cfg(feature = "dev-tools")]
@@ -328,9 +345,6 @@ pub(super) const STARTER_DEFAULT_SHELL: &str = "/bin/bash";
 pub(super) const STARTER_WORKSPACE_MAX_FILE_BYTES: u64 = 8_388_608;
 pub(super) const STARTER_LOCAL_RETENTION_DAYS: u64 = 30;
 pub(super) const STARTER_LOG_LEVEL: &str = "info";
-pub(super) const STARTER_SUPABASE_URL: &str = "https://example.supabase.co";
-pub(super) const STARTER_SUPABASE_API_KEY_REF: &str = "SUPABASE_SECRET_KEY";
-pub(super) const STARTER_SUPABASE_SCHEMA: &str = "acp_stack";
 pub(super) const STARTER_AGENT_ID: &str = "placeholder";
 pub(super) const STARTER_AGENT_NAME: &str = "Placeholder Agent";
 pub(super) const STARTER_AGENT_COMMAND: &str = "acp-agent";
@@ -391,6 +405,114 @@ fn configure_subagent_inherit_for_init(
     Ok(true)
 }
 
+fn apply_supabase_env_defaults(args: &mut InitArgs) -> Result<()> {
+    let explicit_supabase_args = args.supabase_url.is_some()
+        || args.supabase_schema.is_some()
+        || args.supabase_api_key_ref.is_some();
+
+    if args.no_supabase {
+        return Ok(());
+    }
+
+    let enabled = match env_value(SUPABASE_ENABLED_ENV) {
+        Some(value) => Some(parse_supabase_enabled_env(&value)?),
+        None => None,
+    };
+
+    if enabled == Some(false) && !explicit_supabase_args {
+        args.no_supabase = true;
+        return Ok(());
+    }
+
+    if args.supabase_url.is_none() {
+        args.supabase_url = env_value(SUPABASE_URL_ENV);
+    }
+    if args.supabase_schema.is_none() {
+        args.supabase_schema = env_value(SUPABASE_SCHEMA_ENV);
+    }
+    if args.supabase_api_key_ref.is_none() {
+        args.supabase_api_key_ref = env_value(SUPABASE_API_KEY_REF_ENV);
+    }
+
+    if enabled == Some(true) && args.supabase_url.is_none() {
+        return Err(StackError::MissingField {
+            field: SUPABASE_URL_ENV,
+        });
+    }
+
+    if args.supabase_url.is_none()
+        && (args.supabase_schema.is_some() || args.supabase_api_key_ref.is_some())
+    {
+        return Err(StackError::InvalidParam {
+            field: "--supabase-url",
+            reason: "required when setting Supabase schema or API-key ref during init".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn parse_supabase_enabled_env(value: &str) -> Result<bool> {
+    match value {
+        "1" | "true" | "TRUE" | "yes" | "YES" => Ok(true),
+        "0" | "false" | "FALSE" | "no" | "NO" => Ok(false),
+        _ => Err(StackError::InvalidParam {
+            field: SUPABASE_ENABLED_ENV,
+            reason: "must be 0, 1, true, false, yes, or no".to_owned(),
+        }),
+    }
+}
+
+fn apply_supabase_to_config_for_init(args: &InitArgs, config: &mut Config) -> Result<bool> {
+    if args.no_supabase {
+        let mut supabase = config
+            .logging
+            .supabase
+            .clone()
+            .unwrap_or_else(disabled_supabase_config);
+        supabase.enabled = false;
+        return apply_supabase_config(config, supabase);
+    }
+
+    let Some(url) = args.supabase_url.clone() else {
+        return Ok(false);
+    };
+    apply_supabase_config(
+        config,
+        enabled_supabase_config(
+            url,
+            Some(
+                args.supabase_schema
+                    .clone()
+                    .unwrap_or_else(|| SUPABASE_DEFAULT_SCHEMA.to_owned()),
+            ),
+            Some(
+                args.supabase_api_key_ref
+                    .clone()
+                    .unwrap_or_else(|| SUPABASE_DEFAULT_API_KEY_REF.to_owned()),
+            ),
+        ),
+    )
+}
+
+fn reject_supabase_init_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    if args.supabase_url.is_some()
+        || args.supabase_schema.is_some()
+        || args.supabase_api_key_ref.is_some()
+        || args.no_supabase
+    {
+        return Err(StackError::InvalidParam {
+            field: "--supabase-url",
+            reason: "Supabase init setup applies only when creating a starter config; use `acps logging supabase` for initialized instances".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     if args.skip_workspace_init() && mode != InitMode::Dev {
         return Err(StackError::InvalidParam {
@@ -414,6 +536,11 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // missing first-run selection never leaves `agent.id = "placeholder"` on
     // disk.
     let creating_config = !config_path.exists();
+    if creating_config && !args.resume {
+        apply_supabase_env_defaults(&mut args)?;
+    } else if !creating_config && !args.resume {
+        reject_supabase_init_args_for_existing_config(&args)?;
+    }
     if creating_config && !args.resume && args.agent.is_none() {
         if !io::stdin().is_terminal() {
             return Err(StackError::InvalidParam {
@@ -537,6 +664,20 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             })?;
         }
     }
+    if resumed && let Some(recorded) = recorded_args.as_ref() {
+        if !args.no_supabase {
+            args.no_supabase = recorded.no_supabase;
+        }
+        if args.supabase_url.is_none() {
+            args.supabase_url = recorded.supabase_url.clone();
+        }
+        if args.supabase_schema.is_none() {
+            args.supabase_schema = recorded.supabase_schema.clone();
+        }
+        if args.supabase_api_key_ref.is_none() {
+            args.supabase_api_key_ref = recorded.supabase_api_key_ref.clone();
+        }
+    }
 
     let mut config = Config::load_from_path(&config_path)?;
     let selected_agent = select_agent_for_init(&args, &registry)?;
@@ -549,8 +690,9 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         apply_registry_entry_to_config(&mut config, entry);
     }
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
+    let supabase_configured = apply_supabase_to_config_for_init(&args, &mut config)?;
     prompt_init_skills_if_needed(&mut args, &config, &registry)?;
-    if selected_agent.is_some() || edge_requested {
+    if selected_agent.is_some() || edge_requested || supabase_configured {
         let canonical = config.to_canonical_toml()?;
         config = config::load_config_from_str(&canonical)?;
         atomic_write_owner_only(&config_path, canonical.as_bytes())?;
@@ -695,6 +837,23 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     } else {
         auth_status
     };
+    if let Some(supabase) = config.logging.supabase.as_ref()
+        && supabase.enabled
+    {
+        let stored = match ensure_supabase_secret(
+            &mut secret_store,
+            &supabase.api_key_ref,
+            io::stdin().is_terminal() && !args.non_interactive,
+        ) {
+            Ok(stored) => stored,
+            Err(error) => return finalize_with_error(&store, &init_run, error),
+        };
+        if stored {
+            println!("supabase secret: set ({})", supabase.api_key_ref);
+        } else {
+            println!("supabase secret: preserved ({})", supabase.api_key_ref);
+        }
+    }
 
     // -----------------------------------------------------------------
     // Step 2: agent_install — install the configured agent if requested.

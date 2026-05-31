@@ -13,6 +13,7 @@ use super::config::ConfigCommand;
 use super::deps::DepsCommand;
 use super::init::{InitArgs, InitMode};
 use super::installer::InstallerCommand;
+use super::logging::LoggingCommand;
 use super::logs::LogsCommand;
 use super::metrics::MetricsCommand;
 use super::reset::ResetArgs;
@@ -33,6 +34,7 @@ use super::ws::WsCommand;
   acps init --agent opencode --provider openrouter --api-key-ref OPENROUTER_API_KEY
   acps status --format json
   acps sessions list --range week --format json
+  acps logging supabase status --format json
   acps logs query --since 1h --kind prompt. --format json
   acps deps check --format json
   acps security history --format json
@@ -94,6 +96,15 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Configure external logging sinks.
+    #[command(after_help = "Examples:
+  acps logging supabase status
+  acps logging supabase enable --url https://example.supabase.co
+  acps logging supabase set-secret")]
+    Logging {
+        #[command(subcommand)]
+        command: LoggingCommand,
     },
     /// Query durable runtime logs.
     #[command(after_help = "Examples:
@@ -227,6 +238,9 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Command::Config { command } => {
             super::config::run_config_command(command, output.effective())
+        }
+        Command::Logging { command } => {
+            super::logging::run_logging_command(command, output.effective())
         }
         Command::Logs { command } => super::logs::run_logs_command(command, output),
         Command::Agent { command } => super::agent::run_agent_command(command, output),

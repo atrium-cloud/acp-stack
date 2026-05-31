@@ -5,6 +5,7 @@ mod core;
 mod deps;
 mod init;
 mod installer;
+mod logging;
 mod logs;
 mod metrics;
 mod reset;

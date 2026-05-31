@@ -72,15 +72,19 @@ The starter config binds the API to `127.0.0.1:7700`. Keep that loopback bind an
 
 ## Environment Overrides
 
-The unit ships with `EnvironmentFile=-/etc/acp-stack/environment` (the leading `-` makes the file optional). Create it to inject runtime env vars without editing the unit:
+The unit ships with `EnvironmentFile=-/etc/acp-stack/environment` (the leading `-` makes the file optional). Use it for runtime env vars that the service should receive without editing the unit:
 
 ```sh
 sudo install -m 0600 -o root -g root /dev/null /etc/acp-stack/environment
-sudo tee -a /etc/acp-stack/environment >/dev/null <<'ENV'
-ACP_STACK_SUPABASE_URL=https://example.supabase.co
-ENV
-sudo systemctl restart acp-stack
 ```
+
+Configure Supabase during init:
+
+```sh
+sudo -u acp -H acps init --agent <agent-id> --supabase-url https://example.supabase.co
+```
+
+For headless init, set `ACP_STACK_SUPABASE_URL` and `ACP_STACK_SUPABASE_SECRET_KEY` in the init environment. After init, use `acps logging supabase ...` for Supabase changes.
 
 ## Operate
 
