@@ -26,6 +26,8 @@ use crate::error::{Result, StackError};
 const EMBEDDED_REGISTRY: &str = include_str!("../../../data/agents.toml");
 pub const LEGACY_PLACEHOLDER_AGENT_ID: &str = "placeholder";
 #[cfg(feature = "test-fixtures")]
+pub const DEV_PLACEBO_AGENT_ID: &str = "placebo";
+#[cfg(feature = "test-fixtures")]
 pub const DEV_PLACEBO_MODEL_OPTION: &str = "placebo-model";
 
 #[cfg(feature = "test-fixtures")]
@@ -75,14 +77,7 @@ impl RegistryCatalog {
             return;
         };
         let placebo_path = path.display().to_string();
-        let install = InstallSet {
-            shell: Some(ShellInstall {
-                script: format!("test -x {}", shell_quote_str(&placebo_path)),
-                creates: placebo_path.clone(),
-            }),
-            npm: None,
-            github: None,
-        };
+        let install = development_placebo_install(&placebo_path);
         for entry in &mut self.agents {
             entry.kind = RegistryKind::Native;
             entry.github = None;
@@ -92,6 +87,9 @@ impl RegistryCatalog {
                 install: install.clone(),
             });
         }
+        self.merge(RegistryCatalog {
+            agents: vec![development_placebo_entry(&placebo_path, install)],
+        });
     }
 
     pub fn from_toml(body: &str) -> Result<Self> {
@@ -594,6 +592,50 @@ fn github_path_from_value<'a>(agent_id: &str, field: &str, value: &'a str) -> Re
         });
     }
     Ok(value)
+}
+
+#[cfg(feature = "test-fixtures")]
+fn development_placebo_install(placebo_path: &str) -> InstallSet {
+    InstallSet {
+        shell: Some(ShellInstall {
+            script: format!("test -x {}", shell_quote_str(placebo_path)),
+            creates: placebo_path.to_owned(),
+        }),
+        npm: None,
+        github: None,
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> RegistryEntry {
+    RegistryEntry {
+        id: DEV_PLACEBO_AGENT_ID.to_owned(),
+        name: "Placebo Agent".to_owned(),
+        kind: RegistryKind::Native,
+        headless_compatible: true,
+        set_provider: false,
+        set_model: false,
+        allow_custom_provider: false,
+        allow_custom_model: false,
+        set_mode: false,
+        supports_mcp: true,
+        supports_agent_skills: false,
+        agent_skills_install_dir: None,
+        subagents: false,
+        subagent_alias: None,
+        subagent_free_models: Vec::new(),
+        stdio_framing: RegistryStdioFraming::JsonLines,
+        website: None,
+        github: None,
+        support_doc: Some("src/bin/placebo_agent/main.rs".to_owned()),
+        testflight_prompt: None,
+        testflight_expect_fs: None,
+        adapter: None,
+        harness: Some(HarnessSpec {
+            id: placebo_path.to_owned(),
+            install,
+        }),
+    }
 }
 
 #[cfg(feature = "test-fixtures")]

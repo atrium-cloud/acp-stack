@@ -20,6 +20,7 @@ pub(super) fn should_install_agent(config: &Config, registry: &RegistryCatalog) 
             .harness
             .as_ref()
             .is_some_and(|harness| harness.id == placebo_id)
+            && !Path::new(&config.workspace.root).is_dir()
         {
             return Ok(false);
         }

@@ -224,10 +224,7 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
         check(env_ref, "agent.env")?;
     }
     if let Some(supabase) = &config.logging.supabase {
-        check(
-            &supabase.api_key_ref,
-            "logging.supabase.api_key_ref",
-        )?;
+        check(&supabase.api_key_ref, "logging.supabase.api_key_ref")?;
     }
     for source in &config.workspace.code_sources {
         if let Some(value) = source.credential_ref.as_deref() {
