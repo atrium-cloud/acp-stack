@@ -504,13 +504,7 @@ impl AcpBridge {
         };
 
         let capabilities = AgentCapabilitiesDto::from_initialize_response(&init_response)?;
-        let session_model = agent.provider.as_ref().and_then(|provider| {
-            if agent.id == "goose" {
-                provider.model.clone()
-            } else {
-                None
-            }
-        });
+        let session_model = pre_session_model(agent);
         let child = Arc::new(TokioMutex::new(Some(child)));
         spawn_child_exit_watcher(
             Arc::clone(&child),
@@ -847,6 +841,28 @@ impl AcpBridge {
 
         Ok(status.and_then(|s| s.code()))
     }
+}
+
+fn pre_session_model(agent: &AgentConfig) -> Option<String> {
+    if agent.id != "goose" && !is_development_placebo_agent(&agent.id) {
+        return None;
+    }
+    agent.model.clone().or_else(|| {
+        agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.clone())
+    })
+}
+
+#[cfg(feature = "test-fixtures")]
+fn is_development_placebo_agent(agent_id: &str) -> bool {
+    agent_id == crate::runtime::install::agent_registry::DEV_PLACEBO_AGENT_ID
+}
+
+#[cfg(not(feature = "test-fixtures"))]
+fn is_development_placebo_agent(_agent_id: &str) -> bool {
+    false
 }
 
 fn spawn_child_exit_watcher(

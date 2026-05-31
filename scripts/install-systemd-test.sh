@@ -45,7 +45,10 @@ Env knobs:
                                  (default ubuntu:24.04)
   ACP_STACK_SYSTEMD_TEST_IMAGE  Prebuilt systemd-capable image to use instead
                                  of building acp-stack-systemd-test:ubuntu-24.04
-  ACP_STACK_SYSTEMD_TEST_AGENT  Real supported agent id to initialize
+  ACP_STACK_SYSTEMD_TEST_AGENT  Agent id to initialize
+  ACP_STACK_DEV_PLACEBO_REGISTRY
+                                 Test-fixture agent binary path passed into the
+                                 container when set
 USAGE
 }
 
@@ -94,6 +97,11 @@ if [[ ! -x "${acps_binary}" || ! -x "${acpctl_binary}" ]]; then
   exit 1
 fi
 
+docker_env_args=()
+if [[ -n "${ACP_STACK_DEV_PLACEBO_REGISTRY:-}" ]]; then
+  docker_env_args+=(--env "ACP_STACK_DEV_PLACEBO_REGISTRY=${ACP_STACK_DEV_PLACEBO_REGISTRY}")
+fi
+
 if [[ -z "${ACP_STACK_SYSTEMD_TEST_IMAGE:-}" ]]; then
   echo "install-systemd-test: building systemd test image ${IMAGE} from ${BASE_IMAGE}..."
   docker build \
@@ -111,6 +119,7 @@ docker run -d \
   --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   -v "${REPO_ROOT}:/src:ro" \
+  "${docker_env_args[@]}" \
   -p "${HOST_PORT}:7700" \
   "${IMAGE}" \
   /sbin/init >/dev/null
@@ -129,7 +138,7 @@ done
 
 echo "install-systemd-test: running install-systemd.sh inside container..."
 if [[ -z "${INIT_AGENT}" ]]; then
-  echo "install-systemd-test: ACP_STACK_SYSTEMD_TEST_AGENT is required; choose a real supported agent id." >&2
+  echo "install-systemd-test: ACP_STACK_SYSTEMD_TEST_AGENT is required; choose an agent id." >&2
   exit 1
 fi
 stdout_capture="$(mktemp)"

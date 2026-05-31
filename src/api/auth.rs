@@ -772,7 +772,7 @@ mod tests {
     }
 
     fn test_config() -> Config {
-        let toml_text = include_str!("../../tests/fixtures/valid-acp-stack.toml");
+        let toml_text = include_str!("../../tests/fixtures/valid-opencode-stack.toml");
         crate::config::load_config_from_str(toml_text).expect("sample config parses")
     }
 

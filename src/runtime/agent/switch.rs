@@ -400,8 +400,10 @@ mod tests {
     };
 
     fn valid_config() -> Config {
-        load_config_from_str(include_str!("../../../tests/fixtures/valid-acp-stack.toml"))
-            .expect("fixture parses")
+        load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture parses")
     }
 
     fn mcp_config() -> McpConfig {

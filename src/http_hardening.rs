@@ -511,7 +511,7 @@ mod tests {
 
     fn cloudflare_config() -> crate::config::Config {
         let mut config = crate::config::load_config_from_str(include_str!(
-            "../tests/fixtures/valid-acp-stack.toml"
+            "../tests/fixtures/valid-opencode-stack.toml"
         ))
         .expect("fixture config");
         config.security.http.trust_proxy_headers = true;

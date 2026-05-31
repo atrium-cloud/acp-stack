@@ -142,7 +142,7 @@ fn create_runtime_files(root: &std::path::Path, state_path: &std::path::Path) ->
 }
 
 fn test_config() -> Config {
-    let toml_text = include_str!("fixtures/valid-acp-stack.toml");
+    let toml_text = include_str!("fixtures/valid-placebo-stack.toml");
     load_config_from_str(toml_text).expect("config parses")
 }
 

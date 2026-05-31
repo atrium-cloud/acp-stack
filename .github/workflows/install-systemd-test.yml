@@ -11,10 +11,14 @@ on:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
+      - src/bin/placebo_agent/**
       - src/cli/serve.rs
       - src/cli/init.rs
+      - src/cli/init/**
       - src/config.rs
+      - src/dev_gates.rs
       - src/main.rs
+      - src/runtime/install/**
       - .github/workflows/install-systemd-test.yml
   pull_request:
     paths:
@@ -25,10 +29,14 @@ on:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
+      - src/bin/placebo_agent/**
       - src/cli/serve.rs
       - src/cli/init.rs
+      - src/cli/init/**
       - src/config.rs
+      - src/dev_gates.rs
       - src/main.rs
+      - src/runtime/install/**
       - .github/workflows/install-systemd-test.yml
 
 concurrency:
@@ -53,11 +61,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --release --bin acps --bin acpctl --locked
+        run: cargo build --release --features test-fixtures --bin acps --bin acpctl --bin placebo-agent --locked
 
       - name: Run install-systemd-test.sh
         env:
           ACP_STACK_SKIP_BUILD: '1'
+          ACP_STACK_SYSTEMD_TEST_AGENT: placebo
+          ACP_STACK_DEV_PLACEBO_REGISTRY: /src/target/release/placebo-agent
         run: bash scripts/install-systemd-test.sh
 
       - name: Capture journal on failure

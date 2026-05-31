@@ -168,7 +168,7 @@ fn create_runtime_files(root: &Path, state_path: &Path) -> PathBuf {
 }
 
 fn test_config() -> Config {
-    let toml_text = include_str!("fixtures/valid-acp-stack.toml");
+    let toml_text = include_str!("fixtures/valid-placebo-stack.toml");
     load_config_from_str(toml_text).expect("config parses")
 }
 
@@ -365,7 +365,7 @@ async fn config_export_returns_canonical_toml() {
 #[tokio::test]
 async fn config_validate_accepts_valid_toml() {
     let harness = ServerHarness::spawn().await;
-    let toml = include_str!("fixtures/valid-acp-stack.toml");
+    let toml = include_str!("fixtures/valid-placebo-stack.toml");
     let response = reqwest::Client::new()
         .post(format!("{}/v1/config/validate", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
@@ -715,7 +715,7 @@ async fn status_agent_returns_configured_agent_snapshot() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], Value::Bool(true));
     assert_eq!(body["data"]["configured"], Value::Bool(true));
-    assert_eq!(body["data"]["agent"]["id"], "opencode");
+    assert_eq!(body["data"]["agent"]["id"], "placebo");
     assert_eq!(body["data"]["agent"]["adapter"], Value::Null);
     assert!(body["data"]["lifecycle_events"].as_array().is_some());
 }
@@ -801,7 +801,7 @@ async fn health_ready_returns_200_when_subsystems_are_healthy() {
     assert_eq!(body["data"]["failing"], serde_json::json!([]));
     assert_eq!(body["data"]["sqlite"]["reachable"], Value::Bool(true));
     assert_eq!(body["data"]["workspace"]["writable"], Value::Bool(true));
-    assert_eq!(body["data"]["agent"]["id"], "opencode");
+    assert_eq!(body["data"]["agent"]["id"], "placebo");
     assert_eq!(body["data"]["agent"]["orphaned_process_count"], 0);
     // Default fixture has Supabase disabled; sink subsystem should still report
     // but with `enabled=false`.
@@ -948,7 +948,7 @@ async fn health_ready_reports_orphaned_agent_process_groups() {
                 "agent.started",
                 "agent initialized",
                 &serde_json::json!({
-                    "agent_id": "opencode",
+                    "agent_id": "placebo",
                     "pid": orphan.pid,
                     "adapter": null,
                 })
@@ -2729,7 +2729,7 @@ async fn rate_limit_envelope_uses_standard_shape() {
 async fn config_import_dry_run_returns_metadata() {
     let harness = ServerHarness::spawn().await;
     let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
-    let toml = include_str!("fixtures/valid-acp-stack.toml");
+    let toml = include_str!("fixtures/valid-placebo-stack.toml");
     let response = reqwest::Client::new()
         .post(format!(
             "{}/v1/config/import?dry_run=true",
@@ -2768,7 +2768,7 @@ async fn config_import_dry_run_returns_metadata() {
 async fn config_import_dry_run_reports_auth_ref_mismatch_without_mutation() {
     let harness = ServerHarness::spawn().await;
     let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
-    let toml = include_str!("fixtures/valid-acp-stack.toml").replace(
+    let toml = include_str!("fixtures/valid-placebo-stack.toml").replace(
         r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
         r#"admin_key_ref = "ROTATED_ADMIN_KEY""#,
     );
@@ -2804,7 +2804,7 @@ async fn config_import_dry_run_reports_auth_ref_mismatch_without_mutation() {
 async fn config_import_rejects_auth_ref_mismatch_before_write() {
     let harness = ServerHarness::spawn().await;
     let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
-    let toml = include_str!("fixtures/valid-acp-stack.toml").replace(
+    let toml = include_str!("fixtures/valid-placebo-stack.toml").replace(
         r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
         r#"admin_key_ref = "ROTATED_ADMIN_KEY""#,
     );
@@ -2857,10 +2857,8 @@ async fn config_import_oversized_body_returns_413() {
 async fn config_validate_secret_ref_value_error_does_not_echo_secret() {
     let harness = ServerHarness::spawn().await;
     let secret = "sk-proj-inline-secret-value";
-    let toml = include_str!("fixtures/valid-acp-stack.toml").replace(
-        r#"env = ["OPENCODE_API_KEY"]"#,
-        &format!(r#"env = ["{secret}"]"#),
-    );
+    let toml = include_str!("fixtures/valid-placebo-stack.toml")
+        .replace("env = []", &format!(r#"env = ["{secret}"]"#));
     let response = reqwest::Client::new()
         .post(format!("{}/v1/config/validate", harness.base_url))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))

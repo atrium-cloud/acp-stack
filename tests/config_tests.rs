@@ -3,7 +3,7 @@ use acp_stack::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, load_config_from_str,
 };
 
-const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
+const VALID_CONFIG: &str = include_str!("fixtures/valid-opencode-stack.toml");
 
 #[test]
 fn parses_valid_config_and_exports_canonical_toml() {

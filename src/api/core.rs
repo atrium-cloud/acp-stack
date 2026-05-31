@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn adapter_metadata_can_be_populated_from_override_registry() {
         let mut config = crate::config::load_config_from_str(include_str!(
-            "../../tests/fixtures/valid-acp-stack.toml"
+            "../../tests/fixtures/valid-opencode-stack.toml"
         ))
         .expect("fixture parses");
         let registry = crate::runtime::install::agent_registry::RegistryCatalog::from_toml(

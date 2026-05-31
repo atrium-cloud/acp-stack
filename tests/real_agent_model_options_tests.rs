@@ -3,7 +3,7 @@
 //! These exercise ACP `session/new` model config options against installed
 //! agents rather than the fake test agent. Run explicitly with:
 //!
-//! `cargo test --test real_agent_model_options_tests -- --ignored`
+//! `ACP_STACK_RUN_REAL_AGENT_TESTS=1 cargo test --test real_agent_model_options_tests -- --ignored`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ use acp_stack::runtime::agent::acp_bridge::{
     session_model_selection_for_value, session_model_values,
 };
 use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
+
+const REAL_AGENT_TESTS_ENV: &str = "ACP_STACK_RUN_REAL_AGENT_TESTS";
 
 struct NoopSessionEventSink;
 
@@ -50,6 +52,7 @@ fn real_agent_config(id: &str, name: &str, command: &str, args: &[&str]) -> Agen
 }
 
 fn required_env(names: &[&str]) -> HashMap<String, String> {
+    require_real_agent_tests_enabled();
     names
         .iter()
         .map(|name| {
@@ -58,6 +61,12 @@ fn required_env(names: &[&str]) -> HashMap<String, String> {
             ((*name).to_owned(), value)
         })
         .collect()
+}
+
+fn require_real_agent_tests_enabled() {
+    if std::env::var(REAL_AGENT_TESTS_ENV).as_deref() != Ok("1") {
+        panic!("real-agent tests require `{REAL_AGENT_TESTS_ENV}=1`");
+    }
 }
 
 async fn assert_real_agent_advertises_model(

@@ -206,11 +206,11 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
 }
 
 #[tokio::test]
-async fn goose_new_session_sets_configured_model_before_prompt() {
+async fn new_session_sets_configured_model_before_prompt() {
     use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
 
     let mut config = fake_agent_config();
-    config.id = "goose".into();
+    config.id = "placebo".into();
     config.args.extend([
         "--expect-model-config".into(),
         "deepseek/deepseek-v4-flash".into(),

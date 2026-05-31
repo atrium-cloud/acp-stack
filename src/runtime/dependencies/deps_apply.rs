@@ -577,7 +577,7 @@ mod tests {
     use crate::config::{DependenciesConfig, DependencyEntry, DependencyInstallAction};
 
     fn config_with_dep(entry: DependencyEntry) -> Config {
-        let toml_text = include_str!("../../../tests/fixtures/valid-acp-stack.toml");
+        let toml_text = include_str!("../../../tests/fixtures/valid-opencode-stack.toml");
         let mut config = crate::config::load_config_from_str(toml_text).expect("config");
         config.dependencies = DependenciesConfig {
             commands: vec![entry],

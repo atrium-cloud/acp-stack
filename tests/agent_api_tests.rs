@@ -248,7 +248,7 @@ impl Drop for AgentHarness {
 /// fixture. Empty `[agent].env` so the handlers don't try to open a secret
 /// store that doesn't exist in the test tempdir.
 fn test_config() -> Config {
-    let toml_text = include_str!("fixtures/valid-acp-stack.toml");
+    let toml_text = include_str!("fixtures/valid-opencode-stack.toml");
     let mut config = load_config_from_str(toml_text).expect("config parses");
     config.agent.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
     config.agent.args = vec!["acp".into()];

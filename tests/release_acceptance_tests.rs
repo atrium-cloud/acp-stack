@@ -48,11 +48,12 @@ fn config_path(home: &Path) -> PathBuf {
 }
 
 fn run_fixture_init(home: &Path, workspace: &Path) {
+    std::fs::create_dir_all(workspace.join("uploads")).expect("workspace dirs");
     acps_command(home)
         .args([
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--no-skills",
             "--workspace-root",
             workspace.to_str().expect("workspace path is UTF-8"),
@@ -98,6 +99,7 @@ fn assert_plaintext_not_written(root: &Path, needle: &str) {
 fn configure_fixture_secret_assertion(home: &Path) {
     let path = config_path(home);
     let mut config = Config::load_from_path(&path).expect("config loads");
+    config.agent.env = vec![ACCEPTANCE_KEY_REF.to_owned()];
     config.agent.args.push("--assert-env-present".to_owned());
     config.agent.args.push(ACCEPTANCE_KEY_REF.to_owned());
     config.permissions.mode = "supervised".to_owned();
@@ -399,27 +401,6 @@ async fn release_acceptance_fixture_first_test() {
 
     run_fixture_init(home.path(), &workspace);
     set_secret(home.path(), ACCEPTANCE_KEY_REF, ACCEPTANCE_KEY_VALUE);
-    acps_command(home.path())
-        .args([
-            "init",
-            "--agent",
-            "opencode",
-            "--no-skills",
-            "--provider",
-            "openai",
-            "--api-key-ref",
-            ACCEPTANCE_KEY_REF,
-            "--workspace-root",
-            workspace.to_str().expect("workspace path is UTF-8"),
-            "--workspace-uploads",
-            workspace
-                .join("uploads")
-                .to_str()
-                .expect("uploads path is UTF-8"),
-            "--skip-testflight",
-        ])
-        .assert()
-        .success();
     configure_fixture_secret_assertion(home.path());
 
     let export_path = home.path().join("exported-acp-stack.toml");

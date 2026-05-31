@@ -152,7 +152,7 @@ impl From<acp_stack::state::Event> for EventRow {
 }
 
 fn test_config() -> Config {
-    let toml_text = include_str!("fixtures/valid-acp-stack.toml");
+    let toml_text = include_str!("fixtures/valid-placebo-stack.toml");
     load_config_from_str(toml_text).expect("config parses")
 }
 
@@ -812,7 +812,7 @@ async fn bind_local_unlinks_stale_socket_and_succeeds() {
 async fn workspace_write_rejects_over_max_file_bytes() {
     let harness = Harness::spawn().await;
     // Build a body larger than the test config's workspace.max_file_bytes
-    // (8 MiB per fixtures/valid-acp-stack.toml).
+    // (8 MiB per fixtures/valid-placebo-stack.toml).
     let big = "x".repeat(9 * 1024 * 1024);
     let body = serde_json::json!({
         "path": "huge.bin",

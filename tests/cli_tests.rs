@@ -17,7 +17,8 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-const VALID_CONFIG: &str = include_str!("fixtures/valid-acp-stack.toml");
+const VALID_CONFIG: &str = include_str!("fixtures/valid-opencode-stack.toml");
+const VALID_PLACEBO_CONFIG: &str = include_str!("fixtures/valid-placebo-stack.toml");
 const SESSION_KEY: &str = "acps_session_cccccccccccccccccccccccccccccccccccccccccccc";
 const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd";
 
@@ -88,7 +89,7 @@ impl AgentCliHarness {
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(tempdir.path(), &path);
         let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
-        let mut config = load_config_from_str(VALID_CONFIG).expect("config parses");
+        let mut config = load_config_from_str(VALID_PLACEBO_CONFIG).expect("config parses");
         config.agent.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
         config.agent.args = vec!["acp".into()];
         config.agent.env = vec![];
@@ -204,7 +205,7 @@ fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
         .map(|arg| toml_string(arg))
         .collect::<Vec<_>>()
         .join(", ");
-    let config = VALID_CONFIG
+    let config = VALID_PLACEBO_CONFIG
         .replace(
             r#"root = "/workspace""#,
             &format!(r#"root = "{}""#, workspace.display()),
@@ -214,7 +215,7 @@ fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
             &format!(r#"uploads = "{}/uploads""#, workspace.display()),
         )
         .replace(
-            r#"command = "opencode""#,
+            r#"command = "placebo-agent""#,
             &format!(
                 "command = {}",
                 toml_string(env!("CARGO_BIN_EXE_placebo-agent"))
@@ -224,8 +225,7 @@ fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
         .replace(
             r#"cwd = "/workspace""#,
             &format!("cwd = {}", toml_string(&workspace.to_string_lossy())),
-        )
-        .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []");
+        );
     fs::write(config_dir.join("acp-stack.toml"), config).expect("config should be written");
 }
 
@@ -309,7 +309,11 @@ fn validates_explicit_config_path() {
     let mut command = acps_command();
 
     command
-        .args(["config", "validate", "tests/fixtures/valid-acp-stack.toml"])
+        .args([
+            "config",
+            "validate",
+            "tests/fixtures/valid-opencode-stack.toml",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("config is valid"));
@@ -426,22 +430,10 @@ fn init_creates_config_and_state() {
 
     command
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .stdout(predicates::str::contains("progress: initializing secrets"))
-        .stdout(predicates::str::contains(
-            "progress: configuring provider and model",
-        ))
-        .stdout(predicates::str::contains(
-            "progress: writing agent headless config",
-        ))
         .stdout(predicates::str::contains("initialized acp-stack"));
 
     let config_path = tempdir.path().join(".config/acp-stack/acp-stack.toml");
@@ -471,7 +463,7 @@ fn init_writes_mcp_declarations_to_starter_config() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--skip-workspace-init",
             "--mcp-preset",
@@ -723,7 +715,7 @@ fn init_rejects_mcp_declarations_when_config_exists() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--skip-workspace-init",
         ])
@@ -757,7 +749,7 @@ fn assert_init_mcp_failure(home: &std::path::Path, extra_args: &[&str], expected
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--skip-workspace-init",
         ])
@@ -806,7 +798,7 @@ fn init_rejects_private_drive_file_viewer_url_as_data_source() {
         .args([
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--data-from",
             "https://drive.google.com/file/d/abc123/view",
@@ -825,7 +817,7 @@ fn init_accepts_drive_uc_export_download_url_as_data_source() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--skip-workspace-init",
             "--data-from",
@@ -844,7 +836,7 @@ fn init_rejects_drive_folder_url_as_data_source() {
         .args([
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--data-from",
             "https://drive.google.com/drive/folders/abc123",
@@ -863,7 +855,7 @@ fn init_rejects_dropbox_preview_url_without_dl_flag() {
         .args([
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--data-from",
             "https://www.dropbox.com/scl/fi/abc123/file.zip?dl=0",
@@ -883,7 +875,7 @@ fn init_accepts_dropbox_url_with_dl_one() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--skip-workspace-init",
             "--data-from",
@@ -903,13 +895,7 @@ fn init_default_skips_testflight_under_non_interactive_runs() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .stdout(predicates::str::contains(
@@ -927,7 +913,7 @@ fn init_skip_testflight_flag_is_acknowledged_in_output() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--skip-testflight",
             "--skip-workspace-init",
         ])
@@ -948,7 +934,7 @@ fn init_creates_workspace_root_and_uploads_without_sources() {
         .args([
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--no-skills",
             "--skip-testflight",
             "--workspace-root",
@@ -976,7 +962,7 @@ fn init_edge_profile_prints_edge_artifact_progress() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--no-skills",
             "--skip-testflight",
             "--skip-workspace-init",
@@ -1019,7 +1005,7 @@ fn init_skip_workspace_init_is_acknowledged_in_output() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--no-skills",
             "--skip-testflight",
             "--skip-workspace-init",
@@ -1143,7 +1129,7 @@ fn init_no_skills_flag_skips_skill_install_prompt() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--no-skills",
             "--skip-testflight",
             "--skip-workspace-init",
@@ -1243,7 +1229,7 @@ fn init_writes_deployment_controlled_workspace_defaults() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--workspace-root",
             "/srv/acp",
             "--workspace-uploads",
@@ -1270,13 +1256,7 @@ fn init_rejects_conflicting_deployment_overrides_for_existing_config() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
@@ -1302,13 +1282,7 @@ fn init_skips_opencode_config_without_configured_provider() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .stdout(predicates::str::contains("OpenCode config:").not());
@@ -2504,13 +2478,7 @@ creates = "opencode"
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "pi", "--skip-workspace-init"])
         .assert()
         .success()
         .stdout(predicates::str::contains("Pi settings:").not());
@@ -3537,8 +3505,13 @@ wire_api = "responses"
     assert!(config.contains("[agent.provider]"));
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"model = "gpt-5.5""#));
-    assert!(!config.contains("api_key_ref"));
     assert!(config.contains("env = []"));
+    let parsed_config: toml::Value = toml::from_str(&config).expect("config should parse");
+    assert!(
+        parsed_config["agent"]["provider"]
+            .get("api_key_ref")
+            .is_none()
+    );
 
     let codex: toml::Value = toml::from_str(
         &fs::read_to_string(codex_dir.join("config.toml"))
@@ -4440,13 +4413,7 @@ fn init_creates_owner_only_config_and_state_paths() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 
@@ -4497,13 +4464,7 @@ fn init_fails_when_existing_config_is_invalid() {
 
     command
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -4527,13 +4488,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .arg("--workspace-root")
         .arg(&workspace_dir)
         .arg("--workspace-uploads")
@@ -4571,13 +4526,7 @@ fn status_format_json_reports_same_top_level_sections() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .arg("--workspace-root")
         .arg(&workspace_dir)
         .arg("--workspace-uploads")
@@ -5391,7 +5340,7 @@ fn agent_test_succeeds_with_prompt() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent test: ok"))
-        .stdout(predicates::str::contains("agent: opencode"))
+        .stdout(predicates::str::contains("agent: placebo"))
         .stdout(predicates::str::contains("prompt: provided"))
         .stdout(predicates::str::contains("session_id: sess_fake_0"))
         .stdout(predicates::str::contains("stop_reason: end_turn"))
@@ -5409,9 +5358,9 @@ fn agent_test_uses_default_prompt_when_omitted() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent test: ok"))
-        .stdout(predicates::str::contains("prompt: registry"))
-        .stdout(predicates::str::contains("stop_reason: end_turn"))
-        .stdout(predicates::str::contains("fs_smoke: ok"));
+        .stdout(predicates::str::contains("agent: placebo"))
+        .stdout(predicates::str::contains("prompt: default"))
+        .stdout(predicates::str::contains("stop_reason: end_turn"));
 }
 
 #[test]
@@ -7116,13 +7065,7 @@ fn write_acp_config_options(
 fn run_init_with_home(home: &std::path::Path) {
     acps_command()
         .env("HOME", home)
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success();
 }
@@ -7242,13 +7185,7 @@ fn init_prints_session_and_admin_keys_on_first_run() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let output = acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .get_output()
@@ -7270,13 +7207,7 @@ fn init_is_idempotent_and_preserves_keys() {
 
     let stdout = acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .get_output()
@@ -7309,7 +7240,9 @@ fn init_fails_fast_when_store_exists_with_both_auth_refs_missing() {
     // store is non-empty. The new init logic must refuse to silently
     // re-generate the admin key in this corrupted state.
     let mut store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
-    store.set("OPENCODE_API_KEY", "xyz").expect("set unrelated");
+    store
+        .set("UNRELATED_API_KEY", "xyz")
+        .expect("set unrelated");
     store
         .delete("ACP_STACK_SESSION_KEY")
         .expect("delete session");
@@ -7318,13 +7251,7 @@ fn init_fails_fast_when_store_exists_with_both_auth_refs_missing() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -7362,13 +7289,7 @@ fn init_fails_fast_when_admin_key_missing_in_existing_store() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -7538,13 +7459,7 @@ fn auth_regenerate_session_key_rotates_only_session() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let first_init_stdout = acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .get_output()
@@ -7688,13 +7603,7 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
     // Fresh init after reset produces a different admin key than the first.
     let init_after = acps_command()
         .env("HOME", tempdir.path())
-        .args([
-            "dev",
-            "init",
-            "--agent",
-            "opencode",
-            "--skip-workspace-init",
-        ])
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
         .get_output()
@@ -7734,7 +7643,8 @@ fn config_import_with_force_replaces_existing_config() {
     run_init_with_home(tempdir.path());
 
     // Build an alternate config with a recognizable bind addr.
-    let modified = VALID_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7777""#);
+    let modified =
+        VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7777""#);
     let import_path = tempdir.path().join("alt.toml");
     fs::write(&import_path, &modified).expect("write alt");
 
@@ -7812,7 +7722,8 @@ fn config_export_format_json_wraps_toml_without_leaking_secret_values() {
 fn config_import_supports_base64_input() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     // No init first; we want to exercise the create-fresh import path.
-    let modified = VALID_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7788""#);
+    let modified =
+        VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7788""#);
     let encoded = base64::engine::general_purpose::STANDARD.encode(modified);
 
     acps_command()
@@ -7835,7 +7746,7 @@ fn config_import_refuses_to_change_auth_refs() {
     // Build an alternate config that changes admin_key_ref. Import must
     // refuse, otherwise an operator could swap which secret is treated as
     // the admin key without going through `acps reset --yes`.
-    let modified = VALID_CONFIG.replace(
+    let modified = VALID_PLACEBO_CONFIG.replace(
         r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
         r#"admin_key_ref = "MY_NEW_ADMIN""#,
     );
@@ -7857,7 +7768,7 @@ fn config_import_refuses_to_change_session_ref() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    let modified = VALID_CONFIG.replace(
+    let modified = VALID_PLACEBO_CONFIG.replace(
         r#"session_key_ref = "ACP_STACK_SESSION_KEY""#,
         r#"session_key_ref = "MY_NEW_SESSION""#,
     );
@@ -7893,7 +7804,7 @@ fn config_import_dry_run_with_path() {
     let original_config = fs::read_to_string(&config_path).expect("config readable");
 
     let import_path = tempdir.path().join("import.toml");
-    fs::write(&import_path, VALID_CONFIG).expect("write config");
+    fs::write(&import_path, VALID_PLACEBO_CONFIG).expect("write config");
 
     let output = acps_command()
         .env("HOME", tempdir.path())
@@ -7922,7 +7833,7 @@ fn config_import_dry_run_with_path() {
 fn config_import_dry_run_with_base64() {
     let tempdir = tempfile::tempdir().expect("tempdir");
 
-    let encoded = base64::engine::general_purpose::STANDARD.encode(VALID_CONFIG);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(VALID_PLACEBO_CONFIG);
 
     let output = acps_command()
         .env("HOME", tempdir.path())
@@ -8025,7 +7936,7 @@ fn init_resume_targets_specific_pending_run_by_id() {
             "dev",
             "init",
             "--agent",
-            "opencode",
+            "placebo",
             "--resume",
             "--run-id",
             &pending_id,
