@@ -42,12 +42,14 @@ Every rejected authentication writes one row. The attempted token value is never
 
 ## Prompt Lifecycle Columns
 
-The `prompts` table carries two columns for terminal failure classification beyond `error_code` / `error_message`:
+The `prompts` table carries message identity fields plus terminal failure classification beyond `error_code` / `error_message`:
 
-| Column                | Type      | Notes                                                                                                  |
-| --------------------- | --------- | ------------------------------------------------------------------------------------------------------ |
-| `failure_class`       | TEXT NULL | Internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover |
-| `failure_detail_json` | TEXT NULL | Class-specific JSON envelope. NULL when no structured detail is captured                               |
+| Column                    | Type      | Notes                                                                                                  |
+| ------------------------- | --------- | ------------------------------------------------------------------------------------------------------ |
+| `message_id`              | TEXT NULL | ACP user prompt message id sent with `session/prompt`                                                  |
+| `message_id_acknowledged` | INTEGER   | 1 only after the agent echoes the message id in `PromptResponse.userMessageId`                         |
+| `failure_class`           | TEXT NULL | Internal taxonomy bucket. NULL for non-terminal rows and for terminal rows the taxonomy does not cover |
+| `failure_detail_json`     | TEXT NULL | Class-specific JSON envelope. NULL when no structured detail is captured                               |
 
 `prompts.status` accepts six values: `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. The `stalled` value is terminal and is only written by the stale-prompt sweeper (see `docs/specs/runtime.md`). The index `prompts_status_updated_at_idx` on `(status, updated_at)` backs the sweeper's stuck-prompt query.
 

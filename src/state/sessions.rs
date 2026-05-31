@@ -100,6 +100,8 @@ pub struct PromptRecord {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub prompt_json: String,
+    pub message_id: Option<String>,
+    pub message_id_acknowledged: bool,
     /// Internal failure taxonomy (see `FailureClass`). Populated only for
     /// terminal `errored`/`stalled` rows; otherwise NULL in the DB and `None`
     /// here. Phase 2 wires up the supervisor call sites.
@@ -258,8 +260,10 @@ pub(super) fn row_to_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptR
         error_code: row.get(6)?,
         error_message: row.get(7)?,
         prompt_json: row.get(8)?,
-        failure_class: row.get(9)?,
-        failure_detail_json: row.get(10)?,
+        message_id: row.get(9)?,
+        message_id_acknowledged: row.get::<_, i64>(10)? != 0,
+        failure_class: row.get(11)?,
+        failure_detail_json: row.get(12)?,
     })
 }
 
@@ -712,6 +716,14 @@ impl StateStore {
     }
 
     pub fn insert_prompt(&self, record: NewPromptRecord) -> Result<PromptRecord> {
+        self.insert_prompt_with_message_id(record, None)
+    }
+
+    pub fn insert_prompt_with_message_id(
+        &self,
+        record: NewPromptRecord,
+        message_id: Option<String>,
+    ) -> Result<PromptRecord> {
         validate_json_payload(self.connection(), &record.prompt_json)?;
         let now = current_timestamp();
         let row = PromptRecord {
@@ -724,6 +736,8 @@ impl StateStore {
             error_code: None,
             error_message: None,
             prompt_json: record.prompt_json,
+            message_id,
+            message_id_acknowledged: false,
             failure_class: None,
             failure_detail_json: None,
         };
@@ -731,8 +745,8 @@ impl StateStore {
             conn.execute(
                 r#"
                 INSERT INTO prompts
-                    (id, session_id, created_at, updated_at, status, prompt_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    (id, session_id, created_at, updated_at, status, prompt_json, message_id)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
                 params![
                     row.id,
@@ -741,6 +755,7 @@ impl StateStore {
                     row.updated_at,
                     row.status,
                     row.prompt_json,
+                    row.message_id,
                 ],
             )?;
             Ok(())
@@ -755,6 +770,7 @@ impl StateStore {
                 r#"
                 SELECT id, session_id, created_at, updated_at, status,
                        stop_reason, error_code, error_message, prompt_json,
+                       message_id, message_id_acknowledged,
                        failure_class, failure_detail_json
                 FROM prompts
                 WHERE id = ?1
@@ -763,6 +779,49 @@ impl StateStore {
                 row_to_prompt,
             )
             .optional()?)
+    }
+
+    pub fn get_prompt_by_message_id(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Option<PromptRecord>> {
+        Ok(self
+            .connection()
+            .query_row(
+                r#"
+                SELECT id, session_id, created_at, updated_at, status,
+                       stop_reason, error_code, error_message, prompt_json,
+                       message_id, message_id_acknowledged,
+                       failure_class, failure_detail_json
+                FROM prompts
+                WHERE session_id = ?1 AND message_id = ?2
+                "#,
+                params![session_id, message_id],
+                row_to_prompt,
+            )
+            .optional()?)
+    }
+
+    pub fn acknowledge_prompt_message_id(&self, prompt_id: &str, message_id: &str) -> Result<()> {
+        let now = current_timestamp();
+        self.persist_with_outbox("prompts", prompt_id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE prompts
+                SET message_id_acknowledged = 1,
+                    updated_at = ?1
+                WHERE id = ?2 AND message_id = ?3
+                "#,
+                params![now, prompt_id, message_id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::PromptNotFound {
+                    id: prompt_id.to_owned(),
+                });
+            }
+            Ok(())
+        })
     }
 
     /// Update a prompt's lifecycle row. `failure_class` and
@@ -1055,6 +1114,7 @@ impl StateStore {
             r#"
             SELECT id, session_id, created_at, updated_at, status,
                    stop_reason, error_code, error_message, prompt_json,
+                   message_id, message_id_acknowledged,
                    failure_class, failure_detail_json
             FROM prompts
             WHERE session_id = ?1 AND status IN ('pending', 'running')

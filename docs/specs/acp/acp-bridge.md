@@ -16,6 +16,7 @@ The bridge maps runtime session operations to ACP methods where supported:
 - list
 - load
 - resume
+- fork
 - close/delete
 - prompt
 - cancel
@@ -26,23 +27,24 @@ If an agent does not advertise an optional capability, the corresponding runtime
 - `session/list` requires `supports_list_sessions`
 - `session/load` requires `supports_load_session`
 - `session/resume` requires `supports_resume_session`
+- `session/fork` requires `supports_fork_session`
 
-Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,close}` for the rest. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Forking at a prompt breakpoint also requires explicit `sessionCapabilities.fork.messageId` support; otherwise only current-head fork is allowed. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
 ### Session Resume Capability Matrix
 
 `data/agents.toml` does not declare per-agent overrides for these capabilities; every value below is discovered at runtime from the agent's `initialize` reply. A value listed as "untested" has not been confirmed end-to-end against the agent in question.
 
-| Agent      | `session/list` | `session/load` | `session/resume` |
-| ---------- | -------------- | -------------- | ---------------- |
-| OpenCode   | discovered     | discovered     | discovered       |
-| Cursor CLI | discovered     | discovered     | discovered       |
-| Amp Code   | discovered     | discovered     | discovered       |
-| Pi Agent   | discovered     | discovered     | discovered       |
-| Goose      | discovered     | discovered     | discovered       |
-| Codex      | discovered     | discovered     | discovered       |
+| Agent      | `session/list` | `session/load` | `session/resume` | `session/fork` |
+| ---------- | -------------- | -------------- | ---------------- | -------------- |
+| OpenCode   | discovered     | discovered     | discovered       | discovered     |
+| Cursor CLI | discovered     | discovered     | discovered       | discovered     |
+| Amp Code   | discovered     | discovered     | discovered       | discovered     |
+| Pi Agent   | discovered     | discovered     | discovered       | discovered     |
+| Goose      | discovered     | discovered     | discovered       | discovered     |
+| Codex      | discovered     | discovered     | discovered       | discovered     |
 
-"Discovered" means the runtime trusts the value advertised by the agent's `initialize` response. When an agent reports `false` (or omits the flag), the matching `POST /v1/sessions/{id}/{load,resume}` route returns HTTP 501 `agent.unsupported_capability` and the operator-facing alternative is to create a fresh session. The per-agent live behavior of these capabilities — what the agent actually does after a live ACP connection drop — is captured in `docs/agents/{agent}.md`.
+"Discovered" means the runtime trusts the value advertised by the agent's `initialize` response. When an agent reports `false` (or omits the flag), the matching `POST /v1/sessions/{id}/{load,resume,fork}` route returns HTTP 501 `agent.unsupported_capability` and the operator-facing alternative is to create a fresh session. The per-agent live behavior of these capabilities is captured in `docs/agents/{agent}.md`.
 
 ## Streaming
 
