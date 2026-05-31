@@ -12,7 +12,7 @@
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
 | Agents         | `acps agent install`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
-| Sessions       | `acps sessions list/status/new/prompt/cancel/close`                         |
+| Sessions       | `acps sessions list/status/new/fork/prompt/cancel/close`                    |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
 | WebSockets     | `acps ws connections`, `ws sessions`, `ws disconnect`                       |
@@ -116,6 +116,7 @@ Mapped model and mode values are validated against the configured agent's ACP-ad
 acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>]
 acps sessions status [--threshold <duration>] [--limit <n>]
 acps sessions new
+acps sessions fork <session-id> [--message-id <id>] [--cwd <path>]
 acps sessions prompt <session-id>
 acps sessions cancel <session-id>
 acps sessions close <session-id>
@@ -124,6 +125,8 @@ acps sessions close <session-id>
 `sessions list` shows the durable local session list after any supported ACP session-list sync. Sessions discovered from the agent but not loaded locally are shown as `available`.
 
 `sessions status` prints active sessions with recent or idle state. The default recent threshold is `15m`.
+
+`sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
 
 ## Logs, Metrics, And Health
 

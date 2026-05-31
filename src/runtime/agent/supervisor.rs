@@ -51,7 +51,7 @@ const AGENT_CRASH_RESTART_BACKOFF: Duration = Duration::from_millis(250);
 const AGENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 use agent_client_protocol::schema::{
-    ContentBlock, McpServer, PromptRequest, SessionId as AcpSessionId, StopReason,
+    ContentBlock, McpServer, PromptRequest, PromptResponse, SessionId as AcpSessionId, StopReason,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -74,7 +74,7 @@ use crate::state::{
     EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_SYSTEM,
     FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
     PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
-    next_prompt_id,
+    next_prompt_id, next_prompt_message_id,
 };
 
 pub struct ServerLifecycle {
@@ -716,6 +716,107 @@ impl AgentSupervisor {
             })
     }
 
+    pub async fn fork_session(
+        &self,
+        parent_session_id: &str,
+        cwd: Option<String>,
+        mcp_servers: Vec<McpServer>,
+        workspace_root: &str,
+        message_id: Option<String>,
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<SessionRecord> {
+        let bridge = self.bridge().await?;
+        let parent = {
+            let guard = state.lock().await;
+            guard.get_session(parent_session_id)?
+        }
+        .ok_or_else(|| StackError::SessionNotFound {
+            id: parent_session_id.to_owned(),
+        })?;
+        if parent.status == SESSION_STATUS_CLOSED {
+            return Err(StackError::SessionClosed {
+                id: parent_session_id.to_owned(),
+            });
+        }
+        let breakpoint_message_id = if let Some(message_id) = message_id {
+            let prompt = {
+                let guard = state.lock().await;
+                guard.get_prompt_by_message_id(parent_session_id, &message_id)?
+            }
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "message_id",
+                reason: format!(
+                    "session `{parent_session_id}` has no prompt with message id `{message_id}`"
+                ),
+            })?;
+            if !prompt.message_id_acknowledged {
+                return Err(StackError::InvalidParam {
+                    field: "message_id",
+                    reason: format!("message id `{message_id}` was not acknowledged by the agent"),
+                });
+            }
+            Some(message_id)
+        } else {
+            None
+        };
+        let resolved_cwd = cwd.unwrap_or_else(|| {
+            if parent.cwd.is_empty() {
+                workspace_root.to_owned()
+            } else {
+                parent.cwd.clone()
+            }
+        });
+        let response = bridge
+            .fork_session(
+                AcpSessionId::new(parent_session_id.to_owned()),
+                PathBuf::from(&resolved_cwd),
+                mcp_servers,
+                breakpoint_message_id.clone(),
+            )
+            .await?;
+        let child_session_id = response.session_id.0.to_string();
+        let metadata_json = json!({
+            "fork": {
+                "parent_session_id": parent_session_id,
+                "strategy": "acp_native",
+                "message_id": breakpoint_message_id,
+            }
+        })
+        .to_string();
+        let record = NewSessionRecord {
+            id: child_session_id.clone(),
+            agent_id: parent.agent_id.clone(),
+            cwd: resolved_cwd,
+            title: parent.title.clone(),
+            metadata_json,
+        };
+        let guard = state.lock().await;
+        let inserted = guard.insert_session(record)?;
+        let payload = json!({
+            "parent_session_id": parent_session_id,
+            "child_session_id": child_session_id,
+            "strategy": "acp_native",
+            "message_id": breakpoint_message_id,
+            "cwd": inserted.cwd,
+        })
+        .to_string();
+        guard.append_session_event(
+            &inserted.id,
+            "info",
+            "session.forked",
+            "session forked",
+            &payload,
+        )?;
+        guard.append_session_event(
+            parent_session_id,
+            "info",
+            "session.fork.created_child",
+            "session fork child created",
+            &payload,
+        )?;
+        Ok(inserted)
+    }
+
     /// `DELETE /v1/sessions/{id}`. Closes the agent-side session and marks
     /// the local row `closed`.
     ///
@@ -786,13 +887,17 @@ impl AgentSupervisor {
             }
         }
         let prompt_id = next_prompt_id();
+        let message_id = next_prompt_message_id();
         let record = {
             let guard = state.lock().await;
-            guard.insert_prompt(NewPromptRecord {
-                id: prompt_id.clone(),
-                session_id: session_id.to_owned(),
-                prompt_json,
-            })?
+            guard.insert_prompt_with_message_id(
+                NewPromptRecord {
+                    id: prompt_id.clone(),
+                    session_id: session_id.to_owned(),
+                    prompt_json,
+                },
+                Some(message_id.clone()),
+            )?
         };
 
         let cancel = CancellationToken::new();
@@ -800,8 +905,10 @@ impl AgentSupervisor {
         let state_clone = state.clone();
         let session_id_owned = session_id.to_owned();
         let prompt_id_owned = prompt_id.clone();
+        let message_id_owned = message_id.clone();
         let acp_request =
-            PromptRequest::new(AcpSessionId::new(session_id_owned.clone()), prompt_blocks);
+            PromptRequest::new(AcpSessionId::new(session_id_owned.clone()), prompt_blocks)
+                .message_id(message_id);
 
         let join = tokio::spawn(async move {
             // Flip `pending -> running` so clients polling immediately after
@@ -828,6 +935,21 @@ impl AgentSupervisor {
                 result = bridge_call => Outcome::Settled(result),
                 _ = cancel_inner.cancelled() => Outcome::Cancelled,
             };
+            if let Outcome::Settled(Ok(response)) = &outcome
+                && response.user_message_id.as_deref() == Some(message_id_owned.as_str())
+            {
+                let guard = state_clone.lock().await;
+                if let Err(err) =
+                    guard.acknowledge_prompt_message_id(&prompt_id_owned, &message_id_owned)
+                {
+                    tracing::warn!(
+                        error = %err,
+                        prompt_id = %prompt_id_owned,
+                        message_id = %message_id_owned,
+                        "failed to acknowledge prompt message id"
+                    );
+                }
+            }
 
             // Terminal taxonomy: cancellation is not a failure (failure_class
             // stays None), inference-HTTP failures get their own class and a
@@ -1291,7 +1413,7 @@ async fn append_and_publish_agent_lifecycle(
 }
 
 enum Outcome {
-    Settled(Result<StopReason>),
+    Settled(Result<PromptResponse>),
     Cancelled,
 }
 
@@ -1326,7 +1448,8 @@ fn build_terminal_outcome_with_prompt_id(
     prompt_id_for_event: Option<&str>,
 ) -> TerminalOutcome {
     match outcome {
-        Outcome::Settled(Ok(stop_reason)) => {
+        Outcome::Settled(Ok(response)) => {
+            let stop_reason = response.stop_reason;
             let stop_str = stop_reason_str(stop_reason);
             let status = if stop_reason == StopReason::Cancelled {
                 PromptStatus::Cancelled

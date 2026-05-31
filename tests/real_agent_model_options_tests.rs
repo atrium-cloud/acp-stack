@@ -170,7 +170,8 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
     let stop = tokio::time::timeout(Duration::from_secs(180), bridge.prompt_session(request))
         .await
         .expect("real ACP agent prompt timed out")
-        .expect("real ACP agent should complete prompt");
+        .expect("real ACP agent should complete prompt")
+        .stop_reason;
     println!("{agent_id} prompt stop reason: {stop:?}");
 
     bridge.shutdown().await.expect("real ACP agent shutdown");

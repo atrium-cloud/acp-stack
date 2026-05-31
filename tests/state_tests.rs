@@ -39,7 +39,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        16
+        17
     );
 }
 
@@ -411,6 +411,48 @@ fn active_session_activity_tracks_prompt_submission_as_user() {
 }
 
 #[test]
+fn prompt_message_id_round_trips_and_acknowledges() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_message_id".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/message-id".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    let prompt = store
+        .insert_prompt_with_message_id(
+            NewPromptRecord {
+                id: "prm_message_id".to_owned(),
+                session_id: "sess_message_id".to_owned(),
+                prompt_json: "[]".to_owned(),
+            },
+            Some("00000000-0000-4000-8000-000000000001".to_owned()),
+        )
+        .expect("prompt inserted");
+    assert_eq!(
+        prompt.message_id.as_deref(),
+        Some("00000000-0000-4000-8000-000000000001")
+    );
+    assert!(!prompt.message_id_acknowledged);
+
+    store
+        .acknowledge_prompt_message_id("prm_message_id", "00000000-0000-4000-8000-000000000001")
+        .expect("prompt message id acknowledged");
+    let prompt = store
+        .get_prompt_by_message_id("sess_message_id", "00000000-0000-4000-8000-000000000001")
+        .expect("prompt lookup")
+        .expect("prompt exists");
+    assert!(prompt.message_id_acknowledged);
+}
+
+#[test]
 fn active_session_activity_tracks_prompt_status_update_as_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
@@ -727,7 +769,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 16")
+            .contains("state schema version 99 is newer than supported version 17")
     );
 }
 
@@ -2256,7 +2298,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        16
+        17
     );
 
     let done = store

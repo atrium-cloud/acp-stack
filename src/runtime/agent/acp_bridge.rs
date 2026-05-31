@@ -25,15 +25,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    AgentNotification, CancelNotification, CloseSessionRequest, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
-    NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SessionConfigOptionCategory, SessionId, SessionInfo,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModelRequest,
-    SetSessionModelResponse, StopReason,
+    AgentNotification, CancelNotification, CloseSessionRequest, ForkSessionResponse,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, SessionConfigOptionCategory, SessionId,
+    SessionInfo, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModelRequest, SetSessionModelResponse,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo};
+use agent_client_protocol::{
+    Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest, UntypedMessage,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::{Child, Command};
@@ -148,6 +150,33 @@ impl AgentCapabilitiesDto {
 
     pub fn supports_close_session(&self) -> bool {
         self.supports_session_capability("close")
+    }
+
+    pub fn supports_fork_session(&self) -> bool {
+        self.supports_session_capability("fork")
+    }
+
+    pub fn supports_fork_message_id(&self) -> bool {
+        let fork = self
+            .capabilities
+            .get("sessionCapabilities")
+            .and_then(Value::as_object)
+            .and_then(|caps| caps.get("fork"))
+            .and_then(Value::as_object);
+        fork.and_then(|fork| fork.get("messageId"))
+            .is_some_and(Value::is_object)
+            || fork
+                .and_then(|fork| fork.get("_meta"))
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("acpStack"))
+                .and_then(Value::as_object)
+                .and_then(|stack| stack.get("messageId"))
+                .is_some_and(Value::is_object)
+            || fork
+                .and_then(|fork| fork.get("_meta"))
+                .and_then(Value::as_object)
+                .and_then(|fork| fork.get("messageId"))
+                .is_some_and(Value::is_object)
     }
 
     fn supports_session_capability(&self, name: &str) -> bool {
@@ -601,6 +630,40 @@ impl AcpBridge {
         Ok(response)
     }
 
+    pub async fn fork_session(
+        &self,
+        session_id: SessionId,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+        message_id: Option<String>,
+    ) -> Result<ForkSessionResponse> {
+        if !self.capabilities.supports_fork_session() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/fork",
+            });
+        }
+        if message_id.is_some() && !self.capabilities.supports_fork_message_id() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/fork.messageId",
+            });
+        }
+        let connection = self.connection().await?;
+        let request = StackForkSessionRequest {
+            session_id,
+            cwd,
+            mcp_servers,
+            message_id,
+        };
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/fork",
+                message: err.to_string(),
+            })
+    }
+
     /// `session/list`. Requires the `sessionCapabilities.list` capability.
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         if !self.capabilities.supports_list_sessions() {
@@ -752,10 +815,10 @@ impl AcpBridge {
     /// `err.to_string()` is never persisted: 4xx/5xx paths surface only the
     /// vetted reason label, and the generic fallback uses a sanitized message
     /// to avoid leaking URLs / headers / bodies / secrets into the state row.
-    pub async fn prompt_session(&self, request: PromptRequest) -> Result<StopReason> {
+    pub async fn prompt_session(&self, request: PromptRequest) -> Result<PromptResponse> {
         let connection = self.connection().await?;
         match connection.send_request(request).block_task().await {
-            Ok(response) => Ok(response.stop_reason),
+            Ok(response) => Ok(response),
             Err(err) => {
                 let classified = inference_failure::classify(&err);
                 Err(map_prompt_error(classified))
@@ -841,6 +904,47 @@ impl AcpBridge {
 
         Ok(status.and_then(|s| s.code()))
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackForkSessionRequest {
+    session_id: SessionId,
+    cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mcp_servers: Vec<McpServer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+}
+
+impl JsonRpcMessage for StackForkSessionRequest {
+    fn matches_method(method: &str) -> bool {
+        method == "session/fork"
+    }
+
+    fn method(&self) -> &str {
+        "session/fork"
+    }
+
+    fn to_untyped_message(
+        &self,
+    ) -> std::result::Result<UntypedMessage, agent_client_protocol::Error> {
+        UntypedMessage::new("session/fork", self)
+    }
+
+    fn parse_message(
+        method: &str,
+        params: &impl Serialize,
+    ) -> std::result::Result<Self, agent_client_protocol::Error> {
+        if method != "session/fork" {
+            return Err(agent_client_protocol::Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+
+impl JsonRpcRequest for StackForkSessionRequest {
+    type Response = ForkSessionResponse;
 }
 
 fn pre_session_model(agent: &AgentConfig) -> Option<String> {

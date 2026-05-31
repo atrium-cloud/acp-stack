@@ -22,6 +22,8 @@ pub enum SessionsCommand {
     Status(SessionsStatusArgs),
     /// Create a new session through the running daemon.
     New(SessionsNewArgs),
+    /// Fork an existing session through ACP.
+    Fork(SessionsForkArgs),
     /// Send a prompt to a session. Polls until completion unless `--no-wait`.
     Prompt(SessionsPromptArgs),
     /// Cancel any in-flight prompts and notify the agent.
@@ -61,6 +63,17 @@ pub struct SessionsNewArgs {
     /// `workspace.root` configured for the runtime.
     #[arg(long)]
     cwd: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsForkArgs {
+    session_id: String,
+    /// Optional working directory for the forked session.
+    #[arg(long)]
+    cwd: Option<String>,
+    /// Optional ACP prompt message id to fork from.
+    #[arg(long)]
+    message_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -188,6 +201,29 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                     print_json(response.get("data").unwrap_or(&response))?;
                 } else {
                     println!("session: {id}");
+                    if !cwd.is_empty() {
+                        println!("cwd: {cwd}");
+                    }
+                }
+                Ok(())
+            }
+            SessionsCommand::Fork(args) => {
+                let body = serde_json::json!({
+                    "cwd": args.cwd,
+                    "message_id": args.message_id,
+                });
+                let encoded = encode_path_segment(&args.session_id);
+                let path = format!("/v1/sessions/{encoded}/fork");
+                let response =
+                    daemon_request(&base_url, CliMethod::Post, &path, &session_key, Some(&body))
+                        .await?;
+                let id = response["data"]["id"].as_str().unwrap_or("?");
+                let cwd = response["data"]["cwd"].as_str().unwrap_or("");
+                if output.is_json() {
+                    print_json(response.get("data").unwrap_or(&response))?;
+                } else {
+                    println!("session: {id}");
+                    println!("parent: {}", args.session_id);
                     if !cwd.is_empty() {
                         println!("cwd: {cwd}");
                     }

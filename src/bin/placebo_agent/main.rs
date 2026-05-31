@@ -5,16 +5,21 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, ProtocolVersion,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionInfo,
+    ContentChunk, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+    ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionInfo,
     SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Error, Responder};
+use agent_client_protocol::{
+    Agent, Client, ConnectionTo, Dispatch, Error, JsonRpcMessage, JsonRpcRequest, Responder,
+    UntypedMessage,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -96,6 +101,12 @@ struct AcpArgs {
     no_cap_resume_session: bool,
     #[arg(long)]
     no_cap_close_session: bool,
+    #[arg(long)]
+    no_cap_fork_session: bool,
+    #[arg(long)]
+    no_cap_fork_message_id: bool,
+    #[arg(long)]
+    expect_fork_message_id: Option<String>,
     #[arg(long)]
     prompt_silent: bool,
     #[arg(long)]
@@ -262,6 +273,15 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
             {
                 let state = Arc::clone(&state);
                 async move |request, responder, connection| {
+                    handle_fork_session(Arc::clone(&state), request, responder, connection).await
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = Arc::clone(&state);
+                async move |request, responder, connection| {
                     handle_prompt(Arc::clone(&state), request, responder, connection).await
                 }
             },
@@ -308,6 +328,17 @@ async fn handle_initialize(
     }
     if !state.args.no_cap_close_session {
         session_capabilities = session_capabilities.close(SessionCloseCapabilities::new());
+    }
+    if !state.args.no_cap_fork_session {
+        let mut fork = SessionForkCapabilities::new();
+        if !state.args.no_cap_fork_message_id {
+            let mut stack = serde_json::Map::new();
+            stack.insert("messageId".to_owned(), serde_json::json!({}));
+            let mut meta = serde_json::Map::new();
+            meta.insert("acpStack".to_owned(), serde_json::Value::Object(stack));
+            fork = fork.meta(meta);
+        }
+        session_capabilities = session_capabilities.fork(fork);
     }
     let capabilities = AgentCapabilities::new()
         .load_session(!state.args.no_cap_load_session)
@@ -451,6 +482,36 @@ async fn handle_close_session(
     responder.respond(CloseSessionResponse::new())
 }
 
+async fn handle_fork_session(
+    state: SharedState,
+    request: PlaceboForkSessionRequest,
+    responder: Responder<ForkSessionResponse>,
+    _connection: ConnectionTo<Client>,
+) -> agent_client_protocol::Result<()> {
+    let PlaceboForkSessionRequest {
+        session_id: _parent_session_id,
+        cwd,
+        mcp_servers: _mcp_servers,
+        message_id: _message_id,
+    } = request;
+    let mut state = state.lock().await;
+    if let Some(expected) = state.args.expect_fork_message_id.as_deref()
+        && _message_id.as_deref() != Some(expected)
+    {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            format!("expected fork message id {expected}"),
+        ));
+    }
+    let session_id = format!("{}{}", FIXTURE_SESSION_PREFIX, state.next_session);
+    state.next_session += 1;
+    state.created_sessions.push(CreatedSession {
+        id: session_id.clone(),
+        cwd,
+    });
+    responder.respond(ForkSessionResponse::new(session_id))
+}
+
 async fn handle_prompt(
     state: SharedState,
     request: PromptRequest,
@@ -516,7 +577,43 @@ async fn handle_prompt(
             StopReason::EndTurn
         }
     };
-    responder.respond(PromptResponse::new(stop_reason))
+    responder.respond(PromptResponse::new(stop_reason).user_message_id(request.message_id.clone()))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaceboForkSessionRequest {
+    session_id: SessionId,
+    cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+}
+
+impl JsonRpcMessage for PlaceboForkSessionRequest {
+    fn matches_method(method: &str) -> bool {
+        method == "session/fork"
+    }
+
+    fn method(&self) -> &str {
+        "session/fork"
+    }
+
+    fn to_untyped_message(&self) -> std::result::Result<UntypedMessage, Error> {
+        UntypedMessage::new("session/fork", self)
+    }
+
+    fn parse_message(method: &str, params: &impl Serialize) -> std::result::Result<Self, Error> {
+        if method != "session/fork" {
+            return Err(Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+
+impl JsonRpcRequest for PlaceboForkSessionRequest {
+    type Response = ForkSessionResponse;
 }
 
 async fn handle_cancel(

@@ -300,6 +300,10 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
         .as_str()
         .expect("prompt id")
         .to_owned();
+    let message_id = submit["data"]["message_id"]
+        .as_str()
+        .expect("prompt message id")
+        .to_owned();
 
     // Poll until terminal. Bounded so a hung agent fails the test instead
     // of hanging CI forever.
@@ -328,6 +332,8 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     };
     assert_eq!(final_status["status"], "completed");
     assert_eq!(final_status["stop_reason"], "end_turn");
+    assert_eq!(final_status["message_id"], message_id);
+    assert_eq!(final_status["message_id_acknowledged"], true);
 
     // The fake agent emits two `session/update` notifications per prompt.
     // The bridge persists them keyed by session_id, so the events endpoint
@@ -366,6 +372,95 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
     assert_eq!(close.status(), StatusCode::OK);
     let close_body: Value = close.json().await.expect("close json");
     assert_eq!(close_body["data"]["status"], "closed");
+}
+
+#[tokio::test]
+async fn fork_session_records_parent_lineage() {
+    let harness = Harness::spawn().await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    let forked: Value = client
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("fork")
+        .json()
+        .await
+        .expect("fork json");
+    let child_id = forked["data"]["id"].as_str().expect("child id");
+
+    let state = harness.state.lock().await;
+    let child = state
+        .get_session(child_id)
+        .expect("child lookup")
+        .expect("child exists");
+    let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
+    assert_eq!(metadata["fork"]["parent_session_id"], session_id);
+    assert_eq!(metadata["fork"]["strategy"], "acp_native");
+    assert!(metadata["fork"]["message_id"].is_null());
+}
+
+#[tokio::test]
+async fn fork_session_forwards_message_breakpoint_to_placebo() {
+    const BREAKPOINT_MESSAGE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--expect-fork-message-id".to_owned(),
+            BREAKPOINT_MESSAGE_ID.to_owned(),
+        ]);
+    })
+    .await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    {
+        let state = harness.state.lock().await;
+        state
+            .insert_prompt_with_message_id(
+                NewPromptRecord {
+                    id: "prm_fork_breakpoint".to_owned(),
+                    session_id: session_id.clone(),
+                    prompt_json: r#"[{"type":"text","text":"fork breakpoint"}]"#.to_owned(),
+                },
+                Some(BREAKPOINT_MESSAGE_ID.to_owned()),
+            )
+            .expect("prompt inserted");
+        state
+            .acknowledge_prompt_message_id("prm_fork_breakpoint", BREAKPOINT_MESSAGE_ID)
+            .expect("prompt message id acknowledged");
+    }
+
+    let forked: Value = client
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "message_id": BREAKPOINT_MESSAGE_ID }))
+        .send()
+        .await
+        .expect("fork")
+        .json()
+        .await
+        .expect("fork json");
+    let child_id = forked["data"]["id"].as_str().expect("child id");
+
+    let state = harness.state.lock().await;
+    let child = state
+        .get_session(child_id)
+        .expect("child lookup")
+        .expect("child exists");
+    let metadata: Value = serde_json::from_str(&child.metadata_json).expect("metadata json");
+    assert_eq!(metadata["fork"]["parent_session_id"], session_id);
+    assert_eq!(metadata["fork"]["strategy"], "acp_native");
+    assert_eq!(metadata["fork"]["message_id"], BREAKPOINT_MESSAGE_ID);
 }
 
 #[tokio::test]

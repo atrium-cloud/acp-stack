@@ -192,6 +192,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/016_command_output_reconnect.sqlite.sql"),
         postgres: include_str!("../../migrations/016_command_output_reconnect.postgres.sql"),
     },
+    Migration {
+        id: 17,
+        name: "prompt_message_ids",
+        sqlite_file: "017_prompt_message_ids.sqlite.sql",
+        postgres_file: "017_prompt_message_ids.postgres.sql",
+        sqlite: include_str!("../../migrations/017_prompt_message_ids.sqlite.sql"),
+        postgres: include_str!("../../migrations/017_prompt_message_ids.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including bundled Postgres

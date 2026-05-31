@@ -498,6 +498,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/sessions/{id}/load"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/resume") {
         "/v1/sessions/{id}/resume"
+    } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/fork") {
+        "/v1/sessions/{id}/fork"
     } else if bare.starts_with("/v1/sessions/") && bare.contains("/prompts/") {
         "/v1/sessions/{id}/prompts/{prompt_id}"
     } else if bare.starts_with("/v1/sessions/") && bare.ends_with("/events") {

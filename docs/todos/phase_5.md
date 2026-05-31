@@ -24,6 +24,7 @@
 - [ ] Add provider/model selection UX on top of the Phase 4 `models.dev` resolver, including clear filtering by available secret refs.
 - [x] Add provider picker readiness labels for missing and available secret refs.
 - [x] Add `acps agent switch` UX with target install preview, compatible provider reuse, secret-ref migration, and model follow-up gating.
+- [x] Add `acps sessions fork` with optional cwd and prompt message-id breakpoint flags.
 - [ ] Add retry/reporting polish for failed init, dependency, ingestion, and testflight steps.
 - [x] Add failed init retry reporting with resumable run id.
 - [x] Add shell completion generation.
@@ -53,6 +54,9 @@
 - [x] Persist prompt lifecycle states with explicit `pending|running|completed|errored|cancelled|stalled` or equivalent states.
 - [x] Add stale-prompt detection for sessions that stop emitting ACP updates before terminal state.
 - [x] Sync ACP `session/list` discovery into durable session history and expose discovered sessions as `available`.
+- [x] Persist ACP prompt message IDs and acknowledgement state for durable reconnect and fork breakpoint lookup.
+- [x] Route session forking through ACP and persist parent lineage on child sessions.
+- [ ] Replace the local fork message-id extension when upstream ACP exposes an equivalent or richer `session/fork` shape.
 - [x] Ensure clients can reconnect and recover current prompt/session state from HTTP without relying on live WebSocket history.
 - [x] Document behavior for ACP `session/resume`, `session/load`, and unsupported resume paths per supported agent.
 - [x] Classify prompt failures caused by model/inference endpoint HTTP 5xx responses separately from VM, daemon, and agent runtime failures.

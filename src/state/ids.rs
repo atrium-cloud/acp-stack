@@ -6,6 +6,7 @@
 //! by concurrent `acps` invocations.
 
 use chrono::{SecondsFormat, Utc};
+use rand::RngExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -78,6 +79,32 @@ pub fn next_prompt_id() -> String {
     let sequence = PROMPT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("prm_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+pub fn next_prompt_message_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
 }
 
 pub fn next_command_id() -> String {

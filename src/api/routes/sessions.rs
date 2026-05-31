@@ -423,6 +423,41 @@ pub(crate) async fn sessions_resume_handler(
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct SessionsForkBody {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+pub(crate) async fn sessions_fork_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<SessionsForkBody>>,
+) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
+    let Json(payload) = body.unwrap_or_default();
+    let cwd = payload
+        .cwd
+        .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
+        .transpose()?;
+    let mcp_servers = open_mcp_servers(&state.config)?;
+    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
+    let record = state
+        .agent_supervisor
+        .fork_session(
+            &id,
+            cwd,
+            mcp_servers,
+            &state.config.workspace.root,
+            payload.message_id,
+            &state.state,
+        )
+        .await?;
+    persist_mcp_attached(&state, &record.id, &server_names).await;
+    Ok(ApiSuccess::new(SessionResponse::from(record)))
+}
+
 async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[String]) {
     if names.is_empty() {
         return;
@@ -488,6 +523,7 @@ pub(crate) struct PromptSubmitResponse {
     session_id: String,
     status: String,
     created_at: String,
+    message_id: Option<String>,
 }
 
 pub(crate) async fn sessions_prompt_handler(
@@ -514,6 +550,7 @@ pub(crate) async fn sessions_prompt_handler(
         session_id: record.session_id,
         status: record.status,
         created_at: record.created_at,
+        message_id: record.message_id,
     }))
 }
 
@@ -527,6 +564,8 @@ pub(crate) struct PromptStatusResponse {
     stop_reason: Option<String>,
     error_code: Option<String>,
     error_message: Option<String>,
+    message_id: Option<String>,
+    message_id_acknowledged: bool,
 }
 
 impl From<PromptRecord> for PromptStatusResponse {
@@ -540,6 +579,8 @@ impl From<PromptRecord> for PromptStatusResponse {
             stop_reason: r.stop_reason,
             error_code: r.error_code,
             error_message: r.error_message,
+            message_id: r.message_id,
+            message_id_acknowledged: r.message_id_acknowledged,
         }
     }
 }
