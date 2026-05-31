@@ -65,6 +65,17 @@ docker run -d \
 
 Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. First-run API keys are printed to container logs in that mode.
 
+For first-run Supabase logging setup, pass these env vars with auto-init:
+
+```text
+ACP_STACK_SUPABASE_URL=https://example.supabase.co
+ACP_STACK_SUPABASE_SCHEMA=acp_stack
+ACP_STACK_SUPABASE_API_KEY_REF=SUPABASE_SECRET_KEY
+ACP_STACK_SUPABASE_SECRET_KEY=<supabase-secret-key>
+```
+
+After init has created the durable config, use `acps logging supabase ...` for changes.
+
 ## Railway
 
 Use the root `Dockerfile` and attach a persistent Railway volume at `/home/acp`. Railway provides `PORT`; the image binds to that port automatically.

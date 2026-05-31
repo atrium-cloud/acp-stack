@@ -38,6 +38,10 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "cloudflare_api_token_ref": args.cloudflare_api_token_ref,
         "cloudflare_account_id_ref": args.cloudflare_account_id_ref,
         "cloudflared_deployment": args.cloudflared_deployment.as_config_value(),
+        "supabase_url": args.supabase_url,
+        "supabase_schema": args.supabase_schema,
+        "supabase_api_key_ref": args.supabase_api_key_ref,
+        "no_supabase": args.no_supabase,
         "skip_workspace_init": args.skip_workspace_init(),
         "testflight": args.testflight,
         "skip_testflight": args.skip_testflight,
@@ -89,7 +93,13 @@ pub(super) struct RecordedInitArgs {
     pub(super) cloudflare_api_token_ref: Option<String>,
     pub(super) cloudflare_account_id_ref: Option<String>,
     pub(super) cloudflared_deployment: Option<String>,
+    pub(super) supabase_url: Option<String>,
+    pub(super) supabase_schema: Option<String>,
+    pub(super) supabase_api_key_ref: Option<String>,
     #[serde(default)]
+    pub(super) no_supabase: bool,
+    #[serde(default)]
+    #[cfg_attr(not(feature = "dev-tools"), allow(dead_code))]
     pub(super) skip_workspace_init: bool,
     #[serde(default)]
     pub(super) testflight: bool,

@@ -11,14 +11,17 @@ use crate::config::{
 };
 use crate::error::{Result, StackError};
 
+use super::super::logging::{
+    SUPABASE_DEFAULT_API_KEY_REF, SUPABASE_DEFAULT_SCHEMA, disabled_supabase_config,
+    enabled_supabase_config,
+};
 use super::{
     InitArgs, STARTER_ADMIN_KEY_REF, STARTER_AGENT_COMMAND, STARTER_AGENT_ID,
     STARTER_AGENT_INSTALL_COMMAND, STARTER_AGENT_INSTALL_CREATES, STARTER_AGENT_INSTALL_TYPE,
     STARTER_AGENT_NAME, STARTER_AGENT_RESTART, STARTER_AUTH_BLOCK_DURATION,
     STARTER_AUTH_FAILURES_PER_MINUTE, STARTER_DEFAULT_SHELL, STARTER_LOCAL_RETENTION_DAYS,
     STARTER_LOG_LEVEL, STARTER_MAX_REQUEST_BYTES, STARTER_RATE_LIMIT_BURST,
-    STARTER_RATE_LIMIT_PER_MINUTE, STARTER_SESSION_KEY_REF, STARTER_SUPABASE_API_KEY_REF,
-    STARTER_SUPABASE_SCHEMA, STARTER_SUPABASE_URL, STARTER_WORKSPACE_MAX_FILE_BYTES,
+    STARTER_RATE_LIMIT_PER_MINUTE, STARTER_SESSION_KEY_REF, STARTER_WORKSPACE_MAX_FILE_BYTES,
 };
 
 pub(super) fn validate_deployment_overrides_match_existing(
@@ -132,12 +135,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
         logging: LoggingConfig {
             level: STARTER_LOG_LEVEL.to_owned(),
             local_retention_days: STARTER_LOCAL_RETENTION_DAYS,
-            supabase: Some(SupabaseLoggingConfig {
-                enabled: false,
-                url: STARTER_SUPABASE_URL.to_owned(),
-                api_key_ref: STARTER_SUPABASE_API_KEY_REF.to_owned(),
-                schema: STARTER_SUPABASE_SCHEMA.to_owned(),
-            }),
+            supabase: Some(starter_supabase_config(args)),
         },
         agent: AgentConfig {
             id: STARTER_AGENT_ID.to_owned(),
@@ -171,6 +169,28 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
     let canonical = starter.to_canonical_toml()?;
     config::load_config_from_str(&canonical)?;
     Ok(canonical)
+}
+
+fn starter_supabase_config(args: &InitArgs) -> SupabaseLoggingConfig {
+    if args.no_supabase {
+        return disabled_supabase_config();
+    }
+    match args.supabase_url.clone() {
+        Some(url) => enabled_supabase_config(
+            url,
+            Some(
+                args.supabase_schema
+                    .clone()
+                    .unwrap_or_else(|| SUPABASE_DEFAULT_SCHEMA.to_owned()),
+            ),
+            Some(
+                args.supabase_api_key_ref
+                    .clone()
+                    .unwrap_or_else(|| SUPABASE_DEFAULT_API_KEY_REF.to_owned()),
+            ),
+        ),
+        None => disabled_supabase_config(),
+    }
 }
 
 fn starter_runtime_user(args: &InitArgs) -> Result<String> {

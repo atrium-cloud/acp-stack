@@ -38,6 +38,7 @@ acps init \
   [--code-from <repo-url>]... [--data-from <path-or-url>]... \
   [--mcp-preset linear] [--mcp-stdio <name=command>]... [--mcp-stdio-env <server=SECRET_REF>]... \
   [--mcp-http <name=https://...>]... [--mcp-http-header <server=Header:SECRET_REF>]... \
+  [--supabase-url <url>] [--supabase-schema <schema>] [--supabase-api-key-ref <ref>] [--no-supabase] \
   [--edge cloudflare --exposure tunnel --hostname <host>] [--cloudflare-mode generated|managed] \
   [--cloudflare-api-token-ref <ref> --cloudflare-account-id-ref <ref>] \
   [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
@@ -50,6 +51,8 @@ Interactive init may prompt for missing choices. Non-interactive first runs requ
 `acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected.
 
 On new starter configs, `--mcp-preset linear` adds the Linear hosted MCP declaration using `LINEAR_API_KEY`. `--mcp-stdio name=command` and `--mcp-http name=https://...` add custom runtime-wide MCP declarations. `--mcp-stdio-env server=SECRET_REF` and `--mcp-http-header server=Header:SECRET_REF` attach required secret refs to those declarations.
+
+`--supabase-url` enables the external Supabase logging sink during init. `--supabase-schema` defaults to `acp_stack`; `--supabase-api-key-ref` defaults to `SUPABASE_SECRET_KEY`. Interactive init prompts for a missing Supabase secret key. Non-interactive init expects `ACP_STACK_SUPABASE_SECRET_KEY` or an existing secret-store entry.
 
 `--skills-source` and `--skills` install selected Agent Skills before testflight.
 Official sources are `openai` and `anthropic`; custom sources use
@@ -78,6 +81,17 @@ acps config import --base64 <code> [--force] [--dry-run]
 ```
 
 Export emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+
+## Logging Commands
+
+```sh
+acps logging supabase status
+acps logging supabase enable --url <url> [--schema <schema>] [--api-key-ref <ref>]
+acps logging supabase disable
+acps logging supabase set-secret [--api-key-ref <ref>]
+```
+
+`set-secret` stores the Supabase secret key in the encrypted secret store. Status output reports whether the configured secret exists but never prints its value.
 
 ## Agent Commands
 
