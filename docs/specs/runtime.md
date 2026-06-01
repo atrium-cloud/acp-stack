@@ -116,7 +116,7 @@ The `reason_category` catalog is:
 
 ## Dependencies And MCP
 
-Dependency declarations report whether expected tools, packages, runtimes, and MCP servers are present. Install actions run only when explicitly declared for a command dependency.
+Dependency declarations report whether expected tools, packages, runtimes, and MCP servers are present. Commands and runtimes are checked as executables on PATH. Package checks use local Linux package databases when available. Install actions run only when explicitly declared for a command dependency.
 
 MCP server declarations are resolved at ACP session creation, load, or resume. Secret refs for stdio env vars and HTTP headers are resolved from the encrypted secret store at attach time.
 

@@ -92,6 +92,7 @@ pub enum DepApplyOutcome {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DepsApplyReport {
+    pub apply_run_id: String,
     pub before: Vec<DepStatus>,
     pub after: Vec<DepStatus>,
     pub results: Vec<DepApplyResult>,
@@ -182,6 +183,7 @@ pub fn apply_dependencies_with_progress(
     }
     let after = compute_before_after_report(config);
     Ok(DepsApplyReport {
+        apply_run_id,
         before,
         after,
         results,
