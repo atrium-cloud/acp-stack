@@ -77,6 +77,9 @@ async fn post_agent_daemon(
 }
 
 pub(super) fn run_agent_install(_args: AgentInstallArgs, output: OutputFormat) -> Result<()> {
+    if !output.is_json() {
+        println!("progress: preparing agent install");
+    }
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
 
@@ -92,6 +95,9 @@ pub(super) fn run_agent_install(_args: AgentInstallArgs, output: OutputFormat) -
     let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = config.agent.install.as_ref() {
+        if !output.is_json() {
+            println!("progress: running configured agent installer");
+        }
         // Operator escape-hatch shell recipe takes precedence over the
         // embedded registry. Useful for private forks of an agent whose id
         // happens to clash with a curated entry.
@@ -107,9 +113,15 @@ pub(super) fn run_agent_install(_args: AgentInstallArgs, output: OutputFormat) -
             Some(&log_base),
         )?
     } else {
+        if !output.is_json() {
+            println!("progress: resolving agent install plan");
+        }
         let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
         let entry = registry.lookup_required(&config.agent.id)?;
         let dest = local_bin_dir(&home);
+        if !output.is_json() {
+            println!("progress: installing resolved agent artifacts");
+        }
         install_resolved(
             &config.agent,
             entry,

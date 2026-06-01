@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use http::header::HeaderName;
@@ -51,6 +51,118 @@ pub(super) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) 
     reject_starter_only_mcp_arg("--mcp-stdio-env", &args.mcp_stdio_env)?;
     reject_starter_only_mcp_arg("--mcp-http", &args.mcp_http)?;
     reject_starter_only_mcp_arg("--mcp-http-header", &args.mcp_http_header)
+}
+
+pub(super) fn prompt_starter_config_selections_if_needed(args: &mut InitArgs) -> Result<()> {
+    if args.non_interactive || !io::stdin().is_terminal() {
+        return Ok(());
+    }
+    prompt_repeated_values(
+        "code source git URL",
+        "add code source? [y/N]: ",
+        "code source URL: ",
+        &mut args.code_from,
+    )?;
+    prompt_repeated_values(
+        "data source path or HTTPS archive URL",
+        "add data source? [y/N]: ",
+        "data source path or URL: ",
+        &mut args.data_from,
+    )?;
+    prompt_mcp_preset(args)?;
+    prompt_repeated_values(
+        "custom stdio MCP server",
+        "add custom stdio MCP server? [y/N]: ",
+        "stdio MCP server (name=command): ",
+        &mut args.mcp_stdio,
+    )?;
+    prompt_repeated_values(
+        "custom HTTP MCP server",
+        "add custom HTTP MCP server? [y/N]: ",
+        "HTTP MCP server (name=https://...): ",
+        &mut args.mcp_http,
+    )?;
+    prompt_repeated_values(
+        "stdio MCP secret ref",
+        "add stdio MCP secret ref? [y/N]: ",
+        "stdio MCP secret ref (server=SECRET_REF): ",
+        &mut args.mcp_stdio_env,
+    )?;
+    prompt_repeated_values(
+        "HTTP MCP header secret ref",
+        "add HTTP MCP header secret ref? [y/N]: ",
+        "HTTP MCP header secret ref (server=Header:SECRET_REF): ",
+        &mut args.mcp_http_header,
+    )?;
+    Ok(())
+}
+
+fn prompt_mcp_preset(args: &mut InitArgs) -> Result<()> {
+    if !args.mcp_preset.is_empty() || !confirm_prompt("add Linear MCP preset? [y/N]: ")? {
+        return Ok(());
+    }
+    args.mcp_preset.push("linear".to_owned());
+    Ok(())
+}
+
+fn prompt_repeated_values(
+    label: &'static str,
+    add_prompt: &'static str,
+    value_prompt: &'static str,
+    values: &mut Vec<String>,
+) -> Result<()> {
+    if !values.is_empty() {
+        println!("{label}: already configured ({})", values.len());
+        return Ok(());
+    }
+    while confirm_prompt(add_prompt)? {
+        let value = prompt_non_empty_value(value_prompt)?;
+        values.push(value);
+    }
+    Ok(())
+}
+
+fn confirm_prompt(prompt: &'static str) -> Result<bool> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: "stdout".into(),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: "stdin".into(),
+            source,
+        })?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn prompt_non_empty_value(prompt: &'static str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|source| StackError::ConfigWrite {
+            path: "stdout".into(),
+            source,
+        })?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|source| StackError::ConfigRead {
+            path: "stdin".into(),
+            source,
+        })?;
+    let value = answer.trim().to_owned();
+    if value.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: prompt,
+            reason: "selection cannot be empty".to_owned(),
+        });
+    }
+    Ok(value)
 }
 
 fn reject_starter_only_mcp_arg(field: &'static str, values: &[String]) -> Result<()> {

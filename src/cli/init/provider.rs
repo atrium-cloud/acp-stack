@@ -65,12 +65,40 @@ fn select_provider_for_init(
         );
         return Ok(None);
     }
+    let mut selectable = Vec::with_capacity(providers.len());
+    let (available, needs_input): (Vec<_>, Vec<_>) = providers.iter().partition(|summary| {
+        provider_has_available_secret_refs(&config.agent.id, summary, secret_store)
+    });
     println!("providers for {}:", config.agent.id);
-    for (index, summary) in providers.iter().enumerate() {
-        println!(
-            "{}",
-            provider_list_line(index, &config.agent.id, summary, secret_store)
-        );
+    if !available.is_empty() {
+        println!("available secret refs:");
+        for summary in available {
+            selectable.push(summary);
+            println!(
+                "{}",
+                provider_list_line(
+                    selectable.len() - 1,
+                    &config.agent.id,
+                    summary,
+                    secret_store
+                )
+            );
+        }
+    }
+    if !needs_input.is_empty() {
+        println!("missing or custom secret refs:");
+        for summary in needs_input {
+            selectable.push(summary);
+            println!(
+                "{}",
+                provider_list_line(
+                    selectable.len() - 1,
+                    &config.agent.id,
+                    summary,
+                    secret_store
+                )
+            );
+        }
     }
     print!("select provider [number or id, blank to skip]: ");
     io::stdout()
@@ -98,22 +126,35 @@ fn select_provider_for_init(
                 field: "provider",
                 reason: format!(
                     "provider selection `{answer}` is out of range (expected 1..={})",
-                    providers.len()
+                    selectable.len()
                 ),
             });
         }
-        let Some(summary) = providers.get(index - 1) else {
+        let Some(summary) = selectable.get(index - 1) else {
             return Err(StackError::InvalidParam {
                 field: "provider",
                 reason: format!(
                     "provider selection `{answer}` is out of range (expected 1..={})",
-                    providers.len()
+                    selectable.len()
                 ),
             });
         };
         return Ok(Some(summary.id.to_owned()));
     }
     Ok(Some(answer.to_owned()))
+}
+
+fn provider_has_available_secret_refs(
+    agent_id: &str,
+    summary: &AgentProviderSummary,
+    secret_store: &SecretStore,
+) -> bool {
+    let Some(api_key_ref) = summary.default_api_key_ref else {
+        return provider_uses_agent_native_auth(agent_id, summary.id);
+    };
+    required_env_refs_for_provider_id(summary.id, api_key_ref)
+        .iter()
+        .all(|env_ref| secret_store.contains(env_ref))
 }
 
 fn provider_list_line(
@@ -552,6 +593,11 @@ mod tests {
             provider_readiness_label("opencode", &summary, &secret_store),
             "ready"
         );
+        assert!(provider_has_available_secret_refs(
+            "opencode",
+            &summary,
+            &secret_store
+        ));
     }
 
     #[test]
@@ -567,6 +613,11 @@ mod tests {
             provider_readiness_label("opencode", &summary, &secret_store),
             "missing CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID"
         );
+        assert!(!provider_has_available_secret_refs(
+            "opencode",
+            &summary,
+            &secret_store
+        ));
     }
 
     #[test]
