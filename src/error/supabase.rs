@@ -8,6 +8,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
     Some(match err {
         MissingSupabaseApiKey { .. } => "logging.supabase.missing_api_key",
+        MissingSupabaseDbUrl { .. } => "logging.supabase.missing_db_url",
         InvalidSupabaseUrl { .. } => "logging.supabase.invalid_url",
         InvalidSupabaseSchema { .. } => "logging.supabase.invalid_schema",
         SupabaseSinkHttp { .. } => "logging.supabase.http_error",
@@ -21,6 +22,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
     Some(match err {
         MissingSupabaseApiKey { .. } => {
             "secret store is missing Supabase secret API key reference".to_owned()
+        }
+        MissingSupabaseDbUrl { .. } => {
+            "secret store is missing Supabase Postgres writer DB URL reference".to_owned()
         }
         InvalidSupabaseUrl { .. } => "[logging.supabase].url must start with `https://`".to_owned(),
         InvalidSupabaseSchema { .. } => {
@@ -40,6 +44,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         MissingSupabaseApiKey { .. }
+        | MissingSupabaseDbUrl { .. }
         | InvalidSupabaseUrl { .. }
         | InvalidSupabaseSchema { .. }
         | SupabaseSinkHttp { .. }
