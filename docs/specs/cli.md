@@ -156,7 +156,7 @@ acps sessions close <session-id>
 
 `acps metrics summary` prints the daemon's summary metrics for a time window.
 
-`acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed.
+`acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed. Apply output includes the durable `apply_run_id`; failed runs point operators to `acps installer history --agent deps_apply`.
 
 ## Shell Completion
 

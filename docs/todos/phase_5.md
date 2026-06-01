@@ -17,15 +17,15 @@
 - [x] Add human-readable and JSON output modes for common commands.
 - [x] Add consistent `--format text|json` support.
 - [x] Add clearer command errors with remediation hints.
-- [ ] Add progress output for long-running installer, dependency, import, and export operations.
+- [x] Add progress output for long-running installer, dependency, import, and export operations.
 - [x] Add text-mode progress output for long-running init and dependency apply actions.
-- [ ] Add richer init selection UX for code sources, data sources, MCP presets, custom MCP declarations, and required secrets.
+- [x] Add richer init selection UX for code sources, data sources, MCP presets, custom MCP declarations, and required secrets.
 - [x] Add init-time Agent Skills source and skill selection backed by the trusted skills catalog.
-- [ ] Add provider/model selection UX on top of the Phase 4 `models.dev` resolver, including clear filtering by available secret refs.
+- [x] Add provider/model selection UX on top of the Phase 4 `models.dev` resolver, including clear filtering by available secret refs.
 - [x] Add provider picker readiness labels for missing and available secret refs.
 - [x] Add `acps agent switch` UX with target install preview, compatible provider reuse, secret-ref migration, and model follow-up gating.
 - [x] Add `acps sessions fork` with optional cwd and prompt message-id breakpoint flags.
-- [ ] Add retry/reporting polish for failed init, dependency, ingestion, and testflight steps.
+- [x] Add retry/reporting polish for failed init, dependency, ingestion, and testflight steps.
 - [x] Add failed init retry reporting with resumable run id.
 - [x] Add shell completion generation.
 - [x] Add help examples for common workflows.

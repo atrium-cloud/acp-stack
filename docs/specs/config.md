@@ -167,7 +167,7 @@ scope = "user"
 timeout_secs = 600
 ```
 
-Only `commands` entries may declare install actions. `packages`, `runtimes`, and `mcp` entries are declarative checks.
+Only `commands` entries may declare install actions. `packages`, `runtimes`, and `mcp` entries are declarative checks. Runtime entries are executable checks; package entries use local Linux package databases when available.
 
 ## Edge
 

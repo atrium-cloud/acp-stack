@@ -6,12 +6,13 @@
 //! `docs/specs/api/api.md#dependencies-api`, 0.0.2 reports missing
 //! dependencies; broad automatic installation is out of scope.
 //!
-//! Today only `command` checks are implemented (PATH lookup). Packages and
-//! runtimes report `available = false` with a clear `reason`. MCP entries
-//! cross-reference `[[mcp.servers]]` so the operator can see which declared
-//! integrations have actual server configs.
+//! Commands and runtimes are checked as executable names on PATH. Linux package
+//! entries are checked against local package databases when one is available.
+//! MCP entries cross-reference `[[mcp.servers]]` so the operator can see which
+//! declared integrations have actual server configs.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use serde::Serialize;
 
@@ -48,10 +49,10 @@ pub fn check_dependencies(config: &Config) -> DepsReport {
         dependencies.push(check_command(entry));
     }
     for entry in &config.dependencies.packages {
-        dependencies.push(unimplemented_status(entry, DepKind::Package));
+        dependencies.push(check_package(entry));
     }
     for entry in &config.dependencies.runtimes {
-        dependencies.push(unimplemented_status(entry, DepKind::Runtime));
+        dependencies.push(check_runtime(entry));
     }
     for entry in &config.dependencies.mcp {
         dependencies.push(check_mcp(entry, config));
@@ -60,10 +61,18 @@ pub fn check_dependencies(config: &Config) -> DepsReport {
 }
 
 fn check_command(entry: &DependencyEntry) -> DepStatus {
+    check_executable(entry, DepKind::Command, "command")
+}
+
+fn check_runtime(entry: &DependencyEntry) -> DepStatus {
+    check_executable(entry, DepKind::Runtime, "runtime")
+}
+
+fn check_executable(entry: &DependencyEntry, kind: DepKind, label: &str) -> DepStatus {
     match resolve_command_path(&entry.name) {
         Some(path) => DepStatus {
             name: entry.name.clone(),
-            kind: DepKind::Command,
+            kind,
             required: entry.required,
             available: true,
             path: Some(path.to_string_lossy().into_owned()),
@@ -72,35 +81,159 @@ fn check_command(entry: &DependencyEntry) -> DepStatus {
         },
         None => DepStatus {
             name: entry.name.clone(),
-            kind: DepKind::Command,
+            kind,
             required: entry.required,
             available: false,
             path: None,
             feature: entry.feature.clone(),
             reason: Some(format!(
-                "`{}` not found or not executable on PATH",
-                entry.name
+                "{label} `{}` not found or not executable on PATH",
+                entry.name,
             )),
         },
     }
 }
 
-fn unimplemented_status(entry: &DependencyEntry, kind: DepKind) -> DepStatus {
-    let reason = match kind {
-        DepKind::Package => "package-check-not-implemented",
-        DepKind::Runtime => "runtime-check-not-implemented",
-        DepKind::Command => "command-check-not-implemented",
-        DepKind::Mcp => "mcp-check-not-implemented",
+#[derive(Debug, Clone, Copy)]
+enum PackageCheckerKind {
+    Dpkg,
+    ExitStatus,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackageChecker {
+    command: &'static str,
+    args_before_name: &'static [&'static str],
+    kind: PackageCheckerKind,
+}
+
+const LINUX_PACKAGE_CHECKERS: &[PackageChecker] = &[
+    PackageChecker {
+        command: "dpkg-query",
+        args_before_name: &["-W", "-f=${db:Status-Abbrev}"],
+        kind: PackageCheckerKind::Dpkg,
+    },
+    PackageChecker {
+        command: "rpm",
+        args_before_name: &["-q", "--quiet"],
+        kind: PackageCheckerKind::ExitStatus,
+    },
+    PackageChecker {
+        command: "apk",
+        args_before_name: &["info", "-e"],
+        kind: PackageCheckerKind::ExitStatus,
+    },
+    PackageChecker {
+        command: "pacman",
+        args_before_name: &["-Q"],
+        kind: PackageCheckerKind::ExitStatus,
+    },
+];
+
+fn check_package(entry: &DependencyEntry) -> DepStatus {
+    let mut available_checkers = Vec::new();
+    for checker in LINUX_PACKAGE_CHECKERS {
+        let Some(checker_path) = resolve_command_path(checker.command) else {
+            continue;
+        };
+        available_checkers.push(checker.command);
+        match run_package_checker(checker, &checker_path, &entry.name) {
+            PackageCheckResult::Available => {
+                return DepStatus {
+                    name: entry.name.clone(),
+                    kind: DepKind::Package,
+                    required: entry.required,
+                    available: true,
+                    path: None,
+                    feature: entry.feature.clone(),
+                    reason: None,
+                };
+            }
+            PackageCheckResult::Missing => {}
+            PackageCheckResult::Failed(reason) => {
+                return DepStatus {
+                    name: entry.name.clone(),
+                    kind: DepKind::Package,
+                    required: entry.required,
+                    available: false,
+                    path: None,
+                    feature: entry.feature.clone(),
+                    reason: Some(reason),
+                };
+            }
+        }
+    }
+
+    let reason = if available_checkers.is_empty() {
+        "no supported Linux package database command found on PATH (tried dpkg-query, rpm, apk, pacman)"
+            .to_owned()
+    } else {
+        format!(
+            "package `{}` was not reported installed by {}",
+            entry.name,
+            available_checkers.join(", "),
+        )
     };
+
     DepStatus {
         name: entry.name.clone(),
-        kind,
+        kind: DepKind::Package,
         required: entry.required,
         available: false,
         path: None,
         feature: entry.feature.clone(),
-        reason: Some(reason.to_owned()),
+        reason: Some(reason),
     }
+}
+
+enum PackageCheckResult {
+    Available,
+    Missing,
+    Failed(String),
+}
+
+fn run_package_checker(
+    checker: &PackageChecker,
+    checker_path: &std::path::Path,
+    package_name: &str,
+) -> PackageCheckResult {
+    let output = Command::new(checker_path)
+        .args(checker.args_before_name)
+        .arg(package_name)
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(source) => {
+            return PackageCheckResult::Failed(format!(
+                "package check with `{}` failed: {source}",
+                checker.command,
+            ));
+        }
+    };
+
+    match checker.kind {
+        PackageCheckerKind::Dpkg => {
+            if output.status.success() && dpkg_status_is_installed(&output.stdout) {
+                PackageCheckResult::Available
+            } else {
+                PackageCheckResult::Missing
+            }
+        }
+        PackageCheckerKind::ExitStatus => {
+            if output.status.success() {
+                PackageCheckResult::Available
+            } else {
+                PackageCheckResult::Missing
+            }
+        }
+    }
+}
+
+fn dpkg_status_is_installed(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let mut chars = text.trim_start().chars();
+    chars.next();
+    matches!(chars.next(), Some('i'))
 }
 
 fn check_mcp(entry: &DependencyEntry, config: &Config) -> DepStatus {
@@ -207,6 +340,55 @@ mod tests {
         assert!(!entry.available);
         assert!(entry.reason.as_deref().unwrap_or("").contains("not found"));
         assert_eq!(entry.feature.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn missing_runtime_reports_unavailable_without_placeholder_reason() {
+        let deps = DependenciesConfig {
+            runtimes: vec![DependencyEntry {
+                name: "definitely-not-installed-runtime-12345".to_owned(),
+                required: true,
+                feature: Some("runtime-test".to_owned()),
+                install: None,
+            }],
+            ..Default::default()
+        };
+        let report = check_dependencies(&minimal_config(deps, McpConfig::default()));
+        let entry = &report.dependencies[0];
+        assert_eq!(entry.kind, DepKind::Runtime);
+        assert!(!entry.available);
+        let reason = entry.reason.as_deref().unwrap_or("");
+        assert!(reason.contains("runtime"));
+        assert!(!reason.contains("runtime-check-not-implemented"));
+        assert_eq!(entry.feature.as_deref(), Some("runtime-test"));
+    }
+
+    #[test]
+    fn missing_package_reports_unavailable_without_placeholder_reason() {
+        let deps = DependenciesConfig {
+            packages: vec![DependencyEntry {
+                name: "definitely-not-installed-package-12345".to_owned(),
+                required: true,
+                feature: Some("package-test".to_owned()),
+                install: None,
+            }],
+            ..Default::default()
+        };
+        let report = check_dependencies(&minimal_config(deps, McpConfig::default()));
+        let entry = &report.dependencies[0];
+        assert_eq!(entry.kind, DepKind::Package);
+        assert!(!entry.available);
+        let reason = entry.reason.as_deref().unwrap_or("");
+        assert!(!reason.contains("package-check-not-implemented"));
+        assert_eq!(entry.feature.as_deref(), Some("package-test"));
+    }
+
+    #[test]
+    fn dpkg_status_parser_accepts_held_installed_packages() {
+        assert!(dpkg_status_is_installed(b"ii "));
+        assert!(dpkg_status_is_installed(b"hi "));
+        assert!(!dpkg_status_is_installed(b"rc "));
+        assert!(!dpkg_status_is_installed(b"iH "));
     }
 
     #[cfg(unix)]
