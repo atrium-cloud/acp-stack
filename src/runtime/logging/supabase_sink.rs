@@ -19,12 +19,13 @@ use tokio::sync::{Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::config::SupabaseLoggingConfig;
+use crate::config::{SupabaseLoggingBackend, SupabaseLoggingConfig};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::state::{StateStore, sink_outbox::OutboxRow};
 
 use super::sink_redaction::redact_row;
+use super::supabase_mirror;
 
 /// Sink poll cadence. Starts at the minimum, doubles on empty fetches up to
 /// the ceiling, and resets to the minimum after any non-empty fetch so the
@@ -39,10 +40,16 @@ struct UploadGroupContext<'a> {
     state: &'a Arc<TokioMutex<StateStore>>,
     client: &'a reqwest::Client,
     config: &'a SupabaseLoggingConfig,
-    api_key: &'a str,
+    credential: &'a SupabaseSinkCredential,
     event_hub: &'a EventHub,
     failure_window_count: &'a mut i64,
     failure_window_last_error: &'a mut Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SupabaseSinkCredential {
+    PostgrestApiKey(String),
+    PostgresDbUrl(String),
 }
 
 /// Spawned background worker that owns the Supabase REST client and a
@@ -57,7 +64,7 @@ impl SupabaseSink {
     pub fn spawn(
         state: Arc<TokioMutex<StateStore>>,
         config: SupabaseLoggingConfig,
-        api_key: String,
+        credential: SupabaseSinkCredential,
         event_hub: EventHub,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
@@ -75,7 +82,7 @@ impl SupabaseSink {
             run_worker(
                 state,
                 config,
-                api_key,
+                credential,
                 client,
                 event_hub,
                 shutdown_for_worker,
@@ -117,7 +124,7 @@ impl Drop for SupabaseSink {
 async fn run_worker(
     state: Arc<TokioMutex<StateStore>>,
     config: SupabaseLoggingConfig,
-    api_key: String,
+    credential: SupabaseSinkCredential,
     client: reqwest::Client,
     event_hub: EventHub,
     shutdown: Arc<Notify>,
@@ -146,7 +153,7 @@ async fn run_worker(
             &state,
             &client,
             &config,
-            &api_key,
+            &credential,
             &event_hub,
             &mut failure_window_count,
             &mut failure_window_last_error,
@@ -184,7 +191,7 @@ async fn run_worker(
             &state,
             &client,
             &config,
-            &api_key,
+            &credential,
             &event_hub,
             &mut failure_window_count,
             &mut failure_window_last_error,
@@ -220,7 +227,7 @@ async fn process_one_batch(
     state: &Arc<TokioMutex<StateStore>>,
     client: &reqwest::Client,
     config: &SupabaseLoggingConfig,
-    api_key: &str,
+    credential: &SupabaseSinkCredential,
     event_hub: &EventHub,
     failure_window_count: &mut i64,
     failure_window_last_error: &mut Option<String>,
@@ -255,7 +262,7 @@ async fn process_one_batch(
             state,
             client,
             config,
-            api_key,
+            credential,
             event_hub,
             failure_window_count,
             failure_window_last_error,
@@ -370,7 +377,7 @@ async fn upload_group(
         send_batch(
             context.client,
             context.config,
-            context.api_key,
+            context.credential,
             table,
             &payloads,
         )
@@ -444,11 +451,44 @@ async fn upload_group(
 async fn send_batch(
     client: &reqwest::Client,
     config: &SupabaseLoggingConfig,
+    credential: &SupabaseSinkCredential,
+    table: &str,
+    payloads: &[Value],
+) -> Result<()> {
+    match config.backend {
+        SupabaseLoggingBackend::Postgrest => {
+            let SupabaseSinkCredential::PostgrestApiKey(api_key) = credential else {
+                return Err(StackError::SupabaseSinkHttp {
+                    status: 0,
+                    body: "postgrest backend received non-PostgREST credential".to_owned(),
+                });
+            };
+            send_postgrest_batch(client, config, api_key, table, payloads).await
+        }
+        SupabaseLoggingBackend::Postgres => {
+            let SupabaseSinkCredential::PostgresDbUrl(db_url) = credential else {
+                return Err(StackError::SupabaseSinkHttp {
+                    status: 0,
+                    body: "postgres backend received non-Postgres credential".to_owned(),
+                });
+            };
+            send_postgres_batch(config, db_url, table, payloads).await
+        }
+    }
+}
+
+async fn send_postgrest_batch(
+    client: &reqwest::Client,
+    config: &SupabaseLoggingConfig,
     api_key: &str,
     table: &str,
     payloads: &[Value],
 ) -> Result<()> {
-    let url = format!("{}/rest/v1/{table}", config.url.trim_end_matches('/'),);
+    let remote_table = supabase_mirror::remote_table_name(config, table)?;
+    let url = format!(
+        "{}/rest/v1/{remote_table}",
+        config.url.trim_end_matches('/'),
+    );
     let mut headers = HeaderMap::new();
     headers.insert(
         HeaderName::from_static("apikey"),
@@ -493,6 +533,64 @@ async fn send_batch(
         status: status.as_u16(),
         body,
     })
+}
+
+pub async fn send_postgres_batch(
+    config: &SupabaseLoggingConfig,
+    db_url: &str,
+    table: &str,
+    payloads: &[Value],
+) -> Result<()> {
+    let sql = supabase_mirror::postgres_insert_sql(config, table)?;
+    let client = connect_postgres(db_url).await?;
+    let json_payload = Value::Array(payloads.to_vec());
+    client
+        .execute(sql.as_str(), &[&json_payload])
+        .await
+        .map_err(|err| StackError::SupabaseSinkHttp {
+            status: 0,
+            body: format!("postgres insert failed: {err}"),
+        })?;
+    Ok(())
+}
+
+pub async fn check_postgres_table(
+    config: &SupabaseLoggingConfig,
+    db_url: &str,
+    table: &str,
+) -> Result<bool> {
+    let sql = supabase_mirror::check_table_sql(config, table)?;
+    let client = connect_postgres(db_url).await?;
+    client
+        .query_one(sql.as_str(), &[])
+        .await
+        .and_then(|row| row.try_get::<_, bool>(0))
+        .map_err(|err| StackError::SupabaseSinkHttp {
+            status: 0,
+            body: format!("postgres table check failed: {err}"),
+        })
+}
+
+async fn connect_postgres(db_url: &str) -> Result<tokio_postgres::Client> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+    let (client, connection) =
+        tokio_postgres::connect(db_url, tls)
+            .await
+            .map_err(|err| StackError::SupabaseSinkHttp {
+                status: 0,
+                body: format!("postgres connect failed: {err}"),
+            })?;
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            tracing::warn!(error = %err, "supabase postgres connection closed");
+        }
+    });
+    Ok(client)
 }
 
 fn record_failure_observation(

@@ -136,7 +136,7 @@ Usage fields stay `null` when the configured agent does not report them. The sha
 
 ## External Logging
 
-When the Supabase sink is enabled, selected local rows are redacted and delivered to the configured external schema. The sink uses `[logging.supabase].api_key_ref` for a Supabase secret API key. Delivery is asynchronous and retryable. Local SQLite writes do not depend on external delivery succeeding.
+When the Supabase sink is enabled, selected local rows are redacted and delivered to the configured external backend. The recommended `postgres` backend uses `[logging.supabase].db_url_ref`; the legacy `postgrest` backend uses `[logging.supabase].api_key_ref`. Delivery is asynchronous and retryable. Local SQLite writes do not depend on external delivery succeeding.
 
 The security self-check reports persistent external logging delivery failures.
 

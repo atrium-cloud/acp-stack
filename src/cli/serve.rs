@@ -1,4 +1,5 @@
 use crate::api::{self, AppState, RuntimePaths};
+use crate::config::SupabaseLoggingBackend;
 use crate::config::{self, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
@@ -7,7 +8,8 @@ use crate::fs_util::{
 };
 use crate::runtime::agent::stale_prompt_sweeper::StalePromptSweeper;
 use crate::runtime::agent::supervisor::ServerLifecycle;
-use crate::runtime::logging::supabase_sink::SupabaseSink;
+use crate::runtime::logging::supabase_mirror::SUPABASE_DEFAULT_DB_URL_REF;
+use crate::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 use clap::Args;
@@ -142,14 +144,33 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             .supabase
             .as_ref()
             .expect("checked is_some_and above");
-        if !secret_store.contains(&supabase.api_key_ref) {
-            return Err(StackError::MissingSupabaseApiKey {
-                name: supabase.api_key_ref.clone(),
-            });
-        }
-        let key = secret_store.get(&supabase.api_key_ref)?.to_owned();
+        let credential = match supabase.backend {
+            SupabaseLoggingBackend::Postgrest => {
+                if !secret_store.contains(&supabase.api_key_ref) {
+                    return Err(StackError::MissingSupabaseApiKey {
+                        name: supabase.api_key_ref.clone(),
+                    });
+                }
+                SupabaseSinkCredential::PostgrestApiKey(
+                    secret_store.get(&supabase.api_key_ref)?.to_owned(),
+                )
+            }
+            SupabaseLoggingBackend::Postgres => {
+                let Some(db_url_ref) = supabase.db_url_ref.as_ref() else {
+                    return Err(StackError::MissingSupabaseApiKey {
+                        name: SUPABASE_DEFAULT_DB_URL_REF.to_owned(),
+                    });
+                };
+                if !secret_store.contains(db_url_ref) {
+                    return Err(StackError::MissingSupabaseApiKey {
+                        name: db_url_ref.clone(),
+                    });
+                }
+                SupabaseSinkCredential::PostgresDbUrl(secret_store.get(db_url_ref)?.to_owned())
+            }
+        };
         store.set_external_logging_enabled(true);
-        Some((supabase.clone(), key))
+        Some((supabase.clone(), credential))
     } else {
         None
     };

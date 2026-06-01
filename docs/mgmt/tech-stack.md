@@ -10,6 +10,7 @@ This document records technology choices that affect maintenance or deployment. 
 | Tokio                     | async process, IO, timers, and networking                  |
 | Axum                      | HTTP routing and middleware                                |
 | SQLite                    | local durable state                                        |
+| tokio-postgres            | Supabase Postgres logging backend                          |
 | age-compatible encryption | local secret store                                         |
 | agent-client-protocol SDK | ACP client boundary to agents                              |
 | rmcp                      | local MCP server/client integration for `acpctl mcp serve` |

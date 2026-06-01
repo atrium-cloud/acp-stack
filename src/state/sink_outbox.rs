@@ -405,7 +405,9 @@ fn hydrate_commands(conn: &Connection, id: &str) -> Result<Option<Map<String, Va
         .query_row(
             r#"
             SELECT id, created_at, updated_at, status, command, exit_status,
-                   started_at, finished_at, cwd, env_json, duration_ms, truncated
+                   started_at, finished_at, cwd, env_json, duration_ms, truncated,
+                   last_output_event_id, last_output_at, last_output_seq,
+                   output_bytes, last_progress_at
             FROM commands WHERE id = ?1
             "#,
             params![id],
@@ -438,6 +440,25 @@ fn hydrate_commands(conn: &Connection, id: &str) -> Result<Option<Map<String, Va
                 );
                 let truncated: i64 = row.get(11)?;
                 obj.insert("truncated".into(), Value::Number(truncated.into()));
+                for (idx, key) in [
+                    (12usize, "last_output_event_id"),
+                    (13, "last_output_at"),
+                    (16, "last_progress_at"),
+                ] {
+                    let value: Option<String> = row.get(idx)?;
+                    obj.insert(key.into(), value.map(Value::String).unwrap_or(Value::Null));
+                }
+                let last_output_seq: Option<i64> = row.get(14)?;
+                obj.insert(
+                    "last_output_seq".into(),
+                    last_output_seq
+                        .map(|v| Value::Number(v.into()))
+                        .unwrap_or(Value::Null),
+                );
+                obj.insert(
+                    "output_bytes".into(),
+                    Value::Number(row.get::<_, i64>(15)?.into()),
+                );
                 Ok(obj)
             },
         )

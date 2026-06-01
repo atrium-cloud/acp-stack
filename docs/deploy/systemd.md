@@ -78,13 +78,12 @@ The unit ships with `EnvironmentFile=-/etc/acp-stack/environment` (the leading `
 sudo install -m 0600 -o root -g root /dev/null /etc/acp-stack/environment
 ```
 
-Configure Supabase during init:
+Configure Supabase logging after init on a host where the Supabase CLI is authenticated:
 
 ```sh
-sudo -u acp -H acps init --agent <agent-id> --supabase-url https://example.supabase.co
+sudo -u acp -H acps logging supabase setup --url https://example.supabase.co
+sudo -u acp -H acps logging supabase check
 ```
-
-For headless init, set `ACP_STACK_SUPABASE_URL` and `ACP_STACK_SUPABASE_SECRET_KEY` in the init environment. After init, use `acps logging supabase ...` for Supabase changes.
 
 ## Operate
 
