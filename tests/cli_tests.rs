@@ -7617,7 +7617,16 @@ fn logging_supabase_sql_prints_prefixed_public_ddl() {
     let sql = String::from_utf8(output).expect("sql utf8");
     assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"public\".\"acp_stack_events\""));
     assert!(sql.contains("CREATE ROLE \"acp_stack_logger\" LOGIN PASSWORD 'test_writer_password'"));
-    assert!(sql.contains("GRANT INSERT, UPDATE ON TABLE"));
+    assert!(sql.contains("SECURITY DEFINER"));
+    assert!(sql.contains(
+        "GRANT EXECUTE ON FUNCTION \"public\".\"acp_stack_ingest_batch\"(text, jsonb) TO \"acp_stack_logger\""
+    ));
+    assert!(sql.contains("REVOKE ALL ON TABLE"));
+    assert!(sql.contains("ALTER TABLE \"public\".\"acp_stack_events\" ENABLE ROW LEVEL SECURITY"));
+    assert!(sql.contains("FOR INSERT TO \"acp_stack_logger\" WITH CHECK (true)"));
+    assert!(sql.contains("FOR UPDATE TO \"acp_stack_logger\" USING (true) WITH CHECK (true)"));
+    assert!(!sql.contains("GRANT INSERT, UPDATE, SELECT ON TABLE"));
+    assert!(!sql.contains("FOR SELECT TO \"acp_stack_logger\""));
     assert!(sql.contains("failure_detail_json jsonb"));
     assert!(sql.contains("message_id_acknowledged boolean NOT NULL DEFAULT false"));
     assert!(sql.contains("output_bytes bigint NOT NULL DEFAULT 0"));

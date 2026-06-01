@@ -196,6 +196,11 @@ pub enum StackError {
     )]
     MissingSupabaseApiKey { name: String },
 
+    #[error(
+        "secret store is non-empty but does not contain the Supabase Postgres writer DB URL reference `{name}`"
+    )]
+    MissingSupabaseDbUrl { name: String },
+
     // === supabase logging sink ===
     #[error(
         "[logging.supabase].url must start with `https://` when external logging is enabled; got `{url}`"
@@ -809,7 +814,9 @@ impl StackError {
             StackError::ConfigRead { .. } => {
                 "verify the config path and file permissions, then retry the command"
             }
-            StackError::SecretNotFound { .. } | StackError::MissingSupabaseApiKey { .. } => {
+            StackError::SecretNotFound { .. }
+            | StackError::MissingSupabaseApiKey { .. }
+            | StackError::MissingSupabaseDbUrl { .. } => {
                 "store the missing secret with `acps secrets set <name>`"
             }
             StackError::MissingSessionKey { name } | StackError::MissingAdminKey { name } => {

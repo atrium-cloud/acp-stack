@@ -157,12 +157,12 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             }
             SupabaseLoggingBackend::Postgres => {
                 let Some(db_url_ref) = supabase.db_url_ref.as_ref() else {
-                    return Err(StackError::MissingSupabaseApiKey {
+                    return Err(StackError::MissingSupabaseDbUrl {
                         name: SUPABASE_DEFAULT_DB_URL_REF.to_owned(),
                     });
                 };
                 if !secret_store.contains(db_url_ref) {
-                    return Err(StackError::MissingSupabaseApiKey {
+                    return Err(StackError::MissingSupabaseDbUrl {
                         name: db_url_ref.clone(),
                     });
                 }

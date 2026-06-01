@@ -7,6 +7,7 @@ pub const SUPABASE_DEFAULT_SCHEMA: &str = "public";
 pub const SUPABASE_DEFAULT_TABLE_PREFIX: &str = "acp_stack_";
 pub const SUPABASE_DEFAULT_DB_URL_REF: &str = "SUPABASE_LOG_DB_URL";
 pub const SUPABASE_WRITER_ROLE: &str = "acp_stack_logger";
+const SUPABASE_INGEST_FUNCTION_SUFFIX: &str = "ingest_batch";
 
 pub const MIRRORED_TABLES: &[&str] = &[
     "events",
@@ -73,11 +74,27 @@ pub fn setup_sql(schema: &str, table_prefix: &str, writer_password: &str) -> Str
     let security_events = table(schema.as_str(), table_prefix, "security_events");
     let connection_events = table(schema.as_str(), table_prefix, "connection_events");
     let usage_metrics = table(schema.as_str(), table_prefix, "usage_metrics");
+    let ingest_function = function(
+        schema.as_str(),
+        table_prefix,
+        SUPABASE_INGEST_FUNCTION_SUFFIX,
+    );
+    let ingest_function_signature = format!("{ingest_function}(text, jsonb)");
     let raw_table_names = MIRRORED_TABLES
         .iter()
         .map(|name| table(schema.as_str(), table_prefix, name))
         .collect::<Vec<_>>()
         .join(", ");
+    let rls_policies = MIRRORED_TABLES
+        .iter()
+        .map(|name| rls_policy_sql(schema.as_str(), table_prefix, name, role.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ingest_cases = MIRRORED_TABLES
+        .iter()
+        .map(|name| ingest_case_sql(schema.as_str(), table_prefix, name))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     format!(
         r#"
@@ -256,7 +273,28 @@ BEGIN
 END $$;
 
 GRANT USAGE ON SCHEMA {schema} TO {role};
-GRANT INSERT, UPDATE ON TABLE {raw_table_names} TO {role};
+REVOKE ALL ON TABLE {raw_table_names} FROM {role};
+
+{rls_policies}
+
+CREATE OR REPLACE FUNCTION {ingest_function}(source_table text, payload jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = {schema}, pg_temp
+AS $function$
+BEGIN
+    CASE source_table
+{ingest_cases}
+    ELSE
+        RAISE EXCEPTION 'unsupported acp-stack mirror table: %', source_table
+            USING ERRCODE = 'invalid_parameter_value';
+    END CASE;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION {ingest_function_signature} FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION {ingest_function_signature} TO {role};
 
 INSERT INTO {migrations} (version, name, applied_at)
 VALUES (1, 'supabase_cli_backed_logging_setup', now())
@@ -288,8 +326,29 @@ pub fn check_table_sql(config: &SupabaseLoggingConfig, source_table: &str) -> Re
 }
 
 pub fn postgres_insert_sql(config: &SupabaseLoggingConfig, source_table: &str) -> Result<String> {
-    let remote = remote_table_name(config, source_table)?;
-    let target = format!("{}.{}", quote_ident(&config.schema), quote_ident(&remote));
+    if !MIRRORED_TABLES.contains(&source_table) {
+        return Err(StackError::SupabaseSinkUnknownTable {
+            table: source_table.to_owned(),
+        });
+    }
+    let ingest_function = format!(
+        "{}.{}",
+        quote_ident(&config.schema),
+        quote_ident(&format!(
+            "{}{SUPABASE_INGEST_FUNCTION_SUFFIX}",
+            config.table_prefix
+        ))
+    );
+    Ok(format!("SELECT {ingest_function}($1::text, $2::jsonb)"))
+}
+
+fn postgres_upsert_sql(
+    quoted_schema: &str,
+    table_prefix: &str,
+    source_table: &str,
+    payload_expression: &str,
+) -> Result<String> {
+    let target = table(quoted_schema, table_prefix, source_table);
     let assignments = columns_for(source_table)?
         .iter()
         .copied()
@@ -301,7 +360,7 @@ pub fn postgres_insert_sql(config: &SupabaseLoggingConfig, source_table: &str) -
         .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
-        "INSERT INTO {target} SELECT * FROM jsonb_populate_recordset(NULL::{target}, $1::jsonb) \
+        "INSERT INTO {target} SELECT * FROM jsonb_populate_recordset(NULL::{target}, {payload_expression}) \
          ON CONFLICT (id) DO UPDATE SET {assignments}"
     ))
 }
@@ -404,8 +463,39 @@ fn table(quoted_schema: &str, prefix: &str, name: &str) -> String {
     )
 }
 
+fn function(quoted_schema: &str, prefix: &str, name: &str) -> String {
+    format!(
+        "{quoted_schema}.{}",
+        quote_ident(&format!("{prefix}{name}"))
+    )
+}
+
 fn index_name(prefix: &str, name: &str) -> String {
     quote_ident(&format!("{prefix}{name}"))
+}
+
+fn rls_policy_sql(quoted_schema: &str, prefix: &str, name: &str, quoted_role: &str) -> String {
+    let target = table(quoted_schema, prefix, name);
+    let insert_policy = quote_ident(&format!("{prefix}{name}_logger_insert_policy"));
+    let update_policy = quote_ident(&format!("{prefix}{name}_logger_update_policy"));
+    format!(
+        r#"ALTER TABLE {target} ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS {insert_policy} ON {target};
+CREATE POLICY {insert_policy} ON {target}
+    FOR INSERT TO {quoted_role} WITH CHECK (true);
+DROP POLICY IF EXISTS {update_policy} ON {target};
+CREATE POLICY {update_policy} ON {target}
+    FOR UPDATE TO {quoted_role} USING (true) WITH CHECK (true);"#
+    )
+}
+
+fn ingest_case_sql(quoted_schema: &str, prefix: &str, name: &str) -> String {
+    let upsert = postgres_upsert_sql(quoted_schema, prefix, name, "payload")
+        .expect("ingest cases are generated only for mirrored tables");
+    format!(
+        r#"    WHEN '{name}' THEN
+        {upsert};"#
+    )
 }
 
 fn qualified_regclass(schema: &str, table: &str) -> String {

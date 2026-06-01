@@ -229,11 +229,15 @@ fn run_supabase_status(output: OutputFormat) -> Result<()> {
         .clone()
         .unwrap_or_else(disabled_supabase_config);
     let store = SecretStore::open(&home)?;
-    let secret_present = store.contains(&supabase.api_key_ref);
+    let api_key_present = store.contains(&supabase.api_key_ref);
     let db_url_present = supabase
         .db_url_ref
         .as_ref()
         .is_some_and(|db_url_ref| store.contains(db_url_ref));
+    let active_credential_present = match supabase.backend {
+        SupabaseLoggingBackend::Postgrest => api_key_present,
+        SupabaseLoggingBackend::Postgres => db_url_present,
+    };
 
     if output.is_json() {
         print_json(&serde_json::json!({
@@ -245,8 +249,10 @@ fn run_supabase_status(output: OutputFormat) -> Result<()> {
             "table_prefix": supabase.table_prefix,
             "api_key_ref": supabase.api_key_ref,
             "db_url_ref": supabase.db_url_ref,
-            "secret_present": secret_present,
+            "api_key_present": api_key_present,
+            "secret_present": api_key_present,
             "db_url_present": db_url_present,
+            "active_credential_present": active_credential_present,
         }))?;
     } else {
         println!(
@@ -261,19 +267,29 @@ fn run_supabase_status(output: OutputFormat) -> Result<()> {
         println!("backend: {}", supabase_backend_label(supabase.backend));
         println!("schema: {}", supabase.schema);
         println!("table_prefix: {}", supabase.table_prefix);
-        println!("api_key_ref: {}", supabase.api_key_ref);
-        println!(
-            "db_url_ref: {}",
-            supabase.db_url_ref.as_deref().unwrap_or("unset")
-        );
-        println!(
-            "secret: {}",
-            if secret_present { "present" } else { "missing" }
-        );
-        println!(
-            "db_url: {}",
-            if db_url_present { "present" } else { "missing" }
-        );
+        match supabase.backend {
+            SupabaseLoggingBackend::Postgrest => {
+                println!("api_key_ref: {}", supabase.api_key_ref);
+                println!(
+                    "api_key: {}",
+                    if api_key_present {
+                        "present"
+                    } else {
+                        "missing"
+                    }
+                );
+            }
+            SupabaseLoggingBackend::Postgres => {
+                println!(
+                    "db_url_ref: {}",
+                    supabase.db_url_ref.as_deref().unwrap_or("unset")
+                );
+                println!(
+                    "db_url: {}",
+                    if db_url_present { "present" } else { "missing" }
+                );
+            }
+        }
     }
     Ok(())
 }
