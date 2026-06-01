@@ -128,10 +128,42 @@ pub(super) fn finalize_with_error(
     run: &InitRunRecord,
     error: StackError,
 ) -> Result<()> {
+    let failed_step = store
+        .query_init_steps(&run.id)
+        .ok()
+        .and_then(failed_step_for_report);
     finalize_run(store, &run.id, INIT_RUN_FAILED)?;
     eprintln!("init failed in run {}", run.id);
+    if let Some(step) = failed_step {
+        eprintln!("failed step: {}", step.kind);
+        if let Some(log_dir) = step.log_dir.as_deref()
+            && !log_dir.trim().is_empty()
+        {
+            eprintln!("logs: {log_dir}");
+        }
+    }
     eprintln!("retry: acps init --resume --run-id {}", run.id);
     Err(error)
+}
+
+fn failed_step_for_report(steps: Vec<InitStepRecord>) -> Option<InitStepRecord> {
+    steps
+        .into_iter()
+        .filter(|step| step.status == INIT_STEP_FAILED || step.status == INIT_STEP_RUNNING)
+        .max_by(|left, right| {
+            let left_timestamp = step_report_timestamp(left);
+            let right_timestamp = step_report_timestamp(right);
+            left_timestamp
+                .cmp(right_timestamp)
+                .then_with(|| left.ordinal.cmp(&right.ordinal))
+        })
+}
+
+fn step_report_timestamp(step: &InitStepRecord) -> &str {
+    step.finished_at
+        .as_deref()
+        .or(step.started_at.as_deref())
+        .unwrap_or("")
 }
 
 pub(super) struct SecretsInitOutcome {
@@ -226,4 +258,54 @@ pub(super) fn init_complete_event_already_recorded(store: &StateStore, run_id: &
     events
         .iter()
         .any(|event| event.payload_json.contains(run_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(
+        ordinal: i64,
+        kind: &str,
+        status: &str,
+        started_at: &str,
+        finished_at: &str,
+    ) -> InitStepRecord {
+        InitStepRecord {
+            id: format!("step_{ordinal}"),
+            run_id: "run".to_owned(),
+            ordinal,
+            kind: kind.to_owned(),
+            status: status.to_owned(),
+            started_at: (!started_at.is_empty()).then(|| started_at.to_owned()),
+            finished_at: (!finished_at.is_empty()).then(|| finished_at.to_owned()),
+            log_dir: None,
+            error_kind: None,
+            error_detail: None,
+            payload_json: "{}".to_owned(),
+        }
+    }
+
+    #[test]
+    fn failed_step_report_uses_latest_attempt_timestamp() {
+        let steps = vec![
+            step(
+                10,
+                "later_prior_failure",
+                INIT_STEP_FAILED,
+                "2026-01-01T00:00:00.000000000Z",
+                "2026-01-01T00:00:01.000000000Z",
+            ),
+            step(
+                2,
+                "current_failure",
+                INIT_STEP_FAILED,
+                "2026-01-01T00:01:00.000000000Z",
+                "2026-01-01T00:01:01.000000000Z",
+            ),
+        ];
+
+        let failed_step = failed_step_for_report(steps).expect("failed step");
+        assert_eq!(failed_step.kind, "current_failure");
+    }
 }

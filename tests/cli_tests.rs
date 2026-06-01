@@ -415,7 +415,11 @@ fn exports_default_home_config_to_output_path() {
         ])
         .assert()
         .success()
-        .stdout("");
+        .stdout(predicates::str::contains("progress: loading config"))
+        .stdout(predicates::str::contains(
+            "progress: rendering config export",
+        ))
+        .stdout(predicates::str::contains("progress: writing config export"));
 
     let exported = fs::read_to_string(output_path).expect("export should be readable");
     assert!(exported.contains("[api]"));
@@ -1371,6 +1375,10 @@ fn init_provider_fails_noninteractive_when_default_secret_is_missing() {
         .lines()
         .find_map(|line| line.strip_prefix("init failed in run "))
         .expect("stderr should include failed init run id");
+    assert!(
+        stderr.contains("failed step: provider_configure"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains(&format!("retry: acps init --resume --run-id {run_id}")),
         "{stderr}"
@@ -4400,6 +4408,15 @@ creates = "cli-registry-agent"
         .args(["agent", "install", "--yes"])
         .assert()
         .success()
+        .stdout(predicates::str::contains(
+            "progress: preparing agent install",
+        ))
+        .stdout(predicates::str::contains(
+            "progress: resolving agent install plan",
+        ))
+        .stdout(predicates::str::contains(
+            "progress: installing resolved agent artifacts",
+        ))
         .stdout(predicates::str::contains("agent install: installed"))
         .stdout(predicates::str::contains(
             binary_path.to_string_lossy().as_ref(),
@@ -8072,6 +8089,7 @@ fn config_import_refuses_without_force_when_config_exists() {
         .args(["config", "import", import_path.to_str().unwrap()])
         .assert()
         .failure()
+        .stdout("")
         .stderr(predicates::str::contains("config already exists"));
 }
 
@@ -8157,6 +8175,28 @@ fn config_export_format_json_wraps_toml_without_leaking_secret_values() {
 }
 
 #[test]
+fn config_export_to_output_reports_progress() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+    let output_path = tempdir.path().join("exported.toml");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["config", "export", "--output"])
+        .arg(&output_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("progress: loading config"))
+        .stdout(predicates::str::contains(
+            "progress: rendering config export",
+        ))
+        .stdout(predicates::str::contains("progress: writing config export"));
+
+    let exported = fs::read_to_string(output_path).expect("export should be written");
+    assert!(exported.contains("ACP_STACK_SESSION_KEY"));
+}
+
+#[test]
 fn config_import_supports_base64_input() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     // No init first; we want to exercise the create-fresh import path.
@@ -8169,6 +8209,11 @@ fn config_import_supports_base64_input() {
         .args(["config", "import", "--base64", &encoded])
         .assert()
         .success()
+        .stdout(predicates::str::contains("progress: reading config import"))
+        .stdout(predicates::str::contains(
+            "progress: validating config import",
+        ))
+        .stdout(predicates::str::contains("progress: writing config import"))
         .stdout(predicates::str::contains("imported config:"));
 
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
@@ -8196,6 +8241,7 @@ fn config_import_refuses_to_change_auth_refs() {
         .args(["config", "import", import_path.to_str().unwrap(), "--force"])
         .assert()
         .failure()
+        .stdout("")
         .stderr(predicates::str::contains(
             "would change `[auth].admin_key_ref`",
         ));
@@ -8218,6 +8264,7 @@ fn config_import_refuses_to_change_session_ref() {
         .args(["config", "import", import_path.to_str().unwrap(), "--force"])
         .assert()
         .failure()
+        .stdout("")
         .stderr(predicates::str::contains(
             "would change `[auth].session_key_ref`",
         ));
@@ -8231,6 +8278,7 @@ fn config_import_rejects_invalid_base64() {
         .args(["config", "import", "--base64", "!!!not-base64!!!"])
         .assert()
         .failure()
+        .stdout("")
         .stderr(predicates::str::contains("not valid base64"));
 }
 
@@ -8307,6 +8355,7 @@ fn config_import_rejects_oversized_path_input() {
         .args(["config", "import", import_path.to_str().unwrap()])
         .assert()
         .failure()
+        .stdout("")
         .stderr(predicates::str::contains("exceeds 1048576-byte size limit"));
 }
 

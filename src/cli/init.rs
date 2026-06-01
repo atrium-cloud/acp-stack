@@ -53,8 +53,8 @@ use self::skills::{
     skill_install_postcondition_holds,
 };
 use self::starter_config::{
-    reject_starter_only_mcp_args_for_existing_config, starter_config,
-    validate_deployment_overrides_match_existing,
+    prompt_starter_config_selections_if_needed, reject_starter_only_mcp_args_for_existing_config,
+    starter_config, validate_deployment_overrides_match_existing,
 };
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
 use super::logging::{
@@ -554,6 +554,9 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                 reason: "initializing a new config requires selecting a real agent".to_owned(),
             })?;
         args.agent = Some(selected.id.clone());
+    }
+    if creating_config && !args.resume {
+        prompt_starter_config_selections_if_needed(&mut args)?;
     }
 
     let config_status = if config_path.exists() {
