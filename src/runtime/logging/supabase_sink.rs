@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
 use rand::RngExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -34,6 +35,8 @@ const POLL_INTERVAL_MIN: Duration = Duration::from_secs(1);
 const POLL_INTERVAL_MAX: Duration = Duration::from_secs(30);
 const BATCH_SIZE: usize = 128;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+const POSTGRES_TIMEOUT: Duration = Duration::from_secs(15);
+const SUPABASE_ROOT_2021_CA_DER_BASE64: &str = "MIIDxDCCAqygAwIBAgIUbLxMod62P2ktCiAkxnKJwtE9VPYwDQYJKoZIhvcNAQELBQAwazELMAkGA1UEBhMCVVMxEDAOBgNVBAgMB0RlbHdhcmUxEzARBgNVBAcMCk5ldyBDYXN0bGUxFTATBgNVBAoMDFN1cGFiYXNlIEluYzEeMBwGA1UEAwwVU3VwYWJhc2UgUm9vdCAyMDIxIENBMB4XDTIxMDQyODEwNTY1M1oXDTMxMDQyNjEwNTY1M1owazELMAkGA1UEBhMCVVMxEDAOBgNVBAgMB0RlbHdhcmUxEzARBgNVBAcMCk5ldyBDYXN0bGUxFTATBgNVBAoMDFN1cGFiYXNlIEluYzEeMBwGA1UEAwwVU3VwYWJhc2UgUm9vdCAyMDIxIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqQXWQyHOB+qR2GJobCq/CBmQ40G0oDmCC3mzVnn8sv4XNeWtE5XcEL0uVih7Jo4Dkx1QDmGHBH1zDfgs2qXiLb6xpw/CKQPypZW1JssOTMIfQppNQ87K75Ya0p25Y3ePS2t2GtvHxNjUV6kjOZjEn2yWEcBdpOVCUYBVFBNMB4YBHkNRDa/+S4uywAoaTWnCJLUicvTlHmMw6xSQQn1UfRQHk50DMCEJ7Cy1RxrZJrkXXRP3LqQL2ijJ6F4yMfh+Gyb4O4XajoVj/+R4GwywKYrrS8PrSNtwxr5StlQO8zIQUSMiq26wM8mgELFlS/32UcltNaQ1xBRizkzpZct9DwIDAQABo2AwXjALBgNVHQ8EBAMCAQYwHQYDVR0OBBYEFKjXuXY32CztkhImng4yJNUtaUYsMB8GA1UdIwQYMBaAFKjXuXY32CztkhImng4yJNUtaUYsMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAB8spzNn+4VUtVxbdMaX+39Z50sc7uATmus16jmmHjhIHz+l/9GlJ5KqAMOx26mPZgfzG7oneL2bVW+WgYUkTT3XEPFWnTp2RJwQao8/tYPXWEJDc0WVQHrpmnWOFKU/d3MqBgBm5y+6jB81TU/RG2rVerPDWP+1MMcNNy0491CTL5XQZ7JfDJJ9CCmXSdtTl4uUQnSuv/QxCea13BX2ZgJc7Au30vihLhub52De4P/4gonKsNHYdbWjg7OWKwNv/zitGDVDB9Y2CMTyZKG3XEu5Ghl1LEnI3QmEKsqaCLv12BnVjbkSeZsMnevJPs1Ye6TjjJwdik5Po/bKiIz+Fq8=";
 const FAILURE_WINDOW_LEN: Duration = Duration::from_secs(60);
 
 struct UploadGroupContext<'a> {
@@ -542,14 +545,14 @@ pub async fn send_postgres_batch(
     payloads: &[Value],
 ) -> Result<()> {
     let sql = supabase_mirror::postgres_insert_sql(config, table)?;
-    let client = connect_postgres(db_url).await?;
+    let client = timeout_postgres("connect", connect_postgres(db_url)).await??;
     let json_payload = Value::Array(payloads.to_vec());
-    client
-        .execute(sql.as_str(), &[&json_payload])
-        .await
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&table, &json_payload];
+    timeout_postgres("execute", client.execute(sql.as_str(), &params))
+        .await?
         .map_err(|err| StackError::SupabaseSinkHttp {
             status: 0,
-            body: format!("postgres insert failed: {err}"),
+            body: format!("postgres insert failed: {err:?}"),
         })?;
     Ok(())
 }
@@ -560,20 +563,31 @@ pub async fn check_postgres_table(
     table: &str,
 ) -> Result<bool> {
     let sql = supabase_mirror::check_table_sql(config, table)?;
-    let client = connect_postgres(db_url).await?;
-    client
-        .query_one(sql.as_str(), &[])
-        .await
+    let client = timeout_postgres("connect", connect_postgres(db_url)).await??;
+    timeout_postgres("query", client.query_one(sql.as_str(), &[]))
+        .await?
         .and_then(|row| row.try_get::<_, bool>(0))
         .map_err(|err| StackError::SupabaseSinkHttp {
             status: 0,
-            body: format!("postgres table check failed: {err}"),
+            body: format!("postgres table check failed: {err:?}"),
         })
 }
 
 async fn connect_postgres(db_url: &str) -> Result<tokio_postgres::Client> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let supabase_root = base64::engine::general_purpose::STANDARD
+        .decode(SUPABASE_ROOT_2021_CA_DER_BASE64)
+        .map_err(|err| StackError::SupabaseSinkHttp {
+            status: 0,
+            body: format!("supabase CA decode failed: {err}"),
+        })?;
+    roots
+        .add(rustls::pki_types::CertificateDer::from(supabase_root))
+        .map_err(|err| StackError::SupabaseSinkHttp {
+            status: 0,
+            body: format!("supabase CA load failed: {err}"),
+        })?;
     let tls_config = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -583,7 +597,7 @@ async fn connect_postgres(db_url: &str) -> Result<tokio_postgres::Client> {
             .await
             .map_err(|err| StackError::SupabaseSinkHttp {
                 status: 0,
-                body: format!("postgres connect failed: {err}"),
+                body: format!("postgres connect failed: {err:?}"),
             })?;
     tokio::spawn(async move {
         if let Err(err) = connection.await {
@@ -591,6 +605,18 @@ async fn connect_postgres(db_url: &str) -> Result<tokio_postgres::Client> {
         }
     });
     Ok(client)
+}
+
+async fn timeout_postgres<T, F>(operation: &'static str, future: F) -> Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(POSTGRES_TIMEOUT, future)
+        .await
+        .map_err(|_| StackError::SupabaseSinkHttp {
+            status: 0,
+            body: format!("postgres {operation} timed out after {POSTGRES_TIMEOUT:?}"),
+        })
 }
 
 fn record_failure_observation(
@@ -612,7 +638,8 @@ fn record_failure_observation(
 fn classify_error(err: &StackError) -> (bool, String) {
     match err {
         StackError::SupabaseSinkHttp { status, body } => {
-            let permanent = *status >= 400 && *status < 500 && *status != 429;
+            let permanent = (*status >= 400 && *status < 500 && *status != 429)
+                || (*status == 0 && body.contains("kind: Db"));
             (permanent, format!("HTTP {status}: {body}"))
         }
         other => (false, other.to_string()),
@@ -732,6 +759,12 @@ mod tests {
         };
         let (p, _) = classify_error(&server);
         assert!(!p);
+        let db_error = StackError::SupabaseSinkHttp {
+            status: 0,
+            body: "postgres insert failed: Error { kind: Db }".into(),
+        };
+        let (p, _) = classify_error(&db_error);
+        assert!(p);
     }
 
     #[test]
