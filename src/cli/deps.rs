@@ -203,6 +203,7 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         }
         println!("---");
         print_apply_status_section("after", &report.after);
+        println!("audit run: {}", report.apply_run_id);
     }
 
     // Surface any non-success as a non-zero exit so automation can
@@ -229,8 +230,9 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         return Err(StackError::InvalidParam {
             field: "deps",
             reason: format!(
-                "deps apply produced non-success outcomes: {}",
-                bad.join("; ")
+                "deps apply produced non-success outcomes: {}; inspect audit rows with `acps installer history --agent deps_apply` (apply_run_id={})",
+                bad.join("; "),
+                report.apply_run_id,
             ),
         });
     }
@@ -275,6 +277,7 @@ fn deps_apply_report_json(
         .collect::<Vec<_>>();
 
     Ok(serde_json::json!({
+        "apply_run_id": &report.apply_run_id,
         "before": before,
         "after": after,
         "results": results,

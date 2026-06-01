@@ -5019,11 +5019,13 @@ fn deps_apply_prints_before_and_after_status() {
         .expect("second progress line");
     let results_index = stdout.find("results:\n").expect("results section");
     let after_index = stdout.find("after:\n").expect("after section");
+    let audit_index = stdout.find("audit run: dap_").expect("audit run line");
     assert!(
         progress_one_index < progress_two_index
             && progress_two_index < before_index
             && before_index < results_index
-            && results_index < after_index,
+            && results_index < after_index
+            && after_index < audit_index,
         "expected before/results/after ordering, got:\n{stdout}",
     );
     assert!(
@@ -5120,6 +5122,12 @@ creates = {}
     assert!(!stdout.contains("progress: applying dependency"));
     assert!(!stdout.contains("sk-test-secret"));
     let body: Value = serde_json::from_slice(&output).expect("deps apply json parses");
+    assert!(
+        body["apply_run_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("dap_")),
+        "{body}",
+    );
     let outcome = &body["results"][0]["outcome"];
     assert_eq!(outcome["kind"], "failed");
     assert_eq!(outcome["exit_code"], 7);

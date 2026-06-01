@@ -188,7 +188,7 @@ Permission requests are created by ACP permission callbacks and by mediated comm
 | `POST /v1/deps/check` | session | re-checks dependency status        |
 | `POST /v1/deps/apply` | admin   | runs declared install actions      |
 
-The runtime never invents package-manager commands. Only install actions declared in config can be applied.
+The runtime never invents package-manager commands. Only install actions declared in config can be applied. Apply responses include `apply_run_id` for correlating dependency audit rows.
 
 ## Status, Logs, Metrics, And Security
 
