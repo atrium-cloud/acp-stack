@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use acp_stack::config::SupabaseLoggingConfig;
+use acp_stack::config::{SupabaseLoggingBackend, SupabaseLoggingConfig};
 use acp_stack::events::EventHub;
-use acp_stack::runtime::logging::supabase_sink::SupabaseSink;
-use acp_stack::state::{NewSessionRecord, StateStore};
+use acp_stack::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
+use acp_stack::state::{NewCommandRecord, NewSessionRecord, StateStore};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -159,7 +159,10 @@ async fn fresh_store_with_external_logging() -> (tempfile::TempDir, Arc<TokioMut
 fn supabase_config(url: &str) -> SupabaseLoggingConfig {
     SupabaseLoggingConfig {
         enabled: true,
+        backend: SupabaseLoggingBackend::Postgrest,
         url: url.to_owned(),
+        table_prefix: String::new(),
+        db_url_ref: None,
         api_key_ref: "SUPABASE_SECRET_KEY".to_owned(),
         schema: "acp_stack".to_owned(),
     }
@@ -193,7 +196,7 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
     let sink = SupabaseSink::spawn(
         state.clone(),
         supabase_config(&url),
-        "test-supabase-api-key".to_owned(),
+        SupabaseSinkCredential::PostgrestApiKey("test-supabase-api-key".to_owned()),
         event_hub,
     )
     .expect("sink spawn");
@@ -226,14 +229,21 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
                 "{}",
             )
             .expect("append auth failure");
+        guard
+            .append_command(NewCommandRecord {
+                command: "printf hello",
+                cwd: Some("/var/secrets/repo"),
+                env_json: Some(r#"{"TOKEN":"sk-command"}"#),
+            })
+            .expect("append command");
     }
 
-    let captured = drain_at_least(&mut rx, 3).await;
+    let captured = drain_at_least(&mut rx, 4).await;
     sink.shutdown().await;
 
     assert!(
-        captured.len() >= 3,
-        "expected at least 3 batched POSTs, got {}",
+        captured.len() >= 4,
+        "expected at least 4 batched POSTs, got {}",
         captured.len()
     );
 
@@ -297,6 +307,26 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
         "session title leaked: {body}",
         body = sessions_req.body
     );
+    let commands_req = captured
+        .iter()
+        .find(|r| r.path.ends_with("/rest/v1/commands"))
+        .expect("commands POST present");
+    let commands_parsed: serde_json::Value =
+        serde_json::from_str(&commands_req.body).expect("body parses");
+    let command = commands_parsed
+        .as_array()
+        .and_then(|rows| rows.first())
+        .expect("command row present");
+    assert_eq!(
+        command.get("output_bytes").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert!(
+        command
+            .get("last_output_event_id")
+            .map(|v| v.is_null())
+            .unwrap_or(false)
+    );
 
     // Local outbox state: all rows must be marked sent.
     let pending_after = state
@@ -318,7 +348,7 @@ async fn payload_never_contains_plaintext_secret() {
     let sink = SupabaseSink::spawn(
         state.clone(),
         supabase_config(&url),
-        "test-supabase-api-key".to_owned(),
+        SupabaseSinkCredential::PostgrestApiKey("test-supabase-api-key".to_owned()),
         event_hub,
     )
     .expect("sink spawn");
@@ -378,7 +408,7 @@ async fn permanent_4xx_failure_does_not_retry_immediately() {
     let sink = SupabaseSink::spawn(
         state.clone(),
         supabase_config(&url),
-        "test-supabase-api-key".to_owned(),
+        SupabaseSinkCredential::PostgrestApiKey("test-supabase-api-key".to_owned()),
         event_hub,
     )
     .expect("sink spawn");
