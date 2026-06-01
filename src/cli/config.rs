@@ -63,7 +63,13 @@ pub(super) fn run_config_command(
             Ok(())
         }
         ConfigCommand::Export(args) => {
+            if !output_format.is_json() && args.output.is_some() {
+                println!("progress: loading config");
+            }
             let config = Config::load_from_default_path()?;
+            if !output_format.is_json() && args.output.is_some() {
+                println!("progress: rendering config export");
+            }
             let canonical = config.to_canonical_toml()?;
             let rendered = if args.base64 {
                 base64::engine::general_purpose::STANDARD.encode(canonical)
@@ -72,6 +78,9 @@ pub(super) fn run_config_command(
             };
 
             if let Some(path) = args.output {
+                if !output_format.is_json() {
+                    println!("progress: writing config export");
+                }
                 std::fs::write(&path, &rendered).map_err(|source| StackError::ConfigWrite {
                     path: path.clone(),
                     source,
@@ -163,6 +172,7 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
                 "target_exists": target.exists(),
             }))?;
         } else {
+            print_config_import_progress(false);
             println!("import dry-run complete");
             println!("  config_version: {}", config.config_version);
             println!("  canonical TOML size: {} bytes", canonical.len());
@@ -185,6 +195,9 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
         }
         let current = Config::load_from_path(&target)?;
         config::compare_auth_refs(&current.auth, &config.auth)?;
+        if !output.is_json() {
+            print_config_import_progress(true);
+        }
         atomic_write_owner_only(&target, canonical.as_bytes())?;
         if output.is_json() {
             print_json(&serde_json::json!({
@@ -197,6 +210,9 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
             println!("imported config (replaced): {}", target.display());
         }
     } else {
+        if !output.is_json() {
+            print_config_import_progress(true);
+        }
         write_new_file_owner_only(&target, canonical.as_bytes())?;
         if output.is_json() {
             print_json(&serde_json::json!({
@@ -211,6 +227,14 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
     }
 
     Ok(())
+}
+
+fn print_config_import_progress(include_write: bool) {
+    println!("progress: reading config import");
+    println!("progress: validating config import");
+    if include_write {
+        println!("progress: writing config import");
+    }
 }
 
 fn load_config(path: Option<PathBuf>) -> Result<Config> {

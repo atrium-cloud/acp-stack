@@ -44,7 +44,7 @@ acps init \
   [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
 ```
 
-Interactive init may prompt for missing choices. Non-interactive first runs require `--agent <id>`; scripts should pass `--non-interactive` with the selected real agent id. Provider-backed setup also requires explicit flags and existing secret refs. Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
+Interactive init may prompt for missing choices, including starter code sources, data sources, MCP declarations, provider, model, mode, and required secret values. Non-interactive first runs require `--agent <id>`; scripts should pass `--non-interactive` with the selected real agent id, explicit provider flags when provider setup is required, and resolvable secret refs. Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
 
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
 
@@ -80,7 +80,7 @@ acps config import <path> [--force] [--dry-run]
 acps config import --base64 <code> [--force] [--dry-run]
 ```
 
-Export emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+Export emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
 
 ## Logging Commands
 
