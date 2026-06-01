@@ -99,9 +99,12 @@ enum Command {
     },
     /// Configure external logging sinks.
     #[command(after_help = "Examples:
-  acps logging supabase status
-  acps logging supabase enable --url https://example.supabase.co
-  acps logging supabase set-secret")]
+	  acps logging supabase status
+	  acps logging supabase setup --url https://example.supabase.co
+	  acps logging supabase check
+	  acps logging supabase enable --url https://example.supabase.co
+	  acps logging supabase set-secret
+	  acps logging supabase set-db-url")]
     Logging {
         #[command(subcommand)]
         command: LoggingCommand,

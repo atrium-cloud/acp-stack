@@ -1256,6 +1256,48 @@ fn supabase_enabled_with_clean_schema_and_https_passes() {
 }
 
 #[test]
+fn supabase_legacy_config_defaults_to_postgrest_backend() {
+    let updated = enable_supabase(VALID_CONFIG);
+    let config = load_config_from_str(&updated).expect("legacy supabase config parses");
+    let supabase = config.logging.supabase.expect("supabase set");
+    assert_eq!(
+        supabase.backend,
+        acp_stack::config::SupabaseLoggingBackend::Postgrest
+    );
+    assert_eq!(supabase.table_prefix, "");
+    assert!(supabase.db_url_ref.is_none());
+}
+
+#[test]
+fn supabase_postgres_backend_requires_db_url_ref() {
+    let updated = enable_supabase(VALID_CONFIG).replace(
+        "[logging.supabase]",
+        "[logging.supabase]\nbackend = \"postgres\"",
+    );
+    let error = load_config_from_str(&updated).expect_err("postgres backend needs db url ref");
+    assert!(
+        error.to_string().contains("logging.supabase.db_url_ref"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn supabase_postgres_backend_accepts_prefixed_public_tables() {
+    let updated = enable_supabase(VALID_CONFIG).replace(
+        "[logging.supabase]",
+        "[logging.supabase]\nbackend = \"postgres\"\ntable_prefix = \"acp_stack_\"\ndb_url_ref = \"SUPABASE_LOG_DB_URL\"",
+    ).replace(r#"schema = "acp_stack""#, r#"schema = "public""#);
+    let config = load_config_from_str(&updated).expect("postgres supabase config parses");
+    let supabase = config.logging.supabase.expect("supabase set");
+    assert_eq!(
+        supabase.backend,
+        acp_stack::config::SupabaseLoggingBackend::Postgres
+    );
+    assert_eq!(supabase.table_prefix, "acp_stack_");
+    assert_eq!(supabase.db_url_ref.as_deref(), Some("SUPABASE_LOG_DB_URL"));
+}
+
+#[test]
 fn parses_config_with_explicit_version() {
     let input = format!("config_version = 1\n{VALID_CONFIG}");
     let config = load_config_from_str(&input).expect("explicit version 1 should parse");

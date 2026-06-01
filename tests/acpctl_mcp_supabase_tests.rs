@@ -15,10 +15,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use acp_stack::api::AppState;
-use acp_stack::config::{Config, SupabaseLoggingConfig, load_config_from_str};
+use acp_stack::config::{
+    Config, SupabaseLoggingBackend, SupabaseLoggingConfig, load_config_from_str,
+};
 use acp_stack::events::EventHub;
 use acp_stack::local_listener;
-use acp_stack::runtime::logging::supabase_sink::SupabaseSink;
+use acp_stack::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
 use acp_stack::state::{EventFilter, StateStore};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::{RunningService, ServiceExt};
@@ -209,7 +211,10 @@ fn test_config() -> Config {
 fn supabase_config(url: &str) -> SupabaseLoggingConfig {
     SupabaseLoggingConfig {
         enabled: true,
+        backend: SupabaseLoggingBackend::Postgrest,
         url: url.to_owned(),
+        table_prefix: String::new(),
+        db_url_ref: None,
         api_key_ref: "SUPABASE_SECRET_KEY".to_owned(),
         schema: "acp_stack".to_owned(),
     }
@@ -277,7 +282,7 @@ async fn mcp_sqlite_remains_source_of_truth_when_supabase_is_enabled() {
     let sink = SupabaseSink::spawn(
         harness.state.clone(),
         supabase_config(&sb_url),
-        "test-supabase-api-key".to_owned(),
+        SupabaseSinkCredential::PostgrestApiKey("test-supabase-api-key".to_owned()),
         EventHub::new(),
     )
     .expect("sink spawn");

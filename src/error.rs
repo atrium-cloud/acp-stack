@@ -207,6 +207,11 @@ pub enum StackError {
     )]
     InvalidSupabaseSchema { schema: String },
 
+    #[error(
+        "[logging.supabase].table_prefix must be empty or a safe Postgres identifier prefix matching `^[a-z_][a-z0-9_]*$`, with enough room for mirrored table names; got `{prefix}`"
+    )]
+    InvalidSupabaseTablePrefix { prefix: String },
+
     // === edge (cloudflare) ===
     #[error("edge.cloudflare.mode must be one of generated, managed; got `{mode}`")]
     InvalidCloudflareMode { mode: String },
@@ -251,6 +256,13 @@ pub enum StackError {
 
     #[error("Supabase sink received a row for unknown source table `{table}`; refusing to upload")]
     SupabaseSinkUnknownTable { table: String },
+
+    #[error("Supabase CLI setup failed at `{command}` with status {status}: {stderr_tail}")]
+    SupabaseCliFailed {
+        command: String,
+        status: String,
+        stderr_tail: String,
+    },
 
     // === stdin / generic config ===
     #[error("failed to read stdin: {source}")]

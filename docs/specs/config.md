@@ -148,7 +148,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 ## Logging
 
-`[logging.supabase]` mirrors selected local state rows to Supabase when enabled. `url` is the Supabase project URL, `schema` defaults to `acp_stack`, and `api_key_ref` names the encrypted secret-store entry that contains the Supabase secret key. Fresh headless setup should use `acps init --supabase-url ...` or the matching deployment env vars; initialized instances can use `acps logging supabase ...`.
+`[logging.supabase]` mirrors selected local state rows to Supabase when enabled. New table-backed setups should use `acps logging supabase setup --url ...`, which provisions prefixed `public` tables through the Supabase CLI and stores a narrow writer DB URL under `db_url_ref`. The legacy `postgrest` backend uses `api_key_ref` for a Supabase secret key and requires pre-provisioned/exposed tables. `acps logging supabase check` writes a marked canary row to verify the configured backend.
 
 ## Dependencies
 

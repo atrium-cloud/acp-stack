@@ -25,7 +25,7 @@ pub use self::schema::{
     DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
     EdgeConfig, HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig,
     McpStdioServer, PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SecurityConfig,
-    SecurityHttpConfig, SupabaseLoggingConfig, WorkspaceConfig,
+    SecurityHttpConfig, SupabaseLoggingBackend, SupabaseLoggingConfig, WorkspaceConfig,
 };
 pub use self::validate::primitives::{
     compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,

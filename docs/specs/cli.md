@@ -86,12 +86,16 @@ Export emits canonical TOML with secret references only. Import validates and ca
 
 ```sh
 acps logging supabase status
+acps logging supabase setup --url <url> [--project-ref <ref>] [--yes]
+acps logging supabase check [--format json]
+acps logging supabase sql
 acps logging supabase enable --url <url> [--schema <schema>] [--api-key-ref <ref>]
 acps logging supabase disable
 acps logging supabase set-secret [--api-key-ref <ref>]
+acps logging supabase set-db-url [--db-url-ref <ref>]
 ```
 
-`set-secret` stores the Supabase secret key in the encrypted secret store. Status output reports whether the configured secret exists but never prints its value.
+`setup` uses the Supabase CLI to provision table-backed logging, then stores only the narrow runtime writer DB URL in the encrypted secret store. `check` writes a marked canary row to prove the configured backend can receive logs. `set-secret` remains for the legacy PostgREST backend. Status output reports whether configured secrets exist but never prints their values.
 
 ## Agent Commands
 

@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::Config;
-use crate::config::schema::{McpServerConfig, SupabaseLoggingConfig};
+use crate::config::schema::{McpServerConfig, SupabaseLoggingBackend, SupabaseLoggingConfig};
 use crate::error::{Result, StackError};
 
 use self::agent::{
@@ -181,6 +181,9 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
     }
     if let Some(supabase) = &config.logging.supabase {
         record(&supabase.api_key_ref, "logging.supabase")?;
+        if let Some(db_url_ref) = supabase.db_url_ref.as_deref() {
+            record(db_url_ref, "logging.supabase.db_url_ref")?;
+        }
     }
     for source in &config.workspace.code_sources {
         if let Some(value) = source.credential_ref.as_deref() {
@@ -225,6 +228,9 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
     }
     if let Some(supabase) = &config.logging.supabase {
         check(&supabase.api_key_ref, "logging.supabase.api_key_ref")?;
+        if let Some(db_url_ref) = supabase.db_url_ref.as_deref() {
+            check(db_url_ref, "logging.supabase.db_url_ref")?;
+        }
     }
     for source in &config.workspace.code_sources {
         if let Some(value) = source.credential_ref.as_deref() {
@@ -280,6 +286,16 @@ fn validate_supabase_logging(supabase: Option<&SupabaseLoggingConfig>) -> Result
             schema: supabase.schema.clone(),
         });
     }
+    if !is_safe_table_prefix(&supabase.table_prefix) {
+        return Err(StackError::InvalidSupabaseTablePrefix {
+            prefix: supabase.table_prefix.clone(),
+        });
+    }
+    if supabase.backend == SupabaseLoggingBackend::Postgres && supabase.db_url_ref.is_none() {
+        return Err(StackError::MissingField {
+            field: "logging.supabase.db_url_ref",
+        });
+    }
     Ok(())
 }
 
@@ -298,4 +314,19 @@ fn is_safe_pg_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_safe_table_prefix(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    if s.len() > 32 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return true;
+    };
+    (first.is_ascii_lowercase() || first == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }

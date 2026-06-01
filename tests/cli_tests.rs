@@ -7521,6 +7521,109 @@ fn logging_supabase_cli_edits_config_and_secret_store() {
 }
 
 #[test]
+fn logging_supabase_setup_uses_cli_and_stores_writer_db_url() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_operator_init_with_home(tempdir.path(), &[]);
+    let fake_bin = tempdir.path().join("bin");
+    fs::create_dir_all(&fake_bin).expect("fake bin");
+    let fake_log = tempdir.path().join("supabase.log");
+    let fake_supabase = fake_bin.join("supabase");
+    fs::write(
+        &fake_supabase,
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> \"$FAKE_SUPABASE_LOG\"\nexit 0\n",
+    )
+    .expect("write fake supabase");
+    #[cfg(unix)]
+    fs::set_permissions(&fake_supabase, fs::Permissions::from_mode(0o755))
+        .expect("chmod fake supabase");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let setup_output = acps_command()
+        .env("HOME", tempdir.path())
+        .env("PATH", path)
+        .env("FAKE_SUPABASE_LOG", &fake_log)
+        .args([
+            "logging",
+            "supabase",
+            "setup",
+            "--url",
+            "https://psklvkrmvqqwzryiawgn.supabase.co/",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let setup_body: Value = serde_json::from_slice(&setup_output).expect("setup json parses");
+    assert_eq!(setup_body["backend"], "postgres");
+    assert_eq!(setup_body["db_url_ref"], "SUPABASE_LOG_DB_URL");
+    assert!(!String::from_utf8_lossy(&setup_output).contains("postgresql://"));
+
+    let fake_log = fs::read_to_string(fake_log).expect("read fake log");
+    assert!(fake_log.contains("|init\n"), "{fake_log}");
+    assert!(
+        fake_log.contains("|link --project-ref psklvkrmvqqwzryiawgn\n"),
+        "{fake_log}"
+    );
+    assert!(fake_log.contains("|db push --yes\n"), "{fake_log}");
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config readable");
+    let config = load_config_from_str(&written).expect("config parses");
+    let supabase = config.logging.supabase.expect("supabase configured");
+    assert!(supabase.enabled);
+    assert_eq!(supabase.url, "https://psklvkrmvqqwzryiawgn.supabase.co");
+    assert_eq!(
+        supabase.backend,
+        acp_stack::config::SupabaseLoggingBackend::Postgres
+    );
+    assert_eq!(supabase.schema, "public");
+    assert_eq!(supabase.table_prefix, "acp_stack_");
+    assert_eq!(supabase.db_url_ref.as_deref(), Some("SUPABASE_LOG_DB_URL"));
+    assert!(!written.contains("postgresql://"));
+
+    let store = SecretStore::open(tempdir.path()).expect("store opens");
+    let db_url = store.get("SUPABASE_LOG_DB_URL").expect("db url");
+    assert!(db_url.starts_with("postgresql://acp_stack_logger:"));
+    assert!(db_url.contains("@db.psklvkrmvqqwzryiawgn.supabase.co:5432/postgres?sslmode=require"));
+}
+
+#[test]
+fn logging_supabase_sql_prints_prefixed_public_ddl() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_operator_init_with_home(tempdir.path(), &[]);
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "logging",
+            "supabase",
+            "sql",
+            "--writer-password",
+            "test_writer_password",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sql = String::from_utf8(output).expect("sql utf8");
+    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"public\".\"acp_stack_events\""));
+    assert!(sql.contains("CREATE ROLE \"acp_stack_logger\" LOGIN PASSWORD 'test_writer_password'"));
+    assert!(sql.contains("GRANT INSERT, UPDATE ON TABLE"));
+    assert!(sql.contains("failure_detail_json jsonb"));
+    assert!(sql.contains("message_id_acknowledged boolean NOT NULL DEFAULT false"));
+    assert!(sql.contains("output_bytes bigint NOT NULL DEFAULT 0"));
+}
+
+#[test]
 fn init_supabase_env_does_not_rewrite_existing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_operator_init_with_home(tempdir.path(), &[]);
