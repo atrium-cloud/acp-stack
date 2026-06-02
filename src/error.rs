@@ -423,6 +423,13 @@ pub enum StackError {
     #[error("agent installer ran but `creates = {name}` did not resolve afterwards")]
     AgentInstallerCreatesMissing { name: String },
 
+    #[error("agent installer prerequisites missing for `{agent_id}` {step}: {tools:?}")]
+    AgentInstallerPrerequisitesMissing {
+        agent_id: String,
+        step: String,
+        tools: Vec<String>,
+    },
+
     #[error("agent installer hit the 10-minute timeout")]
     AgentInstallerTimeout,
 
@@ -828,6 +835,7 @@ impl StackError {
             StackError::ResetNotConfirmed => "re-run with `--yes` to confirm reset",
             StackError::AgentInstallerFailed { .. }
             | StackError::AgentInstallerCreatesMissing { .. }
+            | StackError::AgentInstallerPrerequisitesMissing { .. }
             | StackError::AgentInstallerTimeout => {
                 "inspect `acps installer history`, then retry with `acps agent install`"
             }

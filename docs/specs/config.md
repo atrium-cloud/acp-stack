@@ -138,11 +138,13 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 | Mode         | Behavior                                                |
 | ------------ | ------------------------------------------------------- |
-| `auto`       | allow by default; `review` patterns create audit events |
+| `auto`       | allow by default; `review` patterns create audit events; composed shell commands require review |
 | `supervised` | unmatched risky actions require approval                |
 | `locked`     | unmatched commands require approval                     |
 
 `deny` patterns reject immediately. Pending requests expire after `request_timeout` using `timeout_action`.
+
+Command `deny` and `review` patterns are checked against the full submitted command and each simple command segment separated by shell control operators.
 
 `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.
 

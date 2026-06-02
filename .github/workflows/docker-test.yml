@@ -1,0 +1,57 @@
+name: docker-test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - scripts/docker-entrypoint.sh
+      - scripts/docker-test.sh
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - data/agents.toml
+      - src/bin/placebo_agent/**
+      - src/cli/init.rs
+      - src/cli/init/**
+      - src/cli/serve.rs
+      - src/config.rs
+      - src/dev_gates.rs
+      - src/main.rs
+      - src/runtime/install/**
+      - .github/workflows/docker-test.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - scripts/docker-entrypoint.sh
+      - scripts/docker-test.sh
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - data/agents.toml
+      - src/bin/placebo_agent/**
+      - src/cli/init.rs
+      - src/cli/init/**
+      - src/cli/serve.rs
+      - src/config.rs
+      - src/dev_gates.rs
+      - src/main.rs
+      - src/runtime/install/**
+      - .github/workflows/docker-test.yml
+
+concurrency:
+  group: docker-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Docker test
+        env:
+          ACP_STACK_DOCKER_TEST_AGENT: placebo
+        run: bash scripts/docker-test.sh --cleanup-volumes

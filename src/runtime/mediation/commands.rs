@@ -107,6 +107,7 @@ impl CommandGateway {
                 });
             }
             PolicyDecision::Review => mode == "supervised" || mode == "locked",
+            PolicyDecision::ReviewRequired => true,
             PolicyDecision::Allow => mode == "locked",
         };
 
@@ -222,6 +223,7 @@ impl CommandGateway {
                         "env_names": env_names,
                         "policy_decision": match decision {
                             PolicyDecision::Review => "review",
+                            PolicyDecision::ReviewRequired => "shell-composition",
                             PolicyDecision::Allow => "locked-default",
                             PolicyDecision::Deny => "deny",
                         },

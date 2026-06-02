@@ -58,6 +58,7 @@ pub(super) fn select_install_path(
         return Ok(ResolvedInstallSpec::Shell {
             script: shell.script.clone(),
             creates: shell.creates.clone(),
+            required_tools: shell.required_tools.clone(),
         });
     }
     if let Some(npm) = &install.npm {
@@ -132,7 +133,11 @@ pub(super) fn run_install_step(
 ) -> StepResult {
     let started_at = current_timestamp();
     match spec {
-        ResolvedInstallSpec::Shell { script, creates } => {
+        ResolvedInstallSpec::Shell {
+            script,
+            creates,
+            required_tools: _,
+        } => {
             let result = run_shell_install(&script, agent_env, workspace_root, &[dest_dir]);
             shell_step_with_creates(
                 step_label,

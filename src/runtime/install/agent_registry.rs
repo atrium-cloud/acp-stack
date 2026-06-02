@@ -391,12 +391,18 @@ impl InstallSet {
 pub struct ShellInstall {
     pub script: String,
     pub creates: String,
+    #[serde(default)]
+    pub required_tools: Vec<String>,
 }
 
 impl ShellInstall {
     fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
         validate_nonempty(agent_id, &format!("{field}.script"), &self.script)?;
-        validate_nonempty(agent_id, &format!("{field}.creates"), &self.creates)
+        validate_nonempty(agent_id, &format!("{field}.creates"), &self.creates)?;
+        for tool in &self.required_tools {
+            validate_required_tool(agent_id, &format!("{field}.required_tools"), tool)?;
+        }
+        Ok(())
     }
 }
 
@@ -557,6 +563,16 @@ fn validate_nonempty(agent_id: &str, field: &str, value: &str) -> Result<()> {
     }
 }
 
+fn validate_required_tool(agent_id: &str, field: &str, value: &str) -> Result<()> {
+    validate_nonempty(agent_id, field, value)?;
+    if value.contains('/') {
+        return Err(StackError::RegistryLoad {
+            reason: format!("agent `{agent_id}` {field} entry `{value}` must be a command name"),
+        });
+    }
+    Ok(())
+}
+
 pub fn github_repo_from_url(agent_id: &str, field: &str, url: &str) -> Result<String> {
     let rest = github_path_from_value(agent_id, field, url)?;
     let mut parts = rest.split('/').filter(|part| !part.is_empty());
@@ -600,6 +616,7 @@ fn development_placebo_install(placebo_path: &str) -> InstallSet {
         shell: Some(ShellInstall {
             script: format!("test -x {}", shell_quote_str(placebo_path)),
             creates: placebo_path.to_owned(),
+            required_tools: Vec::new(),
         }),
         npm: None,
         github: None,
@@ -909,6 +926,36 @@ creates = "bad"
             StackError::RegistryLoad { reason } => {
                 assert!(
                     reason.contains("unknown field") || reason.contains("unexpected keys"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_required_tool_paths() {
+        let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "bad"
+required_tools = ["/usr/bin/curl"]
+"#;
+        let err = RegistryCatalog::from_toml(body).expect_err("must reject tool path");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(
+                    reason.contains("must be a command name"),
                     "reason: {reason}"
                 );
             }

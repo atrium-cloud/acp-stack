@@ -78,7 +78,7 @@ The legacy PostgREST backend can still be configured with `acps logging supabase
 
 Use the root `Dockerfile` and attach a persistent Railway volume at `/home/acp`. Railway provides `PORT`; the image binds to that port automatically.
 
-Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`.
+Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`. First deploys must set `ACP_STACK_INIT_AGENT=<agent-id>` so the missing config can be initialized.
 
 On the first successful deploy, capture both generated API keys from deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
 

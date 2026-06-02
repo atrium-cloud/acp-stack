@@ -144,6 +144,8 @@ acps sessions close <session-id>
 
 `sessions status` prints active sessions with recent or idle state. The default recent threshold is `15m`.
 
+`sessions new` and `sessions fork --cwd` accept only existing absolute directories that canonicalize under `[workspace].root`.
+
 `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
 
 ## Logs, Metrics, And Health
