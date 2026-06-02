@@ -119,6 +119,19 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     if let Some(provider) = &config.agent.provider {
         validate_agent_provider(provider)?;
     }
+    if config.agent.model.is_some()
+        && config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_ref())
+            .is_some()
+    {
+        return Err(StackError::InvalidParam {
+            field: "agent.model",
+            reason: "must be omitted when agent.provider.model is set".to_owned(),
+        });
+    }
     if let Some(subagent) = &config.agent.subagent {
         validate_agent_subagent(subagent)?;
     }

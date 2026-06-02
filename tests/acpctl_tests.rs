@@ -61,6 +61,11 @@ impl Harness {
         let store = StateStore::open(&state_path).expect("state open");
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(state_tempdir.path(), &state_path);
+        std::fs::write(
+            &config_path,
+            config.to_canonical_toml().expect("canonical test config"),
+        )
+        .expect("write runtime config");
         let runtime_paths = RuntimePaths::new(config_path, state_path.clone());
 
         let socket_tempdir = tempfile::tempdir().expect("socket tempdir");

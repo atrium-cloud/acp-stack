@@ -35,7 +35,7 @@ Allowed capabilities:
 - log queries
 - workspace list/read/write
 - mediated shell commands
-- config export with secret refs only
+- current config export with secret refs only
 - pending permission inspection
 - read-only WebSocket connection/session views
 - local MCP facade for the same allowlisted operations

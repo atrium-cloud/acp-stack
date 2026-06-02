@@ -44,3 +44,35 @@ fn production_build_does_not_expose_placebo_binary() {
         )]))
     );
 }
+
+#[test]
+fn docker_runtime_includes_registry_install_tools() {
+    let dockerfile = std::fs::read_to_string("Dockerfile").expect("read Dockerfile");
+    let install_line = dockerfile
+        .lines()
+        .find(|line| line.contains("apt-get install"))
+        .expect("runtime apt install line");
+    for tool in ["bash", "curl", "npm"] {
+        assert!(
+            install_line.contains(tool),
+            "Docker runtime must include {tool} for registry install paths"
+        );
+    }
+}
+
+#[test]
+fn docker_entrypoint_maps_provider_init_env_vars() {
+    let entrypoint =
+        std::fs::read_to_string("scripts/docker-entrypoint.sh").expect("read Docker entrypoint");
+    for (env_var, flag) in [
+        ("ACP_STACK_INIT_PROVIDER", "--provider"),
+        ("ACP_STACK_INIT_API_KEY_REF", "--api-key-ref"),
+        ("ACP_STACK_INIT_MODEL", "--model"),
+        ("ACP_STACK_INIT_MODE", "--mode"),
+    ] {
+        assert!(
+            entrypoint.contains(env_var) && entrypoint.contains(flag),
+            "entrypoint must map {env_var} to {flag}"
+        );
+    }
+}
