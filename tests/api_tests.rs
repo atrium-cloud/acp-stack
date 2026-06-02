@@ -71,6 +71,11 @@ impl ServerHarness {
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let config_path = create_runtime_files(tempdir.path(), &path);
+        std::fs::write(
+            &config_path,
+            config.to_canonical_toml().expect("canonical test config"),
+        )
+        .expect("write runtime config");
         let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
         let effective_bind = config.api.bind.clone();
         let app_state = AppState::with_effective_bind_and_runtime_paths(
@@ -360,6 +365,28 @@ async fn config_export_returns_canonical_toml() {
     let toml = body["data"]["toml"].as_str().expect("toml string");
     assert!(toml.contains("[api]"));
     assert!(toml.contains("bind ="));
+}
+
+#[tokio::test]
+async fn config_export_reads_current_runtime_config_file() {
+    let harness = ServerHarness::spawn().await;
+    let current = std::fs::read_to_string(&harness.config_path).expect("read config");
+    let updated = current.replace(
+        r#"public_url = "https://agent.example.com""#,
+        r#"public_url = "https://updated.example.com""#,
+    );
+    std::fs::write(&harness.config_path, updated).expect("write updated config");
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/config/export", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let toml = body["data"]["toml"].as_str().expect("toml string");
+    assert!(toml.contains(r#"public_url = "https://updated.example.com""#));
 }
 
 #[tokio::test]

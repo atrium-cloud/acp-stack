@@ -16,7 +16,8 @@ pub(crate) struct ConfigExportResponse {
 pub(crate) async fn config_export_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<ConfigExportResponse>, StackError> {
-    let toml = state.config.to_canonical_toml()?;
+    let config = crate::config::Config::load_from_path(&state.runtime_paths.config_path)?;
+    let toml = config.to_canonical_toml()?;
     Ok(ApiSuccess::new(ConfigExportResponse { toml }))
 }
 

@@ -50,6 +50,12 @@ impl Harness {
         config.workspace.root = workspace_root.to_string_lossy().into_owned();
         config.workspace.uploads = uploads_root.to_string_lossy().into_owned();
         mutate(&mut config);
+        if !config.agent.args.iter().any(|arg| arg == "--listed-cwd") {
+            config.agent.args.extend([
+                "--listed-cwd".to_owned(),
+                workspace_root.to_string_lossy().into_owned(),
+            ]);
+        }
         let config_path = tempdir.path().join("acp-stack.toml");
         std::fs::write(
             &config_path,
@@ -543,6 +549,103 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
 }
 
 #[tokio::test]
+async fn load_and_resume_reject_closed_sessions() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let client = http();
+
+    let close = client
+        .delete(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("close");
+    assert_eq!(close.status(), StatusCode::OK);
+
+    for route in ["load", "resume"] {
+        let response = client
+            .post(format!(
+                "{}/v1/sessions/{}/{}",
+                harness.base_url, session_id, route
+            ))
+            .header("Authorization", session_bearer())
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("session lifecycle request");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: Value = response.json().await.expect("json");
+        assert_eq!(body["error"]["code"], "session.closed");
+    }
+}
+
+#[tokio::test]
+async fn stored_session_cwd_must_remain_under_workspace_for_reuse() {
+    let harness = Harness::spawn().await;
+    let outside = tempfile::tempdir().expect("outside");
+    {
+        let state = harness.state.lock().await;
+        state
+            .insert_session(NewSessionRecord {
+                id: "sess_bad_cwd".to_owned(),
+                agent_id: "placebo".to_owned(),
+                cwd: outside.path().to_string_lossy().into_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+    }
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/load",
+            harness.base_url, "sess_bad_cwd"
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("load");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "prompt.body_invalid");
+}
+
+#[tokio::test]
+async fn stored_inner_cwd_is_valid_for_load_resume_and_fork() {
+    let harness = Harness::spawn().await;
+    let inner = harness.workspace_root.join("stored-inner");
+    std::fs::create_dir(&inner).expect("inner dir");
+    {
+        let state = harness.state.lock().await;
+        state
+            .insert_session(NewSessionRecord {
+                id: "sess_valid_cwd".to_owned(),
+                agent_id: "placebo".to_owned(),
+                cwd: inner.to_string_lossy().into_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+    }
+
+    let client = http();
+    for route in ["load", "resume", "fork"] {
+        let response = client
+            .post(format!(
+                "{}/v1/sessions/{}/{}",
+                harness.base_url, "sess_valid_cwd", route
+            ))
+            .header("Authorization", session_bearer())
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("session lifecycle request");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
 async fn sessions_list_syncs_agent_discovered_sessions() {
     let harness = Harness::spawn().await;
     let client = http();
@@ -571,6 +674,38 @@ async fn sessions_list_syncs_agent_discovered_sessions() {
     let metadata: Value =
         serde_json::from_str(listed["metadata_json"].as_str().unwrap()).expect("metadata json");
     assert_eq!(metadata["agent_meta"]["origin"], "placebo-agent");
+}
+
+#[tokio::test]
+async fn sessions_list_skips_agent_discovered_cwd_outside_workspace() {
+    let outside = tempfile::tempdir().expect("outside");
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--listed-cwd".to_owned(),
+            outside.path().to_string_lossy().into_owned(),
+        ]);
+    })
+    .await;
+
+    let list: Value = http()
+        .get(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("list json");
+
+    assert_eq!(list["data"]["agent_sync"]["attempted"], true);
+    assert_eq!(list["data"]["agent_sync"]["status"], "synced");
+    assert_eq!(list["data"]["agent_sync"]["upserted"], 0);
+    let listed = list["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == "sess_listed_0");
+    assert!(listed.is_none(), "invalid listed cwd must be skipped");
 }
 
 #[tokio::test]

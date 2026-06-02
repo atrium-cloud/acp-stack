@@ -80,7 +80,7 @@ acps config import <path> [--force] [--dry-run]
 acps config import --base64 <code> [--force] [--dry-run]
 ```
 
-Export emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
 
 ## Logging Commands
 
@@ -144,7 +144,7 @@ acps sessions close <session-id>
 
 `sessions status` prints active sessions with recent or idle state. The default recent threshold is `15m`.
 
-`sessions new` and `sessions fork --cwd` accept only existing absolute directories that canonicalize under `[workspace].root`.
+Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
 `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
 
