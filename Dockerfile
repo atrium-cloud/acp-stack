@@ -11,6 +11,9 @@ COPY migrations ./migrations
 
 RUN cargo build --locked --release
 
+FROM builder AS builder-test
+RUN cargo build --locked --release --features test-fixtures --bin placebo-agent
+
 FROM debian:bookworm-slim AS runtime
 
 RUN addgroup --system --gid 1000 acp \
@@ -37,3 +40,6 @@ ENV HOME=/home/acp
 
 ENTRYPOINT ["acp-stack-docker-entrypoint"]
 CMD ["sh", "-c", "acps serve --bind 0.0.0.0:${PORT:-7700}"]
+
+FROM runtime AS test-runtime
+COPY --from=builder-test /app/target/release/placebo-agent /usr/local/bin/placebo-agent

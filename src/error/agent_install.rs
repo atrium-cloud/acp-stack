@@ -14,6 +14,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentNotConfigured => "agent.not_configured",
         AgentInstallerFailed { .. } => "agent.installer_failed",
         AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
+        AgentInstallerPrerequisitesMissing { .. } => "agent.installer_prerequisites_missing",
         AgentInstallerTimeout => "agent.installer_timeout",
         AgentInstallerLogPersist { .. } => "agent.installer_log_persist_failed",
         AgentRegistryMissing { .. } => "agent.registry_missing",
@@ -55,6 +56,16 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         },
         AgentInstallerCreatesMissing { name } => {
             format!("agent installer ran but `creates = {name}` did not resolve afterwards")
+        }
+        AgentInstallerPrerequisitesMissing {
+            agent_id,
+            step,
+            tools,
+        } => {
+            format!(
+                "agent `{agent_id}` {step} requires missing install tools: {}",
+                tools.join(", ")
+            )
         }
         AgentInstallerTimeout => "agent installer hit the configured timeout".to_owned(),
         AgentInstallerLogPersist { path, .. } => {
@@ -136,6 +147,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         SkillInstallTargetConflict { .. } => StatusCode::CONFLICT,
         AgentInstallerFailed { .. }
         | AgentInstallerCreatesMissing { .. }
+        | AgentInstallerPrerequisitesMissing { .. }
         | AgentInstallerTimeout
         | AgentInstallerLogPersist { .. }
         | AgentRegistryMissing { .. }

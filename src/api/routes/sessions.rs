@@ -480,10 +480,10 @@ async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[Strin
     }
 }
 
-/// Resolve and validate a session `cwd` against `workspace.root`. Returns
-/// the canonical (no `..`) string. Rejects anything outside the workspace
-/// boundary; this is the same containment the Workspace API will share when
-/// it lands.
+/// Resolve and validate a session `cwd` against `workspace.root`. The cwd must
+/// already exist as a directory and canonicalize under the canonical workspace
+/// root so symlink escapes cannot move an ACP session outside the runtime
+/// boundary.
 fn resolve_session_cwd(raw: Option<String>, workspace_root: &str) -> Result<String> {
     let candidate = raw.unwrap_or_else(|| workspace_root.to_owned());
     let root_path = std::path::PathBuf::from(workspace_root);
@@ -504,12 +504,25 @@ fn resolve_session_cwd(raw: Option<String>, workspace_root: &str) -> Result<Stri
             "session cwd must not contain `..` segments".to_owned(),
         ));
     }
-    if !candidate_path.starts_with(&root_path) {
+    let canonical_root = root_path.canonicalize().map_err(|_| {
+        StackError::PromptBodyInvalid("workspace.root must be an existing directory".to_owned())
+    })?;
+    let canonical_candidate = candidate_path.canonicalize().map_err(|_| {
+        StackError::PromptBodyInvalid(
+            "session cwd must be an existing directory under workspace.root".to_owned(),
+        )
+    })?;
+    if !canonical_candidate.is_dir() {
+        return Err(StackError::PromptBodyInvalid(
+            "session cwd must be an existing directory".to_owned(),
+        ));
+    }
+    if !canonical_candidate.starts_with(&canonical_root) {
         return Err(StackError::PromptBodyInvalid(format!(
             "session cwd must be under workspace.root ({workspace_root})"
         )));
     }
-    Ok(candidate)
+    Ok(canonical_candidate.to_string_lossy().into_owned())
 }
 
 #[derive(Deserialize)]

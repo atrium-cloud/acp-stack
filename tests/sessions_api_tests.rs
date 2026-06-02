@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::{Config, load_config_from_str};
+use acp_stack::config::{AgentProviderConfig, Config, load_config_from_str};
 use acp_stack::state::{NewPromptRecord, NewSessionRecord, StateStore};
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
@@ -27,6 +27,7 @@ const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd
 
 struct Harness {
     base_url: String,
+    workspace_root: std::path::PathBuf,
     _tempdir: TempDir,
     state: Arc<TokioMutex<StateStore>>,
     join: JoinHandle<acp_stack::error::Result<()>>,
@@ -43,6 +44,11 @@ impl Harness {
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let mut config = test_config();
+        let workspace_root = tempdir.path().join("workspace");
+        let uploads_root = workspace_root.join("uploads");
+        std::fs::create_dir_all(&uploads_root).expect("workspace dirs");
+        config.workspace.root = workspace_root.to_string_lossy().into_owned();
+        config.workspace.uploads = uploads_root.to_string_lossy().into_owned();
         mutate(&mut config);
         let config_path = tempdir.path().join("acp-stack.toml");
         std::fs::write(
@@ -66,6 +72,7 @@ impl Harness {
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
         let harness = Self {
             base_url,
+            workspace_root,
             _tempdir: tempdir,
             state,
             join,
@@ -156,6 +163,78 @@ async fn create_session(harness: &Harness) -> String {
         .as_str()
         .expect("session id present")
         .to_owned()
+}
+
+#[tokio::test]
+async fn create_session_accepts_existing_cwd_under_workspace() {
+    let harness = Harness::spawn().await;
+    let inner = harness.workspace_root.join("inner");
+    std::fs::create_dir(&inner).expect("inner dir");
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "cwd": inner.to_string_lossy() }))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let canonical_inner = inner.canonicalize().expect("canonical inner");
+    assert_eq!(
+        body["data"]["cwd"],
+        canonical_inner.to_string_lossy().as_ref()
+    );
+}
+
+#[tokio::test]
+async fn create_session_rejects_symlink_cwd_escape() {
+    let harness = Harness::spawn().await;
+    let outside = tempfile::tempdir().expect("outside");
+    let link = harness.workspace_root.join("outside-link");
+    std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "cwd": link.to_string_lossy() }))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "prompt.body_invalid");
+}
+
+#[tokio::test]
+async fn create_session_applies_model_with_custom_config_option_id() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--model-config-option".to_owned(),
+            "deepseek/deepseek-v4-flash".to_owned(),
+            "--model-config-option-id".to_owned(),
+            "agent-model".to_owned(),
+            "--expect-model-config".to_owned(),
+            "deepseek/deepseek-v4-flash".to_owned(),
+        ]);
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+    })
+    .await;
+    let session_id = create_session(&harness).await;
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "model should already be set" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

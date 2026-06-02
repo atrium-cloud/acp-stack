@@ -193,7 +193,7 @@ async fn handle_ws_client_message(subscribed_topics: &mut BTreeSet<String>, text
         if topic.starts_with("sessions.")
             || topic.starts_with("commands.")
             || topic == "workspace"
-            || topic == "agent"
+            || topic == "agent.lifecycle"
             || topic == "status"
             || topic == "logs"
             || topic == "permissions"
