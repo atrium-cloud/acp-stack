@@ -20,11 +20,27 @@ if [ "${ACP_STACK_AUTO_INIT:-0}" = "1" ] && [ ! -f "${config_path}" ]; then
     echo "acp-stack: ACP_STACK_AUTO_INIT requires ACP_STACK_INIT_AGENT=<agent-id>" >&2
     exit 1
   fi
+  run_init() {
+    set -- init --non-interactive --agent "${ACP_STACK_INIT_AGENT}"
+    if [ -n "${ACP_STACK_INIT_PROVIDER:-}" ]; then
+      set -- "$@" --provider "${ACP_STACK_INIT_PROVIDER}"
+    fi
+    if [ -n "${ACP_STACK_INIT_API_KEY_REF:-}" ]; then
+      set -- "$@" --api-key-ref "${ACP_STACK_INIT_API_KEY_REF}"
+    fi
+    if [ -n "${ACP_STACK_INIT_MODEL:-}" ]; then
+      set -- "$@" --model "${ACP_STACK_INIT_MODEL}"
+    fi
+    if [ -n "${ACP_STACK_INIT_MODE:-}" ]; then
+      set -- "$@" --mode "${ACP_STACK_INIT_MODE}"
+    fi
+    acps "$@"
+  }
   echo "acp-stack: config missing; running acps init" >&2
   mkdir -p /workspace /workspace/uploads \
     "${home}/.config/acp-stack" \
     "${home}/.local/share/acp-stack"
-  acps init --non-interactive --agent "${ACP_STACK_INIT_AGENT}"
+  run_init
 fi
 
 exec "$@"

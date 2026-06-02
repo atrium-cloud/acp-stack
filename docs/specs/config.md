@@ -130,7 +130,7 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 | `env`     | secret refs injected as environment variables             |
 | `restart` | process restart policy: `on-crash` or `never`             |
 
-Provider and model fields are documented in [agents/config.md](agents/config.md).
+Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
 
 ## Permissions And Commands
 
@@ -144,7 +144,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 `deny` patterns reject immediately. Pending requests expire after `request_timeout` using `timeout_action`.
 
-Command `deny` and `review` patterns are checked against the full submitted command and each simple command segment separated by shell control operators.
+Command `deny` and `review` patterns are checked against the full submitted command and each simple command segment found through shell control operators, command substitution, or process substitution.
 
 `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.
 
@@ -198,4 +198,4 @@ Secret refs are resolved at session attach time. Secret values do not appear in 
 
 ## Import And Export
 
-Config import validates TOML, rejects unknown fields and invalid enum values, and writes canonical TOML atomically. Config export returns canonical TOML with secret references only.
+Config import validates TOML, rejects unknown fields and invalid enum values, and writes canonical TOML atomically. Config export reads the current config file and returns canonical TOML with secret references only.

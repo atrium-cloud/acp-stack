@@ -57,6 +57,7 @@ api_key_ref = "<provider-api-key-ref>"
 - Provider edits require the configured agent to support provider selection.
 - Model edits require the configured agent to support model selection.
 - Mode edits require the configured agent to advertise mode choices.
+- Root `agent.model` must be omitted when `[agent.provider].model` is set.
 - Mapped model and mode values are validated against ACP-advertised options.
 - Custom-provider model ids are accepted as supplied.
 - API-key refs must be valid secret-ref names and are added to `[agent].env`.

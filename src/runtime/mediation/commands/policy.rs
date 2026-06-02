@@ -100,6 +100,18 @@ fn analyze_shell_command(command: &str) -> ShellCommandAnalysis {
             continue;
         }
         if !in_single
+            && !in_double
+            && matches!(ch, '<' | '>')
+            && chars.get(index + 1) == Some(&'(')
+            && let Some((substitution, end_index)) = parse_process_substitution(&chars, index + 2)
+        {
+            composed = true;
+            push_substitution_segments(&mut segments, &substitution);
+            current.extend(chars[index..end_index].iter());
+            index = end_index;
+            continue;
+        }
+        if !in_single
             && ch == '`'
             && let Some((substitution, end_index)) =
                 parse_backtick_command_substitution(&chars, index + 1)
@@ -182,6 +194,10 @@ fn parse_dollar_command_substitution(chars: &[char], start: usize) -> Option<(St
     None
 }
 
+fn parse_process_substitution(chars: &[char], start: usize) -> Option<(String, usize)> {
+    parse_parenthesized_shell_content(chars, start)
+}
+
 fn parse_backtick_command_substitution(chars: &[char], start: usize) -> Option<(String, usize)> {
     let mut content = String::new();
     let mut index = start;
@@ -203,6 +219,61 @@ fn parse_backtick_command_substitution(chars: &[char], start: usize) -> Option<(
         }
         if ch == '`' {
             return Some((content, index + 1));
+        }
+        content.push(ch);
+        index += 1;
+    }
+    None
+}
+
+fn parse_parenthesized_shell_content(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut content = String::new();
+    let mut index = start;
+    let mut depth = 1;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            content.push(ch);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            content.push(ch);
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            content.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            content.push(ch);
+            index += 1;
+            continue;
+        }
+        if !in_single && !in_double && ch == '(' {
+            depth += 1;
+            content.push(ch);
+            index += 1;
+            continue;
+        }
+        if !in_single && !in_double && ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((content, index + 1));
+            }
+            content.push(ch);
+            index += 1;
+            continue;
         }
         content.push(ch);
         index += 1;
@@ -363,6 +434,19 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_policy_matches_deny_inside_process_substitution() {
+        let permissions = PermissionsConfig {
+            mode: "auto".to_owned(),
+            deny: vec!["rm *".to_owned()],
+            ..PermissionsConfig::default()
+        };
+        assert_eq!(
+            evaluate_policy("cat <(rm -rf target)", &permissions),
+            PolicyDecision::Deny
+        );
+    }
+
+    #[test]
     fn evaluate_policy_matches_review_on_shell_segment() {
         let permissions = PermissionsConfig {
             mode: "auto".to_owned(),
@@ -371,6 +455,19 @@ mod tests {
         };
         assert_eq!(
             evaluate_policy("echo ok; sudo apt update", &permissions),
+            PolicyDecision::Review
+        );
+    }
+
+    #[test]
+    fn evaluate_policy_matches_review_inside_process_substitution() {
+        let permissions = PermissionsConfig {
+            mode: "auto".to_owned(),
+            review: vec!["sudo *".to_owned()],
+            ..PermissionsConfig::default()
+        };
+        assert_eq!(
+            evaluate_policy("diff <(sudo cat /etc/shadow) /dev/null", &permissions),
             PolicyDecision::Review
         );
     }
@@ -401,6 +498,32 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_policy_does_not_treat_quoted_process_substitution_as_composition() {
+        let permissions = PermissionsConfig {
+            mode: "auto".to_owned(),
+            deny: vec!["rm *".to_owned()],
+            ..PermissionsConfig::default()
+        };
+        assert_eq!(
+            evaluate_policy("echo '<(rm -rf target)'", &permissions),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn evaluate_policy_does_not_treat_double_quoted_process_substitution_as_composition() {
+        let permissions = PermissionsConfig {
+            mode: "auto".to_owned(),
+            deny: vec!["rm *".to_owned()],
+            ..PermissionsConfig::default()
+        };
+        assert_eq!(
+            evaluate_policy(r#"echo "<(rm -rf target)""#, &permissions),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
     fn evaluate_policy_does_not_treat_single_quoted_substitution_as_composition() {
         let permissions = PermissionsConfig {
             mode: "auto".to_owned(),
@@ -421,6 +544,18 @@ mod tests {
         };
         assert_eq!(
             evaluate_policy("echo one && echo two", &permissions),
+            PolicyDecision::ReviewRequired
+        );
+    }
+
+    #[test]
+    fn evaluate_policy_requires_review_for_process_substitution() {
+        let permissions = PermissionsConfig {
+            mode: "auto".to_owned(),
+            ..PermissionsConfig::default()
+        };
+        assert_eq!(
+            evaluate_policy("cat <(date)", &permissions),
             PolicyDecision::ReviewRequired
         );
     }

@@ -63,7 +63,7 @@ docker run -d \
   acp-stack:local
 ```
 
-Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. First-run API keys are printed to container logs in that mode.
+Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. Provider-backed agents can also set `ACP_STACK_INIT_PROVIDER`, `ACP_STACK_INIT_API_KEY_REF`, `ACP_STACK_INIT_MODEL`, and `ACP_STACK_INIT_MODE`; these map to the matching `acps init` flags. First-run API keys are printed to container logs in auto-init mode.
 
 For Supabase logging, run setup after init on a host/container where the Supabase CLI is authenticated:
 
@@ -78,7 +78,7 @@ The legacy PostgREST backend can still be configured with `acps logging supabase
 
 Use the root `Dockerfile` and attach a persistent Railway volume at `/home/acp`. Railway provides `PORT`; the image binds to that port automatically.
 
-Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`. First deploys must set `ACP_STACK_INIT_AGENT=<agent-id>` so the missing config can be initialized.
+Railway deployments are detected from the `RAILWAY_*` platform vars. When detected, the entrypoint defaults `ACP_STACK_AUTO_INIT=1`. First deploys must set `ACP_STACK_INIT_AGENT=<agent-id>` and, for provider-backed agents, the matching provider/model init env vars so the missing config can be initialized.
 
 On the first successful deploy, capture both generated API keys from deployment logs. Later deploys reuse the persisted `/home/acp` config, state, age key, and encrypted secret store.
 

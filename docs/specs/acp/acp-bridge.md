@@ -31,6 +31,8 @@ If an agent does not advertise an optional capability, the corresponding runtime
 
 Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Forking at a prompt breakpoint also requires explicit `sessionCapabilities.fork.messageId` support; otherwise only current-head fork is allowed. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
+Sessions learned from `session/list` are persisted only when their CWD is an existing directory under `[workspace].root`. Load, resume, and fork recheck the stored CWD before passing it back to the agent.
+
 ### Session Resume Capability Matrix
 
 `data/agents.toml` does not declare per-agent overrides for these capabilities; every value below is discovered at runtime from the agent's `initialize` reply. A value listed as "untested" has not been confirmed end-to-end against the agent in question.

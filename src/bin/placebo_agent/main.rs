@@ -87,6 +87,8 @@ struct AcpArgs {
     /// Working directory.
     #[arg(long, default_value_os_t = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(DEFAULT_CWD)))]
     cwd: PathBuf,
+    #[arg(long, default_value = DEFAULT_CWD)]
+    listed_cwd: PathBuf,
     #[arg(long)]
     assert_env_absent: Vec<String>,
     #[arg(long)]
@@ -398,11 +400,12 @@ async fn handle_list_sessions(
         );
     }
     if state.args.session_list_paginated && request.cursor.is_none() {
+        let listed_cwd = state.args.listed_cwd.to_string_lossy();
         return responder.respond(
             ListSessionsResponse::new(vec![
                 listed_session(
                     LISTED_PAGE_1_SESSION_ID,
-                    DEFAULT_CWD,
+                    &listed_cwd,
                     "listed page 1",
                     LISTED_UPDATED_AT,
                 )
@@ -412,10 +415,11 @@ async fn handle_list_sessions(
         );
     }
     if state.args.session_list_paginated && request.cursor.as_deref() == Some(LIST_PAGE_2_CURSOR) {
+        let listed_cwd = state.args.listed_cwd.to_string_lossy();
         return responder.respond(ListSessionsResponse::new(vec![
             listed_session(
                 LISTED_PAGE_2_SESSION_ID,
-                DEFAULT_CWD,
+                &listed_cwd,
                 "listed page 2",
                 LISTED_PAGE_2_UPDATED_AT,
             )
@@ -423,10 +427,11 @@ async fn handle_list_sessions(
         ]));
     }
 
+    let listed_cwd = state.args.listed_cwd.to_string_lossy();
     let mut sessions = vec![
         listed_session(
             LISTED_SESSION_ID,
-            DEFAULT_CWD,
+            &listed_cwd,
             "listed session",
             LISTED_UPDATED_AT,
         )

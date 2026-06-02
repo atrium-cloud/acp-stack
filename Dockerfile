@@ -19,7 +19,7 @@ FROM debian:bookworm-slim AS runtime
 RUN addgroup --system --gid 1000 acp \
     && adduser --system --uid 1000 --ingroup acp --home /home/acp --shell /usr/sbin/nologin acp \
     && apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates \
+    && apt-get install --no-install-recommends -y ca-certificates bash curl npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace \

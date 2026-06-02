@@ -865,6 +865,21 @@ fn rejects_blank_agent_model() {
 }
 
 #[test]
+fn rejects_root_model_when_provider_model_is_set() {
+    let config = VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        "restart = \"on-crash\"\nmodel = \"root-model\"",
+    ) + "\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n";
+
+    let error = load_config_from_str(&config).expect_err("dual model config should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("must be omitted when agent.provider.model is set")
+    );
+}
+
+#[test]
 fn rejects_empty_expected_sha256() {
     let config = VALID_CONFIG.replace(
         r#"restart = "on-crash""#,

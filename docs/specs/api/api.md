@@ -43,7 +43,7 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 
 | Route                       | Tier    | Contract                                                     |
 | --------------------------- | ------- | ------------------------------------------------------------ |
-| `GET /v1/config/export`     | session | returns canonical TOML with secret refs only                 |
+| `GET /v1/config/export`     | session | returns current canonical TOML with secret refs only         |
 | `POST /v1/config/validate`  | session | validates raw TOML without writing                           |
 | `POST /v1/config/import`    | admin   | validates and writes canonical TOML; supports `dry_run=true` |
 | `GET /v1/secrets`           | admin   | lists secret names only                                      |
@@ -90,7 +90,9 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
 
-`POST /v1/sessions/{id}/fork` accepts optional `{ "cwd": "<absolute path>", "message_id": "<prompt message id>" }`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
+Session create, load, resume, and fork accept an optional `cwd`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before reuse. Closed sessions cannot be loaded, resumed, forked, or prompted.
+
+`POST /v1/sessions/{id}/fork` also accepts optional `{ "message_id": "<prompt message id>" }`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
 
 Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. `stalled` is a terminal status reached only when the stale-prompt sweeper observes no ACP `session/update` activity for longer than `[prompts].stale_threshold`. From the client's perspective, a `stalled` prompt is final: it will not transition back to `running`, and recovery means submitting a new prompt. See `docs/specs/runtime.md` for the sweeper contract.
 
@@ -178,7 +180,7 @@ The reconnect flow is: read `GET /v1/commands/{id}`, subscribe to `commands.{id}
 | `POST /v1/permissions/{id}/deny`    | session | denies a request                           |
 | `POST /v1/permissions/{id}/cancel`  | session | cancels a request owned by the caller flow |
 
-Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators require review before execution, including in `permissions.mode = "auto"`.
+Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators, command substitution, or process substitution require review before execution, including in `permissions.mode = "auto"`.
 
 ## Dependencies
 

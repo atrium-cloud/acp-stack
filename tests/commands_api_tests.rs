@@ -239,6 +239,29 @@ async fn deny_pattern_rejects_command_substitution_segment() {
 }
 
 #[tokio::test]
+async fn deny_pattern_rejects_process_substitution_segment() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": "cat <(rm -rf target)"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
 async fn review_pattern_enqueues_permission_in_supervised_mode() {
     let permissions = PermissionsConfig {
         mode: "supervised".to_owned(),
@@ -287,6 +310,46 @@ async fn review_pattern_enqueues_permission_in_supervised_mode() {
     let final_body = wait_for_terminal(&harness, &cmd_id).await;
     assert_eq!(final_body["data"]["status"], "failed");
     assert_eq!(final_body["data"]["exit_status"], Value::Null);
+}
+
+#[tokio::test]
+async fn review_pattern_in_process_substitution_enqueues_permission() {
+    let permissions = PermissionsConfig {
+        mode: "supervised".to_owned(),
+        review: vec!["sudo *".to_owned()],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": "diff <(sudo cat /etc/shadow) /dev/null"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let cmd_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending_body: Value = pending.json().await.expect("json");
+    let permissions_list = pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array");
+    let entry = permissions_list
+        .iter()
+        .find(|permission| permission["subject_id"].as_str() == Some(&cmd_id))
+        .expect("pending permission row for process substitution");
+    assert_eq!(entry["detail"]["policy_decision"], "review");
 }
 
 #[tokio::test]
@@ -583,6 +646,64 @@ async fn command_substitution_requires_permission_in_auto_mode() {
         .find(|permission| permission["subject_id"].as_str() == Some(&cmd_id))
         .expect("pending permission row for command substitution");
     assert_eq!(entry["detail"]["policy_decision"], "shell-composition");
+}
+
+#[tokio::test]
+async fn process_substitution_requires_permission_in_auto_mode() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "cat <(date)"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let cmd_id = body["data"]["id"].as_str().unwrap().to_owned();
+
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending_body: Value = pending.json().await.expect("json");
+    let permissions_list = pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array");
+    let entry = permissions_list
+        .iter()
+        .find(|permission| permission["subject_id"].as_str() == Some(&cmd_id))
+        .expect("pending permission row for process substitution");
+    assert_eq!(entry["detail"]["policy_decision"], "shell-composition");
+}
+
+#[tokio::test]
+async fn double_quoted_process_substitution_text_runs_in_auto_mode() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "echo \"<(date)\""})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let final_body = wait_for_terminal(&harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+    assert_eq!(final_body["data"]["exit_status"], 0);
 }
 
 #[tokio::test]

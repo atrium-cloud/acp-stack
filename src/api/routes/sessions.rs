@@ -8,8 +8,8 @@ use super::agent::open_mcp_servers;
 use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
-use crate::runtime::agent::supervisor::SessionListSyncResult;
 use crate::runtime::agent::supervisor::parse_prompt_blocks;
+use crate::runtime::agent::supervisor::{SessionListSyncResult, resolve_session_cwd};
 use crate::state::{
     DEFAULT_SESSION_ACTIVITY_THRESHOLD, PromptRecord, SESSION_STATUS_ACTIVE, SessionActivityRecord,
     SessionRecord, SessionUpdateBounds,
@@ -87,7 +87,11 @@ pub(crate) async fn sessions_list_handler(
     let agent_for_session = state.live_agent_config.lock().await.clone();
     let agent_sync = state
         .agent_supervisor
-        .sync_listed_sessions(&agent_for_session, &state.state)
+        .sync_listed_sessions(
+            &agent_for_session,
+            &state.config.workspace.root,
+            &state.state,
+        )
         .await?;
     let store = state.state.lock().await;
     let bounds = store.session_update_bounds()?;
@@ -478,51 +482,6 @@ async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[Strin
     ) {
         tracing::warn!(error = %err, session_id, "failed to record mcp.session_attached event");
     }
-}
-
-/// Resolve and validate a session `cwd` against `workspace.root`. The cwd must
-/// already exist as a directory and canonicalize under the canonical workspace
-/// root so symlink escapes cannot move an ACP session outside the runtime
-/// boundary.
-fn resolve_session_cwd(raw: Option<String>, workspace_root: &str) -> Result<String> {
-    let candidate = raw.unwrap_or_else(|| workspace_root.to_owned());
-    let root_path = std::path::PathBuf::from(workspace_root);
-    let candidate_path = std::path::PathBuf::from(&candidate);
-    if !candidate_path.is_absolute() {
-        return Err(StackError::PromptBodyInvalid(
-            "session cwd must be an absolute path".to_owned(),
-        ));
-    }
-    // Reject `..` segments before normalization rather than relying on
-    // canonicalize, because the path may not exist yet and canonicalize would
-    // fail. The spec already forbids traversal; we enforce it lexically.
-    if candidate_path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(StackError::PromptBodyInvalid(
-            "session cwd must not contain `..` segments".to_owned(),
-        ));
-    }
-    let canonical_root = root_path.canonicalize().map_err(|_| {
-        StackError::PromptBodyInvalid("workspace.root must be an existing directory".to_owned())
-    })?;
-    let canonical_candidate = candidate_path.canonicalize().map_err(|_| {
-        StackError::PromptBodyInvalid(
-            "session cwd must be an existing directory under workspace.root".to_owned(),
-        )
-    })?;
-    if !canonical_candidate.is_dir() {
-        return Err(StackError::PromptBodyInvalid(
-            "session cwd must be an existing directory".to_owned(),
-        ));
-    }
-    if !canonical_candidate.starts_with(&canonical_root) {
-        return Err(StackError::PromptBodyInvalid(format!(
-            "session cwd must be under workspace.root ({workspace_root})"
-        )));
-    }
-    Ok(canonical_candidate.to_string_lossy().into_owned())
 }
 
 #[derive(Deserialize)]

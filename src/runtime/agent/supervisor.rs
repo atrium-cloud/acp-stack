@@ -489,6 +489,7 @@ impl AgentSupervisor {
     pub async fn sync_listed_sessions(
         &self,
         agent: &AgentConfig,
+        workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<SessionListSyncResult> {
         let bridge = {
@@ -514,34 +515,47 @@ impl AgentSupervisor {
             });
         }
         let sessions = bridge.list_sessions().await?;
-        let records = sessions
-            .into_iter()
-            .map(|session| {
-                let session_id = session.session_id.0.to_string();
-                let cwd = session.cwd.to_string_lossy().into_owned();
-                let updated_at = session.updated_at.clone();
-                let metadata_json = serde_json::json!({
-                    "source": "agent_list",
-                    "agent_updated_at": updated_at,
-                    "agent_meta": session.meta,
-                })
-                .to_string();
-                ListedSessionRecord {
-                    id: session_id,
-                    agent_id: agent.id.clone(),
-                    cwd,
-                    title: session.title,
-                    updated_at: session.updated_at,
-                    metadata_json,
+        let mut skipped_invalid_cwd = 0_u32;
+        let mut records = Vec::new();
+        for session in sessions {
+            let raw_cwd = session.cwd.to_string_lossy().into_owned();
+            let cwd = match resolve_session_cwd(Some(raw_cwd.clone()), workspace_root) {
+                Ok(cwd) => cwd,
+                Err(err) => {
+                    skipped_invalid_cwd += 1;
+                    tracing::warn!(
+                        error = %err,
+                        session_id = %session.session_id.0,
+                        cwd = %raw_cwd,
+                        "skipping ACP-listed session with invalid cwd"
+                    );
+                    continue;
                 }
+            };
+            let session_id = session.session_id.0.to_string();
+            let updated_at = session.updated_at.clone();
+            let metadata_json = serde_json::json!({
+                "source": "agent_list",
+                "agent_updated_at": updated_at,
+                "agent_meta": session.meta,
             })
-            .collect::<Vec<_>>();
+            .to_string();
+            records.push(ListedSessionRecord {
+                id: session_id,
+                agent_id: agent.id.clone(),
+                cwd,
+                title: session.title,
+                updated_at: session.updated_at,
+                metadata_json,
+            });
+        }
         let guard = state.lock().await;
         let counts = guard.upsert_listed_sessions(records)?;
         let payload = serde_json::json!({
             "agent_id": agent.id,
             "upserted": counts.upserted,
             "updated": counts.updated,
+            "skipped_invalid_cwd": skipped_invalid_cwd,
         })
         .to_string();
         guard.append_event(
@@ -570,7 +584,7 @@ impl AgentSupervisor {
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<SessionRecord> {
         let bridge = self.bridge().await?;
-        let resolved_cwd = cwd.unwrap_or_else(|| workspace_root.to_owned());
+        let resolved_cwd = resolve_session_cwd(cwd, workspace_root)?;
         let cwd_path = PathBuf::from(&resolved_cwd);
         let response = bridge.new_session(cwd_path, mcp_servers).await?;
         let session_id = response.session_id.0.to_string();
@@ -643,13 +657,11 @@ impl AgentSupervisor {
         .ok_or_else(|| StackError::SessionNotFound {
             id: session_id.to_owned(),
         })?;
-        let resolved_cwd = cwd.unwrap_or_else(|| {
-            if record.cwd.is_empty() {
-                workspace_root.to_owned()
-            } else {
-                record.cwd.clone()
-            }
-        });
+        reject_closed_session(&record)?;
+        let resolved_cwd = resolve_session_cwd(
+            Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root))),
+            workspace_root,
+        )?;
         bridge
             .load_session(
                 AcpSessionId::new(session_id.to_owned()),
@@ -686,13 +698,11 @@ impl AgentSupervisor {
         .ok_or_else(|| StackError::SessionNotFound {
             id: session_id.to_owned(),
         })?;
-        let resolved_cwd = cwd.unwrap_or_else(|| {
-            if record.cwd.is_empty() {
-                workspace_root.to_owned()
-            } else {
-                record.cwd.clone()
-            }
-        });
+        reject_closed_session(&record)?;
+        let resolved_cwd = resolve_session_cwd(
+            Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root))),
+            workspace_root,
+        )?;
         bridge
             .resume_session(
                 AcpSessionId::new(session_id.to_owned()),
@@ -733,11 +743,7 @@ impl AgentSupervisor {
         .ok_or_else(|| StackError::SessionNotFound {
             id: parent_session_id.to_owned(),
         })?;
-        if parent.status == SESSION_STATUS_CLOSED {
-            return Err(StackError::SessionClosed {
-                id: parent_session_id.to_owned(),
-            });
-        }
+        reject_closed_session(&parent)?;
         let breakpoint_message_id = if let Some(message_id) = message_id {
             let prompt = {
                 let guard = state.lock().await;
@@ -759,13 +765,10 @@ impl AgentSupervisor {
         } else {
             None
         };
-        let resolved_cwd = cwd.unwrap_or_else(|| {
-            if parent.cwd.is_empty() {
-                workspace_root.to_owned()
-            } else {
-                parent.cwd.clone()
-            }
-        });
+        let resolved_cwd = resolve_session_cwd(
+            Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&parent.cwd, workspace_root))),
+            workspace_root,
+        )?;
         let response = bridge
             .fork_session(
                 AcpSessionId::new(parent_session_id.to_owned()),
@@ -1688,6 +1691,61 @@ pub fn resolve_agent_env(
         env.insert(name.clone(), value.to_owned());
     }
     Ok(env)
+}
+
+pub(crate) fn resolve_session_cwd(raw: Option<String>, workspace_root: &str) -> Result<String> {
+    let candidate = raw.unwrap_or_else(|| workspace_root.to_owned());
+    let root_path = PathBuf::from(workspace_root);
+    let candidate_path = PathBuf::from(&candidate);
+    if !candidate_path.is_absolute() {
+        return Err(StackError::PromptBodyInvalid(
+            "session cwd must be an absolute path".to_owned(),
+        ));
+    }
+    if candidate_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(StackError::PromptBodyInvalid(
+            "session cwd must not contain `..` segments".to_owned(),
+        ));
+    }
+    let canonical_root = root_path.canonicalize().map_err(|_| {
+        StackError::PromptBodyInvalid("workspace.root must be an existing directory".to_owned())
+    })?;
+    let canonical_candidate = candidate_path.canonicalize().map_err(|_| {
+        StackError::PromptBodyInvalid(
+            "session cwd must be an existing directory under workspace.root".to_owned(),
+        )
+    })?;
+    if !canonical_candidate.is_dir() {
+        return Err(StackError::PromptBodyInvalid(
+            "session cwd must be an existing directory".to_owned(),
+        ));
+    }
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(StackError::PromptBodyInvalid(format!(
+            "session cwd must be under workspace.root ({workspace_root})"
+        )));
+    }
+    Ok(canonical_candidate.to_string_lossy().into_owned())
+}
+
+fn stored_or_workspace_cwd(stored: &str, workspace_root: &str) -> String {
+    if stored.is_empty() {
+        workspace_root.to_owned()
+    } else {
+        stored.to_owned()
+    }
+}
+
+fn reject_closed_session(session: &SessionRecord) -> Result<()> {
+    if session.status == SESSION_STATUS_CLOSED {
+        return Err(StackError::SessionClosed {
+            id: session.id.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_agent_cwd(agent: &AgentConfig, workspace_root: &str) -> PathBuf {
