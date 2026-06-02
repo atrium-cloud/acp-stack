@@ -15,12 +15,14 @@ use acp_stack::config::{
 };
 use acp_stack::runtime::agent::model_discovery::fetch_session_config_with_timeout;
 use acp_stack::state::StateStore;
+use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const SESSION_KEY: &str = "acps_session_cccccccccccccccccccccccccccccccccccccccccccc";
 const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd";
@@ -282,6 +284,28 @@ fn session_bearer() -> String {
     format!("Bearer {SESSION_KEY}")
 }
 
+fn websocket_url(harness: &AgentHarness) -> String {
+    format!(
+        "{}/v1/ws",
+        harness
+            .base_url
+            .strip_prefix("http://")
+            .map(|rest| format!("ws://{rest}"))
+            .unwrap_or_else(|| harness.base_url.replace("http", "ws"))
+    )
+}
+
+fn websocket_request(harness: &AgentHarness) -> http::Request<()> {
+    let mut request = websocket_url(harness)
+        .into_client_request()
+        .expect("websocket request");
+    request.headers_mut().insert(
+        "Authorization",
+        http::HeaderValue::from_str(&session_bearer()).expect("bearer header"),
+    );
+    request
+}
+
 fn shell_quote_path(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
     format!("'{}'", text.replace('\'', "'\\''"))
@@ -494,6 +518,59 @@ async fn install_then_start_then_capabilities_then_stop() {
         payload["adapter"]["source_url"],
         "https://github.com/zed-industries/codex-acp"
     );
+}
+
+#[tokio::test]
+async fn websocket_streams_agent_lifecycle_topic() {
+    let harness = AgentHarness::spawn().await;
+    let (mut ws, response) = tokio_tungstenite::connect_async(websocket_request(&harness))
+        .await
+        .expect("websocket connects");
+    assert_eq!(response.status().as_u16(), 101);
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({
+            "type": "subscribe",
+            "topics": ["agent.lifecycle"]
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("subscribe");
+
+    let client = http().await;
+    let start = client
+        .post(format!("{}/v1/agent/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("send start");
+    assert_eq!(start.status(), StatusCode::OK);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut received = None;
+    while tokio::time::Instant::now() < deadline {
+        let Some(message) = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .expect("ws message before timeout")
+        else {
+            break;
+        };
+        let message = message.expect("ws message ok");
+        let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+            continue;
+        };
+        let event: Value = serde_json::from_str(&text).expect("event json");
+        if event["type"] == "event"
+            && event["topic"] == "agent.lifecycle"
+            && event["payload"]["kind"] == "agent.started"
+        {
+            received = Some(event);
+            break;
+        }
+    }
+    let event = received.expect("agent.started lifecycle websocket event");
+    assert!(event["id"].as_str().unwrap_or("").starts_with("agl_"));
 }
 
 #[tokio::test]
@@ -1320,6 +1397,11 @@ async fn on_crash_policy_restarts_agent_and_allows_session_resume() {
     let tempdir = TempDir::new().expect("tempdir");
     let pid_path = tempdir.path().join("placebo-agent.pid");
     let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
     config.agent.restart = "on-crash".to_owned();
     config.agent.args.extend([
         "--write-pid".to_owned(),
@@ -1386,6 +1468,11 @@ async fn never_policy_does_not_restart_after_agent_crash() {
     let tempdir = TempDir::new().expect("tempdir");
     let pid_path = tempdir.path().join("placebo-agent.pid");
     let mut config = test_config();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+    config.agent.cwd = Some(config.workspace.root.clone());
     config.agent.restart = "never".to_owned();
     config.agent.args.extend([
         "--write-pid".to_owned(),

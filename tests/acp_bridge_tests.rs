@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use acp_stack::config::{AgentConfig, AgentInstallConfig, AgentProviderConfig};
+use acp_stack::config::{AgentConfig, AgentInstallConfig};
 use acp_stack::runtime::agent::acp_bridge::{AcpBridge, SessionEventSink};
 
 #[derive(Default)]
@@ -210,21 +210,15 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
 }
 
 #[tokio::test]
-async fn new_session_sets_configured_model_before_prompt() {
-    use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
-
+async fn new_session_returns_custom_model_config_option_id() {
     let mut config = fake_agent_config();
     config.id = "placebo".into();
     config.args.extend([
-        "--expect-model-config".into(),
+        "--model-config-option".into(),
         "deepseek/deepseek-v4-flash".into(),
+        "--model-config-option-id".into(),
+        "agent-model".into(),
     ]);
-    config.provider = Some(AgentProviderConfig {
-        id: "openrouter".into(),
-        model: Some("deepseek/deepseek-v4-flash".into()),
-        api_key_ref: Some("OPENROUTER_API_KEY".into()),
-        custom: None,
-    });
     let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
         .await
         .expect("spawn");
@@ -232,15 +226,9 @@ async fn new_session_sets_configured_model_before_prompt() {
     let new_session = bridge
         .new_session(std::env::temp_dir(), vec![])
         .await
-        .expect("session/new sets model config");
-    let prompt = PromptRequest::new(
-        new_session.session_id,
-        vec![ContentBlock::Text(TextContent::new("hello"))],
-    );
-    bridge
-        .prompt_session(prompt)
-        .await
-        .expect("prompt sees configured model");
+        .expect("session/new");
+    let options = new_session.config_options.as_ref().expect("config options");
+    assert_eq!(options[0].id.0.as_ref(), "agent-model");
     bridge.shutdown().await.expect("shutdown ok");
 }
 

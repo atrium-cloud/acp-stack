@@ -99,14 +99,14 @@ impl EventHub {
         });
     }
 
-    /// Fan out an agent-lifecycle row (`agent.*`) on the `agent` topic. The
-    /// persistent record lives in the `agent_lifecycle` table; this is the
-    /// live-stream mirror.
+    /// Fan out an agent-lifecycle row (`agent.*`) on the `agent.lifecycle`
+    /// topic. The persistent record lives in the `agent_lifecycle` table; this
+    /// is the live-stream mirror.
     pub fn publish_agent_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
         self.publish(LiveEvent {
             event_type: "event",
             id: id.to_owned(),
-            topic: "agent".to_owned(),
+            topic: "agent.lifecycle".to_owned(),
             created_at: created_at.to_owned(),
             payload: json!({
                 "kind": kind,
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_agent_event_routes_to_agent_topic() {
+    async fn publish_agent_event_routes_to_agent_lifecycle_topic() {
         let hub = EventHub::new();
         let mut rx = hub.subscribe();
 
@@ -267,7 +267,7 @@ mod tests {
         );
 
         let live = rx.recv().await.expect("event");
-        assert_eq!(live.topic, "agent");
+        assert_eq!(live.topic, "agent.lifecycle");
         assert_eq!(live.payload["kind"], "agent.started");
         assert_eq!(live.payload["data"]["pid"], 123);
     }

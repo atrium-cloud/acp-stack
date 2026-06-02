@@ -90,7 +90,7 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
 
-`POST /v1/sessions/{id}/fork` accepts optional `{ "cwd": "<absolute path>", "message_id": "<prompt message id>" }`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
+`POST /v1/sessions/{id}/fork` accepts optional `{ "cwd": "<absolute path>", "message_id": "<prompt message id>" }`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
 
 Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelled`, and `stalled`. `stalled` is a terminal status reached only when the stale-prompt sweeper observes no ACP `session/update` activity for longer than `[prompts].stale_threshold`. From the client's perspective, a `stalled` prompt is final: it will not transition back to `running`, and recovery means submitting a new prompt. See `docs/specs/runtime.md` for the sweeper contract.
 
@@ -178,7 +178,7 @@ The reconnect flow is: read `GET /v1/commands/{id}`, subscribe to `commands.{id}
 | `POST /v1/permissions/{id}/deny`    | session | denies a request                           |
 | `POST /v1/permissions/{id}/cancel`  | session | cancels a request owned by the caller flow |
 
-Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review.
+Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators require review before execution, including in `permissions.mode = "auto"`.
 
 ## Dependencies
 

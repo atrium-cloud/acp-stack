@@ -135,8 +135,12 @@ build_image_if_needed() {
     echo "Reusing image ${image_tag}."
     return
   fi
+  local build_target_args=()
+  if [[ "${INIT_AGENT}" == "placebo" ]]; then
+    build_target_args=(--target test-runtime)
+  fi
   echo "Building ${image_tag}..."
-  docker build --tag "${image_tag}" "${BUILD_CONTEXT}"
+  docker build "${build_target_args[@]}" --tag "${image_tag}" "${BUILD_CONTEXT}"
 }
 
 create_volumes() {
@@ -193,11 +197,16 @@ run_init() {
     echo "ACP_STACK_DOCKER_TEST_AGENT is required; choose a real supported agent id" >&2
     exit 1
   fi
+  local dev_registry_args=()
+  if [[ "${INIT_AGENT}" == "placebo" ]]; then
+    dev_registry_args=(-e ACP_STACK_DEV_PLACEBO_REGISTRY=/usr/local/bin/placebo-agent)
+  fi
   echo "Running one-shot init..." >&2
   local init_output
   init_output="$(
     docker run --rm \
       --name "${container_name}-init" \
+      "${dev_registry_args[@]}" \
       -v "${workspace_volume}:/workspace" \
       -v "${config_volume}:/home/acp/.config/acp-stack" \
       -v "${state_volume}:/home/acp/.local/share/acp-stack" \
@@ -249,8 +258,13 @@ fi
 
 echo "Starting daemon container..."
 stop_existing_persistent_container
+dev_registry_args=()
+if [[ "${INIT_AGENT}" == "placebo" ]]; then
+  dev_registry_args=(-e ACP_STACK_DEV_PLACEBO_REGISTRY=/usr/local/bin/placebo-agent)
+fi
 server_container_id="$(docker run -d \
   --name "${container_name}" \
+  "${dev_registry_args[@]}" \
   -p "${HOST_PORT}:7700" \
   -v "${workspace_volume}:/workspace" \
   -v "${config_volume}:/home/acp/.config/acp-stack" \

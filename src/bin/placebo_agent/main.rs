@@ -131,6 +131,8 @@ struct AcpArgs {
     session_list_repeated_cursor: bool,
     #[arg(long)]
     model_config_option: Option<String>,
+    #[arg(long, default_value = "model")]
+    model_config_option_id: String,
     #[arg(long)]
     expect_model_config: Option<String>,
     #[arg(long)]
@@ -170,7 +172,7 @@ impl PlaceboState {
         let model = self.args.model_config_option.as_ref()?;
         Some(vec![
             SessionConfigOption::select(
-                "model",
+                self.args.model_config_option_id.clone(),
                 "Model",
                 model.clone(),
                 vec![SessionConfigSelectOption::new(model.clone(), model.clone())],
@@ -447,7 +449,7 @@ async fn handle_set_config_option(
     let mut state = state.lock().await;
     let value = request.value.0.as_ref();
     if state.args.expect_model_config.as_deref() == Some(value)
-        && request.config_id.0.as_ref() == "model"
+        && request.config_id.0.as_ref() == state.args.model_config_option_id.as_str()
     {
         state.model_configured = true;
     }

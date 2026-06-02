@@ -35,7 +35,7 @@
 mod step_logs;
 mod step_runners;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
@@ -462,6 +462,7 @@ pub(super) fn install_one_with_fallback(
     let mut remaining = install.clone();
     let mut rows = Vec::new();
     let mut last_error: Option<StackError> = None;
+    let mut missing_tools = BTreeSet::new();
     loop {
         let spec = match step_runners::select_install_path(
             agent_id,
@@ -489,6 +490,28 @@ pub(super) fn install_one_with_fallback(
             }
         };
         let kind = path_kind_of(&spec);
+        let missing_for_path = missing_required_tools(&spec, workspace_root, dest_dir);
+        if !missing_for_path.is_empty() {
+            for tool in missing_for_path {
+                missing_tools.insert(tool);
+            }
+            match kind {
+                InstallPathKind::Shell => remaining.shell = None,
+                InstallPathKind::Npm => remaining.npm = None,
+                InstallPathKind::Github => remaining.github = None,
+            }
+            if remaining.shell.is_none() && remaining.npm.is_none() && remaining.github.is_none() {
+                return exhausted_after_missing_prerequisites(
+                    agent_id,
+                    field,
+                    step_label,
+                    rows,
+                    last_error,
+                    missing_tools,
+                );
+            }
+            continue;
+        }
         let step = run_install_step(step_label, spec, env, workspace_root, dest_dir);
         let ok = step.outcome.is_ok();
         rows.push(step.row);
@@ -520,6 +543,31 @@ pub(super) fn install_one_with_fallback(
     }
 }
 
+fn exhausted_after_missing_prerequisites(
+    agent_id: &str,
+    field: &str,
+    step_label: &'static str,
+    mut rows: Vec<InstallerRowDraft>,
+    last_error: Option<StackError>,
+    missing_tools: BTreeSet<String>,
+) -> FallbackChain {
+    if !rows.is_empty() {
+        return FallbackChain {
+            rows,
+            terminal_error: last_error,
+        };
+    }
+    rows.push(InstallerRowDraft::config_error(step_label));
+    FallbackChain {
+        rows,
+        terminal_error: Some(StackError::AgentInstallerPrerequisitesMissing {
+            agent_id: agent_id.to_owned(),
+            step: field.to_owned(),
+            tools: missing_tools.into_iter().collect(),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum InstallPathKind {
     Shell,
@@ -533,6 +581,25 @@ fn path_kind_of(spec: &ResolvedInstallSpec) -> InstallPathKind {
         ResolvedInstallSpec::Npm { .. } => InstallPathKind::Npm,
         ResolvedInstallSpec::GithubRelease { .. } => InstallPathKind::Github,
     }
+}
+
+fn missing_required_tools(
+    spec: &ResolvedInstallSpec,
+    workspace_root: &Path,
+    dest_dir: &Path,
+) -> Vec<String> {
+    let required_tools: Vec<&str> = match spec {
+        ResolvedInstallSpec::Shell { required_tools, .. } => {
+            required_tools.iter().map(String::as_str).collect()
+        }
+        ResolvedInstallSpec::Npm { .. } => vec!["npm"],
+        ResolvedInstallSpec::GithubRelease { .. } => Vec::new(),
+    };
+    required_tools
+        .into_iter()
+        .filter(|tool| resolve_creates(tool, workspace_root, &[dest_dir]).is_none())
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(super) fn final_verification(
@@ -569,6 +636,7 @@ pub(super) enum ResolvedInstallSpec {
     Shell {
         script: String,
         creates: String,
+        required_tools: Vec<String>,
     },
     Npm {
         package: String,
@@ -672,7 +740,9 @@ pub(super) fn verify_expected_sha256(expected: Option<&str>, actual: &str) -> Re
 mod tests {
     use super::step_runners::select_install_path;
     use super::*;
-    use crate::runtime::install::agent_registry::{AdapterSpec, HarnessSpec, ShellInstall};
+    use crate::runtime::install::agent_registry::{
+        AdapterSpec, ArchiveKind, HarnessSpec, ShellInstall,
+    };
     use crate::state::StateStore;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
@@ -749,6 +819,7 @@ mod tests {
             shell: Some(ShellInstall {
                 script: script.to_owned(),
                 creates: creates.to_owned(),
+                required_tools: Vec::new(),
             }),
             ..InstallSet::default()
         }
@@ -1072,11 +1143,23 @@ exit 99
         // and tried npm, rather than the pre-audit behavior of bailing
         // on the first failure.
         let tempdir = TempDir::new().expect("tempdir");
+        write_fake_npm(
+            tempdir.path(),
+            r#"
+set -eu
+if [ "$1" = "view" ]; then
+  printf '"1.2.3"\n'
+  exit 0
+fi
+exit 9
+"#,
+        );
 
         let install = InstallSet {
             shell: Some(ShellInstall {
                 script: "exit 1".to_owned(),
                 creates: "fallback-agent".to_owned(),
+                required_tools: Vec::new(),
             }),
             npm: Some(crate::runtime::install::agent_registry::NpmInstall {
                 package: "@acp-stack/definitely-not-published".to_owned(),
@@ -1151,6 +1234,133 @@ exit 99
             "shell installs must leave version unset; got {:?}",
             result.rows[0].version
         );
+    }
+
+    #[test]
+    fn missing_shell_required_tool_fails_when_no_fallback_is_runnable() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let install = InstallSet {
+            shell: Some(ShellInstall {
+                script: "missing-tool-command".to_owned(),
+                creates: "agent".to_owned(),
+                required_tools: vec!["definitely-missing-acp-stack-tool".to_owned()],
+            }),
+            ..InstallSet::default()
+        };
+
+        let chain = install_one_with_fallback(
+            "preflight-agent",
+            "harness.install",
+            STEP_INSTALL,
+            &install,
+            None,
+            None,
+            &HashMap::new(),
+            tempdir.path(),
+            tempdir.path(),
+        );
+
+        match chain.terminal_error.expect("missing prerequisite") {
+            StackError::AgentInstallerPrerequisitesMissing {
+                agent_id,
+                step,
+                tools,
+            } => {
+                assert_eq!(agent_id, "preflight-agent");
+                assert_eq!(step, "harness.install");
+                assert_eq!(tools, vec!["definitely-missing-acp-stack-tool"]);
+            }
+            other => panic!("expected prerequisite error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_shell_required_tool_falls_back_to_runnable_npm_path() {
+        let tempdir = TempDir::new().expect("tempdir");
+        write_fake_npm(
+            tempdir.path(),
+            r#"
+set -eu
+if [ "$1" = "view" ]; then
+  printf '"1.2.3"\n'
+  exit 0
+fi
+exit 9
+"#,
+        );
+        let install = InstallSet {
+            shell: Some(ShellInstall {
+                script: "missing-tool-command".to_owned(),
+                creates: "agent".to_owned(),
+                required_tools: vec!["definitely-missing-acp-stack-tool".to_owned()],
+            }),
+            npm: Some(crate::runtime::install::agent_registry::NpmInstall {
+                package: "@scope/agent".to_owned(),
+                creates: "agent".to_owned(),
+            }),
+            ..InstallSet::default()
+        };
+
+        let chain = install_one_with_fallback(
+            "preflight-agent",
+            "harness.install",
+            STEP_INSTALL,
+            &install,
+            None,
+            None,
+            &HashMap::new(),
+            tempdir.path(),
+            tempdir.path(),
+        );
+
+        assert!(
+            matches!(
+                chain.terminal_error,
+                Some(StackError::AgentInstallerFailed { exit: Some(9), .. })
+            ),
+            "npm fallback should run and fail as the terminal error, got {:?}",
+            chain.terminal_error
+        );
+        assert_eq!(chain.rows.len(), 1);
+    }
+
+    #[test]
+    fn missing_fallback_prerequisite_does_not_mask_runnable_path_failure() {
+        let chain = exhausted_after_missing_prerequisites(
+            "preflight-agent",
+            "harness.install",
+            STEP_INSTALL,
+            vec![InstallerRowDraft::config_error(STEP_INSTALL)],
+            Some(StackError::AgentInstallerFailed {
+                exit: Some(7),
+                stderr_tail: "failed".to_owned(),
+            }),
+            BTreeSet::from(["npm".to_owned()]),
+        );
+        assert!(
+            matches!(
+                chain.terminal_error,
+                Some(StackError::AgentInstallerFailed { exit: Some(7), .. })
+            ),
+            "shell failure should remain terminal when npm is unavailable, got {:?}",
+            chain.terminal_error
+        );
+        assert_eq!(chain.rows.len(), 1);
+    }
+
+    #[test]
+    fn github_release_install_path_has_no_host_tool_prerequisites() {
+        let spec = ResolvedInstallSpec::GithubRelease {
+            repo: "owner/repo".to_owned(),
+            asset_pattern: "agent-linux-x86_64.tar.gz".to_owned(),
+            archive: ArchiveKind::TarGz,
+            archive_binary_name: None,
+            binary_name: "agent".to_owned(),
+            checksums_asset: None,
+            version_pin: None,
+        };
+        let tempdir = TempDir::new().expect("tempdir");
+        assert!(missing_required_tools(&spec, tempdir.path(), tempdir.path()).is_empty());
     }
 
     #[test]
