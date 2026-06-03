@@ -11,6 +11,7 @@ on:
       - scripts/docker-entrypoint.sh
       - src/**
       - tests/release_gate_tests.rs
+      - tests/release_acceptance_tests.rs
       - .github/workflows/release-gate-tests.yml
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - scripts/docker-entrypoint.sh
       - src/**
       - tests/release_gate_tests.rs
+      - tests/release_acceptance_tests.rs
       - .github/workflows/release-gate-tests.yml
 
 concurrency:
@@ -45,3 +47,6 @@ jobs:
 
       - name: Run release gate tests
         run: cargo test --test release_gate_tests --locked
+
+      - name: Run release acceptance tests
+        run: cargo test --test release_acceptance_tests --features dev-tools,test-fixtures --locked
