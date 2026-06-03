@@ -6,8 +6,9 @@ OpenCode is a native ACP target. `acp-stack` launches `opencode acp`.
 
 ```sh
 acps init --agent opencode
-acps secrets set <provider-api-key-ref>
-acps agent set --provider <provider-id> --model <provider/model-id>
+acps secrets set OPENROUTER_API_KEY
+acps agent set --provider openrouter --model <provider/model-id>
+acps agent test
 ```
 
 Agent config shape:

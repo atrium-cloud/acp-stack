@@ -257,12 +257,36 @@ mod tests {
     use crate::events::EventHub;
     use crate::runtime::mediation::permissions::PermissionService;
     use crate::state::StateStore;
+    use agent_client_protocol::JsonRpcMessage;
     use agent_client_protocol::schema::{
-        PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionRequest,
-        SessionId, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+        AgentNotification, PermissionOption, PermissionOptionId, PermissionOptionKind,
+        RequestPermissionRequest, SessionId, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl SessionEventSink for RecordingSink {
+        fn append<'a>(
+            &'a self,
+            session_id: &'a str,
+            kind: &'a str,
+            payload_json: &'a str,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.events.lock().expect("sink lock").push((
+                    session_id.to_owned(),
+                    kind.to_owned(),
+                    payload_json.to_owned(),
+                ));
+            })
+        }
+    }
 
     fn fake_request(session_id: &str) -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -432,5 +456,37 @@ mod tests {
                 .expect("legacy model should validate"),
             AgentSessionModelSelection::LegacyModel
         );
+    }
+
+    #[tokio::test]
+    async fn usage_update_notifications_deserialize_and_enqueue() {
+        let params = serde_json::json!({
+            "sessionId": "sess_usage",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "used": 128,
+                "size": 4096,
+                "cost": {
+                    "amount": 0.25,
+                    "currency": "USD"
+                }
+            }
+        });
+        let notification = AgentNotification::parse_message("session/update", &params)
+            .expect("usage_update notification should deserialize");
+        let AgentNotification::SessionNotification(note) = notification else {
+            panic!("usage_update should be a session notification");
+        };
+        let sink = Arc::new(RecordingSink::default());
+        let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+        enqueue_session_notification(sink_dyn, Arc::new(NotificationDrain::default()), &note);
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let events = sink.events.lock().expect("sink events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "sess_usage");
+        assert_eq!(events[0].1, "session.update");
+        assert!(events[0].2.contains(r#""sessionUpdate":"usage_update""#));
     }
 }
