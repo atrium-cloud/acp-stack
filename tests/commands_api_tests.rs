@@ -120,6 +120,37 @@ async fn submit(harness: &Harness, body: Value) -> reqwest::Response {
         .expect("send")
 }
 
+async fn pending_permission_for_command(harness: &Harness, command_id: &str) -> Value {
+    let pending =
+        auth(session_client().get(format!("{}/v1/permissions/pending", harness.base_url)))
+            .send()
+            .await
+            .expect("send");
+    assert_eq!(pending.status(), StatusCode::OK);
+    let pending_body: Value = pending.json().await.expect("json");
+    pending_body["data"]["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .find(|permission| permission["subject_id"].as_str() == Some(command_id))
+        .expect("pending permission row")
+        .clone()
+}
+
+async fn approve_pending_command(harness: &Harness, command_id: &str) {
+    let permission = pending_permission_for_command(harness, command_id).await;
+    let permission_id = permission["id"].as_str().expect("permission id");
+    let approve_response = auth(session_client().post(format!(
+        "{}/v1/permissions/{permission_id}/approve",
+        harness.base_url
+    )))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(approve_response.status(), StatusCode::OK);
+}
+
 /// Drive `GET /v1/commands/{id}` until the row reaches a terminal status
 /// (anything other than `pending` / `running`). Bounded loop so a regression
 /// surfaces as a deterministic timeout rather than a hung test.
@@ -187,6 +218,208 @@ async fn deny_pattern_rejects_submission() {
     })
     .await;
     let response = submit(&harness, serde_json::json!({"command": "rm -rf /"})).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_shell_constructed_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "r''m -rf target"})).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_escaped_newline_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": "r\\\nm -rf target"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_ansi_c_quoted_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "$'r'm -rf target"})).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_ansi_c_octal_quoted_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": r"$'\162'm -rf target"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_ansi_c_nul_quoted_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": r"$'rm\0' -rf target"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_ansi_c_nul_suffix_quoted_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": r"$'rm\0suffix' -rf target"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_shell_constructed_command_after_assignment_prefix() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": "X=1 r''m -rf target"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_shell_constructed_command_after_time_prefix() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": "time r''m -rf target"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "command.denied");
+}
+
+#[tokio::test]
+async fn deny_pattern_rejects_shell_constructed_command_after_redirection_prefix() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let redirect_path = harness.workspace_root.join("policy.log");
+    let response = submit(
+        &harness,
+        serde_json::json!({
+            "command": format!(">{} r''m -rf target", redirect_path.to_string_lossy()),
+        }),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["error"]["code"], "command.denied");
@@ -310,6 +543,28 @@ async fn review_pattern_enqueues_permission_in_supervised_mode() {
     let final_body = wait_for_terminal(&harness, &cmd_id).await;
     assert_eq!(final_body["data"]["status"], "failed");
     assert_eq!(final_body["data"]["exit_status"], Value::Null);
+}
+
+#[tokio::test]
+async fn review_pattern_matches_shell_constructed_command_word() {
+    let permissions = PermissionsConfig {
+        mode: "supervised".to_owned(),
+        review: vec!["sudo *".to_owned()],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "s''udo true"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let command_id = body["data"]["id"].as_str().expect("command id");
+    let permission = pending_permission_for_command(&harness, command_id).await;
+    assert_eq!(permission["detail"]["policy_decision"], "review");
 }
 
 #[tokio::test]
@@ -613,6 +868,83 @@ async fn composed_command_requires_permission_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn constructed_command_word_requires_permission_in_auto_mode() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "e''cho one"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let command_id = body["data"]["id"].as_str().expect("command id");
+    let permission = pending_permission_for_command(&harness, command_id).await;
+    assert_eq!(permission["detail"]["policy_decision"], "shell-composition");
+}
+
+#[tokio::test]
+async fn parameter_expanded_command_word_requires_permission_in_auto_mode() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let commands = CommandsConfig {
+        default_timeout: "10m".to_owned(),
+        cancel_grace: "5s".to_owned(),
+        env_allowlist: vec!["X".to_owned()],
+        max_output_bytes: 1_048_576,
+        ..CommandsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: Some(commands),
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": r"r${X} -rf target", "env": { "X": "m" }}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let command_id = body["data"]["id"].as_str().expect("command id");
+    let permission = pending_permission_for_command(&harness, command_id).await;
+    assert_eq!(permission["detail"]["policy_decision"], "shell-composition");
+}
+
+#[tokio::test]
+async fn brace_expanded_command_word_requires_permission_in_auto_mode() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "r{m,} -rf target"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let command_id = body["data"]["id"].as_str().expect("command id");
+    let permission = pending_permission_for_command(&harness, command_id).await;
+    assert_eq!(permission["detail"]["policy_decision"], "shell-composition");
+}
+
+#[tokio::test]
 async fn command_substitution_requires_permission_in_auto_mode() {
     let permissions = PermissionsConfig {
         mode: "auto".to_owned(),
@@ -707,6 +1039,31 @@ async fn double_quoted_process_substitution_text_runs_in_auto_mode() {
 }
 
 #[tokio::test]
+async fn quoted_denied_word_argument_runs_in_auto_mode() {
+    let permissions = PermissionsConfig {
+        mode: "auto".to_owned(),
+        review: vec![],
+        deny: vec!["rm *".to_owned()],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(
+        &harness,
+        serde_json::json!({"command": r#"echo "rm -rf target""#}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let final_body = wait_for_terminal(&harness, &id).await;
+    assert_eq!(final_body["data"]["status"], "exited");
+}
+
+#[tokio::test]
 async fn env_not_on_allowlist_rejected() {
     let commands = CommandsConfig {
         default_timeout: "10m".to_owned(),
@@ -783,6 +1140,48 @@ async fn cwd_relative_under_workspace_accepted() {
     let id = body["data"]["id"].as_str().unwrap().to_owned();
     let final_body = wait_for_terminal(&harness, &id).await;
     assert_eq!(final_body["data"]["status"], "exited");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cwd_symlink_replacement_before_approval_fails_spawn() {
+    let permissions = PermissionsConfig {
+        mode: "locked".to_owned(),
+        review: vec![],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let inner = harness.workspace_root.join("inner");
+    std::fs::create_dir(&inner).expect("inner dir");
+    let outside = tempfile::tempdir().expect("outside");
+    let response = submit(
+        &harness,
+        serde_json::json!({
+            "command": "printf escaped > marker",
+            "cwd": inner.to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["status"], "pending");
+    let command_id = body["data"]["id"].as_str().expect("command id").to_owned();
+
+    std::fs::remove_dir(&inner).expect("remove inner");
+    std::os::unix::fs::symlink(outside.path(), &inner).expect("replace with symlink");
+    approve_pending_command(&harness, &command_id).await;
+
+    let final_body = wait_for_terminal(&harness, &command_id).await;
+    assert_eq!(final_body["data"]["status"], "failed");
+    assert!(
+        !outside.path().join("marker").exists(),
+        "command must not run after cwd symlink replacement"
+    );
 }
 
 #[tokio::test]

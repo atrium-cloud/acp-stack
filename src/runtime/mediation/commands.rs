@@ -112,12 +112,10 @@ impl CommandGateway {
         };
 
         // 2. cwd resolution under workspace.root (must stay inside).
-        let resolved_cwd = match &request.cwd {
-            Some(cwd) => Some(resolve_cwd_under_workspace(
-                Path::new(&self.config.workspace.root),
-                cwd,
-            )?),
-            None => None,
+        let workspace_root_path = Path::new(&self.config.workspace.root);
+        let execution_cwd = match &request.cwd {
+            Some(cwd) => resolve_cwd_under_workspace(workspace_root_path, cwd)?,
+            None => resolve_cwd_under_workspace(workspace_root_path, &self.config.workspace.root)?,
         };
 
         // 3. env allow-list enforcement. Reject any name that is not on the
@@ -178,9 +176,7 @@ impl CommandGateway {
             })?;
 
         // 5. Insert the pending row.
-        let cwd_owned = resolved_cwd
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned());
+        let cwd_owned = request.cwd.as_ref().map(|_| execution_cwd.display_path());
         let record = {
             let store = self.state.lock().await;
             store.append_command(NewCommandRecord {
@@ -247,9 +243,8 @@ impl CommandGateway {
             command_id: record.id.clone(),
             shell: self.config.workspace.default_shell.clone(),
             command: request.command.clone(),
-            cwd: cwd_owned,
+            cwd: execution_cwd,
             env: request.env.clone(),
-            workspace_root: self.config.workspace.root.clone(),
             timeout_duration,
             cancel_grace,
             progress_interval,

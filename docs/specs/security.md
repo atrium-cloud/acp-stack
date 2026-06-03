@@ -72,6 +72,8 @@ Permission policy applies to ACP permission requests and mediated shell commands
 | `supervised` mode | require approval for unmatched risky work  |
 | `locked` mode     | require approval for unmatched commands    |
 
+Shell command policy matches both raw and shell-word-normalized command forms. Constructed command words require review when no deny or review pattern matches.
+
 Pending requests expire according to config. Approval and denial decisions are durable events.
 
 ## Workspace Boundary

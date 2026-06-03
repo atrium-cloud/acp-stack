@@ -59,6 +59,7 @@ pub(super) enum Outcome {
     Canceled,
     TimedOut,
     SpawnError,
+    PersistenceError,
 }
 
 pub(super) trait OptionFlatten {

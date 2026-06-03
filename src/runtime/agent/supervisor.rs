@@ -658,10 +658,11 @@ impl AgentSupervisor {
             id: session_id.to_owned(),
         })?;
         reject_closed_session(&record)?;
-        let resolved_cwd = resolve_session_cwd(
-            Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root))),
-            workspace_root,
-        )?;
+        let explicit_cwd = cwd.is_some();
+        let requested_cwd =
+            cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root));
+        let resolved_cwd = resolve_session_cwd(Some(requested_cwd), workspace_root)?;
+        let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         bridge
             .load_session(
                 AcpSessionId::new(session_id.to_owned()),
@@ -670,8 +671,22 @@ impl AgentSupervisor {
             )
             .await?;
         let guard = state.lock().await;
-        guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
-        guard.append_session_event(session_id, "info", "session.loaded", "session loaded", "{}")?;
+        if explicit_cwd {
+            guard.update_session_status_and_cwd(
+                session_id,
+                SESSION_STATUS_ACTIVE,
+                &resolved_cwd,
+            )?;
+        } else {
+            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
+        }
+        guard.append_session_event(
+            session_id,
+            "info",
+            "session.loaded",
+            "session loaded",
+            &json!({ "cwd": resolved_cwd }).to_string(),
+        )?;
         guard
             .get_session(session_id)?
             .ok_or_else(|| StackError::SessionNotFound {
@@ -699,10 +714,11 @@ impl AgentSupervisor {
             id: session_id.to_owned(),
         })?;
         reject_closed_session(&record)?;
-        let resolved_cwd = resolve_session_cwd(
-            Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root))),
-            workspace_root,
-        )?;
+        let explicit_cwd = cwd.is_some();
+        let requested_cwd =
+            cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root));
+        let resolved_cwd = resolve_session_cwd(Some(requested_cwd), workspace_root)?;
+        let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         bridge
             .resume_session(
                 AcpSessionId::new(session_id.to_owned()),
@@ -711,13 +727,21 @@ impl AgentSupervisor {
             )
             .await?;
         let guard = state.lock().await;
-        guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
+        if explicit_cwd {
+            guard.update_session_status_and_cwd(
+                session_id,
+                SESSION_STATUS_ACTIVE,
+                &resolved_cwd,
+            )?;
+        } else {
+            guard.update_session_status(session_id, SESSION_STATUS_ACTIVE)?;
+        }
         guard.append_session_event(
             session_id,
             "info",
             "session.resumed",
             "session resumed",
-            "{}",
+            &json!({ "cwd": resolved_cwd }).to_string(),
         )?;
         guard
             .get_session(session_id)?
@@ -769,6 +793,7 @@ impl AgentSupervisor {
             Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&parent.cwd, workspace_root))),
             workspace_root,
         )?;
+        let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         let response = bridge
             .fork_session(
                 AcpSessionId::new(parent_session_id.to_owned()),
