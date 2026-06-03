@@ -17,6 +17,7 @@ use crate::runtime::agent::acp_bridge::{
     session_config_values, session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
     optional_env_refs_for_provider_id, provider_id_is_known, provider_id_supports_agent,
@@ -634,39 +635,7 @@ pub(in crate::cli) fn resolve_agent_model_value(
     model_id: &str,
 ) -> Result<String> {
     let response = read_agent_new_session_response(home, config)?;
-    if session_model_selection_for_value(&response, model_id).is_ok() {
-        return Ok(model_id.to_owned());
-    }
-    let values = session_model_values(&response)?;
-    if let Some(provider_id) = provider_id {
-        let provider_qualified = format!("{provider_id}/{model_id}");
-        if values.iter().any(|value| value == &provider_qualified)
-            && session_model_selection_for_value(&response, &provider_qualified).is_ok()
-        {
-            return Ok(provider_qualified);
-        }
-    }
-    let mut base_matches = values
-        .iter()
-        .filter(|value| advertised_model_base_matches(value, provider_id, model_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    base_matches.sort();
-    base_matches.dedup();
-    if base_matches.len() == 1
-        && session_model_selection_for_value(&response, &base_matches[0]).is_ok()
-    {
-        return Ok(base_matches.remove(0));
-    }
-    session_model_selection_for_value(&response, model_id).map(|_| model_id.to_owned())
-}
-
-fn advertised_model_base_matches(value: &str, provider_id: Option<&str>, model_id: &str) -> bool {
-    let base = value.split_once('[').map_or(value, |(base, _)| base);
-    if let Some((provider, model)) = base.split_once('/') {
-        return provider_id.is_none_or(|provider_id| provider == provider_id) && model == model_id;
-    }
-    base == model_id
+    resolve_advertised_model_value(&response, provider_id, model_id)
 }
 
 fn select_agent_session_config_value(
