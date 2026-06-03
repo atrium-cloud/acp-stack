@@ -61,6 +61,25 @@ fn docker_runtime_includes_registry_install_tools() {
 }
 
 #[test]
+fn docker_test_runtime_uses_fixture_enabled_binaries() {
+    let dockerfile = std::fs::read_to_string("Dockerfile").expect("read Dockerfile");
+    assert!(
+        dockerfile.contains(
+            "cargo build --locked --release --features test-fixtures --bin acps --bin acpctl --bin placebo-agent"
+        ),
+        "test-runtime must build fixture-enabled runtime binaries for placebo registry support"
+    );
+    for binary in ["acps", "acpctl", "placebo-agent"] {
+        assert!(
+            dockerfile.contains(&format!(
+                "COPY --from=builder-test /app/target/release/{binary} /usr/local/bin/{binary}"
+            )),
+            "test-runtime must copy fixture-enabled {binary}"
+        );
+    }
+}
+
+#[test]
 fn docker_entrypoint_maps_provider_init_env_vars() {
     let entrypoint =
         std::fs::read_to_string("scripts/docker-entrypoint.sh").expect("read Docker entrypoint");
