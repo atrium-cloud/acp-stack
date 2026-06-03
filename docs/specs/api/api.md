@@ -90,7 +90,7 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
 
-Session create, load, resume, and fork accept an optional `cwd`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before reuse. Closed sessions cannot be loaded, resumed, forked, or prompted.
+Session create, load, resume, and fork accept an optional `cwd`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before reuse. Explicit load/resume CWDs are stored after the agent accepts the call. Closed sessions cannot be loaded, resumed, forked, or prompted.
 
 `POST /v1/sessions/{id}/fork` also accepts optional `{ "message_id": "<prompt message id>" }`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
 
@@ -180,7 +180,7 @@ The reconnect flow is: read `GET /v1/commands/{id}`, subscribe to `commands.{id}
 | `POST /v1/permissions/{id}/deny`    | session | denies a request                           |
 | `POST /v1/permissions/{id}/cancel`  | session | cancels a request owned by the caller flow |
 
-Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators, command substitution, or process substitution require review before execution, including in `permissions.mode = "auto"`.
+Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators, command substitution, or process substitution require review before execution, including in `permissions.mode = "auto"`. Policy matching considers shell-word-normalized command words, so constructed spellings such as quoted or escaped command names can be denied or routed to review.
 
 ## Dependencies
 

@@ -34,6 +34,7 @@ use super::output::{
     BOUNDED_READ_CHUNK_BYTES, OptionFlatten, Outcome, OutputChunk, OutputCounter,
     POST_WAIT_DRAIN_BUDGET, floor_char_boundary, utf8_split_boundary,
 };
+use super::policy::ResolvedCommandCwd;
 use super::process::{kill_process_group_pid, send_terminate};
 
 pub(super) struct SupervisorTask {
@@ -44,9 +45,8 @@ pub(super) struct SupervisorTask {
     pub(super) command_id: String,
     pub(super) shell: String,
     pub(super) command: String,
-    pub(super) cwd: Option<String>,
+    pub(super) cwd: ResolvedCommandCwd,
     pub(super) env: Option<HashMap<String, String>>,
-    pub(super) workspace_root: String,
     pub(super) timeout_duration: Duration,
     pub(super) cancel_grace: Duration,
     pub(super) progress_interval: Duration,
@@ -117,6 +117,11 @@ impl SupervisorTask {
             }
         }
         let started = Instant::now();
+        if let Err(error) = self.mark_running().await {
+            tracing::warn!(error = %error, command_id = %self.command_id, "failed to mark command running before spawn");
+            self.deregister().await;
+            return;
+        }
         let spawn_result = self.spawn_child();
         let mut child = match spawn_result {
             Ok(child) => child,
@@ -132,18 +137,29 @@ impl SupervisorTask {
         // open, and we need a pid for the post-wait process-group kill.
         let pid = child.id().map(|id| id as i32);
 
-        // Transition row to `running`.
-        if let Err(error) = self.mark_running().await {
-            tracing::warn!(error = %error, command_id = %self.command_id, "failed to mark command running");
+        if let Err(error) = self
+            .publish_status_event("command.started", json!({"command_id": self.command_id}))
+            .await
+        {
+            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command started event");
+            break_for_persistence_error(&mut child).await;
+            self.finish_after_persistence_error(started).await;
+            self.deregister().await;
+            return;
         }
-        self.publish_status_event("command.started", json!({"command_id": self.command_id}))
-            .await;
-        if self.review_flagged {
-            self.publish_status_event(
-                "command.review_flagged",
-                json!({"command_id": self.command_id}),
-            )
-            .await;
+        if self.review_flagged
+            && let Err(error) = self
+                .publish_status_event(
+                    "command.review_flagged",
+                    json!({"command_id": self.command_id}),
+                )
+                .await
+        {
+            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command review event");
+            break_for_persistence_error(&mut child).await;
+            self.finish_after_persistence_error(started).await;
+            self.deregister().await;
+            return;
         }
 
         let stdout = child.stdout.take();
@@ -185,7 +201,10 @@ impl SupervisorTask {
                     break self.handle_timeout(&mut child).await;
                 }
                 _ = sleep_until(next_progress_deadline) => {
-                    self.publish_progress_event().await;
+                    if let Err(error) = self.publish_progress_event().await {
+                        tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command progress; terminating command");
+                        break self.handle_persistence_error(&mut child).await;
+                    }
                     next_progress_deadline = Instant::now() + self.progress_interval;
                 }
                 wait_result = child.wait() => {
@@ -195,8 +214,15 @@ impl SupervisorTask {
                     };
                 }
                 Some(chunk) = rx.recv() => {
-                    if self.handle_chunk(chunk, &mut byte_counter).await {
-                        next_progress_deadline = Instant::now() + self.progress_interval;
+                    match self.handle_chunk(chunk, &mut byte_counter).await {
+                        Ok(true) => {
+                            next_progress_deadline = Instant::now() + self.progress_interval;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command output; terminating command");
+                            break self.handle_persistence_error(&mut child).await;
+                        }
                     }
                 }
             }
@@ -234,7 +260,11 @@ impl SupervisorTask {
             }
             match tokio::time::timeout(drain_deadline - now, rx.recv()).await {
                 Ok(Some(chunk)) => {
-                    let _ = self.handle_chunk(chunk, &mut byte_counter).await;
+                    if let Err(error) = self.handle_chunk(chunk, &mut byte_counter).await {
+                        tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist drained command output");
+                        drained_within_budget = false;
+                        break;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => {
@@ -275,6 +305,9 @@ impl SupervisorTask {
             Outcome::Canceled => (CommandStatus::Canceled, None, "command.canceled"),
             Outcome::TimedOut => (CommandStatus::Failed, None, "command.timeout"),
             Outcome::SpawnError => (CommandStatus::Failed, None, "command.failed"),
+            Outcome::PersistenceError => {
+                (CommandStatus::Failed, None, "command.persistence_failed")
+            }
         };
 
         if let Err(error) = {
@@ -287,18 +320,24 @@ impl SupervisorTask {
             )
         } {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command row");
+            self.deregister().await;
+            return;
         }
 
-        self.publish_status_event(
-            kind,
-            json!({
-                "command_id": self.command_id,
-                "status": status.as_str(),
-                "exit_status": exit_status,
-                "duration_ms": duration_ms,
-            }),
-        )
-        .await;
+        if let Err(error) = self
+            .publish_status_event(
+                kind,
+                json!({
+                    "command_id": self.command_id,
+                    "status": status.as_str(),
+                    "exit_status": exit_status,
+                    "duration_ms": duration_ms,
+                }),
+            )
+            .await
+        {
+            tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist terminal command event");
+        }
 
         self.deregister().await;
     }
@@ -306,11 +345,24 @@ impl SupervisorTask {
     fn spawn_child(&self) -> std::result::Result<tokio::process::Child, std::io::Error> {
         let mut cmd = Command::new(&self.shell);
         cmd.arg("-c").arg(&self.command);
-        let cwd = match &self.cwd {
-            Some(cwd) => cwd.clone(),
-            None => self.workspace_root.clone(),
-        };
-        cmd.current_dir(&cwd);
+        #[cfg(unix)]
+        let cwd_handle = self.cwd.open_verified()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let cwd_fd = cwd_handle.as_raw_fd();
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fchdir(cwd_fd) == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        cmd.current_dir(self.cwd.path());
         cmd.env_clear();
         if let Some(env) = &self.env {
             for (key, value) in env {
@@ -327,7 +379,10 @@ impl SupervisorTask {
         cmd.kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
-        cmd.spawn()
+        let child = cmd.spawn();
+        #[cfg(unix)]
+        drop(cwd_handle);
+        child
     }
 
     async fn mark_running(&self) -> Result<()> {
@@ -335,11 +390,11 @@ impl SupervisorTask {
         store.start_command(&self.command_id)
     }
 
-    async fn handle_chunk(&self, chunk: OutputChunk, counter: &mut OutputCounter) -> bool {
+    async fn handle_chunk(&self, chunk: OutputChunk, counter: &mut OutputCounter) -> Result<bool> {
         if counter.exhausted {
             // Already past the cap: drop without persisting; keep draining so
             // the child does not block on a full pipe buffer.
-            return false;
+            return Ok(false);
         }
         let remaining = counter.remaining();
         let bytes = chunk.data.as_bytes();
@@ -349,75 +404,61 @@ impl SupervisorTask {
             let head = &chunk.data[..cutoff];
             let mut persisted_progress = false;
             if !head.is_empty() {
-                self.persist_chunk(&chunk.stream, counter.seq, head).await;
+                self.persist_chunk(&chunk.stream, counter.seq, head).await?;
                 counter.seq += 1;
                 counter.used += head.len();
                 persisted_progress = true;
             }
             counter.exhausted = true;
-            if let Err(error) = {
+            {
                 let store = self.state.lock().await;
                 store.mark_command_truncated(&self.command_id)
-            } {
-                tracing::warn!(error = %error, command_id = %self.command_id, "failed to mark command truncated");
-            }
+            }?;
             self.publish_status_event(
                 "command.output_truncated",
                 json!({"command_id": self.command_id}),
             )
-            .await;
-            return persisted_progress;
+            .await?;
+            return Ok(persisted_progress);
         }
         self.persist_chunk(&chunk.stream, counter.seq, &chunk.data)
-            .await;
+            .await?;
         counter.seq += 1;
         counter.used += bytes.len();
-        true
+        Ok(true)
     }
 
-    async fn persist_chunk(&self, stream: &str, seq: u64, data: &str) {
+    async fn persist_chunk(&self, stream: &str, seq: u64, data: &str) -> Result<()> {
         let event = {
             let store = self.state.lock().await;
             store.append_command_output(&self.command_id, stream, seq, data)
-        };
-        match event {
-            Ok(event) => {
-                self.event_hub.publish_command_event(
-                    &self.command_id,
-                    &event,
-                    json!({
-                        "event_id": event.id,
-                        "created_at": event.created_at,
-                        "command_id": self.command_id,
-                        "stream": stream,
-                        "seq": seq,
-                        "data": data,
-                    }),
-                );
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command output");
-            }
-        }
+        }?;
+        self.event_hub.publish_command_event(
+            &self.command_id,
+            &event,
+            json!({
+                "event_id": event.id,
+                "created_at": event.created_at,
+                "command_id": self.command_id,
+                "stream": stream,
+                "seq": seq,
+                "data": data,
+            }),
+        );
+        Ok(())
     }
 
-    async fn publish_progress_event(&self) {
+    async fn publish_progress_event(&self) -> Result<()> {
         let event = {
             let store = self.state.lock().await;
             store.append_command_progress(&self.command_id)
-        };
-        match event {
-            Ok(event) => {
-                self.event_hub.publish_command_event(
-                    &self.command_id,
-                    &event,
-                    json!({"command_id": self.command_id}),
-                );
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command progress");
-            }
-        }
+        }?;
+        self.event_hub.publish_command_event(
+            &self.command_id,
+            &event,
+            json!({"command_id": self.command_id}),
+        );
+        Ok(())
     }
 
     async fn handle_cancel(&self, child: &mut tokio::process::Child) -> Outcome {
@@ -442,6 +483,21 @@ impl SupervisorTask {
                 let _ = child.wait().await;
                 Outcome::TimedOut
             }
+        }
+    }
+
+    async fn handle_persistence_error(&self, child: &mut tokio::process::Child) -> Outcome {
+        break_for_persistence_error(child).await;
+        Outcome::PersistenceError
+    }
+
+    async fn finish_after_persistence_error(&self, started: Instant) {
+        let duration_ms = i64::try_from(started.elapsed().as_millis()).ok();
+        if let Err(error) = {
+            let store = self.state.lock().await;
+            store.finish_command(&self.command_id, CommandStatus::Failed, None, duration_ms)
+        } {
+            tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command after persistence error");
         }
     }
 
@@ -473,7 +529,7 @@ impl SupervisorTask {
         }
     }
 
-    async fn publish_status_event(&self, kind: &'static str, data: Value) {
+    async fn publish_status_event(&self, kind: &'static str, data: Value) -> Result<()> {
         let payload_text = data.to_string();
         let event = {
             let store = self.state.lock().await;
@@ -484,16 +540,10 @@ impl SupervisorTask {
                 "",
                 &payload_text,
             )
-        };
-        match event {
-            Ok(event) => {
-                self.event_hub
-                    .publish_command_event(&self.command_id, &event, data);
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, command_id = %self.command_id, "failed to publish command status event");
-            }
-        }
+        }?;
+        self.event_hub
+            .publish_command_event(&self.command_id, &event, data);
+        Ok(())
     }
 
     async fn deregister(&self) {
@@ -540,6 +590,17 @@ async fn sleep_until(deadline: Instant) {
         return;
     }
     sleep(deadline - now).await;
+}
+
+async fn break_for_persistence_error(child: &mut tokio::process::Child) {
+    send_terminate(child);
+    if timeout(Duration::from_millis(250), child.wait())
+        .await
+        .is_err()
+    {
+        kill_tokio_process_group(child);
+        let _ = child.wait().await;
+    }
 }
 
 async fn read_stream<R>(reader: R, stream: &'static str, tx: tokio::sync::mpsc::Sender<OutputChunk>)
@@ -607,5 +668,47 @@ where
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
+
+    #[tokio::test]
+    async fn failed_running_transition_prevents_spawn() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_path = tempdir.path().join("state.sqlite");
+        let state = StateStore::open(&state_path).expect("state open");
+        state.migrate().expect("migrate");
+        let marker = tempdir.path().join("spawned");
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let task = SupervisorTask {
+            state: Arc::new(TokioMutex::new(state)),
+            event_hub: EventHub::new(),
+            running: Arc::new(TokioMutex::new(HashMap::new())),
+            awaiting_permission: Arc::new(TokioMutex::new(HashMap::new())),
+            command_id: "cmd_missing".to_owned(),
+            shell: "/bin/sh".to_owned(),
+            command: format!("printf spawned > {}", marker.to_string_lossy()),
+            cwd: resolve_cwd_under_workspace(tempdir.path(), &tempdir.path().to_string_lossy())
+                .expect("resolved cwd"),
+            env: None,
+            timeout_duration: Duration::from_secs(1),
+            cancel_grace: Duration::from_millis(50),
+            progress_interval: Duration::from_secs(1),
+            cancel_rx,
+            max_output_bytes: 1024,
+            review_flagged: false,
+            permission_rx: None,
+        };
+
+        task.run().await;
+
+        assert!(
+            !marker.exists(),
+            "command must not spawn when durable running transition fails"
+        );
     }
 }

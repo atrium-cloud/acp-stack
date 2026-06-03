@@ -45,7 +45,7 @@ Options:
                            script)
   --no-init                Skip acps init (two-step install: init later as the
                            runtime user)
-  --no-os-deps             Skip the ca-certificates install step
+  --no-os-deps             Skip OS dependency installation
   --force                  Overwrite an existing unit file; re-run acps init
                            if the instance is already initialized
   -h, --help               Show this message
@@ -186,40 +186,73 @@ fi
 
 current_step="os_deps"
 
-ca_certs_installed() {
+readonly OS_DEP_PACKAGES=(ca-certificates bash curl npm)
+
+package_installed() {
+  local package="$1"
   case "${distro_family}" in
-    debian) dpkg -s ca-certificates >/dev/null 2>&1 ;;
-    rhel|suse) rpm -q ca-certificates >/dev/null 2>&1 ;;
-    *) command -v update-ca-certificates >/dev/null 2>&1 || command -v update-ca-trust >/dev/null 2>&1 ;;
+    debian) dpkg -s "${package}" >/dev/null 2>&1 ;;
+    rhel|suse) rpm -q "${package}" >/dev/null 2>&1 ;;
+    *)
+      case "${package}" in
+        ca-certificates) command -v update-ca-certificates >/dev/null 2>&1 || command -v update-ca-trust >/dev/null 2>&1 ;;
+        *) command -v "${package}" >/dev/null 2>&1 ;;
+      esac
+      ;;
+  esac
+}
+
+missing_os_dep_packages() {
+  local missing=()
+  local package
+  for package in "${OS_DEP_PACKAGES[@]}"; do
+    if ! package_installed "${package}"; then
+      missing+=("${package}")
+    fi
+  done
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    printf '%s\n' "${missing[@]}"
+  fi
+}
+
+install_missing_os_deps() {
+  local missing=("$@")
+  case "${distro_family}" in
+    debian)
+      log "installing OS dependencies via apt-get: ${missing[*]}"
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
+      ;;
+    rhel)
+      log "installing OS dependencies via dnf/yum: ${missing[*]}"
+      if command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q "${missing[@]}"
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q "${missing[@]}"
+      else
+        fail "missing package manager for required OS dependencies: ${missing[*]}"
+      fi
+      ;;
+    suse)
+      log "installing OS dependencies via zypper: ${missing[*]}"
+      zypper --non-interactive install "${missing[@]}"
+      ;;
+    *)
+      fail "missing required OS tools and unsupported package manager: ${missing[*]}"
+      ;;
   esac
 }
 
 if [[ "${install_os_deps}" == true ]]; then
-  if ca_certs_installed; then
-    log "ca-certificates already installed; skipping OS deps."
+  mapfile -t missing_deps < <(missing_os_dep_packages)
+  if [[ "${#missing_deps[@]}" -eq 0 ]]; then
+    log "OS dependencies already installed; skipping."
   else
-    case "${distro_family}" in
-      debian)
-        log "installing ca-certificates via apt-get..."
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ca-certificates
-        ;;
-      rhel)
-        log "installing ca-certificates via dnf/yum..."
-        if command -v dnf >/dev/null 2>&1; then
-          dnf install -y -q ca-certificates
-        else
-          yum install -y -q ca-certificates
-        fi
-        ;;
-      suse)
-        log "installing ca-certificates via zypper..."
-        zypper --non-interactive install ca-certificates
-        ;;
-      *)
-        log "unrecognized distro; skipping ca-certificates install (pass --no-os-deps to silence this notice)."
-        ;;
-    esac
+    install_missing_os_deps "${missing_deps[@]}"
+    mapfile -t missing_deps < <(missing_os_dep_packages)
+    if [[ "${#missing_deps[@]}" -ne 0 ]]; then
+      fail "required OS tools still missing after install: ${missing_deps[*]}"
+    fi
   fi
 else
   log "skipping OS deps install (--no-os-deps)."

@@ -3,6 +3,8 @@ set -eu
 
 home="${HOME:-/home/acp}"
 config_path="${home}/.config/acp-stack/acp-stack.toml"
+workspace_root="${ACP_STACK_INIT_WORKSPACE_ROOT:-/workspace}"
+workspace_uploads="${ACP_STACK_INIT_WORKSPACE_UPLOADS:-${workspace_root}/uploads}"
 railway_platform=0
 
 if [ -n "${RAILWAY_PROJECT_ID:-}" ] && \
@@ -34,10 +36,16 @@ if [ "${ACP_STACK_AUTO_INIT:-0}" = "1" ] && [ ! -f "${config_path}" ]; then
     if [ -n "${ACP_STACK_INIT_MODE:-}" ]; then
       set -- "$@" --mode "${ACP_STACK_INIT_MODE}"
     fi
+    if [ -n "${ACP_STACK_INIT_WORKSPACE_ROOT:-}" ]; then
+      set -- "$@" --workspace-root "${ACP_STACK_INIT_WORKSPACE_ROOT}"
+    fi
+    if [ -n "${ACP_STACK_INIT_WORKSPACE_UPLOADS:-}" ]; then
+      set -- "$@" --workspace-uploads "${ACP_STACK_INIT_WORKSPACE_UPLOADS}"
+    fi
     acps "$@"
   }
   echo "acp-stack: config missing; running acps init" >&2
-  mkdir -p /workspace /workspace/uploads \
+  mkdir -p "${workspace_root}" "${workspace_uploads}" \
     "${home}/.config/acp-stack" \
     "${home}/.local/share/acp-stack"
   run_init

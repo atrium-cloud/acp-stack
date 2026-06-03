@@ -646,6 +646,99 @@ async fn stored_inner_cwd_is_valid_for_load_resume_and_fork() {
 }
 
 #[tokio::test]
+async fn explicit_load_and_resume_cwd_is_persisted_after_agent_success() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let load_cwd = harness.workspace_root.join("load-cwd");
+    let resume_cwd = harness.workspace_root.join("resume-cwd");
+    std::fs::create_dir(&load_cwd).expect("load cwd");
+    std::fs::create_dir(&resume_cwd).expect("resume cwd");
+    let client = http();
+
+    let load_body: Value = client
+        .post(format!(
+            "{}/v1/sessions/{}/load",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "cwd": load_cwd.to_string_lossy() }))
+        .send()
+        .await
+        .expect("load")
+        .json()
+        .await
+        .expect("load json");
+    let canonical_load = load_cwd.canonicalize().expect("canonical load cwd");
+    assert_eq!(
+        load_body["data"]["cwd"],
+        canonical_load.to_string_lossy().as_ref()
+    );
+
+    let resume_body: Value = client
+        .post(format!(
+            "{}/v1/sessions/{}/resume",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "cwd": resume_cwd.to_string_lossy() }))
+        .send()
+        .await
+        .expect("resume")
+        .json()
+        .await
+        .expect("resume json");
+    let canonical_resume = resume_cwd.canonicalize().expect("canonical resume cwd");
+    assert_eq!(
+        resume_body["data"]["cwd"],
+        canonical_resume.to_string_lossy().as_ref()
+    );
+
+    let state = harness.state.lock().await;
+    let stored = state
+        .get_session(&session_id)
+        .expect("session lookup")
+        .expect("session exists");
+    assert_eq!(stored.cwd, canonical_resume.to_string_lossy());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stored_session_cwd_symlink_escape_is_rejected_before_reuse() {
+    let harness = Harness::spawn().await;
+    let inner = harness.workspace_root.join("stored-cwd");
+    std::fs::create_dir(&inner).expect("inner dir");
+    {
+        let state = harness.state.lock().await;
+        state
+            .insert_session(NewSessionRecord {
+                id: "sess_changed_cwd".to_owned(),
+                agent_id: "placebo".to_owned(),
+                cwd: inner.to_string_lossy().into_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+    }
+    std::fs::remove_dir(&inner).expect("remove inner");
+    let outside = tempfile::tempdir().expect("outside");
+    std::os::unix::fs::symlink(outside.path(), &inner).expect("replace with symlink");
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/resume",
+            harness.base_url, "sess_changed_cwd"
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("resume");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "prompt.body_invalid");
+}
+
+#[tokio::test]
 async fn sessions_list_syncs_agent_discovered_sessions() {
     let harness = Harness::spawn().await;
     let client = http();

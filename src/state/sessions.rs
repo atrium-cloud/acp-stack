@@ -574,6 +574,24 @@ impl StateStore {
         })
     }
 
+    pub fn update_session_status_and_cwd(&self, id: &str, status: &str, cwd: &str) -> Result<()> {
+        let now = current_timestamp();
+        self.persist_with_outbox("sessions", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE sessions
+                SET status = ?1, cwd = ?2, updated_at = ?3
+                WHERE id = ?4
+                "#,
+                params![status, cwd, now, id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::SessionNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
+    }
+
     /// Append an event scoped to a session. Used by the ACP bridge to persist
     /// `session/update` notifications. `kind` is the dotted event kind (e.g.
     /// `session.update`); `payload_json` is the verbatim notification body.

@@ -144,7 +144,7 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 
 `deny` patterns reject immediately. Pending requests expire after `request_timeout` using `timeout_action`.
 
-Command `deny` and `review` patterns are checked against the full submitted command and each simple command segment found through shell control operators, command substitution, or process substitution.
+Command `deny` and `review` patterns are checked against raw and shell-word-normalized forms of the full submitted command and each simple command segment found through shell control operators, command substitution, or process substitution. Shell word construction in the command word requires review when no policy pattern matches.
 
 `[commands].env_allowlist` is the only non-secret environment forwarded into mediated shell commands. Secret refs are injected only through explicit agent or MCP configuration.
 

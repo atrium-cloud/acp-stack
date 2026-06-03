@@ -69,10 +69,59 @@ fn docker_entrypoint_maps_provider_init_env_vars() {
         ("ACP_STACK_INIT_API_KEY_REF", "--api-key-ref"),
         ("ACP_STACK_INIT_MODEL", "--model"),
         ("ACP_STACK_INIT_MODE", "--mode"),
+        ("ACP_STACK_INIT_WORKSPACE_ROOT", "--workspace-root"),
+        ("ACP_STACK_INIT_WORKSPACE_UPLOADS", "--workspace-uploads"),
     ] {
         assert!(
             entrypoint.contains(env_var) && entrypoint.contains(flag),
             "entrypoint must map {env_var} to {flag}"
         );
     }
+}
+
+#[test]
+fn systemd_installer_includes_registry_install_tools() {
+    let installer =
+        std::fs::read_to_string("scripts/install-systemd.sh").expect("read systemd installer");
+    for tool in ["ca-certificates", "bash", "curl", "npm"] {
+        assert!(
+            installer.contains(tool),
+            "systemd installer must include {tool} for registry install paths"
+        );
+    }
+    assert!(
+        installer.contains("missing required OS tools"),
+        "systemd installer must fail clearly when registry tools cannot be installed"
+    );
+}
+
+#[test]
+fn railway_docs_require_persistent_workspace_volume() {
+    let docs = std::fs::read_to_string("docs/deploy/docker.md").expect("read Docker docs");
+    for required in [
+        "/home/acp/workspace",
+        "ACP_STACK_INIT_WORKSPACE_ROOT",
+        "ACP_STACK_INIT_WORKSPACE_UPLOADS",
+    ] {
+        assert!(
+            docs.contains(required),
+            "Railway docs must mention {required}"
+        );
+    }
+}
+
+#[test]
+fn release_workflow_runs_acceptance_gate() {
+    let workflow = std::fs::read_to_string(".github/workflows/release-gate-tests.yml")
+        .expect("read release gate workflow");
+    assert!(
+        workflow.contains("tests/release_acceptance_tests.rs"),
+        "release workflow must trigger on release acceptance test changes"
+    );
+    assert!(
+        workflow.contains(
+            "cargo test --test release_acceptance_tests --features dev-tools,test-fixtures --locked"
+        ),
+        "release workflow must run release_acceptance_tests with release fixtures"
+    );
 }
