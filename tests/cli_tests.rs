@@ -1878,6 +1878,93 @@ fn init_explicit_model_validates_against_acp_advertised_values() {
 }
 
 #[test]
+fn init_explicit_model_accepts_provider_model_shorthand() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["openrouter/deepseek/deepseek-v4-flash"],
+        &[],
+    );
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openrouter",
+            "--api-key-ref",
+            "OPENROUTER_API_KEY",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"model = "openrouter/deepseek/deepseek-v4-flash""#));
+
+    let opencode_path = tempdir
+        .path()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json");
+    let opencode: Value = serde_json::from_str(
+        &fs::read_to_string(opencode_path).expect("opencode config should be readable"),
+    )
+    .expect("opencode config should parse");
+    assert_eq!(opencode["model"], "openrouter/deepseek/deepseek-v4-flash");
+}
+
+#[test]
+fn init_explicit_model_shorthand_prefers_selected_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &[
+            "deepseek/deepseek-v4-flash",
+            "openrouter/deepseek/deepseek-v4-flash",
+        ],
+        &[],
+    );
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openrouter",
+            "--api-key-ref",
+            "OPENROUTER_API_KEY",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acp-stack.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"model = "openrouter/deepseek/deepseek-v4-flash""#));
+    assert!(!config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
+}
+
+#[test]
 fn init_rejected_model_restores_prior_headless_config() {
     // Pre-write a prior opencode headless config, then run init with
     // an unadvertised --model. The init must reject the value AND

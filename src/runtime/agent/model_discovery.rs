@@ -152,6 +152,62 @@ pub fn validate_advertised_value(
     }
 }
 
+pub fn resolve_advertised_model_value(
+    response: &NewSessionResponse,
+    provider_id: Option<&str>,
+    model_id: &str,
+) -> Result<String> {
+    let values = session_model_values(response)?;
+    let exact_is_advertised = session_model_selection_for_value(response, model_id).is_ok();
+    if let Some(provider_id) = provider_id
+        && exact_is_advertised
+        && advertised_model_provider_matches(model_id, provider_id)
+    {
+        return Ok(model_id.to_owned());
+    }
+    if let Some(provider_id) = provider_id {
+        let provider_qualified = format!("{provider_id}/{model_id}");
+        if values.iter().any(|value| value == &provider_qualified)
+            && session_model_selection_for_value(response, &provider_qualified).is_ok()
+        {
+            return Ok(provider_qualified);
+        }
+    }
+    let mut base_matches = values
+        .iter()
+        .filter(|value| advertised_model_base_matches(value, provider_id, model_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    base_matches.sort();
+    base_matches.dedup();
+    if base_matches.len() == 1
+        && session_model_selection_for_value(response, &base_matches[0]).is_ok()
+    {
+        return Ok(base_matches.remove(0));
+    }
+    if exact_is_advertised {
+        return Ok(model_id.to_owned());
+    }
+    session_model_selection_for_value(response, model_id).map(|_| model_id.to_owned())
+}
+
+fn advertised_model_base_matches(value: &str, provider_id: Option<&str>, model_id: &str) -> bool {
+    let base = value.split_once('[').map_or(value, |(base, _)| base);
+    if let Some((provider, model)) = base.split_once('/') {
+        return provider_id.is_none_or(|provider_id| provider == provider_id) && model == model_id;
+    }
+    base == model_id
+}
+
+fn advertised_model_provider(value: &str) -> Option<&str> {
+    let base = value.split_once('[').map_or(value, |(base, _)| base);
+    base.split_once('/').map(|(provider, _)| provider)
+}
+
+fn advertised_model_provider_matches(value: &str, provider_id: &str) -> bool {
+    advertised_model_provider(value).is_some_and(|provider| provider == provider_id)
+}
+
 fn resolve_agent_env(home: &Path, config: &Config) -> Result<HashMap<String, String>> {
     if config.agent.env.is_empty() {
         return Ok(HashMap::new());

@@ -6,8 +6,10 @@ use crate::dev_gates::{FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
-    advertised_values_for_category, fetch_session_config, validate_advertised_value,
+    advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
+    validate_advertised_value,
 };
+use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
 use super::InitArgs;
@@ -298,7 +300,11 @@ fn configure_model_for_init(
     agent_name: &str,
 ) -> Result<ModelModeAction> {
     if let Some(explicit) = args.model.as_deref() {
-        validate_advertised_value(response, AgentSessionConfigCategory::Model, explicit).map_err(
+        let agent_provider_id =
+            config.agent.provider.as_ref().and_then(|provider| {
+                agent_provider_id_for_provider_id(&config.agent.id, &provider.id)
+            });
+        let model = resolve_advertised_model_value(response, agent_provider_id, explicit).map_err(
             |err| {
                 let advertised =
                     advertised_values_for_category(response, AgentSessionConfigCategory::Model)
@@ -309,7 +315,7 @@ fn configure_model_for_init(
                 }
             },
         )?;
-        write_model_into_config(config, explicit.to_owned());
+        write_model_into_config(config, model);
         return Ok(ModelModeAction::Set);
     }
 
