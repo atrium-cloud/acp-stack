@@ -128,7 +128,7 @@ testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
 id = "amp-acp"
-github = "finn-lyu/amp-acp"
+github = "tao12345666333/amp-acp"
 
 [agents.adapter.install.github]
 asset_pattern = "amp-acp-linux-{arch}.tar.gz"
