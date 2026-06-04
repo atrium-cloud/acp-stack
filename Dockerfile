@@ -24,12 +24,14 @@ RUN addgroup --system --gid 1000 acp \
 
 RUN mkdir -p /workspace \
     /workspace/uploads \
+    /usr/share/doc/acp-stack \
     /home/acp/.config/acp-stack \
     /home/acp/.local/share/acp-stack \
     && chown -R acp:acp /workspace /home/acp/.config /home/acp/.local/share
 
 COPY --from=builder /app/target/release/acps /usr/local/bin/acps
 COPY --from=builder /app/target/release/acpctl /usr/local/bin/acpctl
+COPY LICENSE NOTICE TRADEMARKS.md /usr/share/doc/acp-stack/
 COPY scripts/docker-entrypoint.sh /usr/local/bin/acp-stack-docker-entrypoint
 RUN chmod 0755 /usr/local/bin/acp-stack-docker-entrypoint
 
