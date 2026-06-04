@@ -8,6 +8,8 @@ If you have a feature/fix you strongly believe should be added, reach out to the
 
 The repository remains licensed under Apache 2.0. Anyone who wants to build on the project can fork it.
 
+Keep attribution notices from [NOTICE](NOTICE), and see [TRADEMARKS.md](TRADEMARKS.md) before using the project name or branding.
+
 ## Issues
 
 Issues remain welcome when they are focused and actionable. Please describe the observed behavior, expected behavior, relevant environment details, and any reproduction steps.
