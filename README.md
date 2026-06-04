@@ -46,4 +46,4 @@ Issues and security reports remain welcome. Anyone who wants to build on the pro
 
 ## License
 
-`acp-stack` is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+`acp-stack` is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE). Attribution notices are in [NOTICE](NOTICE). Brand-use guidance is in [TRADEMARKS.md](TRADEMARKS.md).
