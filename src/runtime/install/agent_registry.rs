@@ -818,6 +818,12 @@ mod tests {
             amp.adapter.as_ref().map(|adapter| adapter.id.as_str()),
             Some("amp-acp")
         );
+        assert_eq!(
+            amp.adapter
+                .as_ref()
+                .and_then(|adapter| adapter.github.as_deref()),
+            Some("tao12345666333/amp-acp")
+        );
         assert_eq!(amp.support_doc.as_deref(), Some("docs/agents/amp.md"));
         let pi = catalog.lookup("pi").expect("pi entry exists");
         assert_eq!(pi.kind, RegistryKind::Adapter);
@@ -987,10 +993,10 @@ required_tools = ["/usr/bin/curl"]
             github_repo_from_url(
                 "amp",
                 "adapter.github",
-                "https://github.com/finn-lyu/amp-acp"
+                "https://github.com/tao12345666333/amp-acp"
             )
             .expect("repo"),
-            "finn-lyu/amp-acp"
+            "tao12345666333/amp-acp"
         );
     }
 
