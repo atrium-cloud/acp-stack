@@ -44,6 +44,6 @@ External PR contributions are paused for the foreseeable future because maintain
 
 Issues and security reports remain welcome. Anyone who wants to build on the project can fork it under the Apache 2.0 license. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-## License
+## Licensing
 
 `acp-stack` is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE). Attribution notices are in [NOTICE](NOTICE). Brand-use guidance is in [TRADEMARKS.md](TRADEMARKS.md).
