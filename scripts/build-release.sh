@@ -84,7 +84,13 @@ cp "${REPO_ROOT}/install.sh" "${DIST_DIR}/install.sh"
 
 (
   cd "${DIST_DIR}"
-  shasum -a 256 "${PROJECT}-${version}-"*.tar.gz > SHA256SUMS
+  # sha256sum on Linux (CI runners), shasum on macOS (local maintainer builds).
+  # Both emit the same "<hash>  <file>" format install.sh verifies against.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${PROJECT}-${version}-"*.tar.gz > SHA256SUMS
+  else
+    shasum -a 256 "${PROJECT}-${version}-"*.tar.gz > SHA256SUMS
+  fi
 )
 log "wrote ${DIST_DIR}/SHA256SUMS"
 
