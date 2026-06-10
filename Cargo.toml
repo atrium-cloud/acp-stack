@@ -1,6 +1,6 @@
 [package]
 name = "acp-stack"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 description = "Self-hostable Linux runtime for ACP-compatible agents."
 license = "Apache-2.0"
@@ -100,3 +100,12 @@ rmcp = { version = "1.7.0", features = [
     "transport-streamable-http-client-unix-socket",
 ] }
 tokio-rustls = { version = "0.26.4", default-features = false }
+
+# Release binaries ship to cloud sandboxes: strip symbols and favor a smaller,
+# faster artifact. `lto = "thin"` keeps link time reasonable while still
+# inlining across crates; `panic` is left at the default `unwind` so the
+# integration tests that drive the release binary keep their backtraces.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
