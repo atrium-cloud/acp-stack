@@ -1,0 +1,58 @@
+name: release
+
+# Builds and publishes the Linux release artifacts on GitHub's runners. A single
+# Linux job cross-compiles both arches via cargo-zigbuild (glibc 2.17 floor),
+# reusing scripts/build-release.sh verbatim, then attaches the tarballs +
+# SHA256SUMS + install.sh to the GitHub Release.
+#
+# Normal flow: push a tag.
+#   git tag v0.1.0 && git push origin v0.1.0
+# The workflow_dispatch path re-runs a build for an already-pushed tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # rust-toolchain.toml pins 1.95.0; install it and the cross targets here so
+      # build-release.sh's own `rustup target add` is a no-op on the runner.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build release artifacts
+        run: bash scripts/build-release.sh
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/acp-stack-*.tar.gz
+            dist/SHA256SUMS
+            dist/install.sh
+          generate_release_notes: true
