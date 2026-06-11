@@ -10,7 +10,7 @@
 - Protocol boundary: `acp-stack` acts as an ACP client and uses ACP as the agent protocol boundary.
 - State: SQLite is the local source of truth for runtime history.
 - Secrets: age-compatible encrypted storage, with secret references in config.
-- Config: portable TOML at `~/.config/acp-stack/acp-stack.toml`.
+- Config: portable TOML at `~/.config/acp-stack/acps-config.toml`.
 
 References:
 
@@ -18,6 +18,7 @@ References:
 - API contract: docs/specs/api/api.md
 - ACP bridge: docs/specs/acp/acp-bridge.md
 - CLI: docs/specs/cli.md
+- Init guide: docs/specs/init.md
 - Runtime: docs/specs/runtime.md
 - Security: docs/specs/security.md
 - Linear MCP example: docs/specs/mcp.md

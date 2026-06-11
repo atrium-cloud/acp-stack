@@ -20,7 +20,7 @@ readonly RUNTIME_USER="${ACP_STACK_SYSTEMD_TEST_USER:-acp_test}"
 readonly HOME_DIR="/home/${RUNTIME_USER}"
 readonly WORKSPACE_ROOT="${ACP_STACK_SYSTEMD_TEST_WORKSPACE:-/srv/acp-stack}"
 readonly INIT_AGENT="${ACP_STACK_SYSTEMD_TEST_AGENT:-}"
-readonly CONFIG_PATH="${HOME_DIR}/.config/acp-stack/acp-stack.toml"
+readonly CONFIG_PATH="${HOME_DIR}/.config/acp-stack/acps-config.toml"
 readonly UNIT_PATH="/etc/systemd/system/acp-stack.service"
 
 stdout_capture=""

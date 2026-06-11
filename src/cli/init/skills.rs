@@ -1,4 +1,3 @@
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -11,7 +10,7 @@ use crate::runtime::install::skill_installer::{
 };
 use crate::runtime::install::skill_registry::SkillCatalog;
 
-use super::InitArgs;
+use super::{InitArgs, prompt, prompts_enabled};
 
 #[derive(Debug, Clone)]
 pub(super) struct InitSkillInstallPlan {
@@ -28,44 +27,67 @@ pub(super) fn prompt_init_skills_if_needed(
     if args.resume || args.no_skills || args.skills_source.is_some() || !args.skills.is_empty() {
         return Ok(());
     }
-    if !io::stdin().is_terminal() || agent_install_dir(config, registry).is_none() {
+    let interactive = prompts_enabled(args);
+    if !interactive || agent_install_dir(config, registry).is_none() {
         return Ok(());
     }
 
-    println!("Select Agent Skills source:");
-    println!("  1. OpenAI");
-    println!("  2. Anthropic");
-    println!("  3. Custom GitHub owner/org");
-    println!("  4. Skip");
-    print!("skills source [1-4, blank to skip]: ");
-    flush_stdout()?;
-    let source_answer = read_stdin_line()?;
-    let source_answer = source_answer.trim();
-    if source_answer.is_empty() || source_answer == "4" {
-        args.no_skills = true;
-        return Ok(());
+    #[derive(Clone, PartialEq, Eq)]
+    enum SkillSourceChoice {
+        OpenAi,
+        Anthropic,
+        CustomGithub,
+        Skip,
     }
-
-    args.skills_source = Some(match source_answer {
-        "1" => SOURCE_OPENAI.to_owned(),
-        "2" => SOURCE_ANTHROPIC.to_owned(),
-        "3" => {
-            print!("GitHub owner/org for <owner>/skills: ");
-            flush_stdout()?;
-            let owner = read_stdin_line()?;
-            format!("{SOURCE_CUSTOM_GITHUB_PREFIX}{}", owner.trim())
+    let choice = prompt::select(
+        interactive,
+        "Select Agent Skills source",
+        &[
+            (
+                SkillSourceChoice::OpenAi,
+                "OpenAI".to_owned(),
+                String::new(),
+            ),
+            (
+                SkillSourceChoice::Anthropic,
+                "Anthropic".to_owned(),
+                String::new(),
+            ),
+            (
+                SkillSourceChoice::CustomGithub,
+                "Custom GitHub owner/org".to_owned(),
+                String::new(),
+            ),
+            (SkillSourceChoice::Skip, "Skip".to_owned(), String::new()),
+        ],
+    )?;
+    let source = match choice {
+        None | Some(SkillSourceChoice::Skip) => {
+            args.no_skills = true;
+            return Ok(());
         }
-        other => {
-            return Err(StackError::InvalidParam {
-                field: "skills-source",
-                reason: format!("invalid selection `{other}`"),
-            });
+        Some(SkillSourceChoice::OpenAi) => SOURCE_OPENAI.to_owned(),
+        Some(SkillSourceChoice::Anthropic) => SOURCE_ANTHROPIC.to_owned(),
+        Some(SkillSourceChoice::CustomGithub) => {
+            match prompt::text(interactive, "GitHub owner/org for <owner>/skills", true)? {
+                Some(owner) if !owner.trim().is_empty() => {
+                    format!("{SOURCE_CUSTOM_GITHUB_PREFIX}{}", owner.trim())
+                }
+                _ => {
+                    args.no_skills = true;
+                    return Ok(());
+                }
+            }
         }
-    });
+    };
+    args.skills_source = Some(source);
 
-    print!("skills (comma-separated dash-case, blank to skip): ");
-    flush_stdout()?;
-    let skills = read_stdin_line()?;
+    let skills = prompt::text(
+        interactive,
+        "skills (comma-separated dash-case, blank to skip)",
+        false,
+    )?
+    .unwrap_or_default();
     let skills = skills.trim();
     if skills.is_empty() {
         args.no_skills = true;
@@ -131,18 +153,4 @@ fn agent_install_dir<'a>(config: &Config, registry: &'a RegistryCatalog) -> Opti
         return None;
     }
     entry.agent_skills_install_dir.as_deref()
-}
-
-fn flush_stdout() -> Result<()> {
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ServeIo { source })
-}
-
-fn read_stdin_line() -> Result<String> {
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ServeIo { source })?;
-    Ok(answer)
 }

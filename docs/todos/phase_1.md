@@ -18,8 +18,8 @@
 
 ## Config
 
-- [x] Define `acp-stack.toml` schema for API, auth, workspace, logging, and agent settings.
-- [x] Implement config load from `~/.config/acp-stack/acp-stack.toml`.
+- [x] Define `acps-config.toml` schema for API, auth, workspace, logging, and agent settings.
+- [x] Implement config load from `~/.config/acp-stack/acps-config.toml`.
 - [x] Implement config validation with typed errors.
 - [x] Implement `acps config validate [path]`.
 - [x] Implement `acps config export [--output path]`.

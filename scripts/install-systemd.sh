@@ -282,7 +282,7 @@ log "installed /usr/local/bin/acps and /usr/local/bin/acpctl."
 
 current_step="acps_init"
 
-config_file="${home_dir}/.config/acp-stack/acp-stack.toml"
+config_file="${home_dir}/.config/acp-stack/acps-config.toml"
 if [[ "${do_init}" == true ]]; then
   if [[ -f "${config_file}" && "${force}" != true ]]; then
     log "config already present at ${config_file}; skipping acps init (pass --force to re-run)."

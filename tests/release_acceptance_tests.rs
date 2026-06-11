@@ -44,7 +44,7 @@ fn acps_command(home: &Path) -> Command {
 }
 
 fn config_path(home: &Path) -> PathBuf {
-    home.join(".config/acp-stack/acp-stack.toml")
+    home.join(".config/acp-stack/acps-config.toml")
 }
 
 fn run_fixture_init(home: &Path, workspace: &Path) {
@@ -403,7 +403,7 @@ async fn release_acceptance_fixture_first_test() {
     set_secret(home.path(), ACCEPTANCE_KEY_REF, ACCEPTANCE_KEY_VALUE);
     configure_fixture_secret_assertion(home.path());
 
-    let export_path = home.path().join("exported-acp-stack.toml");
+    let export_path = home.path().join("exported-acps-config.toml");
     let exported = export_config(home.path(), &export_path);
     let (session_key, admin_key) = generated_keys(home.path());
     assert!(exported.contains(ACCEPTANCE_KEY_REF));

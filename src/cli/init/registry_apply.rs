@@ -1,12 +1,11 @@
-use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
-
 use crate::config::{CloudflareEdgeConfig, Config, DependencyEntry, EdgeConfig};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::env_refs_for_agent_id;
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 
-use super::{CloudflaredDeploymentArg, EdgeExposureArg, EdgeProviderArg, InitArgs};
+use super::{
+    CloudflaredDeploymentArg, EdgeExposureArg, EdgeProviderArg, InitArgs, prompt, prompts_enabled,
+};
 
 pub(super) fn apply_edge_profile_to_config(args: &InitArgs, config: &mut Config) -> Result<bool> {
     let Some(edge) = args.edge else {
@@ -83,54 +82,44 @@ pub(super) fn select_agent_for_init<'a>(
     if let Some(id) = &args.agent {
         return registry.lookup_required(id).map(Some);
     }
-    if !io::stdin().is_terminal() {
+    if !prompts_enabled(args) {
         return Ok(None);
     }
     let entries = registry.entries();
     if entries.is_empty() {
         return Ok(None);
     }
-    println!("Select an agent to configure:");
-    for (index, entry) in entries.iter().enumerate() {
-        println!("  {}. {} ({})", index + 1, entry.name, entry.id);
+
+    #[derive(Clone, PartialEq, Eq)]
+    enum AgentChoice {
+        Id(String),
+        Skip,
     }
-    print!("agent [1-{}, blank to keep current]: ", entries.len());
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    let index = answer
-        .parse::<usize>()
-        .map_err(|_| StackError::InvalidParam {
-            field: "agent",
-            reason: format!("invalid selection `{answer}`"),
-        })?;
-    if index == 0 {
-        return Err(StackError::InvalidParam {
-            field: "agent",
-            reason: format!("selection `{answer}` is out of range"),
-        });
-    }
-    entries
-        .get(index - 1)
-        .ok_or_else(|| StackError::InvalidParam {
-            field: "agent",
-            reason: format!("selection `{answer}` is out of range"),
+    let mut items = entries
+        .iter()
+        .map(|entry| {
+            (
+                AgentChoice::Id(entry.id.clone()),
+                format!("{} ({})", entry.name, entry.id),
+                String::new(),
+            )
         })
-        .map(Some)
+        .collect::<Vec<_>>();
+    items.push((AgentChoice::Skip, "Skip".to_owned(), String::new()));
+    let Some(choice) = prompt::searchable_select(prompts_enabled(args), "Agent", &items)? else {
+        return Ok(None);
+    };
+    let AgentChoice::Id(id) = choice else {
+        return Ok(None);
+    };
+    if let Some(entry) = registry.lookup(&id) {
+        Ok(Some(entry))
+    } else {
+        Err(StackError::InvalidParam {
+            field: "agent",
+            reason: format!("selected registry agent `{id}` is unavailable"),
+        })
+    }
 }
 
 pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &RegistryEntry) {

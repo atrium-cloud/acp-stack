@@ -1,11 +1,8 @@
-use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
-
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
-use super::InitArgs;
+use super::{InitArgs, prompt, prompts_enabled};
 
 /// What `acps init` should do with the post-init testflight phase. Resolved
 /// from the operator's flags + TTY state + agent registry support so the
@@ -36,6 +33,7 @@ pub(super) fn resolve_testflight_decision(
     if args.skip_testflight {
         return Ok(Some(TestflightDecision::SkipExplicit));
     }
+    let interactive = prompts_enabled(args);
     let Some(entry) = registry.lookup(&config.agent.id) else {
         // Operator's `[agent].id` doesn't match the registry (e.g., escape
         // hatch). No registry entry means we don't know the testflight
@@ -60,33 +58,19 @@ pub(super) fn resolve_testflight_decision(
         print_testflight_credit_warning(entry);
         return Ok(Some(TestflightDecision::Run));
     }
-    if !io::stdin().is_terminal() {
+    if !interactive {
         return Ok(Some(TestflightDecision::SkipNonInteractive));
     }
-    if confirm_testflight_credit_warning(entry)? {
+    if confirm_testflight_credit_warning(interactive, entry)? {
         Ok(Some(TestflightDecision::Run))
     } else {
         Ok(Some(TestflightDecision::SkipDeclined))
     }
 }
 
-fn confirm_testflight_credit_warning(entry: &RegistryEntry) -> Result<bool> {
+fn confirm_testflight_credit_warning(interactive: bool, entry: &RegistryEntry) -> Result<bool> {
     print_testflight_credit_warning(entry);
-    print!("run testflight now? [y/N]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+    prompt::confirm(interactive, "run testflight now?", false)
 }
 
 fn print_testflight_credit_warning(entry: &RegistryEntry) {

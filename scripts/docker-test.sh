@@ -161,7 +161,7 @@ config_volume_initialized() {
   docker run --rm \
     -v "${config_volume}:/home/acp/.config/acp-stack" \
     "${image_tag}" \
-    sh -c 'test -f /home/acp/.config/acp-stack/acp-stack.toml'
+    sh -c 'test -f /home/acp/.config/acp-stack/acps-config.toml'
 }
 
 save_persistent_init_output() {

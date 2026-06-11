@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::auth::generate_api_key;
 use crate::config::Config;
@@ -8,14 +9,15 @@ use crate::error::{Result, StackError};
 use crate::runtime::init_runner::{self, begin_run, finalize_run, find_resumable_run};
 use crate::secrets::SecretStore;
 use crate::state::{
-    EVENT_SOURCE_CLI, INIT_RUN_FAILED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
-    InitRunRecord, InitStepRecord, StateStore,
+    INIT_RUN_FAILED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, InitRunRecord,
+    InitStepRecord, StateStore,
 };
 
 use super::InitArgs;
 
 pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<InitRunRecord> {
     let args_json = serde_json::json!({
+        "config_import_source": args.config_import_source_label(),
         "agent": args.agent,
         "provider": args.provider,
         "api_key_ref": args.api_key_ref,
@@ -166,8 +168,24 @@ fn step_report_timestamp(step: &InitStepRecord) -> &str {
         .unwrap_or("")
 }
 
+/// Freshly generated API key plaintext, returned from a first-run
+/// `secrets_init` so the driver can defer the operator handover to the very end
+/// of init instead of printing it at generation time, where the install /
+/// workspace / testflight scroll buries it. `Zeroizing` wipes the plaintext on
+/// drop.
+pub(super) struct FreshKeys {
+    pub(super) session_ref: String,
+    pub(super) admin_ref: String,
+    pub(super) session_value: Zeroizing<String>,
+    pub(super) admin_value: Zeroizing<String>,
+}
+
 pub(super) struct SecretsInitOutcome {
     pub(super) status: &'static str,
+    /// `Some` only on fresh generation. Existing stores must never surface
+    /// plaintext keys again.
+    pub(super) fresh_keys: Option<FreshKeys>,
+    pub(super) generated_keys: bool,
 }
 
 pub(super) fn perform_secrets_init(
@@ -175,7 +193,6 @@ pub(super) fn perform_secrets_init(
     session_ref: &str,
     admin_ref: &str,
     secret_store: &mut SecretStore,
-    store: &StateStore,
 ) -> Result<SecretsInitOutcome> {
     let session_present = secret_store.contains(session_ref);
     let admin_present = secret_store.contains(admin_ref);
@@ -192,34 +209,29 @@ pub(super) fn perform_secrets_init(
         }
         return Ok(SecretsInitOutcome {
             status: "preserved existing API keys",
+            fresh_keys: None,
+            generated_keys: false,
         });
     }
+    // The plaintext is deliberately NOT printed here. The driver renders the
+    // operator handover at the end of init (see `KeyHandover` in init.rs) so a
+    // long install/workspace/testflight scroll cannot bury it; the values ride
+    // back in `fresh_keys`.
     let session_value = generate_api_key();
     let admin_value = generate_api_key();
-    println!("---");
-    println!("session key ({session_ref}): {session_value}");
-    println!("admin key ({admin_ref}): {admin_value}");
-    println!(
-        "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
-    );
-    println!("---");
     secret_store.set_many([
         (session_ref, session_value.as_str()),
         (admin_ref, admin_value.as_str()),
     ])?;
-    store.append_event_with_source(
-        "info",
-        "auth.keys_generated",
-        EVENT_SOURCE_CLI,
-        "generated session and admin API keys",
-        &serde_json::json!({
-            "session_key_ref": session_ref,
-            "admin_key_ref": admin_ref,
-        })
-        .to_string(),
-    )?;
     Ok(SecretsInitOutcome {
         status: "generated session and admin API keys",
+        generated_keys: true,
+        fresh_keys: Some(FreshKeys {
+            session_ref: session_ref.to_owned(),
+            admin_ref: admin_ref.to_owned(),
+            session_value: Zeroizing::new(session_value),
+            admin_value: Zeroizing::new(admin_value),
+        }),
     })
 }
 
@@ -307,5 +319,24 @@ mod tests {
 
         let failed_step = failed_step_for_report(steps).expect("failed step");
         assert_eq!(failed_step.kind, "current_failure");
+    }
+
+    #[test]
+    fn perform_secrets_init_preserves_existing_keys_without_handover() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secret_store
+            .set_many([
+                ("SESSION_REF", "session-value"),
+                ("ADMIN_REF", "admin-value"),
+            ])
+            .expect("seed keys");
+
+        let outcome = perform_secrets_init(true, "SESSION_REF", "ADMIN_REF", &mut secret_store)
+            .expect("outcome");
+
+        assert_eq!(outcome.status, "preserved existing API keys");
+        assert!(!outcome.generated_keys);
+        assert!(outcome.fresh_keys.is_none());
     }
 }

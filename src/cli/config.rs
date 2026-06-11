@@ -5,7 +5,7 @@ use crate::fs_util::{
 };
 use base64::Engine;
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::core::{OutputFormat, print_json};
 
@@ -42,6 +42,18 @@ pub struct ConfigImportArgs {
     /// Validate and report without writing or auditing.
     #[arg(long)]
     dry_run: bool,
+}
+
+pub(super) enum ConfigImportSource<'a> {
+    Path(&'a Path),
+    Toml(&'a str),
+    Base64(&'a str),
+}
+
+pub(super) struct ConfigImportPayload {
+    pub(super) config: Config,
+    pub(super) canonical: String,
+    pub(super) input_bytes: usize,
 }
 
 pub(super) fn run_config_command(
@@ -112,7 +124,7 @@ pub(super) fn run_config_command(
 }
 
 fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()> {
-    let raw_toml = match (args.path.as_deref(), args.base64.as_deref()) {
+    let source = match (args.path.as_deref(), args.base64.as_deref()) {
         (None, None) => {
             return Err(StackError::MissingField {
                 field: "config import requires either <path> or --base64",
@@ -123,50 +135,26 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
                 field: "config import accepts only one of <path> or --base64",
             });
         }
-        (Some(path), None) => {
-            let bytes = std::fs::read(path).map_err(|source| StackError::ConfigRead {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            if bytes.len() > config::IMPORT_SIZE_LIMIT {
-                return Err(StackError::ImportTooLarge {
-                    limit: config::IMPORT_SIZE_LIMIT,
-                    actual: bytes.len(),
-                });
-            }
-            String::from_utf8(bytes).map_err(|source| StackError::ImportUtf8 { source })?
-        }
-        (None, Some(encoded)) => {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|source| StackError::ImportBase64Decode { source })?;
-            if decoded.len() > config::IMPORT_SIZE_LIMIT {
-                return Err(StackError::ImportTooLarge {
-                    limit: config::IMPORT_SIZE_LIMIT,
-                    actual: decoded.len(),
-                });
-            }
-            String::from_utf8(decoded).map_err(|source| StackError::ImportUtf8 { source })?
-        }
+        (Some(path), None) => ConfigImportSource::Path(path),
+        (None, Some(encoded)) => ConfigImportSource::Base64(encoded),
     };
 
-    let config = config::load_config_from_str(&raw_toml)?;
-    let canonical = config.to_canonical_toml()?;
+    let payload = load_config_import_payload(source)?;
     let target = config::default_config_path()?;
 
     if args.dry_run {
         let auth_refs_ok = if target.exists() {
             let current = Config::load_from_path(&target)?;
-            config::compare_auth_refs(&current.auth, &config.auth).is_ok()
+            config::compare_auth_refs(&current.auth, &payload.config.auth).is_ok()
         } else {
             true
         };
         if output.is_json() {
             print_json(&serde_json::json!({
                 "dry_run": true,
-                "config_version": config.config_version,
-                "canonical_toml_bytes": canonical.len(),
-                "input_bytes": raw_toml.len(),
+                "config_version": payload.config.config_version,
+                "canonical_toml_bytes": payload.canonical.len(),
+                "input_bytes": payload.input_bytes,
                 "auth_refs_unchanged": auth_refs_ok,
                 "target_path": target.display().to_string(),
                 "target_exists": target.exists(),
@@ -174,9 +162,9 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
         } else {
             print_config_import_progress(false);
             println!("import dry-run complete");
-            println!("  config_version: {}", config.config_version);
-            println!("  canonical TOML size: {} bytes", canonical.len());
-            println!("  input size: {} bytes", raw_toml.len());
+            println!("  config_version: {}", payload.config.config_version);
+            println!("  canonical TOML size: {} bytes", payload.canonical.len());
+            println!("  input size: {} bytes", payload.input_bytes);
             println!("  auth refs unchanged: {auth_refs_ok}");
             println!("  would write to: {}", target.display());
             println!("  target exists: {}", target.exists());
@@ -194,17 +182,17 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
             });
         }
         let current = Config::load_from_path(&target)?;
-        config::compare_auth_refs(&current.auth, &config.auth)?;
+        config::compare_auth_refs(&current.auth, &payload.config.auth)?;
         if !output.is_json() {
             print_config_import_progress(true);
         }
-        atomic_write_owner_only(&target, canonical.as_bytes())?;
+        atomic_write_owner_only(&target, payload.canonical.as_bytes())?;
         if output.is_json() {
             print_json(&serde_json::json!({
                 "imported": true,
                 "replaced": true,
                 "path": target.display().to_string(),
-                "bytes": canonical.len(),
+                "bytes": payload.canonical.len(),
             }))?;
         } else {
             println!("imported config (replaced): {}", target.display());
@@ -213,13 +201,13 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
         if !output.is_json() {
             print_config_import_progress(true);
         }
-        write_new_file_owner_only(&target, canonical.as_bytes())?;
+        write_new_file_owner_only(&target, payload.canonical.as_bytes())?;
         if output.is_json() {
             print_json(&serde_json::json!({
                 "imported": true,
                 "replaced": false,
                 "path": target.display().to_string(),
-                "bytes": canonical.len(),
+                "bytes": payload.canonical.len(),
             }))?;
         } else {
             println!("imported config: {}", target.display());
@@ -229,7 +217,57 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
     Ok(())
 }
 
-fn print_config_import_progress(include_write: bool) {
+pub(super) fn load_config_import_payload(
+    source: ConfigImportSource<'_>,
+) -> Result<ConfigImportPayload> {
+    let raw_toml = read_config_import_source(source)?;
+    let config = config::load_config_from_str(&raw_toml)?;
+    let canonical = config.to_canonical_toml()?;
+    Ok(ConfigImportPayload {
+        config,
+        canonical,
+        input_bytes: raw_toml.len(),
+    })
+}
+
+fn read_config_import_source(source: ConfigImportSource<'_>) -> Result<String> {
+    match source {
+        ConfigImportSource::Path(path) => {
+            let bytes = std::fs::read(path).map_err(|source| StackError::ConfigRead {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            read_config_import_bytes(bytes)
+        }
+        ConfigImportSource::Toml(raw_toml) => {
+            if raw_toml.len() > config::IMPORT_SIZE_LIMIT {
+                return Err(StackError::ImportTooLarge {
+                    limit: config::IMPORT_SIZE_LIMIT,
+                    actual: raw_toml.len(),
+                });
+            }
+            Ok(raw_toml.to_owned())
+        }
+        ConfigImportSource::Base64(encoded) => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|source| StackError::ImportBase64Decode { source })?;
+            read_config_import_bytes(decoded)
+        }
+    }
+}
+
+fn read_config_import_bytes(bytes: Vec<u8>) -> Result<String> {
+    if bytes.len() > config::IMPORT_SIZE_LIMIT {
+        return Err(StackError::ImportTooLarge {
+            limit: config::IMPORT_SIZE_LIMIT,
+            actual: bytes.len(),
+        });
+    }
+    String::from_utf8(bytes).map_err(|source| StackError::ImportUtf8 { source })
+}
+
+pub(super) fn print_config_import_progress(include_write: bool) {
     println!("progress: reading config import");
     println!("progress: validating config import");
     if include_write {

@@ -87,6 +87,7 @@ roxmltree = "0.21.1"
 # Pinned to 0.12 so it shares the `digest` 0.10 crate with `sha2` above;
 # newer hmac uses `digest` 0.11 which would force a dual-tree pull.
 hmac = "0.12"
+cliclack = "0.5.4"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

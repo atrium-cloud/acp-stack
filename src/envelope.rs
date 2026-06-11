@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn from_stack_error_sanitizes_local_config_paths() {
         let err = StackError::ConfigRead {
-            path: "/home/alice/.config/acp-stack/acp-stack.toml".into(),
+            path: "/home/alice/.config/acp-stack/acps-config.toml".into(),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
         };
         let env = ApiError::from_stack_error(&err);

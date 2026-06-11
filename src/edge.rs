@@ -592,7 +592,7 @@ fn render_checklist(
 4. Keep `acps` bound to loopback and verify `acps security check` has no Cloudflare findings.
 5. Optionally enable the Cloudflare managed transform that adds visitor location headers.
 
-Managed provisioning stores the tunnel token only in the owner-only `tunnel-token.env` artifact, not in `acp-stack.toml`.
+Managed provisioning stores the tunnel token only in the owner-only `tunnel-token.env` artifact, not in `acps-config.toml`.
 "#,
             hostname = cloudflare.hostname,
         );
@@ -607,7 +607,7 @@ Managed provisioning stores the tunnel token only in the owner-only `tunnel-toke
 5. Keep `acps` bound to loopback and verify `acps security check` has no Cloudflare findings.
 6. Optionally enable the Cloudflare managed transform that adds visitor location headers.
 
-This generated profile does not store Cloudflare API tokens or tunnel tokens in `acp-stack.toml`.
+This generated profile does not store Cloudflare API tokens or tunnel tokens in `acps-config.toml`.
 "#,
         hostname = cloudflare.hostname,
     )

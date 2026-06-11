@@ -12,6 +12,10 @@ pub(super) fn should_install_agent(config: &Config, registry: &RegistryCatalog) 
     let entry = registry.lookup_required(&config.agent.id)?;
     entry.ensure_supported()?;
     #[cfg(feature = "test-fixtures")]
+    if crate::dev_gates::fixture_enabled(crate::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV) {
+        return Ok(false);
+    }
+    #[cfg(feature = "test-fixtures")]
     if let Some(placebo_path) =
         crate::runtime::install::agent_registry::development_placebo_registry_path()
     {
