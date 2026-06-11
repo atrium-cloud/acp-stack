@@ -37,6 +37,7 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("init_steps", 12),
     ("security_runs", 14),
     ("security_findings", 14),
+    ("stack_update_runs", 19),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../../migrations/manifest.toml");
@@ -207,6 +208,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         postgres_file: "018_installer_runs_operation_method.postgres.sql",
         sqlite: include_str!("../../migrations/018_installer_runs_operation_method.sqlite.sql"),
         postgres: include_str!("../../migrations/018_installer_runs_operation_method.postgres.sql"),
+    },
+    Migration {
+        id: 19,
+        name: "stack_update_runs",
+        sqlite_file: "019_stack_update_runs.sqlite.sql",
+        postgres_file: "019_stack_update_runs.postgres.sql",
+        sqlite: include_str!("../../migrations/019_stack_update_runs.sqlite.sql"),
+        postgres: include_str!("../../migrations/019_stack_update_runs.postgres.sql"),
     },
 ];
 

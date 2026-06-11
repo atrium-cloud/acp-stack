@@ -1537,6 +1537,48 @@ fn rejects_agent_auto_update_zero_frequency() {
 }
 
 #[test]
+fn stack_update_config_defaults_to_security_critical_daily() {
+    let config = load_config_from_str(VALID_CONFIG).expect("default config should parse");
+    assert_eq!(
+        config.updates.acp_stack.policy,
+        acp_stack::config::StackUpdatePolicy::SecurityCritical
+    );
+    assert_eq!(config.updates.acp_stack.frequency, "1d");
+}
+
+#[test]
+fn parses_stack_update_config() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [updates.acp_stack]\n\
+         policy = \"compatible\"\n\
+         frequency = \"4w\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("stack update config should parse");
+    assert_eq!(
+        config.updates.acp_stack.policy,
+        acp_stack::config::StackUpdatePolicy::Compatible
+    );
+    assert_eq!(config.updates.acp_stack.frequency, "4w");
+}
+
+#[test]
+fn rejects_stack_update_zero_frequency() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [updates.acp_stack]\n\
+         policy = \"security-critical\"\n\
+         frequency = \"0d\"\n"
+    );
+    let err =
+        load_config_from_str(&config_text).expect_err("zero stack update frequency is invalid");
+    assert!(
+        err.to_string().contains("updates.acp_stack.frequency"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn rejects_commands_with_invalid_progress_interval() {
     let config_text = format!(
         "{VALID_CONFIG}\n\

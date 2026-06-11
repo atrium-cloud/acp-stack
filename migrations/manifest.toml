@@ -105,3 +105,9 @@ id = 18
 name = "installer_runs_operation_method"
 sqlite_file = "018_installer_runs_operation_method.sqlite.sql"
 postgres_file = "018_installer_runs_operation_method.postgres.sql"
+
+[[migration]]
+id = 19
+name = "stack_update_runs"
+sqlite_file = "019_stack_update_runs.sqlite.sql"
+postgres_file = "019_stack_update_runs.postgres.sql"

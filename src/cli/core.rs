@@ -22,6 +22,7 @@ use super::security::SecurityCommand;
 use super::serve::{ServeArgs, ServeMode};
 use super::sessions::SessionsCommand;
 use super::subagent::SubagentCommand;
+use super::update::UpdateCommand;
 use super::ws::WsCommand;
 
 #[derive(Debug, Parser)]
@@ -74,6 +75,15 @@ enum Command {
     },
     /// Print daemon health and runtime status.
     Status,
+    /// Check, install, or configure acp-stack self-updates.
+    #[command(after_help = "Examples:
+  acps update check
+  acps update install --latest
+  acps update set --policy security-critical --frequency 1d")]
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
+    },
     /// Remove local acp-stack config, state, and secrets after confirmation.
     Reset(ResetArgs),
     /// Run the HTTP daemon in the foreground. Blocks until SIGTERM or SIGINT.
@@ -225,6 +235,9 @@ fn run_cli(cli: Cli) -> Result<()> {
             }
         }
         Command::Status => super::status::run_status(output.effective()),
+        Command::Update { command } => {
+            super::update::run_update_command(command, output.effective())
+        }
         Command::Reset(args) => {
             output.reject_json("reset")?;
             super::reset::run_reset(args)

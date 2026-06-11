@@ -19,6 +19,8 @@ pub const DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS: u64 = 65_536;
 pub const DEFAULT_PERMISSION_REQUEST_TIMEOUT: &str = "5m";
 pub const DEFAULT_PERMISSION_TIMEOUT_ACTION: &str = "deny";
 pub const DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY: &str = "1d";
+pub const DEFAULT_STACK_UPDATE_FREQUENCY: &str = "1d";
+pub const DEFAULT_STACK_UPDATE_POLICY: StackUpdatePolicy = StackUpdatePolicy::SecurityCritical;
 
 // API / AUTH / SECURITY
 
@@ -95,6 +97,55 @@ pub struct CloudflareEdgeConfig {
 
 fn default_cloudflared_deployment() -> String {
     "host".to_owned()
+}
+
+// SELF-UPDATE
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatesConfig {
+    #[serde(default = "default_stack_update_config")]
+    pub acp_stack: StackUpdateConfig,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            acp_stack: default_stack_update_config(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StackUpdateConfig {
+    #[serde(default = "default_stack_update_policy")]
+    pub policy: StackUpdatePolicy,
+    #[serde(default = "default_stack_update_frequency")]
+    pub frequency: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StackUpdatePolicy {
+    Compatible,
+    SecurityCritical,
+    Manual,
+}
+
+fn default_stack_update_config() -> StackUpdateConfig {
+    StackUpdateConfig {
+        policy: default_stack_update_policy(),
+        frequency: default_stack_update_frequency(),
+    }
+}
+
+fn default_stack_update_policy() -> StackUpdatePolicy {
+    DEFAULT_STACK_UPDATE_POLICY
+}
+
+fn default_stack_update_frequency() -> String {
+    DEFAULT_STACK_UPDATE_FREQUENCY.to_owned()
 }
 
 // WORKSPACE / SOURCES

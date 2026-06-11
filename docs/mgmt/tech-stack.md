@@ -17,6 +17,7 @@ This document records technology choices that affect maintenance or deployment. 
 | cliclack                  | interactive `acps init` prompts and searchable selectors   |
 | rpassword                 | hidden terminal prompts for admin-key entry                |
 | clap_complete             | shell completion script generation for `acps`              |
+| semver                    | release-version comparison for self-update policy          |
 
 ## Protocols And Interfaces
 
