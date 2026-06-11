@@ -1,7 +1,7 @@
 use acp_stack::config::{
     AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, default_config_path,
-    load_config_from_str,
+    load_config_from_str, parse_duration_string,
 };
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-opencode-stack.toml");
@@ -1485,6 +1485,55 @@ fn commands_progress_interval_defaults_and_overrides() {
     );
     let config = load_config_from_str(&config_text).expect("commands override should parse");
     assert_eq!(config.commands.progress_interval, "250ms");
+}
+
+#[test]
+fn duration_parser_accepts_day_and_week_units() {
+    assert_eq!(
+        parse_duration_string("1d"),
+        Some(std::time::Duration::from_secs(86_400))
+    );
+    assert_eq!(
+        parse_duration_string("3d"),
+        Some(std::time::Duration::from_secs(259_200))
+    );
+    assert_eq!(
+        parse_duration_string("4w"),
+        Some(std::time::Duration::from_secs(2_419_200))
+    );
+    assert_eq!(parse_duration_string("0d"), Some(std::time::Duration::ZERO));
+    assert!(parse_duration_string("1mo").is_none());
+    assert!(parse_duration_string(&format!("{}w", u64::MAX)).is_none());
+}
+
+#[test]
+fn parses_agent_auto_update_config() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.auto_update]\n\
+         enabled = true\n\
+         frequency = \"3d\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("auto-update config should parse");
+    let auto_update = config.agent.auto_update.expect("auto-update configured");
+    assert!(auto_update.enabled);
+    assert_eq!(auto_update.frequency, "3d");
+}
+
+#[test]
+fn rejects_agent_auto_update_zero_frequency() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.auto_update]\n\
+         enabled = true\n\
+         frequency = \"0d\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("zero agent.auto_update.frequency must be rejected");
+    assert!(
+        err.to_string().contains("agent.auto_update.frequency"),
+        "got: {err}"
+    );
 }
 
 #[test]

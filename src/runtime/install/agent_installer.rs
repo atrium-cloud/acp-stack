@@ -61,6 +61,12 @@ pub(crate) const STEP_INSTALL: &str = "install";
 pub(crate) const STEP_HARNESS: &str = "harness";
 pub(crate) const STEP_ADAPTER: &str = "adapter";
 
+pub(crate) use crate::state::{
+    INSTALLER_METHOD_APT as INSTALL_METHOD_APT, INSTALLER_METHOD_GITHUB as INSTALL_METHOD_GITHUB,
+    INSTALLER_METHOD_NATIVE as INSTALL_METHOD_NATIVE, INSTALLER_METHOD_NPM as INSTALL_METHOD_NPM,
+    INSTALLER_METHOD_SHELL as INSTALL_METHOD_SHELL,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallerOutcome {
     Installed { path: PathBuf, sha256: String },
@@ -102,6 +108,7 @@ pub struct InstallerRowDraft {
     pub stderr: String,
     pub exit_status: Option<i32>,
     pub step: String,
+    pub method: Option<String>,
     /// Resolved version the installer wrote. Populated for github_release
     /// (release tag) and npm installs. Shell-recipe installs leave this `None`;
     /// `acps agent check` then reports `unknown, manual check required`.
@@ -123,6 +130,7 @@ impl InstallerRowDraft {
             stderr: String::new(),
             exit_status: Some(0),
             step: step.to_owned(),
+            method: None,
             version: None,
             log_dir: None,
         }
@@ -137,6 +145,7 @@ impl InstallerRowDraft {
             stderr: String::new(),
             exit_status: None,
             step: step.to_owned(),
+            method: None,
             version: None,
             log_dir: None,
         }
@@ -190,6 +199,8 @@ pub fn run_installer(
         exit_status: result.row.exit_status,
         step: &result.row.step,
         version: result.row.version.as_deref(),
+        operation: crate::state::INSTALLER_OPERATION_INSTALL,
+        method: result.row.method.as_deref(),
         log_dir: result.row.log_dir.as_deref(),
         apply_run_id: None,
     })?;
@@ -279,6 +290,8 @@ pub fn install_resolved(
             exit_status: row.exit_status,
             step: &row.step,
             version: row.version.as_deref(),
+            operation: crate::state::INSTALLER_OPERATION_INSTALL,
+            method: row.method.as_deref(),
             log_dir: row.log_dir.as_deref(),
             apply_run_id: None,
         })?;
@@ -437,9 +450,9 @@ pub fn install_resolved_capture(
 /// every attempt is preserved for audit, not just the winner);
 /// `terminal_error` is `None` when any path succeeded, otherwise the
 /// LAST path's error.
-pub(super) struct FallbackChain {
-    pub(super) rows: Vec<InstallerRowDraft>,
-    pub(super) terminal_error: Option<StackError>,
+pub(crate) struct FallbackChain {
+    pub(crate) rows: Vec<InstallerRowDraft>,
+    pub(crate) terminal_error: Option<StackError>,
 }
 
 /// Try each install path declared on the given field in priority order
@@ -448,7 +461,7 @@ pub(super) struct FallbackChain {
 /// been exhausted. Each attempt is recorded so the operator can see the
 /// fallback chain after the fact via `acps installer history`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn install_one_with_fallback(
+pub(crate) fn install_one_with_fallback(
     agent_id: &str,
     field: &str,
     step_label: &'static str,
@@ -675,7 +688,7 @@ pub fn resolve_creates_for_init_resume(
 /// containing `/` resolved relative to `workspace_root` so an installer can
 /// declare `creates = "bin/agent"` without depending on operator cwd; bare
 /// names looked up in caller-provided extra directories and then `PATH`.
-pub(super) fn resolve_creates(
+pub(crate) fn resolve_creates(
     name: &str,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
@@ -722,7 +735,7 @@ pub(super) fn sha256_of_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub(super) fn current_timestamp() -> String {
+pub(crate) fn current_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
@@ -810,6 +823,7 @@ mod tests {
             adapter: None,
             provider: None,
             subagent: None,
+            auto_update: None,
             install: None,
         }
     }
@@ -829,6 +843,7 @@ mod tests {
         HarnessSpec {
             id: id.to_owned(),
             install,
+            update: Default::default(),
         }
     }
 
@@ -837,6 +852,7 @@ mod tests {
             id: id.to_owned(),
             github: None,
             install,
+            update: Default::default(),
         }
     }
 
@@ -1374,6 +1390,7 @@ exit 9
             stderr: "hello stderr\n".into(),
             exit_status: Some(0),
             step: "harness".into(),
+            method: Some(INSTALL_METHOD_GITHUB.to_owned()),
             version: Some("v1.0.0".into()),
             log_dir: None,
         };
@@ -1399,6 +1416,7 @@ exit 9
             stderr: String::new(),
             exit_status: Some(0),
             step: "install".into(),
+            method: Some(INSTALL_METHOD_SHELL.to_owned()),
             version: None,
             log_dir: None,
         };
@@ -1420,6 +1438,7 @@ exit 9
             stderr: String::new(),
             exit_status: Some(0),
             step: "harness".into(),
+            method: Some(INSTALL_METHOD_SHELL.to_owned()),
             version: None,
             log_dir: None,
         };

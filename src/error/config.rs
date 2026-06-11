@@ -97,7 +97,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             "permissions.mode must be one of auto, supervised, locked".to_owned()
         }
         InvalidDurationField { field } => {
-            format!("{field} must be a duration like \"10m\", \"5s\", or \"100ms\"")
+            format!("{field} must be a duration like \"10m\", \"5s\", \"1d\", \"4w\", or \"100ms\"")
         }
         InvalidEnvName { name } => {
             format!("env variable name `{name}` is not a valid POSIX identifier")

@@ -10,7 +10,7 @@
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
-| Agents         | `acps agent install`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test` |
+| Agents         | `acps agent install`, `update`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
 | Sessions       | `acps sessions list/status/new/fork/prompt/cancel/close`                    |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
@@ -124,6 +124,18 @@ acps agent set --mode <mode>
 Mapped model and mode values are validated against the configured agent's ACP-advertised options. Custom-provider model ids are accepted as supplied. For provider-backed agents, `acps agent set --model <model>` uses the existing `[agent.provider]` when present. When a change requires the supervised process to reload agent-owned config, the CLI prints a restart hint.
 
 `acps subagent *` is OpenCode-only and manages the OpenCode small-model lane. `acps subagent match` makes `small_model` follow the main agent model.
+
+`acps agent update [--force] [--restart]` updates stale managed agent steps. By default it skips when the daemon reports an active agent process. `--restart` stops the running agent, updates, then starts it again. `--restart` runs the update offline while the daemon is live, so avoid invoking it during a scheduled daemon auto-update window: both write the same install destination and have no cross-process lock.
+
+`acps agent update set` edits the automatic update policy:
+
+```sh
+acps agent update set --auto-on
+acps agent update set --auto-off
+acps agent update set --frequency 3d
+```
+
+`--frequency` accepts duration suffixes such as `12h`, `1d`, `3d`, and `4w`.
 
 `acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information. `acps agent check` reports whether managed install steps are present and current.
 

@@ -4,6 +4,7 @@ mod set;
 mod status;
 mod switch;
 mod test;
+mod update;
 
 use clap::{Args, Subcommand};
 
@@ -37,6 +38,8 @@ pub enum AgentCommand {
     Status,
     /// Report whether the installed managed harness/adapter is stale against upstream.
     Check,
+    /// Update the configured agent or manage automatic update settings.
+    Update(AgentUpdateArgs),
     /// Start the configured agent and send a real ACP prompt.
     Test(AgentTestArgs),
     /// Set the provider id, model, and API-key ref used by generated agent config.
@@ -63,6 +66,37 @@ pub struct AgentInstallArgs {
     /// Accepted for script consistency; install is already non-interactive.
     #[arg(long)]
     pub(super) yes: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentUpdateArgs {
+    /// Run update steps even when recorded versions already match upstream.
+    #[arg(long)]
+    pub(super) force: bool,
+    /// If the daemon has a running agent, stop it before update and start it afterwards.
+    #[arg(long)]
+    pub(super) restart: bool,
+    #[command(subcommand)]
+    pub(super) command: Option<AgentUpdateSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentUpdateSubcommand {
+    /// Configure automatic update settings without running an update.
+    Set(AgentUpdateSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentUpdateSetArgs {
+    /// Enable periodic agent auto-update.
+    #[arg(long = "auto-on", conflicts_with = "auto_off")]
+    pub(super) auto_on: bool,
+    /// Disable periodic agent auto-update.
+    #[arg(long = "auto-off")]
+    pub(super) auto_off: bool,
+    /// Set the auto-update frequency, such as 1d, 3d, or 4w.
+    #[arg(long)]
+    pub(super) frequency: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -134,6 +168,7 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
         }
         AgentCommand::Status => self::status::run_agent_status(output.effective()),
         AgentCommand::Check => self::check::run_agent_check(output.effective()),
+        AgentCommand::Update(args) => self::update::run_agent_update(args, output.effective()),
         AgentCommand::Test(args) => {
             output.reject_json("agent test")?;
             self::test::run_agent_test(args)
@@ -228,6 +263,8 @@ mod tests {
             exit_status: Some(0),
             step: step.to_owned(),
             version: version.map(str::to_owned),
+            operation: crate::state::INSTALLER_OPERATION_INSTALL.to_owned(),
+            method: None,
             log_dir: None,
             apply_run_id: None,
         }

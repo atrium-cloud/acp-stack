@@ -18,6 +18,7 @@ pub const DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS: u64 = 65_536;
 
 pub const DEFAULT_PERMISSION_REQUEST_TIMEOUT: &str = "5m";
 pub const DEFAULT_PERMISSION_TIMEOUT_ACTION: &str = "deny";
+pub const DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY: &str = "1d";
 
 // API / AUTH / SECURITY
 
@@ -257,8 +258,18 @@ pub struct AgentConfig {
     pub provider: Option<AgentProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<AgentSubagentConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<AgentAutoUpdateConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<AgentInstallConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAutoUpdateConfig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    pub frequency: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

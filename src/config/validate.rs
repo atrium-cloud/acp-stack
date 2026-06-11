@@ -24,8 +24,8 @@ use crate::config::schema::{McpServerConfig, SupabaseLoggingBackend, SupabaseLog
 use crate::error::{Result, StackError};
 
 use self::agent::{
-    validate_agent_install, validate_agent_provider, validate_agent_restart,
-    validate_agent_subagent,
+    validate_agent_auto_update, validate_agent_install, validate_agent_provider,
+    validate_agent_restart, validate_agent_subagent,
 };
 use self::commands::validate_commands;
 use self::deps::validate_dependencies;
@@ -134,6 +134,9 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     }
     if let Some(subagent) = &config.agent.subagent {
         validate_agent_subagent(subagent)?;
+    }
+    if let Some(auto_update) = &config.agent.auto_update {
+        validate_agent_auto_update(auto_update)?;
     }
     if let Some(mode) = config.agent.mode.as_deref()
         && (mode.trim().is_empty() || mode.len() != mode.trim().len())
