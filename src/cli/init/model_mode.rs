@@ -1,4 +1,3 @@
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -12,11 +11,11 @@ use crate::runtime::agent::model_discovery::{
 use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
-use super::InitArgs;
 use super::headless_snapshot::{
     capture_dir_listings_for, capture_path_snapshots, headless_config_candidate_paths,
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
+use super::{InitArgs, prompt, prompts_enabled};
 
 /// Outcome of a single category (model or mode) selection step.
 /// `Skipped` covers both "agent doesn't support this category" and
@@ -35,6 +34,49 @@ pub(super) enum ModelModeAction {
 pub(super) struct ModelModeOutcome {
     pub(super) model_action: ModelModeAction,
     pub(super) mode_action: ModelModeAction,
+}
+
+pub(super) fn preflight_model_and_mode_for_init(
+    args: &InitArgs,
+    registry: &RegistryCatalog,
+    config: &Config,
+    config_path: &Path,
+) -> Result<()> {
+    let Some(entry) = registry.lookup(&config.agent.id) else {
+        return Ok(());
+    };
+    if args.model.is_some() && !entry.set_model {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} does not support model configuration through `acps init`",
+                entry.name,
+            ),
+        });
+    }
+    if args.model.is_some()
+        && entry.set_provider
+        && args.provider.is_none()
+        && config.agent.provider.is_none()
+    {
+        return Err(StackError::InvalidParam {
+            field: "model",
+            reason: format!(
+                "{} stores the model inside [agent.provider]; pass --provider <id> together with --model, or run `acps agent set` after init",
+                entry.name,
+            ),
+        });
+    }
+    if args.mode.is_some() && !entry.set_mode {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} does not support mode configuration through `acps init`",
+                entry.name,
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Drives the L84-L87 ACP-discovery flow during `acps init`.
@@ -117,7 +159,7 @@ pub(super) fn configure_model_and_mode_for_init(
     // honor an explicit `--mode` or interactive picker.
     let skip_model_lane = args.custom_provider;
 
-    let interactive = io::stdin().is_terminal();
+    let interactive = prompts_enabled(args);
     let provider_set_this_run = args.provider.is_some();
     // For provider-backed agents, the model belongs inside
     // `[agent.provider]`. If no provider is configured (neither set
@@ -272,8 +314,14 @@ pub(super) fn configure_model_and_mode_for_init(
         // never asked for or error out on a category they explicitly
         // omitted.
         if model_lane_active {
-            outcome.model_action =
-                configure_model_for_init(args, config, config_path, &response, &entry.name)?;
+            outcome.model_action = configure_model_for_init(
+                args,
+                config,
+                config_path,
+                &response,
+                &entry.name,
+                entry.set_provider,
+            )?;
         }
         if mode_lane_active {
             outcome.mode_action =
@@ -298,12 +346,16 @@ fn configure_model_for_init(
     config_path: &Path,
     response: &agent_client_protocol::schema::NewSessionResponse,
     agent_name: &str,
+    provider_backed: bool,
 ) -> Result<ModelModeAction> {
     if let Some(explicit) = args.model.as_deref() {
-        let agent_provider_id =
-            config.agent.provider.as_ref().and_then(|provider| {
-                agent_provider_id_for_provider_id(&config.agent.id, &provider.id)
-            });
+        let agent_provider_id = provider_backed
+            .then(|| {
+                config.agent.provider.as_ref().and_then(|provider| {
+                    agent_provider_id_for_provider_id(&config.agent.id, &provider.id)
+                })
+            })
+            .flatten();
         let model = resolve_advertised_model_value(response, agent_provider_id, explicit).map_err(
             |err| {
                 let advertised =
@@ -315,12 +367,13 @@ fn configure_model_for_init(
                 }
             },
         )?;
-        write_model_into_config(config, model);
+        write_model_into_config(config, model, provider_backed);
         return Ok(ModelModeAction::Set);
     }
 
     let values = advertised_values_for_category(response, AgentSessionConfigCategory::Model)?;
-    if !io::stdin().is_terminal() {
+    let interactive = prompts_enabled(args);
+    if !interactive {
         // L87: non-interactive run, no explicit choice. Print the
         // advertised values so the operator can rerun with one, and
         // do NOT mutate config — provider stays set, model stays at
@@ -335,12 +388,12 @@ fn configure_model_for_init(
     }
 
     let Some(selected) =
-        prompt_session_config_selection(&values, AgentSessionConfigCategory::Model)?
+        prompt_session_config_selection(interactive, &values, AgentSessionConfigCategory::Model)?
     else {
         return Ok(ModelModeAction::Skipped);
     };
     validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
-    write_model_into_config(config, selected);
+    write_model_into_config(config, selected, provider_backed);
     Ok(ModelModeAction::Set)
 }
 
@@ -375,7 +428,8 @@ fn configure_mode_for_init(
         // than erroring so init still completes.
         return Ok(ModelModeAction::Skipped);
     }
-    if !io::stdin().is_terminal() {
+    let interactive = prompts_enabled(args);
+    if !interactive {
         println!("advertised modes for {agent_name}:");
         for value in &values {
             println!("  {value}");
@@ -384,7 +438,7 @@ fn configure_mode_for_init(
         return Ok(ModelModeAction::PrintedList);
     }
     let Some(selected) =
-        prompt_session_config_selection(&values, AgentSessionConfigCategory::Mode)?
+        prompt_session_config_selection(interactive, &values, AgentSessionConfigCategory::Mode)?
     else {
         return Ok(ModelModeAction::Skipped);
     };
@@ -403,73 +457,45 @@ fn configure_mode_for_init(
 /// `agent.model` that a prior model-only flow may have left behind —
 /// runtime selection in supervisor.rs prefers the root slot, so a leftover
 /// value there would silently override the newly chosen provider model.
-fn write_model_into_config(config: &mut Config, model: String) {
-    if let Some(provider) = config.agent.provider.as_mut() {
+fn write_model_into_config(config: &mut Config, model: String, provider_backed: bool) {
+    if provider_backed && let Some(provider) = config.agent.provider.as_mut() {
         provider.model = Some(model);
         config.agent.model = None;
     } else {
         config.agent.model = Some(model);
+        if let Some(provider) = config.agent.provider.as_mut() {
+            provider.model = None;
+        }
     }
 }
 
 fn prompt_session_config_selection(
+    interactive: bool,
     values: &[String],
     category: AgentSessionConfigCategory,
 ) -> Result<Option<String>> {
-    if values.is_empty() {
+    if values.is_empty() || !interactive {
         return Ok(None);
     }
-    println!("available {} values:", category.id());
-    for (index, value) in values.iter().enumerate() {
-        println!("  {}. {value}", index + 1);
+    #[derive(Clone, PartialEq, Eq)]
+    enum ConfigChoice {
+        Value(String),
+        Skip,
     }
-    print!(
-        "select {} [number or value, blank to skip]: ",
-        category.id()
-    );
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(None);
+    let mut items: Vec<(ConfigChoice, String, String)> = values
+        .iter()
+        .map(|value| {
+            (
+                ConfigChoice::Value(value.clone()),
+                value.clone(),
+                String::new(),
+            )
+        })
+        .collect();
+    items.push((ConfigChoice::Skip, "Skip".to_owned(), String::new()));
+    match prompt::searchable_select(interactive, &format!("select {}", category.id()), &items)? {
+        None => Ok(None),
+        Some(ConfigChoice::Value(value)) => Ok(Some(value)),
+        Some(ConfigChoice::Skip) => Ok(None),
     }
-    if let Ok(index) = answer.parse::<usize>() {
-        // Reject `0` explicitly: `saturating_sub(1)` would map it to the
-        // first entry, but the menu is 1-indexed and accepting 0 would let
-        // the operator confidently pick "0" expecting an out-of-range
-        // error and instead silently get the first item.
-        if index == 0 {
-            return Err(StackError::InvalidParam {
-                field: "selection",
-                reason: format!(
-                    "{} selection `{answer}` is out of range (expected 1..={})",
-                    category.id(),
-                    values.len()
-                ),
-            });
-        }
-        let Some(value) = values.get(index - 1) else {
-            return Err(StackError::InvalidParam {
-                field: "selection",
-                reason: format!(
-                    "{} selection `{answer}` is out of range (expected 1..={})",
-                    category.id(),
-                    values.len()
-                ),
-            });
-        };
-        return Ok(Some(value.clone()));
-    }
-    Ok(Some(answer.to_owned()))
 }

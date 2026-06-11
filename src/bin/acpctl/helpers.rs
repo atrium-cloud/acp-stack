@@ -6,7 +6,7 @@ use crate::cli_defs::LogsQueryArgs;
 use acp_stack::time_util::parse_duration_suffix;
 
 /// Resolve the socket path the daemon is listening on. Precedence:
-/// 1. `[acpctl] socket_path` in `~/.config/acp-stack/acp-stack.toml`, if the
+/// 1. `[acpctl] socket_path` in `~/.config/acp-stack/acps-config.toml`, if the
 ///    file is readable and well-formed — this keeps a CLI invocation in sync
 ///    with a TOML override an operator already configured.
 /// 2. The documented default `~/.local/share/acp-stack/acpctl.sock`.

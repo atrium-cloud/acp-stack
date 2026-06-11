@@ -30,16 +30,17 @@ use super::ws::WsCommand;
     version,
     about = env!("CARGO_PKG_DESCRIPTION"),
     color = clap::ColorChoice::Never,
-    after_help = "Examples:
+after_help = "Examples:
   acps init --agent opencode --provider openrouter --api-key-ref OPENROUTER_API_KEY
+  acps init --from-base64 <base64-acps-config-toml>
   acps status --format json
   acps sessions list --range week --format json
   acps logging supabase status --format json
   acps logs query --since 1h --kind prompt. --format json
   acps deps check --format json
   acps security history --format json
-  acps config export --output acp-stack.toml
-  acps config import acp-stack.toml --dry-run
+  acps config export --output acps-config.toml
+  acps config import acps-config.toml --dry-run
   acps completion zsh > _acps",
 )]
 pub struct Cli {
@@ -90,9 +91,9 @@ enum Command {
     /// Validate, export, or import runtime config.
     #[command(after_help = "Examples:
   acps config validate
-  acps config export --output acp-stack.toml
+  acps config export --output acps-config.toml
   acps config export --format json
-  acps config import acp-stack.toml --dry-run")]
+  acps config import acps-config.toml --dry-run")]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,

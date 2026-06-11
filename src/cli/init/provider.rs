@@ -1,5 +1,4 @@
-use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config::{
     self, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
@@ -14,7 +13,90 @@ use crate::runtime::agent::provider_keys::{
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 
-use super::InitArgs;
+use super::{InitArgs, prompt, prompts_enabled};
+
+pub(super) fn preflight_provider_for_init(
+    args: &InitArgs,
+    registry: &RegistryCatalog,
+    config: &Config,
+    config_path: &Path,
+) -> Result<()> {
+    let Some(provider_id) = args.provider.as_deref() else {
+        return Ok(());
+    };
+    let entry = registry.lookup_required(&config.agent.id)?;
+    if !entry.set_provider {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} does not support provider configuration during init",
+                config.agent.name
+            ),
+        });
+    }
+    if args.custom_provider {
+        if !entry.allow_custom_provider {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "{} does not support custom provider setup",
+                    config.agent.name
+                ),
+            });
+        }
+        if !entry.allow_custom_model {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("{} does not support custom model setup", config.agent.name),
+            });
+        }
+        if !prompts_enabled(args) {
+            required_init_custom_value(false, "provider-name", args.provider_name.clone())?;
+            required_init_custom_value(false, "base-url", args.base_url.clone())?;
+            required_init_custom_value(false, "api-key-ref", args.api_key_ref.clone())?;
+            required_init_custom_value(false, "model", args.model.clone())?;
+        }
+        let api = parse_init_custom_provider_api(
+            args.provider_api.as_deref(),
+            default_init_custom_provider_api(&config.agent.id),
+        )?;
+        if config.agent.id == "codex" && api != CustomProviderApi::Responses {
+            return Err(StackError::InvalidParam {
+                field: "provider-api",
+                reason: "Codex custom providers only support responses".to_owned(),
+            });
+        }
+        parse_init_custom_token_limit(
+            "context",
+            args.context.as_deref(),
+            DEFAULT_CUSTOM_MODEL_CONTEXT,
+        )?;
+        parse_init_custom_token_limit(
+            "output-max-tokens",
+            args.output_max_tokens.as_deref(),
+            DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+        )?;
+        return Ok(());
+    }
+    if config.agent.id == "codex" && provider_id == "openai" && args.api_key_ref.is_some() {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
+        });
+    }
+    if provider_id_is_known(provider_id)
+        && !provider_id_supports_agent(provider_id, &config.agent.id)
+    {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "provider `{provider_id}` is not supported for agent `{}`",
+                config.agent.id
+            ),
+        });
+    }
+    Ok(())
+}
 
 pub(super) fn configure_provider_for_init(
     args: &InitArgs,
@@ -23,12 +105,190 @@ pub(super) fn configure_provider_for_init(
     config_path: &Path,
     secret_store: &mut SecretStore,
 ) -> Result<bool> {
-    let Some(provider_id) = select_provider_for_init(args, registry, config, secret_store)? else {
+    let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(false);
     };
+    if !entry.set_provider {
+        if args.provider.is_some() {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "{} does not support provider configuration during init",
+                    config.agent.name
+                ),
+            });
+        }
+        return Ok(config.agent.provider.take().is_some());
+    }
+
+    let Some(provider_id) = select_provider_for_init(args, registry, config, secret_store)? else {
+        validate_configured_provider_for_init(registry, config, config_path)?;
+        return ensure_configured_provider_refs_for_init(
+            args,
+            registry,
+            config,
+            config_path,
+            secret_store,
+        );
+    };
     let required_refs = apply_provider_to_config(args, registry, config, config_path, provider_id)?;
-    collect_missing_provider_refs(secret_store, &required_refs)?;
+    collect_missing_provider_refs(prompts_enabled(args), secret_store, &required_refs)?;
     Ok(true)
+}
+
+pub(super) fn configured_provider_refs_satisfied(
+    registry: &RegistryCatalog,
+    config: &Config,
+    secret_store: &SecretStore,
+) -> bool {
+    let Some(entry) = registry.lookup(&config.agent.id) else {
+        return true;
+    };
+    if !entry.set_provider {
+        return config.agent.provider.is_none();
+    }
+    let Some(provider) = config.agent.provider.as_ref() else {
+        return false;
+    };
+    if !configured_provider_shape_is_supported(&config.agent.id, entry, provider) {
+        return false;
+    };
+    let Some(api_key_ref) = provider.api_key_ref.as_deref() else {
+        return provider_uses_agent_native_auth(&config.agent.id, &provider.id);
+    };
+    let required_refs = required_env_refs_for_provider_id(&provider.id, api_key_ref);
+    required_refs.iter().all(|env_ref| {
+        config.agent.env.iter().any(|name| name == env_ref) && secret_store.contains(env_ref)
+    })
+}
+
+fn ensure_configured_provider_refs_for_init(
+    args: &InitArgs,
+    registry: &RegistryCatalog,
+    config: &mut Config,
+    config_path: &Path,
+    secret_store: &mut SecretStore,
+) -> Result<bool> {
+    let Some(provider) = config.agent.provider.as_mut() else {
+        return Ok(false);
+    };
+    let mut api_key_ref_changed = false;
+    if provider.api_key_ref.is_none()
+        && !provider_uses_agent_native_auth(&config.agent.id, &provider.id)
+    {
+        let entry = registry.lookup_required(&config.agent.id)?;
+        let Some(default_api_key_ref) =
+            env_var_for_agent_provider_id(&config.agent.id, &provider.id)
+        else {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "{} provider `{}` is missing agent.provider.api_key_ref",
+                    entry.name, provider.id
+                ),
+            });
+        };
+        provider.api_key_ref = Some(default_api_key_ref.to_owned());
+        api_key_ref_changed = true;
+    }
+    let Some(api_key_ref) = provider.api_key_ref.clone() else {
+        return Ok(false);
+    };
+    let required_refs = required_env_refs_for_provider_id(&provider.id, &api_key_ref);
+    let mut env_changed = false;
+    for env_ref in &required_refs {
+        if !config.agent.env.iter().any(|name| name == env_ref) {
+            config.agent.env.push(env_ref.clone());
+            env_changed = true;
+        }
+    }
+    collect_missing_provider_refs(prompts_enabled(args), secret_store, &required_refs)?;
+    Ok(env_changed || api_key_ref_changed)
+}
+
+fn validate_configured_provider_for_init(
+    registry: &RegistryCatalog,
+    config: &Config,
+    config_path: &Path,
+) -> Result<()> {
+    let Some(provider) = config.agent.provider.as_ref() else {
+        return Ok(());
+    };
+    let entry = registry.lookup_required(&config.agent.id)?;
+    if provider.custom.is_some() {
+        if !entry.allow_custom_provider {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!(
+                    "{} does not support custom provider setup",
+                    config.agent.name
+                ),
+            });
+        }
+        if !entry.allow_custom_model {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("{} does not support custom model setup", config.agent.name),
+            });
+        }
+        if config.agent.id == "codex"
+            && provider
+                .custom
+                .as_ref()
+                .is_some_and(|custom| custom.api != CustomProviderApi::Responses)
+        {
+            return Err(StackError::InvalidParam {
+                field: "agent.provider.custom.api",
+                reason: "Codex custom providers only support responses".to_owned(),
+            });
+        }
+        return Ok(());
+    }
+    if !provider_id_is_known(&provider.id) {
+        return Err(StackError::InvalidParam {
+            field: "agent.provider.id",
+            reason: format!(
+                "provider `{}` is not listed in provider/env mapping and has no [agent.provider.custom] block",
+                provider.id
+            ),
+        });
+    }
+    if !provider_id_supports_agent(&provider.id, &config.agent.id) {
+        return Err(StackError::InvalidParam {
+            field: "agent.provider.id",
+            reason: format!(
+                "provider `{}` is not supported for agent `{}`",
+                provider.id, config.agent.id
+            ),
+        });
+    }
+    if config.agent.id == "codex" && provider.id == "openai" && provider.api_key_ref.is_some() {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: "Codex OpenAI uses Codex-native auth; remove agent.provider.api_key_ref"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn configured_provider_shape_is_supported(
+    agent_id: &str,
+    entry: &crate::runtime::install::agent_registry::RegistryEntry,
+    provider: &AgentProviderConfig,
+) -> bool {
+    if provider.custom.is_some() {
+        return entry.allow_custom_provider
+            && entry.allow_custom_model
+            && (agent_id != "codex"
+                || provider
+                    .custom
+                    .as_ref()
+                    .is_some_and(|custom| custom.api == CustomProviderApi::Responses));
+    }
+    provider_id_is_known(&provider.id)
+        && provider_id_supports_agent(&provider.id, agent_id)
+        && !(agent_id == "codex" && provider.id == "openai" && provider.api_key_ref.is_some())
 }
 
 fn select_provider_for_init(
@@ -40,14 +300,24 @@ fn select_provider_for_init(
     if let Some(provider_id) = &args.provider {
         return Ok(Some(provider_id.clone()));
     }
-    if !io::stdin().is_terminal() {
-        return Ok(None);
-    }
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(None);
     };
     if !entry.set_provider {
         return Ok(None);
+    }
+    if config.agent.provider.is_some() {
+        return Ok(None);
+    }
+    let interactive = prompts_enabled(args);
+    if !interactive {
+        return Err(StackError::InvalidParam {
+            field: "--provider",
+            reason: format!(
+                "{} supports provider configuration; pass --provider <id> or import config with [agent.provider]",
+                entry.name,
+            ),
+        });
     }
 
     // Offline-curated picker. The compatibility list is the same source
@@ -58,90 +328,50 @@ fn select_provider_for_init(
     // pre-dates without round-tripping through `acps agent set`.
     let providers = providers_for_agent(&config.agent.id);
     if providers.is_empty() {
-        println!(
-            "no providers in data/providers.toml advertise compatibility with agent `{}`; \
-             pass --provider <id> to skip the picker",
-            config.agent.id
-        );
-        return Ok(None);
+        let provider_id = prompt::text(interactive, "provider id", true)?
+            .map(|id| id.trim().to_owned())
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "--provider",
+                reason: format!("{} requires a provider id", entry.name),
+            })?;
+        return Ok(Some(provider_id));
     }
-    let mut selectable = Vec::with_capacity(providers.len());
     let (available, needs_input): (Vec<_>, Vec<_>) = providers.iter().partition(|summary| {
         provider_has_available_secret_refs(&config.agent.id, summary, secret_store)
     });
-    println!("providers for {}:", config.agent.id);
-    if !available.is_empty() {
-        println!("available secret refs:");
-        for summary in available {
-            selectable.push(summary);
-            println!(
-                "{}",
-                provider_list_line(
-                    selectable.len() - 1,
-                    &config.agent.id,
-                    summary,
-                    secret_store
-                )
-            );
+    // Ready providers first, then ones needing secret/custom setup; the hint
+    // column carries the readiness label so the grouping survives without
+    // separate headers. A trailing item accepts a free-form id for a provider
+    // the embedded mapping pre-dates.
+    #[derive(Clone, PartialEq, Eq)]
+    enum ProviderChoice {
+        Id(String),
+        Custom,
+    }
+    let mut items: Vec<(ProviderChoice, String, String)> = Vec::new();
+    for summary in available.iter().chain(needs_input.iter()) {
+        items.push((
+            ProviderChoice::Id(summary.id.to_owned()),
+            format!("{} ({})", summary.name, summary.id),
+            provider_readiness_label(&config.agent.id, summary, secret_store),
+        ));
+    }
+    items.push((
+        ProviderChoice::Custom,
+        "enter a provider id manually".to_owned(),
+        String::new(),
+    ));
+    match prompt::searchable_select(
+        interactive,
+        &format!("provider for {}", config.agent.id),
+        &items,
+    )? {
+        None => Ok(None),
+        Some(ProviderChoice::Id(id)) => Ok(Some(id)),
+        Some(ProviderChoice::Custom) => {
+            Ok(prompt::text(interactive, "provider id", true)?.map(|id| id.trim().to_owned()))
         }
     }
-    if !needs_input.is_empty() {
-        println!("missing or custom secret refs:");
-        for summary in needs_input {
-            selectable.push(summary);
-            println!(
-                "{}",
-                provider_list_line(
-                    selectable.len() - 1,
-                    &config.agent.id,
-                    summary,
-                    secret_store
-                )
-            );
-        }
-    }
-    print!("select provider [number or id, blank to skip]: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim();
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    if let Ok(index) = answer.parse::<usize>() {
-        // 1-indexed picker; explicitly reject `0` so `saturating_sub`
-        // can't silently fold it to the first entry.
-        if index == 0 {
-            return Err(StackError::InvalidParam {
-                field: "provider",
-                reason: format!(
-                    "provider selection `{answer}` is out of range (expected 1..={})",
-                    selectable.len()
-                ),
-            });
-        }
-        let Some(summary) = selectable.get(index - 1) else {
-            return Err(StackError::InvalidParam {
-                field: "provider",
-                reason: format!(
-                    "provider selection `{answer}` is out of range (expected 1..={})",
-                    selectable.len()
-                ),
-            });
-        };
-        return Ok(Some(summary.id.to_owned()));
-    }
-    Ok(Some(answer.to_owned()))
 }
 
 fn provider_has_available_secret_refs(
@@ -155,21 +385,6 @@ fn provider_has_available_secret_refs(
     required_env_refs_for_provider_id(summary.id, api_key_ref)
         .iter()
         .all(|env_ref| secret_store.contains(env_ref))
-}
-
-fn provider_list_line(
-    index: usize,
-    agent_id: &str,
-    summary: &AgentProviderSummary,
-    secret_store: &SecretStore,
-) -> String {
-    format!(
-        "  {}. {} ({}) [{}]",
-        index + 1,
-        summary.name,
-        summary.id,
-        provider_readiness_label(agent_id, summary, secret_store)
-    )
 }
 
 fn provider_readiness_label(
@@ -297,7 +512,9 @@ fn apply_provider_to_config(
                 reason: format!("{} does not support custom model setup", config.agent.name),
             });
         }
-        if !args.custom_provider && !confirm_custom_provider_setup(&provider_id)? {
+        if !args.custom_provider
+            && !confirm_custom_provider_setup(prompts_enabled(args), &provider_id)?
+        {
             return Err(StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
                 reason: format!(
@@ -346,10 +563,13 @@ fn apply_custom_provider_to_config(
     config_path: &Path,
     provider_id: String,
 ) -> Result<Vec<String>> {
-    let provider_name = required_init_custom_value("provider-name", args.provider_name.clone())?;
-    let base_url = required_init_custom_value("base-url", args.base_url.clone())?;
-    let api_key_ref = required_init_custom_value("api-key-ref", args.api_key_ref.clone())?;
-    let model = required_init_custom_value("model", args.model.clone())?;
+    let interactive = prompts_enabled(args);
+    let provider_name =
+        required_init_custom_value(interactive, "provider-name", args.provider_name.clone())?;
+    let base_url = required_init_custom_value(interactive, "base-url", args.base_url.clone())?;
+    let api_key_ref =
+        required_init_custom_value(interactive, "api-key-ref", args.api_key_ref.clone())?;
+    let model = required_init_custom_value(interactive, "model", args.model.clone())?;
     let model_name = args.model_name.clone().unwrap_or_else(|| model.clone());
     let api = parse_init_custom_provider_api(
         args.provider_api.as_deref(),
@@ -405,64 +625,42 @@ fn apply_custom_provider_to_config(
     Ok(vec![api_key_ref])
 }
 
-fn confirm_custom_provider_setup(provider_id: &str) -> Result<bool> {
-    if !io::stdin().is_terminal() {
-        return Ok(false);
-    }
-    print!(
-        "provider `{provider_id}` has no default API-key env mapping; configure it as a custom provider? [y/N]: "
-    );
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
+fn confirm_custom_provider_setup(interactive: bool, provider_id: &str) -> Result<bool> {
+    prompt::confirm(
+        interactive,
+        &format!(
+            "provider `{provider_id}` has no default API-key env mapping; configure it as a custom provider?"
+        ),
+        false,
+    )
 }
 
-fn required_init_custom_value(field: &'static str, value: Option<String>) -> Result<String> {
+fn required_init_custom_value(
+    interactive: bool,
+    field: &'static str,
+    value: Option<String>,
+) -> Result<String> {
     if let Some(value) = value
         && !value.trim().is_empty()
         && value.trim().len() == value.len()
     {
         return Ok(value);
     }
-    if !io::stdin().is_terminal() {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: format!("--{field} is required for custom provider init"),
-        });
+    let missing = || StackError::InvalidParam {
+        field,
+        reason: format!("--{field} is required for custom provider init"),
+    };
+    match prompt::text(interactive, field, true)? {
+        Some(answer) => {
+            let answer = answer.trim().to_owned();
+            if answer.is_empty() {
+                Err(missing())
+            } else {
+                Ok(answer)
+            }
+        }
+        None => Err(missing()),
     }
-    print!("{field}: ");
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ConfigWrite {
-            path: PathBuf::from("stdout"),
-            source,
-        })?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|source| StackError::ConfigRead {
-            path: PathBuf::from("stdin"),
-            source,
-        })?;
-    let answer = answer.trim().to_owned();
-    if answer.is_empty() {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: format!("--{field} is required for custom provider init"),
-        });
-    }
-    Ok(answer)
 }
 
 fn default_init_custom_provider_api(agent_id: &str) -> CustomProviderApi {
@@ -516,27 +714,23 @@ fn parse_init_custom_token_limit(
 }
 
 fn collect_missing_provider_refs(
+    interactive: bool,
     secret_store: &mut SecretStore,
     required_refs: &[String],
 ) -> Result<()> {
-    if io::stdin().is_terminal() {
+    if interactive {
         let mut collected = Vec::new();
         for env_ref in required_refs {
             if secret_store.contains(env_ref) {
                 continue;
             }
-            print!("{env_ref}: ");
-            io::stdout()
-                .flush()
-                .map_err(|source| StackError::ConfigWrite {
-                    path: PathBuf::from("stdout"),
-                    source,
-                })?;
-            let mut value = String::new();
-            io::stdin()
-                .read_line(&mut value)
-                .map_err(|source| StackError::StdinRead { source })?;
-            let value = value.trim_end_matches(['\n', '\r']).to_owned();
+            // Masked entry via the wizard: a provider API key is a secret value;
+            // echoing it to the terminal (and scrollback) would defeat the
+            // encrypted store.
+            let Some(value) = prompt::password(interactive, env_ref)? else {
+                continue;
+            };
+            let value = zeroize::Zeroizing::new(value);
             if !value.is_empty() {
                 collected.push((env_ref.as_str(), value));
             }
@@ -645,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_list_line_prints_readiness_label() {
+    fn provider_readiness_label_reports_ready_with_secret() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
         secret_store
@@ -654,8 +848,8 @@ mod tests {
         let summary = summary_for("opencode", "openai");
 
         assert_eq!(
-            provider_list_line(0, "opencode", &summary, &secret_store),
-            "  1. OpenAI (openai) [ready]"
+            provider_readiness_label("opencode", &summary, &secret_store),
+            "ready"
         );
     }
 }

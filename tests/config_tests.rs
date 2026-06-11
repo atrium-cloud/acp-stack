@@ -1,9 +1,17 @@
 use acp_stack::config::{
     AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
-    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, load_config_from_str,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, default_config_path,
+    load_config_from_str,
 };
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-opencode-stack.toml");
+
+#[test]
+fn default_config_path_uses_acps_config_toml() {
+    let path = default_config_path().expect("default config path");
+
+    assert!(path.ends_with(".config/acp-stack/acps-config.toml"));
+}
 
 #[test]
 fn parses_valid_config_and_exports_canonical_toml() {
@@ -1146,6 +1154,20 @@ fn accepts_dependencies_section() {
     assert_eq!(config.dependencies.commands.len(), 1);
     assert_eq!(config.dependencies.commands[0].name, "git");
     assert!(config.dependencies.commands[0].required);
+}
+
+#[test]
+fn rejects_removed_startup_section() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[[startup.scripts]]\nname = \"bootstrap\"\nscript = \"echo ready\"\nshell = \"/bin/sh\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&updated).expect_err("startup scripts must be rejected");
+
+    assert!(
+        error.to_string().contains("`[startup]` was removed"),
+        "got: {error}",
+    );
 }
 
 #[test]

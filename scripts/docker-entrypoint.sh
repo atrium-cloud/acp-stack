@@ -2,7 +2,7 @@
 set -eu
 
 home="${HOME:-/home/acp}"
-config_path="${home}/.config/acp-stack/acp-stack.toml"
+config_path="${home}/.config/acp-stack/acps-config.toml"
 workspace_root="${ACP_STACK_INIT_WORKSPACE_ROOT:-/workspace}"
 workspace_uploads="${ACP_STACK_INIT_WORKSPACE_UPLOADS:-${workspace_root}/uploads}"
 railway_platform=0

@@ -146,6 +146,15 @@ fn has_legacy_workspace_source_table(input: &str) -> bool {
     })
 }
 
+fn has_removed_startup_table(input: &str) -> bool {
+    input.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("[startup]")
+            || trimmed.starts_with("[startup.")
+            || trimmed.starts_with("[[startup.")
+    })
+}
+
 pub fn default_config_path() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -153,7 +162,7 @@ pub fn default_config_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home)
         .join(".config")
         .join("acp-stack")
-        .join("acp-stack.toml"))
+        .join("acps-config.toml"))
 }
 
 pub fn load_config_from_str(input: &str) -> Result<Config> {
@@ -169,6 +178,13 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
             reason: "`[workspace.source]` was removed in Phase 4; declare \
                  `[[workspace.code_sources]]` for git repositories or \
                  `[[workspace.data_sources]]` for local/https/s3 inputs (see docs/specs/config.md)"
+                .to_owned(),
+        });
+    }
+    if has_removed_startup_table(input) {
+        return Err(StackError::InvalidParam {
+            field: "startup",
+            reason: "`[startup]` was removed because startup scripts were never executed; use workspace sources, dependency declarations, or agent install configuration instead"
                 .to_owned(),
         });
     }
