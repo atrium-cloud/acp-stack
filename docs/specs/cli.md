@@ -6,7 +6,7 @@
 
 | Area           | Commands                                                                    |
 | -------------- | --------------------------------------------------------------------------- |
-| Instance       | `acps init`, `acps serve`, `acps status`, `acps reset --yes`                |
+| Instance       | `acps init`, `acps serve`, `acps status`, `acps update`, `acps reset --yes` |
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
@@ -82,6 +82,17 @@ acps config import --base64 <code> [--force] [--dry-run]
 ```
 
 Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+
+## Update Commands
+
+```sh
+acps update check
+acps update install --latest [--allow-breaking]
+acps update install --version <tag> [--allow-breaking]
+acps update set --policy security-critical|compatible|manual [--frequency 1d]
+```
+
+`acps update` checks and installs `acp-stack` releases from `atrium-cloud/acp-stack`. Every check and install attempt writes a local update-history row and a `stack.update.*` event. Container deployments are check-only. Host installs replace `acps` and `acpctl` only when the current binary directory is writable; systemd deployments use the root-owned updater unit installed by `scripts/install-systemd.sh`.
 
 ## Logging Commands
 

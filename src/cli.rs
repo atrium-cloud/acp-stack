@@ -15,6 +15,7 @@ mod serve;
 mod sessions;
 mod status;
 mod subagent;
+mod update;
 mod ws;
 
 pub use core::{Cli, run};

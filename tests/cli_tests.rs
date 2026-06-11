@@ -4837,7 +4837,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success()
         .stdout(predicates::str::contains("config:    ok ("))
         .stdout(predicates::str::contains("state:     ok ("))
-        .stdout(predicates::str::contains("schema=18"))
+        .stdout(predicates::str::contains("schema=19"))
         .stdout(predicates::str::contains("latest_event="))
         .stdout(predicates::str::contains(format!(
             "workspace: ok ({workspace_str})"
@@ -7492,6 +7492,40 @@ fn agent_update_set_rejects_invalid_frequency() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("agent.auto_update.frequency"));
+}
+
+#[test]
+fn stack_update_set_edits_update_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "update",
+            "set",
+            "--policy",
+            "compatible",
+            "--frequency",
+            "3d",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "acp-stack update policy: compatible",
+        ))
+        .stdout(predicates::str::contains("frequency: 3d"));
+
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    let config = load_config_from_str(&config_text).expect("config parses after update set");
+    assert_eq!(
+        config.updates.acp_stack.policy,
+        acp_stack::config::StackUpdatePolicy::Compatible
+    );
+    assert_eq!(config.updates.acp_stack.frequency, "3d");
 }
 
 #[test]

@@ -212,6 +212,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
             },
         },
         edge: EdgeConfig::default(),
+        updates: Default::default(),
         workspace: WorkspaceConfig {
             root: workspace_root.clone(),
             uploads: workspace_uploads,

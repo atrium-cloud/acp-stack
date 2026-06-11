@@ -1,6 +1,6 @@
 [Unit]
 Description=acp-stack daemon
-Documentation=https://github.com/finnlyu/acp-stack/blob/main/docs/deploy/systemd.md
+Documentation=https://github.com/atrium-cloud/acp-stack/blob/main/docs/deploy/systemd.md
 After=network-online.target
 Wants=network-online.target
 

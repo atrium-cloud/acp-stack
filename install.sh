@@ -127,9 +127,13 @@ if [ "$DO_SYSTEMD" = true ]; then
   log "fetching systemd installer at ${tag}"
   download "${RAW}/${REPO}/${tag}/scripts/install-systemd.sh" "${tmp}/install-systemd.sh"
   download "${RAW}/${REPO}/${tag}/packaging/systemd/acp-stack.service" "${tmp}/acp-stack.service"
+  download "${RAW}/${REPO}/${tag}/packaging/systemd/acp-stack-update.service" "${tmp}/acp-stack-update.service"
+  download "${RAW}/${REPO}/${tag}/packaging/systemd/acp-stack-update.timer" "${tmp}/acp-stack-update.timer"
 
   set -- --acps-binary "${tmp}/acps" --acpctl-binary "${tmp}/acpctl" \
-         --unit-template "${tmp}/acp-stack.service"
+         --unit-template "${tmp}/acp-stack.service" \
+         --update-service-template "${tmp}/acp-stack-update.service" \
+         --update-timer-template "${tmp}/acp-stack-update.timer"
   if [ -n "$AGENT_ID" ]; then
     set -- "$@" --agent "$AGENT_ID"
   else

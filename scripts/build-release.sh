@@ -7,7 +7,7 @@ set -euo pipefail
 # both cross-compiles to Linux and pins the glibc floor in the target triple
 # so the artifacts run on old and new distros alike.
 #
-# Usage: scripts/build-release.sh
+# Usage: scripts/build-release.sh [--classification regular|security-critical] [--breaking true|false]
 #
 # The git tag for a release must be `v<version>` where <version> is the
 # [package] version in Cargo.toml; install.sh derives the artifact filename
@@ -26,12 +26,54 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly DIST_DIR="${REPO_ROOT}/dist"
 # ---------------------
 
+classification="${ACP_STACK_RELEASE_CLASSIFICATION:-regular}"
+breaking="${ACP_STACK_RELEASE_BREAKING:-false}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --classification)
+      [[ $# -ge 2 ]] || { echo "build-release: --classification needs a value" >&2; exit 1; }
+      classification="$2"
+      shift 2
+      ;;
+    --breaking)
+      [[ $# -ge 2 ]] || { echo "build-release: --breaking needs true or false" >&2; exit 1; }
+      breaking="$2"
+      shift 2
+      ;;
+    -h|--help)
+      sed -n '3,17p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "build-release: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "${classification}" in
+  regular|security-critical) ;;
+  *) echo "build-release: classification must be regular or security-critical" >&2; exit 1 ;;
+esac
+case "${breaking}" in
+  true|false) ;;
+  *) echo "build-release: --breaking must be true or false" >&2; exit 1 ;;
+esac
+
 # macOS `tar` writes AppleDouble (._*) sidecar entries unless told not to;
 # they would pollute the released tarball.
 export COPYFILE_DISABLE=1
 
 log() { printf 'build-release: %s\n' "$*" >&2; }
 fail() { printf 'build-release: error: %s\n' "$*" >&2; exit 1; }
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
 
 command -v cargo-zigbuild >/dev/null 2>&1 \
   || fail "cargo-zigbuild not found; install with: cargo install cargo-zigbuild (and a zig toolchain)"
@@ -94,6 +136,36 @@ cp "${REPO_ROOT}/install.sh" "${DIST_DIR}/install.sh"
 )
 log "wrote ${DIST_DIR}/SHA256SUMS"
 
+manifest="${DIST_DIR}/${PROJECT}-release.json"
+{
+  printf '{\n'
+  printf '  "schema_version": 1,\n'
+  printf '  "repository": "atrium-cloud/acp-stack",\n'
+  printf '  "tag": "v%s",\n' "${version}"
+  printf '  "version": "%s",\n' "${version}"
+  printf '  "classification": "%s",\n' "${classification}"
+  printf '  "breaking": %s,\n' "${breaking}"
+  printf '  "artifacts": [\n'
+  for index in "${!TARGETS[@]}"; do
+    target="${TARGETS[$index]}"
+    tarball="${PROJECT}-${version}-${target}.tar.gz"
+    digest="$(sha256_file "${DIST_DIR}/${tarball}")"
+    comma=","
+    if [[ "${index}" -eq "$((${#TARGETS[@]} - 1))" ]]; then
+      comma=""
+    fi
+    printf '    { "target": "%s", "archive": "%s", "sha256": "%s" }%s\n' \
+      "${target}" "${tarball}" "${digest}" "${comma}"
+  done
+  printf '  ]\n'
+  printf '}\n'
+} >"${manifest}"
+log "wrote ${manifest}"
+(
+  cd "${DIST_DIR}"
+  printf '%s  %s\n' "$(sha256_file "${PROJECT}-release.json")" "${PROJECT}-release.json" >> SHA256SUMS
+)
+
 cat >&2 <<EOF
 
 build-release: done. Artifacts in ${DIST_DIR}:
@@ -102,6 +174,6 @@ $(cd "${DIST_DIR}" && ls -1)
 To publish (after committing + tagging v${version}):
   gh release create v${version} \\
     dist/${PROJECT}-${version}-*.tar.gz \\
-    dist/SHA256SUMS dist/install.sh \\
+    dist/SHA256SUMS dist/install.sh dist/${PROJECT}-release.json \\
     --title "v${version}" --notes "..."
 EOF

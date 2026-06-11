@@ -116,18 +116,33 @@ Use `acpctl logs query` or `acps logs query` for structured runtime history.
 ## Upgrade
 
 ```sh
+sudo systemctl start acp-stack-update.service
+```
+
+Manual binary replacement remains available:
+
+```sh
 sudo install -m 0755 /path/to/acps /usr/local/bin/acps
 sudo install -m 0755 /path/to/acpctl /usr/local/bin/acpctl
 sudo systemctl restart acp-stack
 ```
 
-Re-running the installer with `--force` also refreshes the unit template.
+Enable periodic self-update checks with:
+
+```sh
+sudo systemctl enable --now acp-stack-update.timer
+```
+
+Re-running the installer with `--force` refreshes the daemon and updater unit templates.
 
 ## Uninstall
 
 ```sh
 sudo systemctl disable --now acp-stack
+sudo systemctl disable --now acp-stack-update.timer
 sudo rm /etc/systemd/system/acp-stack.service
+sudo rm /etc/systemd/system/acp-stack-update.service
+sudo rm /etc/systemd/system/acp-stack-update.timer
 sudo systemctl daemon-reload
 sudo rm /usr/local/bin/acps /usr/local/bin/acpctl
 ```

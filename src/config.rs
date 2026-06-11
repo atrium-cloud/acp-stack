@@ -22,11 +22,13 @@ pub use self::schema::{
     CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
-    DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL, DataSourceConfig,
+    DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL,
+    DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig,
     DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
     EdgeConfig, HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig,
     McpStdioServer, PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SecurityConfig,
-    SecurityHttpConfig, SupabaseLoggingBackend, SupabaseLoggingConfig, WorkspaceConfig,
+    SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend,
+    SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
 };
 pub use self::validate::primitives::{
     compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,
@@ -43,6 +45,8 @@ pub struct Config {
     pub security: SecurityConfig,
     #[serde(default, skip_serializing_if = "EdgeConfig::is_empty")]
     pub edge: EdgeConfig,
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     pub workspace: WorkspaceConfig,
     pub logging: LoggingConfig,
     pub agent: AgentConfig,
@@ -90,6 +94,8 @@ struct RawConfig {
     security: Option<RawSecurityConfig>,
     #[serde(default)]
     edge: Option<EdgeConfig>,
+    #[serde(default)]
+    updates: Option<UpdatesConfig>,
     workspace: Option<WorkspaceConfig>,
     logging: Option<LoggingConfig>,
     agent: Option<AgentConfig>,
@@ -208,6 +214,7 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
             })?,
         },
         edge: raw.edge.unwrap_or_default(),
+        updates: raw.updates.unwrap_or_default(),
         workspace: raw.workspace.ok_or(StackError::MissingSection {
             section: "workspace",
         })?,
