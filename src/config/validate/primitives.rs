@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::config::schema::AuthConfig;
 use crate::error::{Result, StackError};
 
-/// Parse a duration string like "10m", "5s", "2h", "750ms". Returns `None` on
+/// Parse a duration string like "10m", "5s", "2h", "1d", "4w", "750ms". Returns `None` on
 /// any invalid input. Empty string and pure-numeric inputs (no suffix) are
 /// rejected so config typos surface at load time rather than meaning seconds.
 pub fn parse_duration_string(input: &str) -> Option<std::time::Duration> {
@@ -30,6 +30,8 @@ pub fn parse_duration_string(input: &str) -> Option<std::time::Duration> {
         "s" => Some(std::time::Duration::from_secs(value)),
         "m" => Some(std::time::Duration::from_secs(value.checked_mul(60)?)),
         "h" => Some(std::time::Duration::from_secs(value.checked_mul(3_600)?)),
+        "d" => Some(std::time::Duration::from_secs(value.checked_mul(86_400)?)),
+        "w" => Some(std::time::Duration::from_secs(value.checked_mul(604_800)?)),
         _ => None,
     }
 }

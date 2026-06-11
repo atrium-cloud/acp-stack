@@ -1350,7 +1350,9 @@ async fn health_ready_does_not_persist_api_request_row() {
 
 #[tokio::test]
 async fn health_ready_marks_deps_failing_when_last_apply_failed() {
-    use acp_stack::state::InstallerRunInput;
+    use acp_stack::state::{
+        INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL, InstallerRunInput,
+    };
 
     let harness = ServerHarness::spawn().await;
     {
@@ -1366,6 +1368,8 @@ async fn health_ready_marks_deps_failing_when_last_apply_failed() {
                 exit_status: Some(1),
                 step: "deps_apply",
                 version: None,
+                operation: INSTALLER_OPERATION_INSTALL,
+                method: Some(INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: Some("dap_api_failed"),
             })

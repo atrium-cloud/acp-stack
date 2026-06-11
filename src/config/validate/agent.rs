@@ -2,10 +2,12 @@
 //! restart policy, agent install escape hatch.
 
 use crate::config::schema::{
-    AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig,
+    AgentAutoUpdateConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
+    AgentSubagentConfig,
 };
 use crate::config::validate::primitives::{
-    require_present, validate_non_empty_trimmed, validate_nonempty, validate_secret_ref_name_value,
+    parse_duration_string, require_present, validate_non_empty_trimmed, validate_nonempty,
+    validate_secret_ref_name_value,
 };
 use crate::error::{Result, StackError};
 
@@ -22,6 +24,20 @@ pub(crate) fn validate_agent_subagent(subagent: &AgentSubagentConfig) -> Result<
     }
     if let Some(provider) = subagent.provider.as_ref() {
         validate_agent_provider_at(provider, AGENT_SUBAGENT_PROVIDER_FIELDS)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agent_auto_update(auto_update: &AgentAutoUpdateConfig) -> Result<()> {
+    let frequency =
+        parse_duration_string(&auto_update.frequency).ok_or(StackError::InvalidDurationField {
+            field: "agent.auto_update.frequency",
+        })?;
+    if frequency.is_zero() {
+        return Err(StackError::InvalidParam {
+            field: "agent.auto_update.frequency",
+            reason: "must be greater than zero".to_owned(),
+        });
     }
     Ok(())
 }

@@ -238,6 +238,8 @@ fn apply_one(
                 exit_status: Some(0),
                 step: DEPS_APPLY_STEP,
                 version: None,
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: Some(apply_run_id),
             })?;
@@ -270,6 +272,8 @@ fn apply_one(
                     exit_status: None,
                     step: DEPS_APPLY_STEP,
                     version: None,
+                    operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                    method: Some(crate::state::INSTALLER_METHOD_SHELL),
                     log_dir: None,
                     apply_run_id: Some(apply_run_id),
                 })?;
@@ -339,6 +343,8 @@ fn apply_one(
             exit_status: persisted_exit,
             step: DEPS_APPLY_STEP,
             version: None,
+            operation: crate::state::INSTALLER_OPERATION_INSTALL,
+            method: Some(crate::state::INSTALLER_METHOD_SHELL),
             log_dir: None,
             apply_run_id: Some(apply_run_id),
         })?;

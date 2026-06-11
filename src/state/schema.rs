@@ -200,6 +200,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/017_prompt_message_ids.sqlite.sql"),
         postgres: include_str!("../../migrations/017_prompt_message_ids.postgres.sql"),
     },
+    Migration {
+        id: 18,
+        name: "installer_runs_operation_method",
+        sqlite_file: "018_installer_runs_operation_method.sqlite.sql",
+        postgres_file: "018_installer_runs_operation_method.postgres.sql",
+        sqlite: include_str!("../../migrations/018_installer_runs_operation_method.sqlite.sql"),
+        postgres: include_str!("../../migrations/018_installer_runs_operation_method.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including bundled Postgres

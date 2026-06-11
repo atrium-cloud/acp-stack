@@ -4,7 +4,10 @@ use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{McpServerConfig, load_config_from_str};
 use acp_stack::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV;
 use acp_stack::secrets::SecretStore;
-use acp_stack::state::{EVENT_SOURCE_CLI, InstallerRunInput, StateStore, default_state_path};
+use acp_stack::state::{
+    EVENT_SOURCE_CLI, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NPM, INSTALLER_OPERATION_INSTALL,
+    InstallerRunInput, StateStore, default_state_path,
+};
 use assert_cmd::Command;
 use axum::{Json, Router, routing::get};
 use base64::Engine;
@@ -4834,7 +4837,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success()
         .stdout(predicates::str::contains("config:    ok ("))
         .stdout(predicates::str::contains("state:     ok ("))
-        .stdout(predicates::str::contains("schema=17"))
+        .stdout(predicates::str::contains("schema=18"))
         .stdout(predicates::str::contains("latest_event="))
         .stdout(predicates::str::contains(format!(
             "workspace: ok ({workspace_str})"
@@ -5054,6 +5057,8 @@ fn agent_check_reports_missing_adapter_step() {
             exit_status: Some(0),
             step: "harness",
             version: None,
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: None,
             log_dir: None,
             apply_run_id: None,
         })
@@ -5115,6 +5120,8 @@ fn installer_history_renders_rows_with_filter() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -5130,6 +5137,8 @@ fn installer_history_renders_rows_with_filter() {
             exit_status: Some(2),
             step: "adapter",
             version: None,
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -5186,6 +5195,8 @@ fn installer_history_format_json_renders_runs() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: Some("/tmp/installer-logs/opencode/harness"),
             apply_run_id: None,
         })
@@ -5234,6 +5245,8 @@ fn installer_history_renders_log_dir_continuation_line() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: Some("/tmp/installer-logs/opencode/2026-05-22T01:00:00.000000000Z/harness"),
             apply_run_id: None,
         })
@@ -5579,6 +5592,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
             exit_status: Some(0),
             step: "install",
             version: Some("1.15.10"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_NPM),
             log_dir: None,
             apply_run_id: None,
         })
@@ -5594,6 +5609,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.2.3"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -5609,6 +5626,8 @@ fn agent_status_surfaces_installed_versions_from_state() {
             exit_status: Some(0),
             step: "adapter",
             version: None,
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -7417,7 +7436,80 @@ fn init_agent_flag_updates_config_non_interactively() {
     assert!(written.contains(r#""--model-config-option""#));
     assert!(written.contains(r#""placebo-model""#));
     assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
+    assert!(written.contains("[agent.auto_update]"));
+    assert!(written.contains("enabled = true"));
+    assert!(written.contains(r#"frequency = "1d""#));
     assert!(!written.contains("[agent.install]"));
+}
+
+#[test]
+fn agent_update_set_edits_auto_update_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update", "set", "--auto-on", "--frequency", "3d"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent update auto: enabled"))
+        .stdout(predicates::str::contains("frequency: 3d"));
+
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    let config = load_config_from_str(&config_text).expect("config parses after update set");
+    let auto_update = config.agent.auto_update.expect("auto-update written");
+    assert!(auto_update.enabled);
+    assert_eq!(auto_update.frequency, "3d");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update", "set", "--auto-off"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent update auto: disabled"));
+
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    let config = load_config_from_str(&config_text).expect("config parses after auto-off");
+    let auto_update = config.agent.auto_update.expect("auto-update retained");
+    assert!(!auto_update.enabled);
+    assert_eq!(auto_update.frequency, "3d");
+}
+
+#[test]
+fn agent_update_set_rejects_invalid_frequency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update", "set", "--frequency", "0d"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("agent.auto_update.frequency"));
+}
+
+#[test]
+fn agent_update_set_auto_on_rejects_non_registry_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    // An escape-hatch agent id that the embedded registry does not resolve:
+    // enabling auto-update would leave the daemon loop failing every cycle.
+    let escape_hatch = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "custom-private-agent""#);
+    fs::write(config_dir.join("acps-config.toml"), escape_hatch).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update", "set", "--auto-on"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a managed registry agent"));
 }
 
 #[test]

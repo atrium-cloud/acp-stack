@@ -99,3 +99,9 @@ id = 17
 name = "prompt_message_ids"
 sqlite_file = "017_prompt_message_ids.sqlite.sql"
 postgres_file = "017_prompt_message_ids.postgres.sql"
+
+[[migration]]
+id = 18
+name = "installer_runs_operation_method"
+sqlite_file = "018_installer_runs_operation_method.sqlite.sql"
+postgres_file = "018_installer_runs_operation_method.postgres.sql"

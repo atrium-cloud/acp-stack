@@ -51,6 +51,8 @@ pub struct InstallerRun {
     pub exit_status: Option<i32>,
     pub step: String,
     pub version: Option<String>,
+    pub operation: String,
+    pub method: Option<String>,
     /// On-disk directory holding the unbounded stdout/stderr capture (each
     /// stream as a single `stdout` / `stderr` file). The 64 KiB columns above
     /// are previews; this points to the audit-grade copy. `None` for legacy
@@ -72,9 +74,19 @@ pub struct InstallerRunInput<'a> {
     pub exit_status: Option<i32>,
     pub step: &'a str,
     pub version: Option<&'a str>,
+    pub operation: &'a str,
+    pub method: Option<&'a str>,
     pub log_dir: Option<&'a str>,
     pub apply_run_id: Option<&'a str>,
 }
+
+pub const INSTALLER_OPERATION_INSTALL: &str = "install";
+pub const INSTALLER_OPERATION_UPDATE: &str = "update";
+pub const INSTALLER_METHOD_SHELL: &str = "shell";
+pub const INSTALLER_METHOD_NPM: &str = "npm";
+pub const INSTALLER_METHOD_GITHUB: &str = "github";
+pub const INSTALLER_METHOD_APT: &str = "apt";
+pub const INSTALLER_METHOD_NATIVE: &str = "native";
 
 /// Canonical on-disk location for installer step logs. Lives alongside
 /// `state.sqlite` under the operator's home so log rotation and backup can
@@ -116,6 +128,8 @@ fn row_to_installer_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstallerRu
         version: row.get(9)?,
         log_dir: row.get(10)?,
         apply_run_id: row.get(11)?,
+        operation: row.get(12)?,
+        method: row.get(13)?,
     })
 }
 
@@ -349,6 +363,8 @@ impl StateStore {
             exit_status: input.exit_status,
             step: input.step.to_owned(),
             version: input.version.map(str::to_owned),
+            operation: input.operation.to_owned(),
+            method: input.method.map(str::to_owned),
             log_dir: input.log_dir.map(str::to_owned),
             apply_run_id: input.apply_run_id.map(str::to_owned),
         };
@@ -356,8 +372,8 @@ impl StateStore {
         self.connection().execute(
             r#"
             INSERT INTO installer_runs
-                (id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                (id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
             params![
                 run.id,
@@ -372,6 +388,8 @@ impl StateStore {
                 run.version,
                 run.log_dir,
                 run.apply_run_id,
+                run.operation,
+                run.method,
             ],
         )?;
 
@@ -394,7 +412,7 @@ impl StateStore {
         if let Some(agent_id) = agent_id {
             let mut statement = self.connection().prepare(
                 r#"
-                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
                 FROM installer_runs
                 WHERE agent_id = ?1
                 ORDER BY started_at DESC, id DESC
@@ -406,7 +424,7 @@ impl StateStore {
         }
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
             FROM installer_runs
             ORDER BY started_at DESC, id DESC
             LIMIT ?1
@@ -424,7 +442,7 @@ impl StateStore {
     ) -> Result<Vec<InstallerRun>> {
         let mut statement = self.connection().prepare(
             r#"
-            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
             FROM installer_runs
             WHERE agent_id = ?1
               AND step = ?2
@@ -447,7 +465,7 @@ impl StateStore {
     ) -> Result<Vec<InstallerRun>> {
         let mut statement = self.connection().prepare(
             r#"
-                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
             FROM installer_runs
             WHERE id IN (
                 SELECT MAX(id) FROM installer_runs
