@@ -22,6 +22,7 @@ static PERMISSION_DECISION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INIT_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INIT_STEP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SECURITY_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static STACK_UPDATE_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn current_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
@@ -147,4 +148,11 @@ pub(super) fn next_security_run_id() -> String {
     let sequence = SECURITY_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     format!("srun_{nanos:020}_{sequence:010}_{pid:010}")
+}
+
+pub(super) fn next_stack_update_run_id() -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+    let sequence = STACK_UPDATE_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    format!("sur_{nanos:020}_{sequence:010}_{pid:010}")
 }

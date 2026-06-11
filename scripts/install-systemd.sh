@@ -4,6 +4,8 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly DEFAULT_UNIT_TEMPLATE="${REPO_ROOT}/packaging/systemd/acp-stack.service"
+readonly DEFAULT_UPDATE_SERVICE_TEMPLATE="${REPO_ROOT}/packaging/systemd/acp-stack-update.service"
+readonly DEFAULT_UPDATE_TIMER_TEMPLATE="${REPO_ROOT}/packaging/systemd/acp-stack-update.timer"
 
 acps_binary=""
 acpctl_binary=""
@@ -13,6 +15,10 @@ workspace_root="/workspace"
 bind_address="127.0.0.1:7700"
 unit_path="/etc/systemd/system/acp-stack.service"
 unit_template="${DEFAULT_UNIT_TEMPLATE}"
+update_service_path="/etc/systemd/system/acp-stack-update.service"
+update_timer_path="/etc/systemd/system/acp-stack-update.timer"
+update_service_template="${DEFAULT_UPDATE_SERVICE_TEMPLATE}"
+update_timer_template="${DEFAULT_UPDATE_TIMER_TEMPLATE}"
 do_init=true
 agent_id=""
 install_os_deps=true
@@ -43,6 +49,12 @@ Options:
   --unit-template <path>   Source unit file (default:
                            packaging/systemd/acp-stack.service alongside this
                            script)
+  --update-service-template <path>
+                           Source updater service template (default:
+                           packaging/systemd/acp-stack-update.service)
+  --update-timer-template <path>
+                           Source updater timer template (default:
+                           packaging/systemd/acp-stack-update.timer)
   --no-init                Skip acps init (two-step install: init later as the
                            runtime user)
   --no-os-deps             Skip OS dependency installation
@@ -117,6 +129,16 @@ while [[ $# -gt 0 ]]; do
       unit_template="$2"
       shift 2
       ;;
+    --update-service-template)
+      [[ $# -ge 2 ]] || { usage >&2; exit 1; }
+      update_service_template="$2"
+      shift 2
+      ;;
+    --update-timer-template)
+      [[ $# -ge 2 ]] || { usage >&2; exit 1; }
+      update_timer_template="$2"
+      shift 2
+      ;;
     --no-init)
       do_init=false
       shift
@@ -165,6 +187,12 @@ if [[ ! -x "${acpctl_binary}" ]]; then
 fi
 if [[ ! -f "${unit_template}" ]]; then
   fail "unit template not found: ${unit_template}"
+fi
+if [[ ! -f "${update_service_template}" ]]; then
+  fail "update service template not found: ${update_service_template}"
+fi
+if [[ ! -f "${update_timer_template}" ]]; then
+  fail "update timer template not found: ${update_timer_template}"
 fi
 
 for cmd in systemctl install useradd runuser; do
@@ -306,48 +334,56 @@ fi
 
 current_step="install_unit"
 
-# Stage the unit through a temp file so we can substitute the @USER@,
-# @HOME_DIR@, @WORKSPACE_ROOT@, and @BIND@ placeholders without mutating the
-# template on disk. Bail if any placeholder is left after substitution.
-tmp_unit="$(mktemp)"
-trap 'rm -f "${tmp_unit}"; on_error' ERR
-trap 'rm -f "${tmp_unit}"' EXIT
 unit_written=false
 
-awk \
-  -v user="${user_name}" \
-  -v home="${home_dir}" \
-  -v workspace="${workspace_root}" \
-  -v bind="${bind_address}" '
-  {
-    gsub(/@USER@/, user)
-    gsub(/@HOME_DIR@/, home)
-    gsub(/@WORKSPACE_ROOT@/, workspace)
-    gsub(/@BIND@/, bind)
-    print
-  }
-' "${unit_template}" >"${tmp_unit}"
+render_and_install_unit() {
+  local template="$1"
+  local destination="$2"
+  local label="$3"
+  local tmp_unit
+  tmp_unit="$(mktemp)"
+  awk \
+    -v user="${user_name}" \
+    -v home="${home_dir}" \
+    -v workspace="${workspace_root}" \
+    -v bind="${bind_address}" '
+    {
+      gsub(/@USER@/, user)
+      gsub(/@HOME_DIR@/, home)
+      gsub(/@WORKSPACE_ROOT@/, workspace)
+      gsub(/@BIND@/, bind)
+      print
+    }
+  ' "${template}" >"${tmp_unit}"
 
-if grep -q '@[A-Z_]\+@' "${tmp_unit}"; then
-  remaining="$(grep -o '@[A-Z_]\+@' "${tmp_unit}" | sort -u | tr '\n' ' ')"
-  fail "unit template still contains placeholder tokens: ${remaining}"
-fi
-
-if [[ -f "${unit_path}" ]]; then
-  if cmp -s "${tmp_unit}" "${unit_path}"; then
-    log "systemd unit already matches ${unit_path}; leaving it unchanged."
-  elif [[ "${force}" == true ]]; then
-    install -o root -g root -m 0644 "${tmp_unit}" "${unit_path}"
-    unit_written=true
-    log "overwrote systemd unit at ${unit_path}."
-  else
-    fail "unit file already exists at ${unit_path} and differs from the rendered unit; pass --force to overwrite."
+  if grep -q '@[A-Z_]\+@' "${tmp_unit}"; then
+    remaining="$(grep -o '@[A-Z_]\+@' "${tmp_unit}" | sort -u | tr '\n' ' ')"
+    rm -f "${tmp_unit}"
+    fail "${label} template still contains placeholder tokens: ${remaining}"
   fi
-else
-  install -o root -g root -m 0644 "${tmp_unit}" "${unit_path}"
-  unit_written=true
-  log "installed systemd unit at ${unit_path}."
-fi
+
+  if [[ -f "${destination}" ]]; then
+    if cmp -s "${tmp_unit}" "${destination}"; then
+      log "${label} already matches ${destination}; leaving it unchanged."
+    elif [[ "${force}" == true ]]; then
+      install -o root -g root -m 0644 "${tmp_unit}" "${destination}"
+      unit_written=true
+      log "overwrote ${label} at ${destination}."
+    else
+      rm -f "${tmp_unit}"
+      fail "${label} already exists at ${destination} and differs from the rendered unit; pass --force to overwrite."
+    fi
+  else
+    install -o root -g root -m 0644 "${tmp_unit}" "${destination}"
+    unit_written=true
+    log "installed ${label} at ${destination}."
+  fi
+  rm -f "${tmp_unit}"
+}
+
+render_and_install_unit "${unit_template}" "${unit_path}" "systemd unit"
+render_and_install_unit "${update_service_template}" "${update_service_path}" "update service"
+render_and_install_unit "${update_timer_template}" "${update_timer_path}" "update timer"
 
 current_step="daemon_reload"
 
@@ -367,6 +403,8 @@ install-systemd: success.
 Next steps:
   Enable + start the daemon:
     sudo systemctl enable --now acp-stack
+  Enable self-update checks:
+    sudo systemctl enable --now acp-stack-update.timer
   Inspect status:
     sudo systemctl status acp-stack
   Tail logs:

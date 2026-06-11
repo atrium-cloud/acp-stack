@@ -23,6 +23,7 @@ mod security;
 mod security_category;
 mod sessions;
 pub(crate) mod sink_outbox;
+mod stack_update;
 
 pub use agent::{
     AgentCapabilitiesRecord, AgentFailureRecord, AgentLifecycleEvent, AgentStartedProcess,
@@ -68,4 +69,9 @@ pub use sessions::{
     PromptRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER,
     SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionActivityRecord,
     SessionRecord, SessionUpdateBounds,
+};
+pub use stack_update::{
+    NewStackUpdateRun, STACK_UPDATE_OPERATION_CHECK, STACK_UPDATE_OPERATION_INSTALL,
+    STACK_UPDATE_STATUS_FAILED, STACK_UPDATE_STATUS_SKIPPED, STACK_UPDATE_STATUS_SUCCEEDED,
+    StackUpdateRun,
 };

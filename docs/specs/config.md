@@ -45,6 +45,10 @@ restart = "on-crash"
 enabled = true
 frequency = "1d"
 
+[updates.acp_stack]
+policy = "security-critical"
+frequency = "1d"
+
 [permissions]
 mode = "auto"
 review = ["sudo *", "rm *"]
@@ -77,6 +81,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[agent]`          | configured ACP agent process and injected secret refs                |
 | `[agent.auto_update]` | periodic managed agent update policy                             |
 | `[agent.provider]` | selected provider/model metadata for provider-backed agents          |
+| `[updates.acp_stack]` | acp-stack self-update policy                                     |
 | `[permissions]`    | command and ACP permission policy                                    |
 | `[commands]`       | mediated shell command limits and env allowlist                      |
 | `[dependencies]`   | expected external programs, runtimes, packages, and MCP declarations |
@@ -138,6 +143,8 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
 
 `[agent.auto_update]` controls daemon-side managed agent updates. `frequency` uses duration suffixes such as `12h`, `1d`, `3d`, or `4w`. Existing configs without this block do not auto-update until the block is added or init writes it for a supported agent. The daemon auto-updater only runs when the agent is stopped and never interrupts a running agent, so a continuously running agent is skipped each cycle; apply updates to a live agent with `acps agent update --restart`.
+
+`[updates.acp_stack]` controls updates of `acp-stack` itself from GitHub Releases. `policy = "security-critical"` is the default and auto-installs only same-major, non-breaking releases marked security-critical. `compatible` also permits same-major, non-breaking regular releases. `manual` disables auto-install. Docker and Railway deployments are check-only and should be updated by redeploying the image.
 
 ## Permissions And Commands
 

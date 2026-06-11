@@ -74,6 +74,8 @@ acps logging supabase check
 
 The legacy PostgREST backend can still be configured with `acps logging supabase enable`.
 
+`acps update check` can report available `acp-stack` releases inside the container, but install is refused. Update Docker and Railway deployments by redeploying a newer image.
+
 ## Railway
 
 Use the root `Dockerfile` and attach a persistent Railway volume at `/home/acp`. Railway provides `PORT`; the image binds to that port automatically.

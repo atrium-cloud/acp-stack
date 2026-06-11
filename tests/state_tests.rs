@@ -4,9 +4,10 @@ use acp_stack::state::{
     INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
     INSTALLER_METHOD_GITHUB, INSTALLER_OPERATION_INSTALL, InstallerRunInput, ListedSessionRecord,
     LogOrder, NewInitRun, NewInitStep, NewPermissionRequest, NewPromptRecord, NewSessionRecord,
-    PermissionStatus, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER,
-    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SecurityCategory,
-    StateStore, default_state_path,
+    NewStackUpdateRun, PermissionStatus, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
+    SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
+    SESSION_STATUS_CLOSED, STACK_UPDATE_OPERATION_CHECK, STACK_UPDATE_STATUS_SUCCEEDED,
+    SecurityCategory, StateStore, default_state_path,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -39,7 +40,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        18
+        19
     );
 }
 
@@ -607,6 +608,47 @@ fn installer_runs_round_trip_records_and_returns_version() {
 }
 
 #[test]
+fn stack_update_runs_round_trip() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .append_stack_update_run(NewStackUpdateRun {
+            operation: STACK_UPDATE_OPERATION_CHECK,
+            status: STACK_UPDATE_STATUS_SUCCEEDED,
+            current_version: "0.1.0",
+            target_version: Some("0.1.1"),
+            target_tag: Some("v0.1.1"),
+            classification: Some("security-critical"),
+            breaking: false,
+            major_upgrade: false,
+            policy: "security-critical",
+            auto: true,
+            message: Some("eligible"),
+            payload_json: r#"{"decision":"install"}"#,
+        })
+        .expect("stack update row should append");
+
+    let runs = store
+        .query_stack_update_runs(10)
+        .expect("stack update runs should query");
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.operation, STACK_UPDATE_OPERATION_CHECK);
+    assert_eq!(run.status, STACK_UPDATE_STATUS_SUCCEEDED);
+    assert_eq!(run.current_version, "0.1.0");
+    assert_eq!(run.target_version.as_deref(), Some("0.1.1"));
+    assert_eq!(run.target_tag.as_deref(), Some("v0.1.1"));
+    assert_eq!(run.classification.as_deref(), Some("security-critical"));
+    assert!(run.auto);
+    assert_eq!(run.policy, "security-critical");
+    assert_eq!(run.message.as_deref(), Some("eligible"));
+    assert_eq!(run.payload_json, r#"{"decision":"install"}"#);
+}
+
+#[test]
 fn latest_successful_installer_runs_are_scoped_by_agent_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
@@ -786,7 +828,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 18")
+            .contains("state schema version 99 is newer than supported version 19")
     );
 }
 
@@ -2315,7 +2357,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        18
+        19
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

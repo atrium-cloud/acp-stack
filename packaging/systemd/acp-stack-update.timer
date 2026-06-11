@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily acp-stack self-update check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+Unit=acp-stack-update.service
+
+[Install]
+WantedBy=timers.target

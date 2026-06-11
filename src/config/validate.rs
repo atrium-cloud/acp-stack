@@ -47,6 +47,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         });
     }
     validate_socket_address("api.bind", &config.api.bind)?;
+    validate_stack_updates(config)?;
     validate_nonzero("api.max_request_bytes", config.api.max_request_bytes)?;
     validate_auth_refs(&config.auth)?;
     validate_nonzero(
@@ -163,6 +164,20 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_secret_refs(config)?;
     validate_supabase_logging(config.logging.supabase.as_ref())?;
 
+    Ok(())
+}
+
+fn validate_stack_updates(config: &Config) -> Result<()> {
+    let frequency = self::primitives::parse_duration_string(&config.updates.acp_stack.frequency)
+        .ok_or(StackError::InvalidDurationField {
+            field: "updates.acp_stack.frequency",
+        })?;
+    if frequency.is_zero() {
+        return Err(StackError::InvalidParam {
+            field: "updates.acp_stack.frequency",
+            reason: "must be greater than zero".to_owned(),
+        });
+    }
     Ok(())
 }
 
