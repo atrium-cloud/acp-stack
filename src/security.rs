@@ -562,7 +562,7 @@ mod tests {
     fn path_mode_loose_for_config_file_is_critical() {
         let http = baseline_http();
         let posture = PathPosture {
-            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acp-stack.toml"),
+            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acps-config.toml"),
             kind: PathKind::ConfigFile,
             uid: 1000,
             mode: 0o644,
@@ -585,7 +585,7 @@ mod tests {
             .as_deref()
             .expect("path_mode_loose remediation");
         assert!(
-            remediation.contains("chmod 0600 -- '/home/acp/.config/acp-stack/acp-stack.toml'"),
+            remediation.contains("chmod 0600 -- '/home/acp/.config/acp-stack/acps-config.toml'"),
             "expected config file chmod hint, got: {remediation}"
         );
     }
@@ -688,7 +688,7 @@ mod tests {
     fn railway_root_volume_still_reports_managed_file_ownership() {
         let http = baseline_http();
         let posture = PathPosture {
-            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acp-stack.toml"),
+            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acps-config.toml"),
             kind: PathKind::ConfigFile,
             uid: 1000,
             mode: 0o600,
@@ -864,7 +864,7 @@ mod tests {
     fn uninspectable_path_is_critical_with_remediation() {
         let http = baseline_http();
         let issue = PathInspectionIssue {
-            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acp-stack.toml"),
+            path: std::path::PathBuf::from("/home/acp/.config/acp-stack/acps-config.toml"),
             kind: PathKind::ConfigFile,
             error: "No such file or directory".to_owned(),
         };

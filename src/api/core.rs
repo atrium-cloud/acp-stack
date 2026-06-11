@@ -136,7 +136,7 @@ impl RuntimePaths {
 
     fn from_state_defaults(state: &StateStore) -> Self {
         let config_path = crate::config::default_config_path()
-            .unwrap_or_else(|_| PathBuf::from(".config/acp-stack/acp-stack.toml"));
+            .unwrap_or_else(|_| PathBuf::from(".config/acp-stack/acps-config.toml"));
         Self::new(config_path, state.path().to_path_buf())
     }
 }

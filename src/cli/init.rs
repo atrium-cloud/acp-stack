@@ -1,6 +1,7 @@
 mod headless_snapshot;
 mod install;
 mod model_mode;
+mod prompt;
 mod provider;
 mod registry_apply;
 mod resume;
@@ -8,7 +9,7 @@ mod skills;
 mod starter_config;
 mod testflight;
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
@@ -38,15 +39,19 @@ use self::headless_snapshot::{
 use self::install::{
     install_configured_agent, local_bin_dir, operator_registry_override, should_install_agent,
 };
-use self::model_mode::{ModelModeAction, configure_model_and_mode_for_init};
-use self::provider::configure_provider_for_init;
+use self::model_mode::{
+    ModelModeAction, configure_model_and_mode_for_init, preflight_model_and_mode_for_init,
+};
+use self::provider::{
+    configure_provider_for_init, configured_provider_refs_satisfied, preflight_provider_for_init,
+};
 use self::registry_apply::{
     apply_edge_profile_to_config, apply_registry_entry_to_config, select_agent_for_init,
 };
 use self::resume::{
-    finalize_with_error, init_complete_event_already_recorded, installer_postcondition_holds,
-    perform_secrets_init, recorded_init_args, resolve_init_run, step_needs_resume,
-    workspace_postcondition_holds,
+    FreshKeys, finalize_with_error, init_complete_event_already_recorded,
+    installer_postcondition_holds, perform_secrets_init, recorded_init_args, resolve_init_run,
+    step_needs_resume, workspace_postcondition_holds,
 };
 use self::skills::{
     install_init_skills, prompt_init_skills_if_needed, resolve_skill_install_plan,
@@ -57,6 +62,7 @@ use self::starter_config::{
     starter_config, validate_deployment_overrides_match_existing,
 };
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
+use super::config as cli_config;
 use super::logging::{
     SUPABASE_API_KEY_REF_ENV, SUPABASE_DEFAULT_API_KEY_REF, SUPABASE_DEFAULT_SCHEMA,
     SUPABASE_ENABLED_ENV, SUPABASE_SCHEMA_ENV, SUPABASE_URL_ENV, apply_supabase_config,
@@ -72,6 +78,27 @@ pub struct InitArgs {
     /// runs must also pass `--agent <id>`.
     #[arg(long)]
     pub(super) non_interactive: bool,
+    /// Initialize from an existing acps-config.toml file.
+    #[arg(
+        long = "from-file",
+        value_name = "PATH",
+        conflicts_with_all = ["from_toml", "from_base64", "resume"]
+    )]
+    pub(super) from_file: Option<PathBuf>,
+    /// Initialize from pasted acps-config.toml text.
+    #[arg(
+        long = "from-toml",
+        value_name = "TOML",
+        conflicts_with_all = ["from_file", "from_base64", "resume"]
+    )]
+    pub(super) from_toml: Option<String>,
+    /// Initialize from base64-encoded acps-config.toml text.
+    #[arg(
+        long = "from-base64",
+        value_name = "BASE64",
+        conflicts_with_all = ["from_file", "from_toml", "resume"]
+    )]
+    pub(super) from_base64: Option<String>,
     /// Select the initial provider id for agents that support provider setup.
     #[arg(long)]
     pub(super) provider: Option<String>,
@@ -332,6 +359,18 @@ impl InitArgs {
             false
         }
     }
+
+    pub(super) fn config_import_source_label(&self) -> Option<&'static str> {
+        if self.from_file.is_some() {
+            Some("file")
+        } else if self.from_toml.is_some() {
+            Some("toml")
+        } else if self.from_base64.is_some() {
+            Some("base64")
+        } else {
+            None
+        }
+    }
 }
 
 pub(super) const STARTER_MAX_REQUEST_BYTES: u64 = 104_857_600;
@@ -354,6 +393,7 @@ pub(super) const STARTER_AGENT_INSTALL_TYPE: &str = "shell";
 pub(super) const STARTER_AGENT_INSTALL_COMMAND: &str = "true";
 
 fn configure_subagent_inherit_for_init(
+    interactive: bool,
     registry: &RegistryCatalog,
     config: &mut Config,
 ) -> Result<bool> {
@@ -376,32 +416,24 @@ fn configure_subagent_inherit_for_init(
     {
         return Ok(false);
     }
-    if io::stdin().is_terminal() {
-        print!(
-            "inherit main provider/model for {}? declining disables it. [Y/n]: ",
-            entry.subagent_alias.as_deref().unwrap_or("subagent")
-        );
-        io::stdout()
-            .flush()
-            .map_err(|source| StackError::ServeIo { source })?;
-        let mut answer = String::new();
-        io::stdin()
-            .read_line(&mut answer)
-            .map_err(|source| StackError::ServeIo { source })?;
-        let answer = answer.trim();
-        if answer.eq_ignore_ascii_case("n") || answer.eq_ignore_ascii_case("no") {
-            config.agent.subagent = Some(AgentSubagentConfig {
-                disabled: true,
-                provider: None,
-            });
-            println!(
-                "subagent model disabled; run `acps subagent set` to configure, or `acps subagent match` to inherit later"
-            );
-            return Ok(true);
-        }
+    let alias = entry.subagent_alias.as_deref().unwrap_or("subagent");
+    // Default-yes: declining (or a non-interactive run) inherits the main
+    // provider/model by leaving `subagent` unset under the "absent = inherit"
+    // semantic; only an explicit "no" disables it.
+    if prompt::confirm(
+        interactive,
+        &format!("inherit main provider/model for {alias}? declining disables it."),
+        true,
+    )? {
+        return Ok(true);
     }
-    // Accept path leaves `subagent` unset on purpose: under the new
-    // "absent = inherit" semantic, no mirror of the main provider is needed.
+    config.agent.subagent = Some(AgentSubagentConfig {
+        disabled: true,
+        provider: None,
+    });
+    println!(
+        "subagent model disabled; run `acps subagent set` to configure, or `acps subagent match` to inherit later"
+    );
     Ok(true)
 }
 
@@ -513,11 +545,206 @@ fn reject_supabase_init_args_for_existing_config(args: &InitArgs) -> Result<()> 
     Ok(())
 }
 
+const KEY_HANDOVER_PRINTED_EVENT: &str = "auth.keys_handover_printed";
+
+/// Drop guard that performs the session/admin key handover as the very last
+/// thing the operator sees. Holding the plaintext across the whole run (instead
+/// of printing at generation time) keeps the keys from scrolling off-screen
+/// behind install/workspace/testflight output; rendering on Drop means a fresh
+/// run that fails AFTER key generation still surfaces the otherwise
+/// unrecoverable, non-regenerable admin key before init exits. `None` (the
+/// preserved/resume path) renders nothing.
+struct KeyHandover {
+    keys: Option<FreshKeys>,
+}
+
+impl Drop for KeyHandover {
+    fn drop(&mut self) {
+        self.print();
+    }
+}
+
+impl KeyHandover {
+    fn print(&mut self) -> Option<(String, String)> {
+        let keys = self.keys.take()?;
+        let refs = (keys.session_ref.clone(), keys.admin_ref.clone());
+        println!("---");
+        println!(
+            "session key ({}): {}",
+            keys.session_ref,
+            keys.session_value.as_str()
+        );
+        println!(
+            "admin key ({}): {}",
+            keys.admin_ref,
+            keys.admin_value.as_str()
+        );
+        println!(
+            "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
+        );
+        println!("---");
+        Some(refs)
+    }
+
+    fn print_and_record(&mut self, store: &StateStore, run_id: &str) -> Result<()> {
+        if let Some((session_ref, admin_ref)) = self.print() {
+            store.append_event_with_source(
+                "info",
+                KEY_HANDOVER_PRINTED_EVENT,
+                crate::state::EVENT_SOURCE_CLI,
+                "session and admin API keys were shown to the operator",
+                &serde_json::json!({
+                    "init_run_id": run_id,
+                    "session_key_ref": session_ref,
+                    "admin_key_ref": admin_ref,
+                })
+                .to_string(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether init should drive interactive prompts: a real TTY and no
+/// `--non-interactive`. The single source of truth for the gate, so every
+/// prompt site honors `--non-interactive` (several previously checked only
+/// `is_terminal()`).
+pub(super) fn prompts_enabled(args: &InitArgs) -> bool {
+    io::stdin().is_terminal() && !args.non_interactive
+}
+
+fn config_import_source_for_init(
+    args: &InitArgs,
+) -> Result<Option<cli_config::ConfigImportSource<'_>>> {
+    match (
+        args.from_file.as_deref(),
+        args.from_toml.as_deref(),
+        args.from_base64.as_deref(),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(path), None, None) => Ok(Some(cli_config::ConfigImportSource::Path(path))),
+        (None, Some(raw_toml), None) => Ok(Some(cli_config::ConfigImportSource::Toml(raw_toml))),
+        (None, None, Some(encoded)) => Ok(Some(cli_config::ConfigImportSource::Base64(encoded))),
+        _ => Err(StackError::InvalidParam {
+            field: "--from-file",
+            reason: "choose only one of --from-file, --from-toml, or --from-base64".to_owned(),
+        }),
+    }
+}
+
+fn prompt_config_source_if_needed(
+    args: &mut InitArgs,
+    config_path: &Path,
+    state_path: &Path,
+) -> Result<()> {
+    if args.config_import_source_label().is_some() || args.resume || args.fresh {
+        return Ok(());
+    }
+    let interactive = prompts_enabled(args);
+    if !interactive {
+        return Ok(());
+    }
+    let resumable = config_path.exists() && resumable_init_exists(state_path)?;
+    if config_path.exists() && !resumable {
+        return Ok(());
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    enum ConfigSourceChoice {
+        Resume,
+        ContinueExisting,
+        ImportFile,
+        PasteBase64,
+        StartFresh,
+    }
+
+    let mut items = Vec::new();
+    if resumable {
+        items.push((
+            ConfigSourceChoice::Resume,
+            "Resume interrupted init".to_owned(),
+            String::new(),
+        ));
+        items.push((
+            ConfigSourceChoice::ContinueExisting,
+            "Continue with existing config".to_owned(),
+            String::new(),
+        ));
+    } else {
+        items.push((
+            ConfigSourceChoice::ImportFile,
+            "Import acps-config.toml path".to_owned(),
+            String::new(),
+        ));
+        items.push((
+            ConfigSourceChoice::PasteBase64,
+            "Paste base64 acps-config.toml".to_owned(),
+            String::new(),
+        ));
+        items.push((
+            ConfigSourceChoice::StartFresh,
+            "Start fresh".to_owned(),
+            String::new(),
+        ));
+    }
+
+    match prompt::select(interactive, "Config source", &items)? {
+        Some(ConfigSourceChoice::Resume) => {
+            args.resume = true;
+        }
+        Some(ConfigSourceChoice::ContinueExisting | ConfigSourceChoice::StartFresh) | None => {}
+        Some(ConfigSourceChoice::ImportFile) => {
+            let Some(path) = prompt::text(interactive, "acps-config.toml path", true)? else {
+                return Ok(());
+            };
+            args.from_file = Some(PathBuf::from(path.trim()));
+        }
+        Some(ConfigSourceChoice::PasteBase64) => {
+            let Some(encoded) = prompt::text(interactive, "base64 acps-config.toml", true)? else {
+                return Ok(());
+            };
+            args.from_base64 = Some(encoded.trim().to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn resumable_init_exists(state_path: &Path) -> Result<bool> {
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    let store = StateStore::open(state_path)?;
+    store.migrate()?;
+    Ok(crate::runtime::init_runner::find_resumable_run(&store)?.is_some())
+}
+
+fn import_config_for_init(args: &InitArgs, config_path: &Path) -> Result<bool> {
+    let Some(source) = config_import_source_for_init(args)? else {
+        return Ok(false);
+    };
+    if config_path.exists() {
+        return Err(StackError::ConfigExists {
+            path: config_path.to_path_buf(),
+        });
+    }
+    let payload = cli_config::load_config_import_payload(source)?;
+    cli_config::print_config_import_progress(true);
+    write_new_file_owner_only(config_path, payload.canonical.as_bytes())?;
+    println!("imported config: {}", config_path.display());
+    Ok(true)
+}
+
 pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     if args.skip_workspace_init() && mode != InitMode::Dev {
         return Err(StackError::InvalidParam {
             field: "--skip-workspace-init",
             reason: "development-only flag; use `acps dev init --skip-workspace-init`".to_owned(),
+        });
+    }
+    if args.resume && args.config_import_source_label().is_some() {
+        return Err(StackError::InvalidParam {
+            field: "--resume",
+            reason: "config import sources cannot be combined with init resume".to_owned(),
         });
     }
 
@@ -529,6 +756,8 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
 
     create_dir_owner_only(config_dir)?;
     create_dir_owner_only(state_dir)?;
+    prompt_config_source_if_needed(&mut args, &config_path, &state_path)?;
+    let imported_config = import_config_for_init(&args, &config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
 
     // Preflight (untracked): new configs must start with a real registry
@@ -566,7 +795,11 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         let existing_config = Config::load_from_path(&config_path)?;
         validate_deployment_overrides_match_existing(&args, &existing_config)?;
         reject_starter_only_mcp_args_for_existing_config(&args)?;
-        "validated existing config"
+        if imported_config {
+            "imported config"
+        } else {
+            "validated existing config"
+        }
     } else {
         let starter_config = starter_config(&args)?;
         let mut new_config = config::load_config_from_str(&starter_config)?;
@@ -586,7 +819,6 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
-
     // Pick the run row: either resume an existing one (explicit `--resume` or
     // auto-detected non-terminal latest) or start fresh. Recording every
     // tracked phase as a step lets `acps init resume` continue from the first
@@ -683,7 +915,11 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     }
 
     let mut config = Config::load_from_path(&config_path)?;
-    let selected_agent = select_agent_for_init(&args, &registry)?;
+    let selected_agent = if imported_config && args.agent.is_none() {
+        None
+    } else {
+        select_agent_for_init(&args, &registry)?
+    };
     if let Some(entry) = selected_agent {
         // Fail fast on agents the runtime cannot drive headlessly (browser
         // OAuth, terminal-only adapters, etc.). Without this check init would
@@ -782,11 +1018,18 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         args.testflight = recorded.testflight;
         args.skip_testflight = recorded.skip_testflight;
     }
+    if let Err(error) = preflight_provider_for_init(&args, &registry, &config, &config_path)
+        .and_then(|_| preflight_model_and_mode_for_init(&args, &registry, &config, &config_path))
+    {
+        return finalize_with_error(&store, &init_run, error);
+    }
+
     let skill_catalog = SkillCatalog::load_embedded()?;
     let skill_install_plan =
         resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog)?;
 
     let mut auth_status: &'static str = "preserved existing API keys";
+    let mut key_handover = KeyHandover { keys: None };
     let session_ref_str = config.auth.session_key_ref.clone();
     let admin_ref_str = config.auth.admin_key_ref.clone();
 
@@ -820,12 +1063,26 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                 &session_ref_str,
                 &admin_ref_str,
                 &mut secret_store,
-                &store,
             )?;
             auth_status = outcome.status;
+            let generated_keys = outcome.generated_keys;
+            key_handover.keys = outcome.fresh_keys;
+            if generated_keys {
+                store.append_event_with_source(
+                    "info",
+                    "auth.keys_generated",
+                    crate::state::EVENT_SOURCE_CLI,
+                    "generated session and admin API keys",
+                    &serde_json::json!({
+                        "session_key_ref": session_ref_str,
+                        "admin_key_ref": admin_ref_str,
+                    })
+                    .to_string(),
+                )?;
+            }
             Ok(StepOutcome::with_payload(format!(
                 r#"{{"session_key_ref":"{}","admin_key_ref":"{}","status":"{}"}}"#,
-                session_ref_str, admin_ref_str, outcome.status
+                session_ref_str, admin_ref_str, auth_status
             )))
         },
     );
@@ -840,6 +1097,10 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     } else {
         auth_status
     };
+    // Hold the freshly-generated keys until init exits. Drop renders the
+    // handover last (after the summary and testflight), and still surfaces them
+    // if a later step fails and returns early.
+    let mut key_handover = key_handover;
     if let Some(supabase) = config.logging.supabase.as_ref()
         && supabase.enabled
     {
@@ -963,67 +1224,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     }
 
     // -----------------------------------------------------------------
-    // Step 3: provider_configure — write provider/model into the config
-    // and persist canonical TOML if anything changed.
-    // -----------------------------------------------------------------
-    println!("progress: configuring provider and model");
-    let result = record_step(
-        &store,
-        &init_run,
-        3,
-        step_kind::PROVIDER_CONFIGURE,
-        || {
-            // Provider config is idempotent only when there's no explicit
-            // change requested for any of the three lanes this step
-            // now owns (provider, model, mode). We always re-run on
-            // resume so partial writes (e.g. missing secret refs) get
-            // re-collected, and so a resumed `--model`/`--mode` still
-            // gets validated and persisted rather than silently
-            // skipped because the prior succeeded row passes the
-            // verifier.
-            Ok(args.provider.is_none() && args.model.is_none() && args.mode.is_none())
-        },
-        || {
-            let provider_configured = configure_provider_for_init(
-                &args,
-                &registry,
-                &mut config,
-                &config_path,
-                &mut secret_store,
-            )?;
-            let model_mode_outcome = configure_model_and_mode_for_init(
-                &args,
-                &home,
-                &registry,
-                &mut config,
-                &config_path,
-            )?;
-            let model_mode_changed =
-                matches!(model_mode_outcome.model_action, ModelModeAction::Set)
-                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
-            let subagent_configured = configure_subagent_inherit_for_init(&registry, &mut config)?;
-            if selected_agent.is_some()
-                || provider_configured
-                || edge_requested
-                || model_mode_changed
-                || subagent_configured
-            {
-                let canonical = config.to_canonical_toml()?;
-                config = config::load_config_from_str(&canonical)?;
-                atomic_write_owner_only(&config_path, canonical.as_bytes())?;
-            }
-            Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
-                model_mode_outcome.model_action, model_mode_outcome.mode_action,
-            )))
-        },
-    );
-    if let Err(error) = result {
-        return finalize_with_error(&store, &init_run, error);
-    }
-
-    // -----------------------------------------------------------------
-    // Step 4: workspace_materialize — clone repos + download/extract
+    // Step 3: workspace_materialize — clone repos + download/extract
     // data sources into /workspace/usr/. Skipped if --skip-workspace-init.
     // Verifier: every source destination has its sentinel file.
     // -----------------------------------------------------------------
@@ -1049,7 +1250,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         let result = crate::runtime::init_runner::record_step_with_default_log_dir(
             &store,
             &init_run,
-            4,
+            3,
             step_kind::WORKSPACE_MATERIALIZE,
             Some(&log_dir_str),
             || Ok(workspace_postcondition_holds(&workspace_for_verify)),
@@ -1073,6 +1274,80 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         }
     } else {
         println!("workspace: skipped (--skip-workspace-init)");
+    }
+
+    // -----------------------------------------------------------------
+    // Step 4: provider_configure — write provider/model into the config
+    // and persist canonical TOML if anything changed.
+    // -----------------------------------------------------------------
+    println!("progress: configuring provider and model");
+    let provider_verify_config = config.clone();
+    let provider_verify_home = home.clone();
+    let result = record_step(
+        &store,
+        &init_run,
+        4,
+        step_kind::PROVIDER_CONFIGURE,
+        || {
+            // Provider config is idempotent only when there's no explicit
+            // change requested for any of the three lanes this step
+            // now owns (provider, model, mode). We always re-run on
+            // resume so partial writes (e.g. missing secret refs) get
+            // re-collected, and so a resumed `--model`/`--mode` still
+            // gets validated and persisted rather than silently
+            // skipped because the prior succeeded row passes the
+            // verifier.
+            let secret_store = SecretStore::open(&provider_verify_home)?;
+            Ok(args.provider.is_none()
+                && args.model.is_none()
+                && args.mode.is_none()
+                && configured_provider_refs_satisfied(
+                    &registry,
+                    &provider_verify_config,
+                    &secret_store,
+                ))
+        },
+        || {
+            let provider_configured = configure_provider_for_init(
+                &args,
+                &registry,
+                &mut config,
+                &config_path,
+                &mut secret_store,
+            )?;
+            let model_mode_outcome = configure_model_and_mode_for_init(
+                &args,
+                &home,
+                &registry,
+                &mut config,
+                &config_path,
+            )?;
+            let model_mode_changed =
+                matches!(model_mode_outcome.model_action, ModelModeAction::Set)
+                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
+            let subagent_configured = configure_subagent_inherit_for_init(
+                prompts_enabled(&args),
+                &registry,
+                &mut config,
+            )?;
+            if selected_agent.is_some()
+                || provider_configured
+                || edge_requested
+                || model_mode_changed
+                || subagent_configured
+            {
+                let canonical = config.to_canonical_toml()?;
+                config = config::load_config_from_str(&canonical)?;
+                atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+            }
+            Ok(StepOutcome::with_payload(format!(
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
+                model_mode_outcome.model_action, model_mode_outcome.mode_action,
+            )))
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&store, &init_run, error);
     }
 
     // -----------------------------------------------------------------
@@ -1347,6 +1622,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             ),
         });
     }
+    key_handover.print_and_record(&store, &init_run.id)?;
     crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
     Ok(())
 }

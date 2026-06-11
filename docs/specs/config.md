@@ -1,6 +1,6 @@
 # Config
 
-`acp-stack` reads TOML config from `~/.config/acp-stack/acp-stack.toml` by default. Config files are portable: secret values are stored separately and referenced by name.
+`acp-stack` reads TOML config from `~/.config/acp-stack/acps-config.toml` by default. Config files are portable: secret values are stored separately and referenced by name.
 
 ## Example
 

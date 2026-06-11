@@ -8,6 +8,7 @@ pub const FIXTURE_NEW_SESSION_RESPONSE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_
 pub const GITHUB_API_BASE_ENV: &str = "ACP_STACK_GITHUB_API_BASE";
 pub const S3_ENDPOINT_OVERRIDE_ENV: &str = "ACP_STACK_S3_ENDPOINT_OVERRIDE";
 pub const TEST_INSECURE_HTTPS_ENV: &str = "ACP_STACK_TEST_INSECURE_HTTPS";
+pub const TEST_SKIP_AGENT_INSTALL_ENV: &str = "ACP_STACK_TEST_SKIP_AGENT_INSTALL";
 
 #[cfg(feature = "test-fixtures")]
 pub fn fixture_path(name: &str) -> Option<PathBuf> {

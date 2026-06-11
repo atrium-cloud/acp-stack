@@ -14,6 +14,7 @@ This document records technology choices that affect maintenance or deployment. 
 | age-compatible encryption | local secret store                                         |
 | agent-client-protocol SDK | ACP client boundary to agents                              |
 | rmcp                      | local MCP server/client integration for `acpctl mcp serve` |
+| cliclack                  | interactive `acps init` prompts and searchable selectors   |
 | rpassword                 | hidden terminal prompts for admin-key entry                |
 | clap_complete             | shell completion script generation for `acps`              |
 

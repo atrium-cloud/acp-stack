@@ -43,7 +43,7 @@ impl AgentHarness {
     async fn spawn_with_config(config: Config) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
-        let config_path = tempdir.path().join("acp-stack.toml");
+        let config_path = tempdir.path().join("acps-config.toml");
         std::fs::write(
             &config_path,
             config.to_canonical_toml().expect("canonical test config"),

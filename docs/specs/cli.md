@@ -18,18 +18,19 @@
 | WebSockets     | `acps ws connections`, `ws sessions`, `ws disconnect`                       |
 | Shell          | `acps completion <shell>`                                                   |
 
-Commands read `~/.config/acp-stack/acp-stack.toml` by default unless an explicit path argument is documented.
+Commands read `~/.config/acp-stack/acps-config.toml` by default unless an explicit path argument is documented.
 
 Most operator commands accept global `--format text|json`; text is the default. Commands that remain text-only reject `--format json` instead of silently ignoring it. Existing `--json` flags remain accepted as aliases for `--format json` and conflict with explicit `--format text`. `acps logs query --follow --format json` emits newline-delimited event objects.
 
 ## Initialization
 
-`acps init` creates or validates config and state, initializes the encrypted secret store, generates API keys on first run, and optionally configures an agent, provider, workspace sources, MCP servers, edge profile, and testflight.
+`acps init` creates or validates config and state, initializes the encrypted secret store, generates API keys on first run, and optionally configures an agent, provider, workspace sources, MCP servers, edge profile, and testflight. See [init.md](init.md) for the end-to-end interactive flow and step sequence; this section is the flag reference.
 
 Common flags:
 
 ```sh
 acps init \
+  [--from-file <path>|--from-toml <toml>|--from-base64 <base64>] \
   [--agent <id>] [--non-interactive] \
   [--skills-source <openai|anthropic|github:owner>] [--skills <name,name>|--no-skills] \
   [--provider <provider-id>] [--api-key-ref <ref>] [--model <model-id>] [--mode <mode>] \
@@ -44,7 +45,7 @@ acps init \
   [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
 ```
 
-Interactive init may prompt for missing choices, including starter code sources, data sources, MCP declarations, provider, model, mode, and required secret values. Non-interactive first runs require `--agent <id>`; scripts should pass `--non-interactive` with the selected real agent id, explicit provider flags when provider setup is required, and resolvable secret refs. Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
+Interactive init may prompt for a config source, then for missing choices, including starter code sources, data sources, MCP declarations, provider, model, mode, and required secret values. `--from-file`, `--from-toml`, and `--from-base64` initialize from an existing `acps-config.toml`; the interactive source prompt offers file import and base64 paste, while `--from-toml` is for scripted raw TOML input. The base64 form is the same TOML content encoded for safer terminal paste. Agent, provider, and advertised model selectors are searchable. Non-interactive first runs require `--agent <id>` unless a complete config is imported; scripts should pass `--non-interactive` with the selected real agent id, explicit provider flags when provider setup is required, and resolvable secret refs. Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
 
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
 

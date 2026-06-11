@@ -1,4 +1,4 @@
-//! TOML schema types for `acp-stack.toml`.
+//! TOML schema types for `acps-config.toml`.
 //!
 //! Every nested config struct lives here. The root `Config` aggregator and the
 //! `RawConfig` deserialization shim stay in `src/config.rs` because they own

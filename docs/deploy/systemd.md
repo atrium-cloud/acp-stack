@@ -62,7 +62,7 @@ Default paths match the Docker image:
 ```text
 /workspace
 /workspace/uploads
-/home/acp/.config/acp-stack/acp-stack.toml
+/home/acp/.config/acp-stack/acps-config.toml
 /home/acp/.config/acp-stack/age.key
 /home/acp/.local/share/acp-stack/state.sqlite
 /home/acp/.local/share/acp-stack/secrets.age

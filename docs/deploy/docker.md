@@ -20,7 +20,7 @@ Mount these paths for a persistent instance:
 /home/acp/.local/share/acp-stack
 ```
 
-`/workspace` stores project files. The config and state mounts preserve `acp-stack.toml`, `age.key`, `state.sqlite`, and `secrets.age`.
+`/workspace` stores project files. The config and state mounts preserve `acps-config.toml`, `age.key`, `state.sqlite`, and `secrets.age`.
 
 ## First Run
 

@@ -125,7 +125,7 @@ fn create_runtime_files(root: &std::path::Path, state_path: &std::path::Path) ->
     let state_dir = state_path.parent().expect("state parent").to_path_buf();
     std::fs::create_dir_all(&config_dir).expect("config dir");
     std::fs::create_dir_all(&state_dir).expect("state dir");
-    let config_path = config_dir.join("acp-stack.toml");
+    let config_path = config_dir.join("acps-config.toml");
     let age_key_path = config_dir.join("age.key");
     let secret_store_path = state_dir.join("secrets.age");
     std::fs::write(&config_path, "test config").expect("write config");

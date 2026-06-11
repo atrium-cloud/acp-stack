@@ -56,7 +56,7 @@ impl Harness {
                 workspace_root.to_string_lossy().into_owned(),
             ]);
         }
-        let config_path = tempdir.path().join("acp-stack.toml");
+        let config_path = tempdir.path().join("acps-config.toml");
         std::fs::write(
             &config_path,
             config.to_canonical_toml().expect("canonical test config"),

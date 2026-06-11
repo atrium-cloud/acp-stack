@@ -15,7 +15,7 @@
 //! `~/.pi/agent/models.json` for Pi — so the candidate list covers those
 //! too when a custom provider is configured. Without this, a failed
 //! `--mode` validation on a custom-provider init could leave the side file
-//! behind even though `acp-stack.toml` was never written.
+//! behind even though `acps-config.toml` was never written.
 
 use std::path::{Path, PathBuf};
 
