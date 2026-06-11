@@ -2,11 +2,11 @@ use acp_stack::state::{
     AuthFailureFilter, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM,
     Event, EventFilter, FailureClass, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED,
     INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
-    InstallerRunInput, ListedSessionRecord, LogOrder, NewInitRun, NewInitStep,
-    NewPermissionRequest, NewPromptRecord, NewSessionRecord, PermissionStatus, PromptStatus,
-    SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
-    SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SecurityCategory, StateStore,
-    default_state_path,
+    INSTALLER_METHOD_GITHUB, INSTALLER_OPERATION_INSTALL, InstallerRunInput, ListedSessionRecord,
+    LogOrder, NewInitRun, NewInitStep, NewPermissionRequest, NewPromptRecord, NewSessionRecord,
+    PermissionStatus, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SecurityCategory,
+    StateStore, default_state_path,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -39,7 +39,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        17
+        18
     );
 }
 
@@ -552,6 +552,8 @@ fn installer_runs_round_trip_records_and_returns_version() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.2.3"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -567,6 +569,8 @@ fn installer_runs_round_trip_records_and_returns_version() {
             exit_status: Some(0),
             step: "adapter",
             version: None,
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: None,
             log_dir: None,
             apply_run_id: None,
         })
@@ -579,9 +583,12 @@ fn installer_runs_round_trip_records_and_returns_version() {
     assert_eq!(history[0].step, "adapter");
     assert_eq!(history[0].agent_id.as_deref(), Some("test-agent"));
     assert!(history[0].version.is_none());
+    assert_eq!(history[0].operation, INSTALLER_OPERATION_INSTALL);
+    assert!(history[0].method.is_none());
     assert_eq!(history[1].step, "harness");
     assert_eq!(history[1].agent_id.as_deref(), Some("test-agent"));
     assert_eq!(history[1].version.as_deref(), Some("v1.2.3"));
+    assert_eq!(history[1].method.as_deref(), Some(INSTALLER_METHOD_GITHUB));
 
     let latest = store
         .latest_successful_installer_runs_for_agent("test-agent")
@@ -617,6 +624,8 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -632,6 +641,8 @@ fn latest_successful_installer_runs_are_scoped_by_agent_id() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v9.9.9"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -663,6 +674,8 @@ fn installer_runs_round_trip_records_log_dir() {
             exit_status: Some(0),
             step: "harness",
             version: Some("v1.0.0"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: Some("/var/lib/acp-stack/installer-logs/test-agent/2026-05-22T10:00:00.000000000Z/harness"),
             apply_run_id: Some("dap_test"),
         })
@@ -695,6 +708,8 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             exit_status: Some(0),
             step: "install",
             version: Some("v1.0.0"),
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -710,6 +725,8 @@ fn latest_successful_installer_runs_skips_failed_rows() {
             exit_status: Some(1),
             step: "install",
             version: None,
+            operation: INSTALLER_OPERATION_INSTALL,
+            method: Some(INSTALLER_METHOD_GITHUB),
             log_dir: None,
             apply_run_id: None,
         })
@@ -769,7 +786,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 17")
+            .contains("state schema version 99 is newer than supported version 18")
     );
 }
 
@@ -2298,8 +2315,18 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        17
+        18
     );
+    let inspection = Connection::open(&path).expect("sqlite inspection should open");
+    let columns = inspection
+        .prepare("PRAGMA table_info(installer_runs)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("installer_runs columns should query");
+    assert!(columns.iter().any(|name| name == "operation"));
+    assert!(columns.iter().any(|name| name == "method"));
 
     let done = store
         .get_prompt("prm_legacy_done")
@@ -3003,22 +3030,12 @@ fn cursor_pagination_stable_under_concurrent_writes() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let path = tempdir.path().join("state.sqlite");
 
-    // Enable WAL so a background writer can append while the foreground
-    // reader paginates without `SQLITE_BUSY` and without blocking. WAL is a
-    // file-header setting — once flipped on, both connections inherit it. We
-    // do this on a raw Connection because `StateStore::open` deliberately
-    // doesn't expose a PRAGMA hook.
-    {
-        let raw = Connection::open(&path).expect("raw open for WAL pragma");
-        raw.pragma_update(None, "journal_mode", "WAL")
-            .expect("enable WAL");
-        // Reasonable busy timeout so the rare contention on the shared file
-        // header doesn't surface as `SQLITE_BUSY`. 2s is plenty for a unit
-        // test and well below the test harness's per-test budget.
-        raw.busy_timeout(std::time::Duration::from_secs(2))
-            .expect("busy timeout");
-    }
-
+    // `StateStore::open` enables WAL and a busy timeout on every connection, so
+    // a background writer can append while the foreground reader paginates
+    // without `SQLITE_BUSY`. This exercises that guarantee: two independent
+    // StateStore handles (separate connections, no shared mutex) write and read
+    // the same file concurrently. The tighter per-handle timeout below keeps
+    // rare file-header contention well under the test harness's budget.
     let reader = StateStore::open(&path).expect("reader open");
     reader.migrate().expect("migration should pass");
     reader

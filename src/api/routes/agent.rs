@@ -84,6 +84,8 @@ async fn install_agent_for_config(
                 exit_status: result.row.exit_status,
                 step: &result.row.step,
                 version: result.row.version.as_deref(),
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                method: result.row.method.as_deref(),
                 log_dir: result.row.log_dir.as_deref(),
                 apply_run_id: None,
             })?;
@@ -128,6 +130,8 @@ async fn install_agent_for_config(
                     exit_status: row.exit_status,
                     step: &row.step,
                     version: row.version.as_deref(),
+                    operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                    method: row.method.as_deref(),
                     log_dir: row.log_dir.as_deref(),
                     apply_run_id: None,
                 })?;

@@ -8,6 +8,7 @@ use crate::fs_util::{
 };
 use crate::runtime::agent::stale_prompt_sweeper::StalePromptSweeper;
 use crate::runtime::agent::supervisor::ServerLifecycle;
+use crate::runtime::install::agent_auto_update::AgentAutoUpdater;
 use crate::runtime::logging::supabase_mirror::SUPABASE_DEFAULT_DB_URL_REF;
 use crate::runtime::logging::supabase_sink::{SupabaseSink, SupabaseSinkCredential};
 use crate::secrets::SecretStore;
@@ -291,6 +292,13 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             app_state.config.prompts.effective_stale_threshold(),
             app_state.config.prompts.effective_sweep_interval(),
         );
+        let agent_auto_updater = AgentAutoUpdater::spawn(
+            home.clone(),
+            app_state.runtime_paths.as_ref().config_path.clone(),
+            app_state.runtime_paths.as_ref().state_path.clone(),
+            state_handle.clone(),
+            agent_supervisor.clone(),
+        );
 
         // The acpctl UDS server runs alongside the TCP server. Both subscribe
         // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
@@ -328,6 +336,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         // `prompt.stalled` event after the lifecycle row, muddling the
         // durable shutdown trail.
         stale_prompt_sweeper.shutdown().await;
+        agent_auto_updater.shutdown().await;
         let reason = match &serve_result {
             Ok(()) => "signal",
             Err(_) => "error",

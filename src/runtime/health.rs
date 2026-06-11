@@ -905,6 +905,8 @@ mod tests {
                 exit_status: exit,
                 step: "deps_apply",
                 version: None,
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: None,
             })
@@ -929,6 +931,8 @@ mod tests {
                 exit_status: exit,
                 step: DEPS_APPLY_STEP,
                 version: None,
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: Some(apply_run_id),
             })
@@ -1091,6 +1095,8 @@ mod tests {
                 exit_status: Some(1),
                 step: "install",
                 version: None,
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                method: Some(crate::state::INSTALLER_METHOD_SHELL),
                 log_dir: None,
                 apply_run_id: None,
             })

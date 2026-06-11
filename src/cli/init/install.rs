@@ -87,9 +87,9 @@ fn resolve_agent_env(home: &Path, config: &Config) -> Result<HashMap<String, Str
 }
 
 pub(super) fn operator_registry_override(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("agents.toml")
+    crate::runtime::install::operator_registry_override(home)
 }
 
 pub(super) fn local_bin_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("bin")
+    crate::runtime::install::local_bin_dir(home)
 }

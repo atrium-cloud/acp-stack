@@ -69,6 +69,8 @@ fn run_installer_history(args: InstallerHistoryArgs, output: OutputFormat) -> Re
                     "exit_status": row.exit_status,
                     "step": &row.step,
                     "version": &row.version,
+                    "operation": &row.operation,
+                    "method": &row.method,
                     "log_dir": &row.log_dir,
                     "apply_run_id": &row.apply_run_id,
                     "duration_ms": duration_ms(row),

@@ -12,6 +12,14 @@ use std::time::Duration;
 
 use super::sink_outbox;
 
+/// Busy-timeout applied to every state connection. The daemon funnels its own
+/// writes through a single connection behind a mutex, but the agent updater
+/// opens a second connection (in `spawn_blocking`) and `acps agent update
+/// --restart` opens one from a separate process while the daemon is live. With
+/// WAL plus this timeout a contended writer waits for the lock instead of
+/// failing immediately with `SQLITE_BUSY`.
+const STATE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct StateStore {
     connection: Connection,
     path: PathBuf,
@@ -37,7 +45,10 @@ impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let connection = Connection::open(&path)?;
-        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Set the busy timeout before switching journal modes so the WAL
+        // transition itself can wait for any concurrent connection.
+        connection.busy_timeout(STATE_BUSY_TIMEOUT)?;
+        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
         Ok(Self {
             connection,
             path,

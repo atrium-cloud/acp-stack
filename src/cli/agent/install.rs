@@ -51,7 +51,7 @@ pub(super) fn run_agent_daemon_post(
     Ok(())
 }
 
-async fn post_agent_daemon(
+pub(super) async fn post_agent_daemon(
     base_url: &str,
     path: &'static str,
     admin_key: &str,
@@ -148,11 +148,11 @@ pub(super) fn run_agent_install(_args: AgentInstallArgs, output: OutputFormat) -
 }
 
 pub(in crate::cli) fn operator_registry_override(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("agents.toml")
+    crate::runtime::install::operator_registry_override(home)
 }
 
 pub(super) fn local_bin_dir(home: &Path) -> PathBuf {
-    home.join(".local").join("bin")
+    crate::runtime::install::local_bin_dir(home)
 }
 
 pub(super) fn resolve_agent_env_for_cli(

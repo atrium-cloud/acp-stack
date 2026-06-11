@@ -271,7 +271,7 @@ fn operator_registry_override_path() -> Option<PathBuf> {
 }
 
 fn registry_override_path(home: &Path) -> PathBuf {
-    home.join(".config").join("acp-stack").join("agents.toml")
+    crate::runtime::install::operator_registry_override(home)
 }
 
 pub(crate) fn populate_agent_adapter_from_registry(

@@ -41,6 +41,10 @@ cwd = "/workspace"
 env = ["<provider-api-key-ref>"]
 restart = "on-crash"
 
+[agent.auto_update]
+enabled = true
+frequency = "1d"
+
 [permissions]
 mode = "auto"
 review = ["sudo *", "rm *"]
@@ -71,6 +75,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[security.http]`  | origin checks, rate limits, proxy trust, and auth-failure blocking   |
 | `[workspace]`      | workspace root, uploads path, shell, runtime user, and file limits   |
 | `[agent]`          | configured ACP agent process and injected secret refs                |
+| `[agent.auto_update]` | periodic managed agent update policy                             |
 | `[agent.provider]` | selected provider/model metadata for provider-backed agents          |
 | `[permissions]`    | command and ACP permission policy                                    |
 | `[commands]`       | mediated shell command limits and env allowlist                      |
@@ -131,6 +136,8 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 | `restart` | process restart policy: `on-crash` or `never`             |
 
 Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
+
+`[agent.auto_update]` controls daemon-side managed agent updates. `frequency` uses duration suffixes such as `12h`, `1d`, `3d`, or `4w`. Existing configs without this block do not auto-update until the block is added or init writes it for a supported agent. The daemon auto-updater only runs when the agent is stopped and never interrupts a running agent, so a continuously running agent is skipped each cycle; apply updates to a live agent with `acps agent update --restart`.
 
 ## Permissions And Commands
 

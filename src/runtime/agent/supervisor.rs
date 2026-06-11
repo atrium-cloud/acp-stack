@@ -17,6 +17,7 @@
 //! Stopped --start()--> Starting --(initialize succeeds)--> Running
 //!                          \--(initialize fails)----------> Stopped
 //! Running --stop()---> Stopping --(child reaped)--> Stopped
+//! Stopped --begin_update()--> Updating --finish_update()--> Stopped
 //! ```
 //!
 //! `Starting` exists so that two concurrent `POST /v1/agent/start` requests
@@ -144,6 +145,7 @@ enum AgentState {
     Starting,
     Running(Arc<AcpBridge>),
     Stopping,
+    Updating,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +155,7 @@ pub enum AgentStateLabel {
     Starting,
     Running,
     Stopping,
+    Updating,
 }
 
 impl AgentStateLabel {
@@ -162,6 +165,7 @@ impl AgentStateLabel {
             AgentState::Starting => Self::Starting,
             AgentState::Running(_) => Self::Running,
             AgentState::Stopping => Self::Stopping,
+            AgentState::Updating => Self::Updating,
         }
     }
 
@@ -175,6 +179,7 @@ impl AgentStateLabel {
             Self::Starting => "starting",
             Self::Running => "running",
             Self::Stopping => "stopping",
+            Self::Updating => "updating",
         }
     }
 }
@@ -319,9 +324,10 @@ impl AgentSupervisor {
                 AgentState::Stopped => {
                     *guard = AgentState::Starting;
                 }
-                AgentState::Starting | AgentState::Running(_) | AgentState::Stopping => {
-                    return Err(StackError::AgentAlreadyRunning);
-                }
+                AgentState::Starting
+                | AgentState::Running(_)
+                | AgentState::Stopping
+                | AgentState::Updating => return Err(StackError::AgentAlreadyRunning),
             }
         }
 
@@ -483,6 +489,23 @@ impl AgentSupervisor {
         matches!(*self.state.lock().await, AgentState::Running(_))
     }
 
+    pub async fn try_begin_update(&self) -> bool {
+        let mut guard = self.state.lock().await;
+        if matches!(*guard, AgentState::Stopped) {
+            *guard = AgentState::Updating;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn finish_update(&self) {
+        let mut guard = self.state.lock().await;
+        if matches!(*guard, AgentState::Updating) {
+            *guard = AgentState::Stopped;
+        }
+    }
+
     /// Sync sessions discoverable via ACP `session/list` into durable local
     /// state. This is discovery only: newly learned sessions are marked
     /// `available` until a caller explicitly loads or resumes them.
@@ -496,7 +519,10 @@ impl AgentSupervisor {
             let guard = self.state.lock().await;
             match &*guard {
                 AgentState::Running(bridge) => Arc::clone(bridge),
-                AgentState::Stopped | AgentState::Starting | AgentState::Stopping => {
+                AgentState::Stopped
+                | AgentState::Starting
+                | AgentState::Stopping
+                | AgentState::Updating => {
                     return Ok(SessionListSyncResult {
                         attempted: false,
                         status: SessionListSyncStatus::NotRunning,
@@ -1328,7 +1354,10 @@ async fn monitor_bridge_exit(
             AgentState::Stopped => {
                 *guard = AgentState::Starting;
             }
-            AgentState::Starting | AgentState::Running(_) | AgentState::Stopping => {
+            AgentState::Starting
+            | AgentState::Running(_)
+            | AgentState::Stopping
+            | AgentState::Updating => {
                 tracing::debug!(
                     agent_id = %restart_context.agent.id,
                     "agent supervisor: automatic restart abandoned because state changed"

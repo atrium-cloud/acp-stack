@@ -1,4 +1,7 @@
-use crate::config::{CloudflareEdgeConfig, Config, DependencyEntry, EdgeConfig};
+use crate::config::{
+    AgentAutoUpdateConfig, CloudflareEdgeConfig, Config, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY,
+    DependencyEntry, EdgeConfig,
+};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::env_refs_for_agent_id;
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
@@ -139,6 +142,9 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         config.agent.mode = None;
         config.agent.model = None;
         config.agent.provider = None;
+        config.agent.auto_update = default_supported_agent_auto_update();
+    } else if config.agent.auto_update.is_none() {
+        config.agent.auto_update = default_supported_agent_auto_update();
     }
     config.agent.expected_sha256 = None;
     config.agent.restart = "on-crash".to_owned();
@@ -167,6 +173,13 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
             config.agent.args = Vec::new();
         }
     }
+}
+
+fn default_supported_agent_auto_update() -> Option<AgentAutoUpdateConfig> {
+    Some(AgentAutoUpdateConfig {
+        enabled: true,
+        frequency: DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY.to_owned(),
+    })
 }
 
 fn default_agent_env_refs(agent_id: &str) -> Vec<String> {

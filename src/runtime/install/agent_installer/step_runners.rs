@@ -18,9 +18,9 @@ use crate::runtime::process_runner::{
 };
 
 use super::{
-    InstallerOutcome, InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES,
-    ResolvedInstallSpec, StepResult, current_timestamp, resolve_creates, sha256_of_file,
-    verify_expected_sha256,
+    INSTALL_METHOD_GITHUB, INSTALL_METHOD_NPM, INSTALL_METHOD_SHELL, InstallerOutcome,
+    InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES, ResolvedInstallSpec,
+    StepResult, current_timestamp, resolve_creates, sha256_of_file, verify_expected_sha256,
 };
 
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -143,9 +143,12 @@ pub(super) fn run_install_step(
                 step_label,
                 started_at,
                 result,
-                &creates,
-                workspace_root,
-                &[dest_dir],
+                CreatesCheck {
+                    creates: &creates,
+                    workspace_root,
+                    extra_path_dirs: &[dest_dir],
+                },
+                Some(INSTALL_METHOD_SHELL.to_owned()),
                 None,
             )
         }
@@ -173,9 +176,12 @@ pub(super) fn run_install_step(
                 step_label,
                 started_at,
                 result,
-                &creates,
-                workspace_root,
-                &[dest_dir],
+                CreatesCheck {
+                    creates: &creates,
+                    workspace_root,
+                    extra_path_dirs: &[dest_dir],
+                },
+                Some(INSTALL_METHOD_NPM.to_owned()),
                 Some(version),
             )
         }
@@ -208,13 +214,18 @@ pub(super) fn run_install_step(
     }
 }
 
+pub(super) struct CreatesCheck<'a> {
+    creates: &'a str,
+    workspace_root: &'a Path,
+    extra_path_dirs: &'a [&'a Path],
+}
+
 pub(super) fn shell_step_with_creates(
     step_label: &'static str,
     started_at: String,
     run_result: Result<CapturedOutput>,
-    creates: &str,
-    workspace_root: &Path,
-    extra_path_dirs: &[&Path],
+    creates_check: CreatesCheck<'_>,
+    method: Option<String>,
     version: Option<String>,
 ) -> StepResult {
     let finished_at = current_timestamp();
@@ -229,6 +240,7 @@ pub(super) fn shell_step_with_creates(
                 stderr: captured.stderr.clone(),
                 exit_status: captured.exit_status,
                 step: step_label.to_owned(),
+                method: method.clone(),
                 version: version.clone(),
                 log_dir: None,
             };
@@ -241,11 +253,15 @@ pub(super) fn shell_step_with_creates(
                     row,
                 };
             }
-            let outcome = resolve_creates(creates, workspace_root, extra_path_dirs)
-                .map(|_| ())
-                .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
-                    name: creates.to_owned(),
-                });
+            let outcome = resolve_creates(
+                creates_check.creates,
+                creates_check.workspace_root,
+                creates_check.extra_path_dirs,
+            )
+            .map(|_| ())
+            .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
+                name: creates_check.creates.to_owned(),
+            });
             if let Err(err) = &outcome {
                 row.status = "failed".to_owned();
                 row.stderr = append_stderr_detail(&row.stderr, err);
@@ -262,6 +278,7 @@ pub(super) fn shell_step_with_creates(
                 stderr: "[installer timed out]".into(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                method: method.clone(),
                 version: version.clone(),
                 log_dir: None,
             },
@@ -276,6 +293,7 @@ pub(super) fn shell_step_with_creates(
                 stderr: String::new(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                method,
                 version,
                 log_dir: None,
             },
@@ -304,6 +322,7 @@ pub(super) fn github_release_step(
                 stderr: String::new(),
                 exit_status: Some(0),
                 step: step_label.to_owned(),
+                method: Some(INSTALL_METHOD_GITHUB.to_owned()),
                 version: Some(outcome.release_tag),
                 log_dir: None,
             },
@@ -320,6 +339,7 @@ pub(super) fn github_release_step(
                     stderr,
                     exit_status: None,
                     step: step_label.to_owned(),
+                    method: Some(INSTALL_METHOD_GITHUB.to_owned()),
                     version: version_pin.map(str::to_owned),
                     log_dir: None,
                 },
@@ -348,6 +368,7 @@ pub(super) fn finalize_shell_step(
                 stderr: captured.stderr.clone(),
                 exit_status: captured.exit_status,
                 step: step_label.to_owned(),
+                method: Some(INSTALL_METHOD_SHELL.to_owned()),
                 version: None,
                 log_dir: None,
             };
@@ -389,6 +410,7 @@ pub(super) fn finalize_shell_step(
                 stderr: "[installer timed out]".into(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                method: Some(INSTALL_METHOD_SHELL.to_owned()),
                 version: None,
                 log_dir: None,
             },
@@ -403,6 +425,7 @@ pub(super) fn finalize_shell_step(
                 stderr: String::new(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                method: Some(INSTALL_METHOD_SHELL.to_owned()),
                 version: None,
                 log_dir: None,
             },
@@ -499,6 +522,7 @@ fn resolve_npm_package_version(
                     stderr: captured.stderr,
                     exit_status: captured.exit_status,
                     step: step_label.to_owned(),
+                    method: Some(INSTALL_METHOD_NPM.to_owned()),
                     version: None,
                     log_dir: None,
                 },
@@ -514,6 +538,7 @@ fn resolve_npm_package_version(
                 stderr: String::new(),
                 exit_status: None,
                 step: step_label.to_owned(),
+                method: Some(INSTALL_METHOD_NPM.to_owned()),
                 version: None,
                 log_dir: None,
             },
@@ -539,6 +564,7 @@ fn npm_version_failure_step(
             stderr: append_stderr_detail(&captured.stderr, &reason),
             exit_status: captured.exit_status,
             step: step_label.to_owned(),
+            method: Some(INSTALL_METHOD_NPM.to_owned()),
             version: None,
             log_dir: None,
         },

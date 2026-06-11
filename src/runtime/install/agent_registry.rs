@@ -85,6 +85,7 @@ impl RegistryCatalog {
             entry.harness = Some(HarnessSpec {
                 id: placebo_path.clone(),
                 install: install.clone(),
+                update: Default::default(),
             });
         }
         self.merge(RegistryCatalog {
@@ -317,12 +318,15 @@ pub enum RegistryStdioFraming {
 pub struct HarnessSpec {
     pub id: String,
     pub install: InstallSet,
+    #[serde(default)]
+    pub update: UpdateSet,
 }
 
 impl HarnessSpec {
     fn validate(&self, agent_id: &str, github: Option<&str>) -> Result<()> {
         validate_nonempty(agent_id, "harness.id", &self.id)?;
-        self.install.validate(agent_id, "harness.install", github)
+        self.install.validate(agent_id, "harness.install", github)?;
+        self.update.validate(agent_id, "harness.update")
     }
 }
 
@@ -333,6 +337,8 @@ pub struct AdapterSpec {
     #[serde(default)]
     pub github: Option<String>,
     pub install: InstallSet,
+    #[serde(default)]
+    pub update: UpdateSet,
 }
 
 impl AdapterSpec {
@@ -342,7 +348,8 @@ impl AdapterSpec {
             github_url_from_value(agent_id, "adapter.github", github)?;
         }
         self.install
-            .validate(agent_id, "adapter.install", self.github.as_deref())
+            .validate(agent_id, "adapter.install", self.github.as_deref())?;
+        self.update.validate(agent_id, "adapter.update")
     }
 }
 
@@ -355,6 +362,34 @@ pub struct InstallSet {
     pub npm: Option<NpmInstall>,
     #[serde(default)]
     pub github: Option<GithubInstall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSet {
+    #[serde(default)]
+    pub apt: Option<AptUpdate>,
+}
+
+impl UpdateSet {
+    fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
+        if let Some(apt) = &self.apt {
+            apt.validate(agent_id, &format!("{field}.apt"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AptUpdate {
+    pub package: String,
+}
+
+impl AptUpdate {
+    fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
+        validate_nonempty(agent_id, &format!("{field}.package"), &self.package)
+    }
 }
 
 impl InstallSet {
@@ -651,6 +686,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         harness: Some(HarnessSpec {
             id: placebo_path.to_owned(),
             install,
+            update: Default::default(),
         }),
     }
 }

@@ -644,7 +644,7 @@ pub enum StackError {
     #[error("permissions.mode must be one of auto, supervised, locked")]
     InvalidPermissionsMode,
 
-    #[error("{field} must be a duration like \"10m\", \"5s\", or \"100ms\"")]
+    #[error("{field} must be a duration like \"10m\", \"5s\", \"1d\", \"4w\", or \"100ms\"")]
     InvalidDurationField { field: &'static str },
 
     #[error("env variable name `{name}` is not a valid POSIX identifier")]

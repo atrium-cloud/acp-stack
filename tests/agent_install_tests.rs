@@ -238,6 +238,7 @@ fn adapter_kind_entry() -> RegistryEntry {
                     },
                 }),
             },
+            update: Default::default(),
         }),
         adapter: Some(AdapterSpec {
             id: ADAPTER_BIN.to_owned(),
@@ -257,6 +258,7 @@ fn adapter_kind_entry() -> RegistryEntry {
                     },
                 }),
             },
+            update: Default::default(),
         }),
     }
 }
@@ -277,6 +279,7 @@ fn agent_config(command: &str) -> AgentConfig {
         adapter: None,
         provider: None,
         subagent: None,
+        auto_update: None,
         install: None,
     }
 }
