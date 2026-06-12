@@ -6,7 +6,7 @@
 
 `acps init` runs interactively when stdin is a TTY and `--non-interactive` is not set. In that mode it prompts for missing choices. Agent, provider, and advertised model selectors are searchable. Optional prompts expose an explicit Skip choice; Esc and Ctrl-C abort init. When stdin is not a TTY, or `--non-interactive` is passed, every prompt is skipped and the corresponding value must be supplied by flag.
 
-The non-interactive contract: a first run that creates a new config requires either `--agent <id>` or a complete imported config, plus resolvable secret references for any provider or MCP secret refs. A non-interactive first run with neither fails before writing any config rather than leaving a placeholder agent on disk.
+The non-interactive contract: a first run that creates a new config requires `--agent <id>`, the `--custom-agent-*` flag set, or a complete imported config. Provider, MCP, and agent env secret refs must resolve when used. A non-interactive first run with no agent path fails before writing config.
 
 ## The Resumable Run
 
@@ -22,21 +22,90 @@ A failed step records the typed error and preserves any captured stdout/stderr i
 
 The operator-facing sequence, in order:
 
-1. Config source. The operator imports an existing config, resumes an interrupted init, or starts fresh. Imports accept an `acps-config.toml` path, scripted TOML text, or base64-encoded `acps-config.toml` text for safer terminal paste; the interactive source prompt offers file import and base64 paste. Imported values are authoritative; later steps run only when required fields or optional sections are missing and the operator chooses to fill them.
-2. Path and registry preflight. Init resolves the config, state, age-key, and secret-store paths under `~/.config/acp-stack` and `~/.local/share/acp-stack`, creates the owner-only directories, and loads the embedded agent registry (with the optional operator override at `~/.config/acp-stack/agents.toml`).
-3. Agent selection (new config only). If no `--agent` was passed, interactive runs present searchable supported registry agents and the operator picks one; non-interactive runs require the flag. Unsupported agents (browser-OAuth, non-headless) are rejected here, before any install.
-4. Starter-config selections (new config only, interactive). Init offers, as add-loops, starter code sources (Git repos), data sources (local paths or HTTPS archives), the Linear MCP preset, custom stdio/HTTP MCP servers, and the secret references those MCP servers require. Flags (`--code-from`, `--data-from`, `--mcp-*`) pre-populate these and skip the matching prompt.
-5. Config and state. Init writes the starter config (or validates an existing/imported one), opens the SQLite state store, and runs migrations.
-   Supported registry agents get `[agent.auto_update] enabled = true` with `frequency = "1d"`. Re-confirming the same agent preserves an existing policy; switching agents resets to the supported-agent default.
-6. Agent Skills selection (interactive). Init offers an Agent Skills source (OpenAI, Anthropic, or a custom GitHub owner) and a skill list, installed before testflight. `--skills-source`/`--skills`/`--no-skills` drive this non-interactively.
-7. Secrets. Init generates the session and admin API keys on a fresh store, or preserves them on a re-run. The plaintext keys are held for the final handover and shown exactly once (see Key Handover).
-8. Agent install. Init installs the configured agent from the embedded catalog; adapter-backed agents install both the harness and the adapter. Expected-hash verification runs when configured.
-9. Workspace materialization. Code sources are cloned into `/workspace/usr/code/<repo>/` and data sources placed under `/workspace/usr/data/<name>/`, with archive-extraction safety checks.
-10. Provider, model, and mode. Agents that support provider setup require a selected or pre-existing provider; agents that do not support provider setup skip this step. Interactive runs present searchable compatible providers — grouped by whether their secret refs are already available — and the operator picks one by entry or exact id. Required provider secret values are collected before model discovery. Existing/imported provider blocks are also checked for missing secret refs before discovery. Model and mode are then selected from, or validated against, the agent's ACP-advertised session config options. Flags `--provider`, `--api-key-ref`, `--model`, `--mode`, and the `--custom-provider` family drive this non-interactively.
-11. Agent-owned config. Init writes the supported agent's own config files so env-injected API keys are consumed headlessly.
-12. Edge artifacts. When `--edge cloudflare` is set, init writes the Cloudflare Tunnel artifacts (generated mode) or provisions the tunnel from secret refs (managed mode).
-13. Init complete. A durable completion event is recorded.
-14. Testflight (optional). See Testflight.
+1. Config source.
+    - Resume, import, or start fresh.
+    - Imports accept file path, TOML text, or base64 TOML. Imported values are authoritative.
+    - Later prompts run only for missing required fields or opted-in optional sections.
+2. Path and registry preflight.
+    - Resolve config, state, age-key, and secret-store paths.
+    - Create owner-only directories.
+    - Load the embedded registry and optional `~/.config/acp-stack/agents.toml` override.
+3. Agent selection (new config only).
+    - Registry agent:
+        - Interactive runs show searchable supported agents.
+        - Non-interactive runs use `--agent <id>`.
+        - Unsupported registry agents are rejected before install.
+    - Custom agent:
+        - Interactive runs offer "Custom agent...".
+        - Non-interactive runs use `--custom-agent-*`.
+        - The id must not be a registry agent id.
+        - Provider/model/mode setup is handled by the agent environment, not init flags.
+4. Starter-config selections (new config only).
+    - Sources:
+        - Code sources are Git repos.
+        - Data sources are local paths or HTTPS archives.
+    - MCP:
+        - Add the Linear preset, custom stdio servers, or custom HTTP servers.
+        - Add required MCP secret refs.
+    - Agent env:
+        - Add secret ref names to `[agent].env`.
+        - Interactive runs can collect masked values.
+    - Dependencies:
+        - Add `[dependencies.commands]` install actions with user or system scope.
+        - Flags pre-populate the matching sections and skip those prompts.
+5. Config and state.
+    - Write a starter config or validate the existing/imported config.
+    - Open SQLite state and run migrations.
+    - For supported registry agents:
+        - New selections get `[agent.auto_update] enabled = true`, `frequency = "1d"`.
+        - Re-confirming the same agent preserves policy.
+        - Switching agents resets to the supported-agent default.
+6. Agent Skills selection (interactive).
+    - Choose OpenAI, Anthropic, or `github:<owner>`.
+    - Choose skills to install before testflight.
+    - `--skills-source`, `--skills`, and `--no-skills` drive this without prompts.
+7. Secrets.
+    - Generate session and admin API keys on a fresh store.
+    - Preserve existing keys on re-run.
+    - Show fresh plaintext keys once at final handover.
+    - Store interactive agent env values and verify `--agent-env-ref` names before install.
+8. Agent install.
+    - Registry agents install from the embedded catalog.
+    - Custom agents install through `[agent.install]`.
+    - Adapter-backed agents install both harness and adapter.
+    - Expected-hash checks run when configured.
+    - Retry uses bounded exponential backoff, with each attempt recorded in installer history.
+9. Workspace materialization.
+    - Clone code sources into `/workspace/usr/code/<repo>/`.
+    - Place data sources under `/workspace/usr/data/<name>/`.
+    - Apply archive-extraction safety checks.
+10. Dependency install (optional).
+    - Pending actions are `[dependencies.commands]` entries whose `creates` target does not resolve.
+    - Interactive runs ask for confirmation and show system-scope notes.
+    - Non-interactive runs require `--deps-apply --deps-apply-yes`.
+    - Failures and unmet system privilege fail init and are recorded under `deps_apply`.
+11. Provider, model, and mode.
+    - Supported registry agents:
+        - Select or validate provider and required secret refs.
+        - Discover ACP-advertised model and mode options with one provisional session.
+        - Apply `--provider`, `--api-key-ref`, `--model`, `--mode`, and custom-provider flags.
+    - Custom agents:
+        - Skip provider/model discovery.
+        - Run one ACP connection gate when the launch command and cwd are present.
+        - Explicit `--model` and `--mode` are rejected.
+12. `acp-stack` auto-update.
+    - Configure `[updates.acp_stack]` as on, security-only, or off.
+    - Frequencies use day/week units, minimum `1d`.
+    - Explicit `--stack-update` flags apply on any run.
+    - Existing configs skip the prompt when no stack-update flags are supplied.
+13. Agent-owned config.
+    - Write supported-agent config files for headless API-key use.
+14. Edge artifacts.
+    - For `--edge cloudflare`, write generated tunnel artifacts or provision managed tunnel refs.
+15. Init complete.
+    - Record the durable completion event.
+16. Testflight (optional).
+    - See Testflight.
 
 After the steps settle, init prints a summary: the config, state, secret-store, and age-key paths, and the auth status.
 

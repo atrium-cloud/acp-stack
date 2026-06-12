@@ -38,6 +38,7 @@ pub mod step_kind {
     pub const SECRETS_INIT: &str = "secrets_init";
     pub const AGENT_INSTALL: &str = "agent_install";
     pub const AGENT_SKILLS_INSTALL: &str = "agent_skills_install";
+    pub const DEPS_APPLY: &str = "deps_apply";
     pub const PROVIDER_CONFIGURE: &str = "provider_configure";
     pub const WORKSPACE_MATERIALIZE: &str = "workspace_materialize";
     pub const AGENT_HEADLESS_CONFIG: &str = "agent_headless_config";

@@ -32,7 +32,7 @@ Pinned installs use catalog metadata when available. Floating installs use the c
 
 ## Init
 
-`acps init` creates or validates config and state, initializes encrypted secrets, generates API keys when absent, and can configure agents, Agent Skills, providers, workspace sources, MCP servers, edge profiles, and testflight.
+`acps init` creates or validates config and state, initializes encrypted secrets, generates API keys when absent, and can configure agents (registry or custom), Agent Skills, providers, workspace sources, MCP servers, extra agent environment variables, dependency install actions, edge profiles, and testflight. The full operator-facing sequence is documented in [init.md](init.md).
 
 Init is resumable. A resumed run skips completed work whose result still exists and retries incomplete or failed work. Existing config and API keys are preserved unless the operator explicitly resets the instance.
 

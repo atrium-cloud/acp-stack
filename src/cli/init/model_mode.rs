@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::dev_gates::{FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV};
+use crate::dev_gates::{
+    FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, TEST_SKIP_AGENT_INSTALL_ENV,
+};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
@@ -15,6 +17,7 @@ use super::headless_snapshot::{
     capture_dir_listings_for, capture_path_snapshots, headless_config_candidate_paths,
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
+use super::registry_apply::is_custom_agent;
 use super::{InitArgs, prompt, prompts_enabled};
 
 /// Outcome of a single category (model or mode) selection step.
@@ -42,6 +45,20 @@ pub(super) fn preflight_model_and_mode_for_init(
     config: &Config,
     config_path: &Path,
 ) -> Result<()> {
+    if is_custom_agent(config, registry) {
+        if args.model.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "--model",
+                reason: "custom agents configure models through their own environment; `--model` applies only to supported registry agents".to_owned(),
+            });
+        }
+        if args.mode.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "--mode",
+                reason: "custom agents configure modes through their own environment; `--mode` applies only to supported registry agents".to_owned(),
+            });
+        }
+    }
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(());
     };
@@ -338,6 +355,62 @@ pub(super) fn configure_model_and_mode_for_init(
             Err(err)
         }
     }
+}
+
+/// Connection gate: confirm the configured agent launches and completes an ACP
+/// session. Registry agents are verified implicitly by model/mode discovery,
+/// which spawns the same provisional session; this gate exists for agents that
+/// do not run discovery (custom agents), so a non-ACP or broken binary is
+/// caught during init rather than at first session. Skips quietly when the
+/// binary is not yet on PATH or the spawn cwd is missing — the same
+/// preconditions discovery uses — so a partial or `--skip-workspace-init` run is
+/// not failed here.
+pub(super) fn verify_agent_acp_connection(home: &Path, config: &Config) -> Result<()> {
+    let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
+        || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
+    let spawn_cwd: PathBuf = config
+        .agent
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
+    if !fixture_discovery {
+        if !spawn_cwd.is_dir() {
+            println!(
+                "acp connection check skipped: spawn cwd `{}` is not yet provisioned",
+                spawn_cwd.display(),
+            );
+            return Ok(());
+        }
+        if crate::runtime::agent::acp_bridge::resolve_command_path(
+            &config.agent.command,
+            &spawn_cwd,
+        )
+        .is_none()
+        {
+            if crate::dev_gates::fixture_enabled(TEST_SKIP_AGENT_INSTALL_ENV) {
+                println!(
+                    "acp connection check skipped: agent command `{}` not found on PATH",
+                    config.agent.command,
+                );
+                return Ok(());
+            }
+            return Err(StackError::AgentInitializeFailed {
+                reason: format!(
+                    "agent command `{}` did not resolve after custom agent install",
+                    config.agent.command,
+                ),
+            });
+        }
+    }
+    fetch_session_config(home, config)
+        .map(|_| ())
+        .map_err(|error| StackError::AgentInitializeFailed {
+            reason: format!(
+                "agent `{}` failed to complete an ACP session during init: {error}",
+                config.agent.command,
+            ),
+        })
 }
 
 fn configure_model_for_init(
