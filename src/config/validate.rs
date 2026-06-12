@@ -63,6 +63,13 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         "security.http.auth_failures_per_minute",
         config.security.http.auth_failures_per_minute,
     )?;
+    // Parsed at runtime by `http_hardening`; validate at config load too so a
+    // malformed or absurd block window surfaces here, with the shared 1970
+    // hardstop applied like every other duration field.
+    self::primitives::validate_duration_field(
+        "security.http.auth_block_duration",
+        &config.security.http.auth_block_duration,
+    )?;
     validate_absolute_path("workspace.root", &config.workspace.root)?;
     validate_absolute_path("workspace.uploads", &config.workspace.uploads)?;
     validate_absolute_path("workspace.default_shell", &config.workspace.default_shell)?;
@@ -168,16 +175,10 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
 }
 
 fn validate_stack_updates(config: &Config) -> Result<()> {
-    let frequency = self::primitives::parse_duration_string(&config.updates.acp_stack.frequency)
-        .ok_or(StackError::InvalidDurationField {
-            field: "updates.acp_stack.frequency",
-        })?;
-    if frequency.is_zero() {
-        return Err(StackError::InvalidParam {
-            field: "updates.acp_stack.frequency",
-            reason: "must be greater than zero".to_owned(),
-        });
-    }
+    self::primitives::normalize_day_or_week_duration(
+        "updates.acp_stack.frequency",
+        &config.updates.acp_stack.frequency,
+    )?;
     Ok(())
 }
 

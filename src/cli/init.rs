@@ -21,6 +21,9 @@ use crate::fs_util::{
     set_owner_only_file, write_new_file_owner_only,
 };
 use crate::runtime::agent::agent_headless_config::OPENCODE_AGENT_ID;
+use crate::runtime::dependencies::deps_apply::{
+    DepApplyOutcome, apply_dependencies_with_progress, pending_candidates,
+};
 use crate::runtime::init_runner::{StepDisposition, StepOutcome, record_step, step_kind};
 use crate::runtime::install::agent_installer::InstallerOutcome;
 use crate::runtime::install::agent_registry::RegistryCatalog;
@@ -37,16 +40,20 @@ use self::headless_snapshot::{
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
 use self::install::{
-    install_configured_agent, local_bin_dir, operator_registry_override, should_install_agent,
+    MAX_INSTALL_ATTEMPTS, install_configured_agent, local_bin_dir, operator_registry_override,
+    run_install_with_retry, should_install_agent,
 };
 use self::model_mode::{
     ModelModeAction, configure_model_and_mode_for_init, preflight_model_and_mode_for_init,
+    verify_agent_acp_connection,
 };
 use self::provider::{
     configure_provider_for_init, configured_provider_refs_satisfied, preflight_provider_for_init,
 };
 use self::registry_apply::{
-    apply_edge_profile_to_config, apply_registry_entry_to_config, select_agent_for_init,
+    AgentSelection, CustomAgentSpec, apply_custom_agent_to_config, apply_edge_profile_to_config,
+    apply_registry_entry_to_config, is_custom_agent, reject_registry_id_for_custom_agent,
+    resolve_custom_agent_spec, select_agent_for_init,
 };
 use self::resume::{
     FreshKeys, finalize_with_error, init_complete_event_already_recorded,
@@ -58,8 +65,12 @@ use self::skills::{
     skill_install_postcondition_holds,
 };
 use self::starter_config::{
-    prompt_starter_config_selections_if_needed, reject_starter_only_mcp_args_for_existing_config,
-    starter_config, validate_deployment_overrides_match_existing,
+    AgentEnvCollection, append_agent_env_refs, apply_agent_env_collection,
+    collect_agent_env_refs_for_init, configure_stack_update_for_init,
+    prompt_starter_config_selections_if_needed, push_args_deps_to_config,
+    reject_agent_env_refs_for_existing_config, reject_deps_args_for_existing_config,
+    reject_starter_only_mcp_args_for_existing_config, should_apply_deps_for_init, starter_config,
+    validate_deployment_overrides_match_existing, validate_stack_update_args,
 };
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
 use super::config as cli_config;
@@ -74,6 +85,85 @@ pub struct InitArgs {
     /// Select the configured agent non-interactively from the registry.
     #[arg(long)]
     pub(super) agent: Option<String>,
+    /// Define a custom (non-registry) agent by id. Requires
+    /// `--custom-agent-command` and `--custom-agent-install`. The agent is
+    /// modeled via `[agent.install]`; provider/model are configured through the
+    /// agent's own env, not these init flags.
+    #[arg(
+        long = "custom-agent-id",
+        value_name = "ID",
+        conflicts_with_all = ["agent", "provider", "model", "mode", "custom_provider"]
+    )]
+    pub(super) custom_agent_id: Option<String>,
+    /// Display name for the custom agent (defaults to the id).
+    #[arg(
+        long = "custom-agent-name",
+        value_name = "NAME",
+        requires = "custom_agent_id"
+    )]
+    pub(super) custom_agent_name: Option<String>,
+    /// Launch command (binary on PATH) for the custom agent.
+    #[arg(
+        long = "custom-agent-command",
+        value_name = "CMD",
+        requires = "custom_agent_id"
+    )]
+    pub(super) custom_agent_command: Option<String>,
+    /// Launch argument for the custom agent. Repeatable.
+    #[arg(
+        long = "custom-agent-arg",
+        value_name = "ARG",
+        requires = "custom_agent_id"
+    )]
+    pub(super) custom_agent_arg: Vec<String>,
+    /// Shell snippet that installs the custom agent (and its adapter, if any).
+    #[arg(
+        long = "custom-agent-install",
+        value_name = "SHELL",
+        requires = "custom_agent_id"
+    )]
+    pub(super) custom_agent_install: Option<String>,
+    /// Path that must resolve to an executable after install (defaults to the
+    /// launch command).
+    #[arg(
+        long = "custom-agent-creates",
+        value_name = "PATH",
+        requires = "custom_agent_id"
+    )]
+    pub(super) custom_agent_creates: Option<String>,
+    /// Reference an existing secret as an environment variable for the agent
+    /// process. Repeatable. The secret must already be in the store;
+    /// interactive runs also offer an add-loop that collects the value. Applies
+    /// only when creating a new config.
+    #[arg(long = "agent-env-ref", value_name = "NAME")]
+    pub(super) agent_env_ref: Vec<String>,
+    /// Declare a user-scope dependency install action as NAME=SHELL. Repeatable.
+    /// New config only.
+    #[arg(long = "dep", value_name = "NAME=SHELL")]
+    pub(super) dep: Vec<String>,
+    /// Declare a system-scope (privileged) dependency install action as
+    /// NAME=SHELL. Repeatable. New config only.
+    #[arg(long = "dep-system", value_name = "NAME=SHELL")]
+    pub(super) dep_system: Vec<String>,
+    /// Run declared dependency install actions during init (opt-in).
+    #[arg(long = "deps-apply")]
+    pub(super) deps_apply: bool,
+    /// Skip the dependency-apply confirmation; required for non-interactive
+    /// dependency apply.
+    #[arg(long = "deps-apply-yes", requires = "deps_apply")]
+    pub(super) deps_apply_yes: bool,
+    /// acp-stack auto-update policy: on (all compatible), security (security
+    /// updates only), or off (manual).
+    #[arg(long = "stack-update", value_name = "on|security|off")]
+    pub(super) stack_update: Option<String>,
+    /// acp-stack auto-update frequency (day/week units, e.g. 1d, 3w; minimum 1
+    /// day). Ignored when the policy is off.
+    #[arg(
+        long = "stack-update-frequency",
+        value_name = "FREQ",
+        requires = "stack_update"
+    )]
+    pub(super) stack_update_frequency: Option<String>,
     /// Confirm that init is running without prompts. Non-interactive first
     /// runs must also pass `--agent <id>`.
     #[arg(long)]
@@ -747,6 +837,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             reason: "config import sources cannot be combined with init resume".to_owned(),
         });
     }
+    validate_stack_update_args(&args)?;
 
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
@@ -769,24 +860,44 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         apply_supabase_env_defaults(&mut args)?;
     } else if !creating_config && !args.resume {
         reject_supabase_init_args_for_existing_config(&args)?;
+        reject_agent_env_refs_for_existing_config(&args)?;
+        reject_deps_args_for_existing_config(&args)?;
     }
-    if creating_config && !args.resume && args.agent.is_none() {
+    // A custom agent declared via `--custom-agent-*` is resolved up front; it
+    // satisfies the "real agent" requirement without an `--agent` registry id
+    // and threads through both config apply sites below.
+    let mut custom_agent_spec: Option<CustomAgentSpec> = resolve_custom_agent_spec(&args)?;
+    if let Some(spec) = &custom_agent_spec {
+        reject_registry_id_for_custom_agent(&spec.id, &registry)?;
+    }
+    if creating_config && !args.resume && args.agent.is_none() && custom_agent_spec.is_none() {
         if !io::stdin().is_terminal() {
             return Err(StackError::InvalidParam {
                 field: "--agent",
-                reason: "non-interactive init requires selecting a real agent; run `acps init` in a TTY or pass `--non-interactive --agent <id>`".to_owned(),
+                reason: "non-interactive init requires selecting a real agent; run `acps init` in a TTY or pass `--non-interactive --agent <id>` or the `--custom-agent-*` flags".to_owned(),
             });
         }
-        let selected =
-            select_agent_for_init(&args, &registry)?.ok_or_else(|| StackError::InvalidParam {
-                field: "--agent",
-                reason: "initializing a new config requires selecting a real agent".to_owned(),
-            })?;
-        args.agent = Some(selected.id.clone());
+        match select_agent_for_init(&args, &registry)?.ok_or_else(|| StackError::InvalidParam {
+            field: "--agent",
+            reason: "initializing a new config requires selecting a real agent".to_owned(),
+        })? {
+            AgentSelection::Registry(entry) => args.agent = Some(entry.id.clone()),
+            AgentSelection::Custom(spec) => custom_agent_spec = Some(spec),
+        }
     }
     if creating_config && !args.resume {
         prompt_starter_config_selections_if_needed(&mut args)?;
     }
+    // Operator agent env refs (flags + interactive add-loop). On a fresh run the
+    // interactive loop also collects masked values; on resume only the replayed
+    // `--agent-env-ref` names are re-collected below (interactive values cannot
+    // be replayed). Names are appended to `config.agent.env` only after the store
+    // verifies them (below), so a failed run never persists an unresolved ref.
+    let mut agent_env_collection = if creating_config && !args.resume {
+        collect_agent_env_refs_for_init(&args, prompts_enabled(&args))?
+    } else {
+        AgentEnvCollection::default()
+    };
 
     let config_status = if config_path.exists() {
         // Repair perms before validation so a failure to parse the file does not
@@ -803,11 +914,14 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     } else {
         let starter_config = starter_config(&args)?;
         let mut new_config = config::load_config_from_str(&starter_config)?;
-        if let Some(agent_id) = args.agent.as_deref() {
+        if let Some(spec) = &custom_agent_spec {
+            apply_custom_agent_to_config(&mut new_config, spec);
+        } else if let Some(agent_id) = args.agent.as_deref() {
             let entry = registry.lookup_required(agent_id)?;
             entry.ensure_supported()?;
             apply_registry_entry_to_config(&mut new_config, entry);
         }
+        push_args_deps_to_config(&mut new_config, &args)?;
         let canonical = new_config.to_canonical_toml()?;
         config::load_config_from_str(&canonical)?;
         write_new_file_owner_only(&config_path, canonical.as_bytes())?;
@@ -913,25 +1027,70 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             args.supabase_api_key_ref = recorded.supabase_api_key_ref.clone();
         }
     }
+    // Replay deps-apply, stack-update, and agent-env-ref intents so a bare
+    // `--resume` still honors them (their effects run in late steps / are
+    // verified after a failure point).
+    if resumed && let Some(recorded) = recorded_args.as_ref() {
+        if args.agent_env_ref.is_empty() {
+            args.agent_env_ref = recorded.agent_env_ref.clone();
+        }
+        if !args.deps_apply {
+            args.deps_apply = recorded.deps_apply;
+        }
+        if !args.deps_apply_yes {
+            args.deps_apply_yes = recorded.deps_apply_yes;
+        }
+        if args.stack_update.is_none() {
+            args.stack_update = recorded.stack_update.clone();
+        }
+        if args.stack_update_frequency.is_none() {
+            args.stack_update_frequency = recorded.stack_update_frequency.clone();
+        }
+    }
+    // On resume, re-collect the replayed `--agent-env-ref` names (flags only) so
+    // they are re-verified against the now-open store rather than silently
+    // dropped. Interactive values from the original run cannot be replayed.
+    if resumed {
+        agent_env_collection = collect_agent_env_refs_for_init(&args, false)?;
+    }
 
     let mut config = Config::load_from_path(&config_path)?;
-    let selected_agent = if imported_config && args.agent.is_none() {
+    // Skip the registry re-apply when it cannot or should not run: a custom
+    // (non-registry) agent is already fully applied at creation time (and a
+    // `lookup_required` on its id would fail), and an imported config without an
+    // explicit `--agent` keeps the agent it was imported with.
+    // Explicit `--custom-agent-*` flags override the skip so an operator can
+    // re-point an existing custom agent. Explicit `--agent` also overrides an
+    // existing custom config and switches back to the supported registry flow.
+    let custom_agent_flags_present = resolve_custom_agent_spec(&args)?.is_some();
+    let selected_agent = if !custom_agent_flags_present
+        && args.agent.is_none()
+        && (is_custom_agent(&config, &registry) || imported_config)
+    {
         None
     } else {
         select_agent_for_init(&args, &registry)?
     };
-    if let Some(entry) = selected_agent {
-        // Fail fast on agents the runtime cannot drive headlessly (browser
-        // OAuth, terminal-only adapters, etc.). Without this check init would
-        // happily install the binary and only fail at first session spawn,
-        // wasting bandwidth and operator time.
-        entry.ensure_supported()?;
-        apply_registry_entry_to_config(&mut config, entry);
-    }
+    let agent_applied = match &selected_agent {
+        Some(AgentSelection::Registry(entry)) => {
+            // Fail fast on agents the runtime cannot drive headlessly (browser
+            // OAuth, terminal-only adapters, etc.). Without this check init would
+            // happily install the binary and only fail at first session spawn,
+            // wasting bandwidth and operator time.
+            entry.ensure_supported()?;
+            apply_registry_entry_to_config(&mut config, entry);
+            true
+        }
+        Some(AgentSelection::Custom(spec)) => {
+            apply_custom_agent_to_config(&mut config, spec);
+            true
+        }
+        None => false,
+    };
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
     let supabase_configured = apply_supabase_to_config_for_init(&args, &mut config)?;
     prompt_init_skills_if_needed(&mut args, &config, &registry)?;
-    if selected_agent.is_some() || edge_requested || supabase_configured {
+    if agent_applied || edge_requested || supabase_configured {
         let canonical = config.to_canonical_toml()?;
         config = config::load_config_from_str(&canonical)?;
         atomic_write_owner_only(&config_path, canonical.as_bytes())?;
@@ -1097,6 +1256,25 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     } else {
         auth_status
     };
+    // Write interactively-collected agent env values and verify flag-provided
+    // refs now that the store is open, before the agent is installed/launched so
+    // `resolve_agent_env` resolves them. The ref names are appended to
+    // `agent.env` only AFTER verification succeeds, so a run that fails here never
+    // persists an unresolved ref (which a later `--resume` would otherwise
+    // complete around). No-op when nothing was collected (a resume or an existing
+    // config).
+    let env_apply = (|| -> Result<()> {
+        apply_agent_env_collection(&mut secret_store, &agent_env_collection)?;
+        if append_agent_env_refs(&mut config, &agent_env_collection) {
+            let canonical = config.to_canonical_toml()?;
+            config = config::load_config_from_str(&canonical)?;
+            atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = env_apply {
+        return finalize_with_error(&store, &init_run, error);
+    }
     // Hold the freshly-generated keys until init exits. Drop renders the
     // handover last (after the summary and testflight), and still surfaces them
     // if a later step fails and returns early.
@@ -1126,7 +1304,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let mut install_outcome: Option<InstallerOutcome> = None;
     let install_step_needs_resume = step_needs_resume(&prior_init_steps, step_kind::AGENT_INSTALL);
     if install_requested || install_step_needs_resume {
-        println!("progress: installing agent");
+        let install_interactive = prompts_enabled(&args);
         let verify_config = config.clone();
         let verify_workspace_root = PathBuf::from(config.workspace.root.clone());
         let verify_local_bin_dir = local_bin_dir(&home);
@@ -1153,7 +1331,25 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                     .query_installer_runs_filtered(Some(&config.agent.id), 1024)
                     .map(|rows| rows.into_iter().map(|r| r.id).collect())
                     .unwrap_or_default();
-                let outcome = install_configured_agent(&home, &config, &registry, &store)?;
+                let outcome = run_install_with_retry(
+                    |attempt| {
+                        let message =
+                            format!("installing agent (attempt {attempt}/{MAX_INSTALL_ATTEMPTS})");
+                        if install_interactive {
+                            prompt::with_spinner(&message, || {
+                                install_configured_agent(&home, &config, &registry, &store)
+                            })
+                        } else {
+                            println!("progress: {message}");
+                            install_configured_agent(&home, &config, &registry, &store)
+                        }
+                    },
+                    |attempt, error, delay| {
+                        println!("agent install attempt {attempt} failed: {error}");
+                        println!("retrying in {}s…", delay.as_secs());
+                        std::thread::sleep(delay);
+                    },
+                )?;
                 let label = outcome.label();
                 let path = outcome.path().display().to_string();
                 let new_installer_run_ids: Vec<String> = store
@@ -1277,6 +1473,78 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     }
 
     // -----------------------------------------------------------------
+    // Step 10 (ordinal): deps_apply — run declared dependency install
+    // actions before the agent is launched for provider/model discovery, so
+    // deps the agent needs to run already exist. Opt-in: a TTY confirm, or
+    // `--deps-apply --deps-apply-yes` non-interactively.
+    // -----------------------------------------------------------------
+    let deps_candidates = pending_candidates(&config, None);
+    // Wrap in finalize_with_error so a confirmation error (e.g. `--deps-apply`
+    // without `--deps-apply-yes`) marks the run terminal instead of leaving it
+    // pending after the earlier steps already succeeded.
+    let deps_apply_requested =
+        match should_apply_deps_for_init(&args, &deps_candidates, prompts_enabled(&args)) {
+            Ok(requested) => requested,
+            Err(error) => return finalize_with_error(&store, &init_run, error),
+        };
+    if deps_apply_requested || step_needs_resume(&prior_init_steps, step_kind::DEPS_APPLY) {
+        println!("progress: applying dependencies");
+        let result = record_step(
+            &store,
+            &init_run,
+            10,
+            step_kind::DEPS_APPLY,
+            || Ok(pending_candidates(&config, None).is_empty()),
+            || {
+                let report = apply_dependencies_with_progress(
+                    &config,
+                    None,
+                    Some(&store),
+                    &config.workspace.default_shell,
+                    |current, total, name| {
+                        println!("progress: applying dependency {current}/{total}: {name}");
+                        Ok(())
+                    },
+                )?;
+                let mut failures = Vec::new();
+                for entry in &report.results {
+                    match &entry.outcome {
+                        DepApplyOutcome::Failed { exit_code, .. } => {
+                            let code = exit_code
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "?".to_owned());
+                            failures.push(format!("{} failed (exit={code})", entry.name));
+                        }
+                        DepApplyOutcome::PrivilegeRequired { uid } => {
+                            failures
+                                .push(format!("{} needs root privilege (uid={uid})", entry.name));
+                        }
+                        DepApplyOutcome::Installed | DepApplyOutcome::AlreadyPresent => {}
+                    }
+                }
+                if !failures.is_empty() {
+                    return Err(StackError::InvalidParam {
+                        field: "deps",
+                        reason: format!(
+                            "dependency apply produced non-success outcomes: {}; inspect `acps installer history --agent deps_apply` (apply_run_id={})",
+                            failures.join("; "),
+                            report.apply_run_id,
+                        ),
+                    });
+                }
+                Ok(StepOutcome::with_payload(format!(
+                    r#"{{"apply_run_id":"{}","applied":{}}}"#,
+                    report.apply_run_id,
+                    report.results.len(),
+                )))
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Step 4: provider_configure — write provider/model into the config
     // and persist canonical TOML if anything changed.
     // -----------------------------------------------------------------
@@ -1322,6 +1590,12 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                 &mut config,
                 &config_path,
             )?;
+            // Custom agents skip provider/model discovery, so they would
+            // otherwise never spawn during init. Gate on an ACP session here so a
+            // non-ACP or broken custom binary is caught now, not at first session.
+            if is_custom_agent(&config, &registry) {
+                verify_agent_acp_connection(&home, &config)?;
+            }
             let model_mode_changed =
                 matches!(model_mode_outcome.model_action, ModelModeAction::Set)
                     || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
@@ -1347,6 +1621,26 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         },
     );
     if let Err(error) = result {
+        return finalize_with_error(&store, &init_run, error);
+    }
+
+    // acp-stack auto-update: configure `[updates.acp_stack]` after mode
+    // selection, before the summary. Flags apply on any run; the interactive
+    // prompt is suppressed on resume.
+    let stack_update_outcome = (|| -> Result<()> {
+        let changed = configure_stack_update_for_init(
+            &args,
+            &mut config,
+            prompts_enabled(&args) && !args.resume && creating_config,
+        )?;
+        if changed {
+            let canonical = config.to_canonical_toml()?;
+            config = config::load_config_from_str(&canonical)?;
+            atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = stack_update_outcome {
         return finalize_with_error(&store, &init_run, error);
     }
 

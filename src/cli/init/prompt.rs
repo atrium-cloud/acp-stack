@@ -100,6 +100,24 @@ pub(super) fn text(interactive: bool, prompt: &str, required: bool) -> Result<Op
     }
 }
 
+/// Run `work` while showing an animated spinner with `message`. The spinner
+/// stops with a success line on `Ok` and an error line on `Err`. Only call this
+/// on the interactive path — cliclack writes the spinner to the terminal.
+pub(super) fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let spinner = cliclack::spinner();
+    spinner.start(message);
+    match work() {
+        Ok(value) => {
+            spinner.stop(message);
+            Ok(value)
+        }
+        Err(error) => {
+            spinner.error(message);
+            Err(error)
+        }
+    }
+}
+
 /// Masked secret entry. Returns `None` when not interactive.
 pub(super) fn password(interactive: bool, prompt: &str) -> Result<Option<String>> {
     if !interactive {

@@ -1579,6 +1579,58 @@ fn rejects_stack_update_zero_frequency() {
 }
 
 #[test]
+fn rejects_stack_update_sub_day_frequency() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [updates.acp_stack]\n\
+         policy = \"security-critical\"\n\
+         frequency = \"12h\"\n"
+    );
+    let err =
+        load_config_from_str(&config_text).expect_err("sub-day stack update frequency is invalid");
+    assert!(
+        err.to_string().contains("updates.acp_stack.frequency"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_stack_update_overflowing_frequency() {
+    // A day/week count that overflows `Duration` passes the unit check but must
+    // still be rejected so config validation matches the runtime parser.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [updates.acp_stack]\n\
+         policy = \"security-critical\"\n\
+         frequency = \"99999999999999999w\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("an overflowing stack update frequency is invalid");
+    assert!(
+        err.to_string().contains("updates.acp_stack.frequency"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_stack_update_frequency_exceeding_epoch() {
+    // `9999w` (~192 years) is representable as a `Duration` but longer than the
+    // time since 1970-01-01, so it must be rejected by the shared epoch hardstop.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [updates.acp_stack]\n\
+         policy = \"security-critical\"\n\
+         frequency = \"9999w\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("a stack update frequency longer than the epoch span is invalid");
+    assert!(
+        err.to_string().contains("updates.acp_stack.frequency"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn rejects_commands_with_invalid_progress_interval() {
     let config_text = format!(
         "{VALID_CONFIG}\n\
@@ -1659,6 +1711,24 @@ fn rejects_prompts_with_unparsable_duration() {
     );
     let err =
         load_config_from_str(&config_text).expect_err("garbage stale_threshold must be rejected");
+    assert!(
+        err.to_string().contains("prompts.stale_threshold"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_duration_field_exceeding_epoch_floor() {
+    // The 1970 hardstop is shared by every duration field, not just the stack
+    // frequency: `30000d` (~82 years) exceeds the time since the Unix epoch.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [prompts]\n\
+         stale_threshold = \"30000d\"\n\
+         sweep_interval = \"30s\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("a stale_threshold longer than the epoch span is invalid");
     assert!(
         err.to_string().contains("prompts.stale_threshold"),
         "got: {err}"

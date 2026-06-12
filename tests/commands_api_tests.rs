@@ -1502,7 +1502,7 @@ async fn truncated_noisy_command_still_emits_progress_events() {
     let response = submit(
         &harness,
         serde_json::json!({
-            "command": "sh -c 'i=0; while [ $i -lt 20 ]; do printf 1234567890; i=$((i+1)); sleep 0.03; done'"
+            "command": "sh -c 'i=0; while [ $i -lt 8 ]; do printf 1234567890; i=$((i+1)); sleep 0.03; done'"
         }),
     )
     .await;

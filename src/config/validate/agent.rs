@@ -6,7 +6,7 @@ use crate::config::schema::{
     AgentSubagentConfig,
 };
 use crate::config::validate::primitives::{
-    parse_duration_string, require_present, validate_non_empty_trimmed, validate_nonempty,
+    require_present, validate_duration_field, validate_non_empty_trimmed, validate_nonempty,
     validate_secret_ref_name_value,
 };
 use crate::error::{Result, StackError};
@@ -29,10 +29,7 @@ pub(crate) fn validate_agent_subagent(subagent: &AgentSubagentConfig) -> Result<
 }
 
 pub(crate) fn validate_agent_auto_update(auto_update: &AgentAutoUpdateConfig) -> Result<()> {
-    let frequency =
-        parse_duration_string(&auto_update.frequency).ok_or(StackError::InvalidDurationField {
-            field: "agent.auto_update.frequency",
-        })?;
+    let frequency = validate_duration_field("agent.auto_update.frequency", &auto_update.frequency)?;
     if frequency.is_zero() {
         return Err(StackError::InvalidParam {
             field: "agent.auto_update.frequency",

@@ -30,6 +30,7 @@ pub use self::schema::{
     SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend,
     SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
 };
+pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
 pub use self::validate::primitives::{
     compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,
 };

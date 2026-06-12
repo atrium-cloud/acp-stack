@@ -142,9 +142,11 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 
 Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
 
+`[agent.install]` is the operator escape hatch for a custom (non-registry) agent: `type = "shell"`, a `shell` snippet that installs the harness (and any adapter), and `creates` — the path that must resolve to an executable after the install runs. When present for an `id` the registry does not know, the runtime drives the agent from `[agent]`/`[agent.install]` directly and skips the registry-only support and provider/model auto-config. `acps init --custom-agent-*` writes this block; an adapter-backed custom agent uses the same shape with `command` pointing at the adapter binary. `[agent.adapter]` is runtime-populated from the registry and rejected if written by hand.
+
 `[agent.auto_update]` controls daemon-side managed agent updates. `frequency` uses duration suffixes such as `12h`, `1d`, `3d`, or `4w`. Existing configs without this block do not auto-update until the block is added or init writes it for a supported agent. The daemon auto-updater only runs when the agent is stopped and never interrupts a running agent, so a continuously running agent is skipped each cycle; apply updates to a live agent with `acps agent update --restart`.
 
-`[updates.acp_stack]` controls updates of `acp-stack` itself from GitHub Releases. `policy = "security-critical"` is the default and auto-installs only same-major, non-breaking releases marked security-critical. `compatible` also permits same-major, non-breaking regular releases. `manual` disables auto-install. Docker and Railway deployments are check-only and should be updated by redeploying the image.
+`[updates.acp_stack]` controls updates of `acp-stack` itself from GitHub Releases. `policy = "security-critical"` is the default and auto-installs only same-major, non-breaking releases marked security-critical. `compatible` also permits same-major, non-breaking regular releases. `manual` disables auto-install. `frequency` uses day/week granularity (minimum a day). `acps init` writes this block — `--stack-update <on|security|off>` and `--stack-update-frequency <freq>`, or the interactive auto-update prompt. Docker and Railway deployments are check-only and should be updated by redeploying the image.
 
 ## Permissions And Commands
 

@@ -1,28 +1,19 @@
 //! Commands (`[commands]`) validation.
 
 use crate::config::schema::CommandsConfig;
-use crate::config::validate::primitives::parse_duration_string;
+use crate::config::validate::primitives::validate_duration_field;
 use crate::error::{Result, StackError};
 
 pub(crate) fn validate_commands(commands: &CommandsConfig) -> Result<()> {
-    let timeout = parse_duration_string(&commands.default_timeout).ok_or(
-        StackError::InvalidDurationField {
-            field: "commands.default_timeout",
-        },
-    )?;
+    let timeout = validate_duration_field("commands.default_timeout", &commands.default_timeout)?;
     if timeout.is_zero() {
         return Err(StackError::NonZeroRequired {
             field: "commands.default_timeout",
         });
     }
-    parse_duration_string(&commands.cancel_grace).ok_or(StackError::InvalidDurationField {
-        field: "commands.cancel_grace",
-    })?;
-    let progress_interval = parse_duration_string(&commands.progress_interval).ok_or(
-        StackError::InvalidDurationField {
-            field: "commands.progress_interval",
-        },
-    )?;
+    validate_duration_field("commands.cancel_grace", &commands.cancel_grace)?;
+    let progress_interval =
+        validate_duration_field("commands.progress_interval", &commands.progress_interval)?;
     if progress_interval.is_zero() {
         return Err(StackError::NonZeroRequired {
             field: "commands.progress_interval",
