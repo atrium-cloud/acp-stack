@@ -1,7 +1,9 @@
 #![cfg(all(feature = "dev-tools", feature = "test-fixtures"))]
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::{McpServerConfig, load_config_from_str};
+use acp_stack::config::{
+    DependencyInstallScope, McpServerConfig, StackUpdatePolicy, load_config_from_str,
+};
 use acp_stack::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV;
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{
@@ -559,6 +561,842 @@ fn init_rejects_removed_startup_script_flag() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("--startup-script"));
+}
+
+#[test]
+fn init_custom_agent_writes_install_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    // Completing init at all proves the registry-only gates were bypassed:
+    // `should_install_agent` would otherwise fail `lookup_required` on a
+    // non-registry id even when agent install is fixture-skipped.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-name",
+            "My Agent",
+            "--custom-agent-command",
+            "my-agent-bin",
+            "--custom-agent-arg",
+            "acp",
+            "--custom-agent-install",
+            "echo install my-agent",
+            "--custom-agent-creates",
+            "my-agent-bin",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("custom agent config should be readable");
+    let config = load_config_from_str(&written).expect("custom agent config should validate");
+    assert_eq!(config.agent.id, "my-agent");
+    assert_eq!(config.agent.name, "My Agent");
+    assert_eq!(config.agent.command, "my-agent-bin");
+    assert_eq!(config.agent.args, vec!["acp".to_owned()]);
+    let install = config
+        .agent
+        .install
+        .as_ref()
+        .expect("custom agent must write an [agent.install] escape hatch");
+    assert_eq!(install.install_type, "shell");
+    assert_eq!(install.creates, "my-agent-bin");
+    assert_eq!(install.shell.as_deref(), Some("echo install my-agent"));
+    // The custom agent block must round-trip canonical TOML.
+    let canonical = config
+        .to_canonical_toml()
+        .expect("custom agent config should round-trip canonical TOML");
+    assert!(canonical.contains("[agent.install]"));
+}
+
+#[test]
+fn init_custom_agent_rejects_placeholder_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "placeholder",
+            "--custom-agent-command",
+            "x",
+            "--custom-agent-install",
+            "echo x",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("placeholder"));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acps-config.toml")
+            .exists(),
+        "a rejected custom agent must not leave a config on disk"
+    );
+}
+
+#[test]
+fn init_custom_agent_rejects_registry_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "placebo",
+            "--custom-agent-command",
+            "x",
+            "--custom-agent-install",
+            "echo x",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--agent placebo"));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acps-config.toml")
+            .exists(),
+        "a rejected custom registry id must not leave a config on disk"
+    );
+}
+
+#[test]
+fn init_custom_agent_requires_command() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-install",
+            "echo x",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--custom-agent-command"));
+}
+
+#[test]
+fn init_custom_agent_rejects_blank_command() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-command",
+            "   ",
+            "--custom-agent-install",
+            "echo x",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--custom-agent-command"));
+}
+
+#[test]
+fn init_custom_agent_rejects_explicit_model_flag_on_rerun() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-command",
+            "my-agent-bin",
+            "--custom-agent-install",
+            "echo install",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--model",
+            "some-model",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--model"));
+}
+
+#[test]
+fn init_custom_agent_rejects_explicit_mode_flag_on_rerun() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-command",
+            "my-agent-bin",
+            "--custom-agent-install",
+            "echo install",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--mode",
+            "review",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--mode"));
+}
+
+#[test]
+fn init_custom_agent_allows_explicit_registry_agent_switch_on_rerun() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-command",
+            "my-agent-bin",
+            "--custom-agent-install",
+            "echo install",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    assert_eq!(config.agent.id, "placebo");
+    assert!(
+        config.agent.install.is_none(),
+        "switching to a registry agent should clear custom install config"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_custom_agent_fails_when_installed_command_is_absent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let workspace = tempdir.path().join("ws");
+    fs::create_dir_all(&workspace).expect("workspace dir should be created");
+    let creates = tempdir.path().join("custom-agent-marker");
+    fs::write(&creates, "#!/bin/sh\nexit 0\n").expect("creates marker should be written");
+    let mut permissions = fs::metadata(&creates)
+        .expect("creates marker metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&creates, permissions).expect("creates marker should be executable");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .env_remove(TEST_SKIP_AGENT_INSTALL_ENV)
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-command",
+            "acpstack-missing-custom-command",
+            "--custom-agent-install",
+            "true",
+            "--custom-agent-creates",
+            creates.to_str().expect("creates path should be utf8"),
+            "--workspace-root",
+            workspace.to_str().expect("workspace path should be utf8"),
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("did not resolve after custom agent install"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_custom_agent_acp_gate_skips_when_spawn_cwd_absent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let workspace = tempdir.path().join("missing-workspace");
+    let creates = tempdir.path().join("custom-agent-marker");
+    fs::write(&creates, "#!/bin/sh\nexit 0\n").expect("creates marker should be written");
+    let mut permissions = fs::metadata(&creates)
+        .expect("creates marker metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&creates, permissions).expect("creates marker should be executable");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .env_remove(TEST_SKIP_AGENT_INSTALL_ENV)
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "my-agent",
+            "--custom-agent-command",
+            "bin/my-agent",
+            "--custom-agent-install",
+            "true",
+            "--custom-agent-creates",
+            creates.to_str().expect("creates path should be utf8"),
+            "--workspace-root",
+            workspace.to_str().expect("workspace path should be utf8"),
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("spawn cwd"));
+}
+
+#[test]
+fn init_agent_env_ref_appends_to_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    // Pre-seed the referenced secret; `--agent-env-ref` references an existing
+    // secret and fails fast otherwise.
+    seed_init_secrets(tempdir.path(), &[("MY_AGENT_TOKEN", "token-value")]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--agent-env-ref",
+            "MY_AGENT_TOKEN",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    assert!(
+        config.agent.env.contains(&"MY_AGENT_TOKEN".to_owned()),
+        "agent.env should contain the operator env ref, got {:?}",
+        config.agent.env
+    );
+}
+
+#[test]
+fn init_agent_env_ref_missing_secret_fails_fast() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--agent-env-ref",
+            "MISSING_TOKEN",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("secret `MISSING_TOKEN` was not found in the secret store"),
+        "{stderr}"
+    );
+    // The ref must NOT be persisted to agent.env when verification fails, or a
+    // later `--resume` would complete with an unresolved env ref.
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    if config_path.is_file() {
+        let written = fs::read_to_string(&config_path).expect("config should be readable");
+        let config = load_config_from_str(&written).expect("config should validate");
+        assert!(
+            !config.agent.env.contains(&"MISSING_TOKEN".to_owned()),
+            "a failed env-ref verification must not persist the ref: {:?}",
+            config.agent.env
+        );
+    }
+}
+
+#[test]
+fn init_agent_env_ref_rejected_for_existing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--agent-env-ref",
+            "MY_AGENT_TOKEN",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--agent-env-ref"));
+}
+
+#[test]
+fn init_dep_flag_writes_user_scope_dependency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--dep",
+            "ripgrep=apt-get install -y ripgrep",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    let entry = config
+        .dependencies
+        .commands
+        .iter()
+        .find(|entry| entry.name == "ripgrep")
+        .expect("ripgrep dependency should be declared");
+    let install = entry
+        .install
+        .as_ref()
+        .expect("dep should have install action");
+    assert_eq!(install.shell, "apt-get install -y ripgrep");
+    assert_eq!(install.scope, DependencyInstallScope::User);
+}
+
+#[test]
+fn init_dep_system_flag_writes_system_scope() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--dep-system",
+            "nginx=apt-get install -y nginx",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    let install = config
+        .dependencies
+        .commands
+        .iter()
+        .find(|entry| entry.name == "nginx")
+        .and_then(|entry| entry.install.as_ref())
+        .expect("nginx dependency should be declared with an install action");
+    assert_eq!(install.scope, DependencyInstallScope::System);
+}
+
+#[test]
+fn init_deps_apply_requires_yes_noninteractive() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--dep",
+            "acpstack-absent-tool=true",
+            "--deps-apply",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--deps-apply-yes"));
+}
+
+#[test]
+fn init_deps_apply_runs_pending_action_and_surfaces_failure() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    // The tool is not on PATH (pending), so the apply step runs its shell,
+    // which exits non-zero — proving the step executes and surfaces failure.
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--dep",
+            "acpstack-failtool=exit 3",
+            "--deps-apply",
+            "--deps-apply-yes",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("acpstack-failtool failed (exit=3)"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn init_custom_agent_acp_gate_skips_when_binary_absent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    // The custom binary is not on PATH (install is fixture-skipped), so the
+    // connection gate skips cleanly and init still completes.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "ghost",
+            "--custom-agent-command",
+            "acpstack-ghost-binary",
+            "--custom-agent-install",
+            "echo install",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("acp connection check skipped"));
+}
+
+#[test]
+fn init_custom_agent_acp_gate_fails_for_non_acp_binary() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let workspace = tempdir.path().join("ws");
+    std::fs::create_dir_all(&workspace).expect("workspace dir should be created");
+
+    // `true` is a real binary on PATH but does not speak ACP, so the gate runs
+    // and surfaces a connection failure instead of completing init.
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--custom-agent-id",
+            "t",
+            "--custom-agent-command",
+            "true",
+            "--custom-agent-install",
+            "echo install",
+            "--workspace-root",
+            workspace.to_str().expect("workspace path should be utf8"),
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("failed to complete an ACP session"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn init_stack_update_off_sets_manual_policy() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--stack-update",
+            "off",
+            "--stack-update-frequency",
+            "6m",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    assert_eq!(config.updates.acp_stack.policy, StackUpdatePolicy::Manual);
+    assert_eq!(config.updates.acp_stack.frequency, "1d");
+}
+
+#[test]
+fn init_stack_update_on_writes_compatible_policy_and_frequency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--stack-update",
+            "on",
+            "--stack-update-frequency",
+            "3w",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    assert_eq!(
+        config.updates.acp_stack.policy,
+        StackUpdatePolicy::Compatible
+    );
+    assert_eq!(config.updates.acp_stack.frequency, "3w");
+}
+
+#[test]
+fn init_stack_update_rejects_sub_day_frequency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--stack-update",
+            "security",
+            "--stack-update-frequency",
+            "6m",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("day (d) or week (w)"));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acps-config.toml")
+            .exists(),
+        "invalid stack-update frequency must fail before config creation"
+    );
+}
+
+#[test]
+fn init_stack_update_rejects_invalid_policy_before_config_creation() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--stack-update",
+            "securty",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("on|security|off"));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acps-config.toml")
+            .exists(),
+        "invalid stack-update policy must fail before config creation"
+    );
+}
+
+#[test]
+fn init_stack_update_existing_config_preserves_policy_without_flags() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--stack-update",
+            "on",
+            "--stack-update-frequency",
+            "3w",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    assert_eq!(
+        config.updates.acp_stack.policy,
+        StackUpdatePolicy::Compatible
+    );
+    assert_eq!(config.updates.acp_stack.frequency, "3w");
+}
+
+#[test]
+fn init_stack_update_default_preserved_non_interactive() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--skip-testflight",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    // No --stack-update flag and non-interactive: the schema defaults are untouched.
+    assert_eq!(
+        config.updates.acp_stack.policy,
+        StackUpdatePolicy::SecurityCritical
+    );
+    assert_eq!(config.updates.acp_stack.frequency, "1d");
 }
 
 #[test]
@@ -7526,6 +8364,26 @@ fn stack_update_set_edits_update_config() {
         acp_stack::config::StackUpdatePolicy::Compatible
     );
     assert_eq!(config.updates.acp_stack.frequency, "3d");
+}
+
+#[test]
+fn stack_update_set_rejects_sub_day_frequency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["update", "set", "--frequency", "12h"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("updates.acp_stack.frequency"));
+
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    let config = load_config_from_str(&config_text).expect("config still parses after failed set");
+    assert_eq!(config.updates.acp_stack.frequency, "1d");
 }
 
 #[test]

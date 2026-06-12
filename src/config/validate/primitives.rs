@@ -36,6 +36,75 @@ pub fn parse_duration_string(input: &str) -> Option<std::time::Duration> {
     }
 }
 
+/// The largest duration any config field may express: the time elapsed since
+/// the Unix epoch. Durations are used as `now - duration` windows (staleness,
+/// auto-update skip), so a span longer than this would place the computed
+/// cutoff before 1970-01-01 — meaningless for the timestamps this runtime
+/// records. The bound grows with wall-clock time, so a config that validates
+/// once stays valid. A system clock set before 1970 (degenerate) yields
+/// `Duration::MAX`, which disables the cap rather than failing every load.
+fn max_duration_since_epoch() -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::MAX)
+}
+
+/// Validate a duration-valued config field: it must parse via
+/// [`parse_duration_string`] and must not exceed [`max_duration_since_epoch`].
+/// Returns the parsed `Duration` so callers can apply their own extra checks
+/// (e.g. non-zero). This is the single place the 1970 hardstop is enforced;
+/// every duration field routes through it.
+pub(crate) fn validate_duration_field(
+    field: &'static str,
+    raw: &str,
+) -> Result<std::time::Duration> {
+    let duration = parse_duration_string(raw).ok_or(StackError::InvalidDurationField { field })?;
+    if duration > max_duration_since_epoch() {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!(
+                "`{raw}` exceeds the maximum interval (the time since 1970-01-01); a longer span would place a `now - {raw}` cutoff before the Unix epoch"
+            ),
+        });
+    }
+    Ok(duration)
+}
+
+pub(crate) fn normalize_day_or_week_duration(field: &'static str, raw: &str) -> Result<String> {
+    let value = raw.trim();
+    let unit_index = value
+        .find(|character: char| !character.is_ascii_digit())
+        .ok_or(StackError::InvalidParam {
+            field,
+            reason: format!("expected a count and a day/week unit (e.g. 1d, 3w), got `{value}`"),
+        })?;
+    let (digits, unit) = value.split_at(unit_index);
+    if !matches!(unit, "d" | "w") {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!(
+                "use a day (d) or week (w) unit; the minimum update granularity is a day, got `{value}`"
+            ),
+        });
+    }
+    let count: u64 = digits.parse().map_err(|_| StackError::InvalidParam {
+        field,
+        reason: format!("`{value}` is not a valid count + unit"),
+    })?;
+    if count == 0 {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "frequency must be at least 1 day".to_owned(),
+        });
+    }
+    // Apply the representability + 1970 hardstop shared by every duration field
+    // (this subsumes the raw-`Duration` overflow guard). Validating here keeps
+    // config load in agreement with the runtime, which re-parses the same string
+    // with `parse_duration_string` when it schedules the next update.
+    validate_duration_field(field, value)?;
+    Ok(value.to_owned())
+}
+
 /// Compare two `[auth]` blocks and return an error if either ref name changed.
 /// Used by both `acps config import` (CLI) and `POST /v1/config/import` to
 /// uphold the "admin key never regenerable in place" + "session key only

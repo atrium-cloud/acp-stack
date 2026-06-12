@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 
 use crate::config::schema::{PermissionsConfig, SecurityHttpConfig};
-use crate::config::validate::primitives::parse_duration_string;
+use crate::config::validate::primitives::validate_duration_field;
 use crate::error::{Result, StackError};
 
 pub(crate) fn validate_permissions(permissions: &PermissionsConfig) -> Result<()> {
@@ -12,9 +12,7 @@ pub(crate) fn validate_permissions(permissions: &PermissionsConfig) -> Result<()
         _ => return Err(StackError::InvalidPermissionsMode),
     }
     if let Some(value) = permissions.request_timeout.as_deref() {
-        let parsed = parse_duration_string(value).ok_or(StackError::InvalidDurationField {
-            field: "permissions.request_timeout",
-        })?;
+        let parsed = validate_duration_field("permissions.request_timeout", value)?;
         if parsed.is_zero() {
             return Err(StackError::NonZeroRequired {
                 field: "permissions.request_timeout",

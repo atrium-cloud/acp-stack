@@ -47,6 +47,19 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "skip_workspace_init": args.skip_workspace_init(),
         "testflight": args.testflight,
         "skip_testflight": args.skip_testflight,
+        // Post-creation intents a bare `--resume` would otherwise drop: the
+        // deps-apply request and the stack-update choice run in late steps, and
+        // `--agent-env-ref` verification is deferred past several failure points,
+        // so its names are replayed and re-verified on resume. The custom-agent
+        // flags and `--dep`/`--dep-system` declarations are NOT recorded — they
+        // are written into the on-disk config at creation, before any step can
+        // fail, so resume recovers them from disk. (Interactive env values are
+        // in-memory only and cannot be replayed.)
+        "agent_env_ref": args.agent_env_ref,
+        "deps_apply": args.deps_apply,
+        "deps_apply_yes": args.deps_apply_yes,
+        "stack_update": args.stack_update,
+        "stack_update_frequency": args.stack_update_frequency,
         "fresh": args.fresh,
         "resume": args.resume,
     })
@@ -107,6 +120,14 @@ pub(super) struct RecordedInitArgs {
     pub(super) testflight: bool,
     #[serde(default)]
     pub(super) skip_testflight: bool,
+    #[serde(default)]
+    pub(super) agent_env_ref: Vec<String>,
+    #[serde(default)]
+    pub(super) deps_apply: bool,
+    #[serde(default)]
+    pub(super) deps_apply_yes: bool,
+    pub(super) stack_update: Option<String>,
+    pub(super) stack_update_frequency: Option<String>,
 }
 
 pub(super) fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
