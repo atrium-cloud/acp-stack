@@ -445,6 +445,10 @@ fn run_supabase_check(output: OutputFormat) -> Result<()> {
 }
 
 fn run_supabase_sql(args: SupabaseSqlArgs, output: OutputFormat) -> Result<()> {
+    // The generated DDL interpolates these identifiers into SQL (including
+    // PL/pgSQL `format()` literals), so hold CLI overrides to the same rules
+    // config-loaded values must satisfy instead of emitting corrupt SQL.
+    crate::config::validate_supabase_identifiers(&args.schema, &args.table_prefix)?;
     let sql = setup_sql(&args.schema, &args.table_prefix, &args.writer_password);
     if output.is_json() {
         print_json(&serde_json::json!({

@@ -8887,14 +8887,82 @@ fn logging_supabase_sql_prints_prefixed_public_ddl() {
         "GRANT EXECUTE ON FUNCTION \"public\".\"acp_stack_ingest_batch\"(text, jsonb) TO \"acp_stack_logger\""
     ));
     assert!(sql.contains("REVOKE ALL ON TABLE"));
-    assert!(sql.contains("ALTER TABLE \"public\".\"acp_stack_events\" ENABLE ROW LEVEL SECURITY"));
-    assert!(sql.contains("FOR INSERT TO \"acp_stack_logger\" WITH CHECK (true)"));
-    assert!(sql.contains("FOR UPDATE TO \"acp_stack_logger\" USING (true) WITH CHECK (true)"));
+    for table in [
+        "schema_migrations",
+        "events",
+        "sessions",
+        "prompts",
+        "commands",
+        "permission_requests",
+        "permission_decisions",
+        "auth_failures",
+        "agent_lifecycle",
+    ] {
+        assert!(
+            sql.contains(&format!(
+                "ALTER TABLE \"public\".\"acp_stack_{table}\" ENABLE ROW LEVEL SECURITY"
+            )),
+            "missing RLS enablement for {table}"
+        );
+    }
+    for view in [
+        "session_turns",
+        "permissions",
+        "agent_events",
+        "security_events",
+        "connection_events",
+        "usage_metrics",
+    ] {
+        assert!(
+            sql.contains(&format!(
+                "CREATE OR REPLACE VIEW \"public\".\"acp_stack_{view}\"\nWITH (security_invoker = true) AS"
+            )),
+            "missing security_invoker for {view}"
+        );
+    }
+    // PUBLIC is revoked unconditionally; anon/authenticated are revoked only
+    // behind a pg_roles existence guard (so the SQL is safe on a non-Supabase
+    // Postgres), never as an unconditional `FROM PUBLIC, "anon", "authenticated"`.
+    assert!(sql.contains("FROM PUBLIC;"));
+    assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name)"));
+    assert!(sql.contains("EXECUTE format('REVOKE ALL ON TABLE"));
+    assert!(sql.contains("EXECUTE format('REVOKE ALL ON FUNCTION"));
+    assert!(!sql.contains("FROM PUBLIC, \"anon\", \"authenticated\""));
+    // Writes go through the SECURITY DEFINER ingest function, so the writer role
+    // gets no direct table access and no per-table RLS policies are emitted.
+    assert!(!sql.contains("CREATE POLICY"));
+    assert!(!sql.contains("FOR INSERT TO \"acp_stack_logger\""));
+    assert!(!sql.contains("FOR UPDATE TO \"acp_stack_logger\""));
     assert!(!sql.contains("GRANT INSERT, UPDATE, SELECT ON TABLE"));
+    assert!(!sql.contains(" TO PUBLIC"));
+    assert!(!sql.contains(" TO \"anon\""));
+    assert!(!sql.contains(" TO \"authenticated\""));
     assert!(!sql.contains("FOR SELECT TO \"acp_stack_logger\""));
     assert!(sql.contains("failure_detail_json jsonb"));
     assert!(sql.contains("message_id_acknowledged boolean NOT NULL DEFAULT false"));
     assert!(sql.contains("output_bytes bigint NOT NULL DEFAULT 0"));
+}
+
+#[test]
+fn logging_supabase_sql_rejects_unsafe_schema() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_operator_init_with_home(tempdir.path(), &[]);
+
+    // A schema with a single quote would break out of the PL/pgSQL `format()`
+    // string literal in the generated revoke statements; reject it up front.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "logging",
+            "supabase",
+            "sql",
+            "--schema",
+            "pub'lic",
+            "--writer-password",
+            "test_writer_password",
+        ])
+        .assert()
+        .failure();
 }
 
 #[test]

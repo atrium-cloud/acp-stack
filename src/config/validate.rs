@@ -313,19 +313,29 @@ fn validate_supabase_logging(supabase: Option<&SupabaseLoggingConfig>) -> Result
             url: supabase.url.clone(),
         });
     }
-    if !is_safe_pg_identifier(&supabase.schema) {
-        return Err(StackError::InvalidSupabaseSchema {
-            schema: supabase.schema.clone(),
-        });
-    }
-    if !is_safe_table_prefix(&supabase.table_prefix) {
-        return Err(StackError::InvalidSupabaseTablePrefix {
-            prefix: supabase.table_prefix.clone(),
-        });
-    }
+    validate_supabase_identifiers(&supabase.schema, &supabase.table_prefix)?;
     if supabase.backend == SupabaseLoggingBackend::Postgres && supabase.db_url_ref.is_none() {
         return Err(StackError::MissingField {
             field: "logging.supabase.db_url_ref",
+        });
+    }
+    Ok(())
+}
+
+/// Reject Supabase schema/table-prefix values that are unsafe as Postgres
+/// identifiers. Shared by config validation and `acps logging supabase sql`,
+/// which builds DDL directly from CLI arguments — including PL/pgSQL
+/// `format()` string literals where a stray `'` or `%` would corrupt the
+/// generated revoke statements.
+pub(crate) fn validate_supabase_identifiers(schema: &str, table_prefix: &str) -> Result<()> {
+    if !is_safe_pg_identifier(schema) {
+        return Err(StackError::InvalidSupabaseSchema {
+            schema: schema.to_owned(),
+        });
+    }
+    if !is_safe_table_prefix(table_prefix) {
+        return Err(StackError::InvalidSupabaseTablePrefix {
+            prefix: table_prefix.to_owned(),
         });
     }
     Ok(())

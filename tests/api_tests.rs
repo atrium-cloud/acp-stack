@@ -1470,10 +1470,13 @@ async fn metrics_summary_counts_existing_state_rows() {
             .expect("append lifecycle");
     }
 
-    // The default window is 24h; the seeded fixtures use dates older than
-    // that, so widen the window for the count assertions.
+    // The default window is 24h; the seeded fixtures use fixed historical dates,
+    // so use an absolute lower bound for stable count assertions.
     let response = reqwest::Client::new()
-        .get(format!("{}/v1/metrics/summary?since=30d", harness.base_url))
+        .get(format!(
+            "{}/v1/metrics/summary?since=2000-01-01T00:00:00Z",
+            harness.base_url
+        ))
         .header("Authorization", format!("Bearer {SESSION_KEY}"))
         .send()
         .await

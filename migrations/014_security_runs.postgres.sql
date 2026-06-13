@@ -37,5 +37,25 @@ CREATE TABLE IF NOT EXISTS security_findings (
     PRIMARY KEY (run_id, ordinal)
 );
 
+ALTER TABLE security_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE security_findings ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE security_runs, security_findings
+FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format(
+                'REVOKE ALL ON TABLE security_runs, security_findings FROM %I',
+                api_role_name
+            );
+        END IF;
+    END LOOP;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_security_findings_run
     ON security_findings(run_id, ordinal);

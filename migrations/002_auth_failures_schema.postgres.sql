@@ -13,6 +13,20 @@ CREATE TABLE auth_failures (
     payload_json jsonb NOT NULL
 );
 
+ALTER TABLE auth_failures ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE auth_failures FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format('REVOKE ALL ON TABLE auth_failures FROM %I', api_role_name);
+        END IF;
+    END LOOP;
+END $$;
+
 INSERT INTO auth_failures
     (id, created_at, key_kind, reason, client_ip, route, payload_json)
 SELECT
