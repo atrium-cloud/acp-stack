@@ -20,5 +20,19 @@ CREATE TABLE IF NOT EXISTS stack_update_runs (
   payload_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+ALTER TABLE stack_update_runs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE stack_update_runs FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format('REVOKE ALL ON TABLE stack_update_runs FROM %I', api_role_name);
+        END IF;
+    END LOOP;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_stack_update_runs_started
 ON stack_update_runs(started_at DESC, id DESC);

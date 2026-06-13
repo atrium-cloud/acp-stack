@@ -41,5 +41,25 @@ CREATE TABLE IF NOT EXISTS init_steps (
     UNIQUE(run_id, ordinal)
 );
 
+ALTER TABLE init_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE init_steps ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE init_runs, init_steps
+FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format(
+                'REVOKE ALL ON TABLE init_runs, init_steps FROM %I',
+                api_role_name
+            );
+        END IF;
+    END LOOP;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_init_steps_run_id
     ON init_steps(run_id, ordinal);

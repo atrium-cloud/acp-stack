@@ -29,5 +29,19 @@ CREATE TABLE IF NOT EXISTS prompts (
     prompt_json   jsonb NOT NULL
 );
 
+ALTER TABLE prompts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE prompts FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format('REVOKE ALL ON TABLE prompts FROM %I', api_role_name);
+        END IF;
+    END LOOP;
+END $$;
+
 CREATE INDEX IF NOT EXISTS prompts_session_idx
     ON prompts (session_id, created_at, id);

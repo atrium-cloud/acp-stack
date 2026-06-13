@@ -8,6 +8,8 @@ pub const SUPABASE_DEFAULT_TABLE_PREFIX: &str = "acp_stack_";
 pub const SUPABASE_DEFAULT_DB_URL_REF: &str = "SUPABASE_LOG_DB_URL";
 pub const SUPABASE_WRITER_ROLE: &str = "acp_stack_logger";
 const SUPABASE_INGEST_FUNCTION_SUFFIX: &str = "ingest_batch";
+const SUPABASE_MIGRATIONS_TABLE: &str = "schema_migrations";
+const SUPABASE_PUBLIC_API_ROLES: &[&str] = &["anon", "authenticated"];
 
 pub const MIRRORED_TABLES: &[&str] = &[
     "events",
@@ -18,6 +20,15 @@ pub const MIRRORED_TABLES: &[&str] = &[
     "permission_decisions",
     "auth_failures",
     "agent_lifecycle",
+];
+
+const SUPABASE_ANALYTICS_VIEWS: &[&str] = &[
+    "session_turns",
+    "permissions",
+    "agent_events",
+    "security_events",
+    "connection_events",
+    "usage_metrics",
 ];
 
 pub fn remote_table_name(config: &SupabaseLoggingConfig, source_table: &str) -> Result<String> {
@@ -67,7 +78,7 @@ pub fn setup_sql(schema: &str, table_prefix: &str, writer_password: &str) -> Str
     let permission_decisions = table(schema.as_str(), table_prefix, "permission_decisions");
     let auth_failures = table(schema.as_str(), table_prefix, "auth_failures");
     let agent_lifecycle = table(schema.as_str(), table_prefix, "agent_lifecycle");
-    let migrations = table(schema.as_str(), table_prefix, "schema_migrations");
+    let migrations = table(schema.as_str(), table_prefix, SUPABASE_MIGRATIONS_TABLE);
     let session_turns = table(schema.as_str(), table_prefix, "session_turns");
     let permissions = table(schema.as_str(), table_prefix, "permissions");
     let agent_events = table(schema.as_str(), table_prefix, "agent_events");
@@ -80,16 +91,25 @@ pub fn setup_sql(schema: &str, table_prefix: &str, writer_password: &str) -> Str
         SUPABASE_INGEST_FUNCTION_SUFFIX,
     );
     let ingest_function_signature = format!("{ingest_function}(text, jsonb)");
-    let raw_table_names = MIRRORED_TABLES
+    let base_table_names = setup_base_table_names()
+        .map(|name| table(schema.as_str(), table_prefix, name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let view_names = SUPABASE_ANALYTICS_VIEWS
         .iter()
         .map(|name| table(schema.as_str(), table_prefix, name))
         .collect::<Vec<_>>()
         .join(", ");
-    let rls_policies = MIRRORED_TABLES
-        .iter()
-        .map(|name| rls_policy_sql(schema.as_str(), table_prefix, name, role.as_str()))
+    let rls_enables = setup_base_table_names()
+        .map(|name| enable_rls_sql(schema.as_str(), table_prefix, name))
         .collect::<Vec<_>>()
         .join("\n");
+    // Lock the Supabase REST API roles out of every mirrored relation. PUBLIC is
+    // revoked unconditionally; `anon`/`authenticated` are revoked only when they
+    // exist so the same SQL stays runnable against a non-Supabase Postgres.
+    let revoke_base_tables = revoke_api_roles_sql("TABLE", &base_table_names);
+    let revoke_views = revoke_api_roles_sql("TABLE", &view_names);
+    let revoke_function = revoke_api_roles_sql("FUNCTION", &ingest_function_signature);
     let ingest_cases = MIRRORED_TABLES
         .iter()
         .map(|name| ingest_case_sql(schema.as_str(), table_prefix, name))
@@ -201,6 +221,10 @@ CREATE TABLE IF NOT EXISTS {agent_lifecycle} (
     payload_json jsonb NOT NULL
 );
 
+{rls_enables}
+
+{revoke_base_tables}
+
 CREATE INDEX IF NOT EXISTS {idx_events_source} ON {events}(source);
 CREATE INDEX IF NOT EXISTS {idx_events_created_kind} ON {events}(created_at, kind);
 CREATE INDEX IF NOT EXISTS {idx_events_kind_created} ON {events}(kind, created_at);
@@ -211,12 +235,14 @@ CREATE INDEX IF NOT EXISTS {idx_commands_progress} ON {commands}(status, last_pr
 CREATE INDEX IF NOT EXISTS {idx_permission_requests_status} ON {permission_requests}(status, created_at);
 CREATE INDEX IF NOT EXISTS {idx_permission_decisions_request} ON {permission_decisions}(request_id);
 
-CREATE OR REPLACE VIEW {session_turns} AS
+CREATE OR REPLACE VIEW {session_turns}
+WITH (security_invoker = true) AS
 SELECT id, session_id, status, stop_reason, error_code, error_message,
        created_at, updated_at, prompt_json
 FROM {prompts};
 
-CREATE OR REPLACE VIEW {permissions} AS
+CREATE OR REPLACE VIEW {permissions}
+WITH (security_invoker = true) AS
 SELECT
     r.id AS request_id,
     r.created_at AS requested_at,
@@ -235,7 +261,8 @@ SELECT
 FROM {permission_requests} AS r
 LEFT JOIN {permission_decisions} AS d ON d.request_id = r.id;
 
-CREATE OR REPLACE VIEW {agent_events} AS
+CREATE OR REPLACE VIEW {agent_events}
+WITH (security_invoker = true) AS
 SELECT id, created_at, event_kind AS kind, message, payload_json,
        'agent_lifecycle'::text AS source
 FROM {agent_lifecycle}
@@ -244,7 +271,8 @@ SELECT id, created_at, kind, message, payload_json, source
 FROM {events}
 WHERE kind LIKE 'agent.%';
 
-CREATE OR REPLACE VIEW {security_events} AS
+CREATE OR REPLACE VIEW {security_events}
+WITH (security_invoker = true) AS
 SELECT id, created_at, key_kind AS kind, reason AS message, payload_json,
        'auth_failures'::text AS source
 FROM {auth_failures}
@@ -253,15 +281,19 @@ SELECT id, created_at, kind, message, payload_json, source
 FROM {events}
 WHERE kind LIKE 'security.%';
 
-CREATE OR REPLACE VIEW {connection_events} AS
+CREATE OR REPLACE VIEW {connection_events}
+WITH (security_invoker = true) AS
 SELECT id, created_at, kind, message, payload_json, source, session_id
 FROM {events}
 WHERE kind IN ('api.request', 'ws.client_connected', 'ws.client_disconnected');
 
-CREATE OR REPLACE VIEW {usage_metrics} AS
+CREATE OR REPLACE VIEW {usage_metrics}
+WITH (security_invoker = true) AS
 SELECT id, created_at, kind, message, payload_json, source, session_id
 FROM {events}
 WHERE kind = 'usage.reported';
+
+{revoke_views}
 
 DO $$
 BEGIN
@@ -273,9 +305,8 @@ BEGIN
 END $$;
 
 GRANT USAGE ON SCHEMA {schema} TO {role};
-REVOKE ALL ON TABLE {raw_table_names} FROM {role};
-
-{rls_policies}
+REVOKE ALL ON TABLE {base_table_names} FROM {role};
+REVOKE ALL ON TABLE {view_names} FROM {role};
 
 CREATE OR REPLACE FUNCTION {ingest_function}(source_table text, payload jsonb)
 RETURNS void
@@ -293,7 +324,7 @@ BEGIN
 END
 $function$;
 
-REVOKE ALL ON FUNCTION {ingest_function_signature} FROM PUBLIC;
+{revoke_function}
 GRANT EXECUTE ON FUNCTION {ingest_function_signature} TO {role};
 
 INSERT INTO {migrations} (version, name, applied_at)
@@ -474,18 +505,40 @@ fn index_name(prefix: &str, name: &str) -> String {
     quote_ident(&format!("{prefix}{name}"))
 }
 
-fn rls_policy_sql(quoted_schema: &str, prefix: &str, name: &str, quoted_role: &str) -> String {
+fn setup_base_table_names() -> impl Iterator<Item = &'static str> {
+    std::iter::once(SUPABASE_MIGRATIONS_TABLE).chain(MIRRORED_TABLES.iter().copied())
+}
+
+fn enable_rls_sql(quoted_schema: &str, prefix: &str, name: &str) -> String {
     let target = table(quoted_schema, prefix, name);
-    let insert_policy = quote_ident(&format!("{prefix}{name}_logger_insert_policy"));
-    let update_policy = quote_ident(&format!("{prefix}{name}_logger_update_policy"));
+    format!("ALTER TABLE {target} ENABLE ROW LEVEL SECURITY;")
+}
+
+/// Revoke every privilege on `targets` from the Supabase REST API roles.
+/// `object_kind` is the SQL object class (`TABLE` or `FUNCTION`) and `targets`
+/// is the already-qualified, comma-joined relation/signature list. PUBLIC is
+/// revoked unconditionally; `anon`/`authenticated` are revoked inside a
+/// `pg_roles` guard so the statement also succeeds where those roles are absent
+/// (e.g. a generic Postgres reached via the printed `acps logging supabase sql`).
+fn revoke_api_roles_sql(object_kind: &str, targets: &str) -> String {
+    let api_role_array = SUPABASE_PUBLIC_API_ROLES
+        .iter()
+        .map(|role| quote_literal(role))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        r#"ALTER TABLE {target} ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS {insert_policy} ON {target};
-CREATE POLICY {insert_policy} ON {target}
-    FOR INSERT TO {quoted_role} WITH CHECK (true);
-DROP POLICY IF EXISTS {update_policy} ON {target};
-CREATE POLICY {update_policy} ON {target}
-    FOR UPDATE TO {quoted_role} USING (true) WITH CHECK (true);"#
+        r#"REVOKE ALL ON {object_kind} {targets} FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY[{api_role_array}] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format('REVOKE ALL ON {object_kind} {targets} FROM %I', api_role_name);
+        END IF;
+    END LOOP;
+END $$;"#
     )
 }
 
@@ -516,4 +569,93 @@ fn quote_ident(value: &str) -> String {
 
 fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generated_sql() -> String {
+        setup_sql("public", "acp_stack_", "test_writer_password")
+    }
+
+    fn generated_relation(name: &str) -> String {
+        format!("\"public\".\"acp_stack_{name}\"")
+    }
+
+    #[test]
+    fn setup_sql_enables_rls_on_every_created_base_table() {
+        let sql = generated_sql();
+
+        for table_name in setup_base_table_names() {
+            let relation = generated_relation(table_name);
+            assert!(
+                sql.contains(&format!(
+                    "ALTER TABLE {relation} ENABLE ROW LEVEL SECURITY;"
+                )),
+                "missing RLS enablement for {relation}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_sql_revokes_public_api_roles_from_tables_and_views() {
+        let sql = generated_sql();
+        let table_names = setup_base_table_names()
+            .map(generated_relation)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let view_names = SUPABASE_ANALYTICS_VIEWS
+            .iter()
+            .map(|name| generated_relation(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // PUBLIC is revoked unconditionally; the API roles are revoked only via a
+        // pg_roles existence guard so the SQL is safe on a non-Supabase Postgres.
+        for targets in [&table_names, &view_names] {
+            assert!(
+                sql.contains(&format!("REVOKE ALL ON TABLE {targets} FROM PUBLIC;")),
+                "missing unconditional PUBLIC revoke for {targets}"
+            );
+            assert!(
+                sql.contains(&format!(
+                    "EXECUTE format('REVOKE ALL ON TABLE {targets} FROM %I', api_role_name);"
+                )),
+                "missing guarded API-role revoke for {targets}"
+            );
+        }
+        assert!(
+            sql.contains("IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name)"),
+            "API-role revoke must be guarded by a pg_roles existence check"
+        );
+        for role in ["\"anon\"", "\"authenticated\""] {
+            assert!(
+                !sql.contains(&format!("FROM PUBLIC, {role}")),
+                "API role {role} must not be revoked unconditionally"
+            );
+        }
+
+        for role in ["PUBLIC", "\"anon\"", "\"authenticated\""] {
+            assert!(
+                !sql.contains(&format!(" TO {role}")),
+                "generated SQL must not grant privileges to {role}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_sql_uses_security_invoker_views() {
+        let sql = generated_sql();
+
+        for view_name in SUPABASE_ANALYTICS_VIEWS {
+            let relation = generated_relation(view_name);
+            assert!(
+                sql.contains(&format!(
+                    "CREATE OR REPLACE VIEW {relation}\nWITH (security_invoker = true) AS"
+                )),
+                "missing security_invoker for {relation}"
+            );
+        }
+    }
 }

@@ -35,6 +35,7 @@ pub use self::validate::primitives::{
     compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,
 };
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
+pub(crate) use self::validate::validate_supabase_identifiers;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -47,3 +47,28 @@ CREATE TABLE IF NOT EXISTS installer_runs (
     stderr text NOT NULL,
     exit_status bigint
 );
+
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_lifecycle ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auth_failures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE installer_runs ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE events, sessions, commands, agent_lifecycle,
+    auth_failures, installer_runs
+FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format(
+                'REVOKE ALL ON TABLE events, sessions, commands, agent_lifecycle, auth_failures, installer_runs FROM %I',
+                api_role_name
+            );
+        END IF;
+    END LOOP;
+END $$;
