@@ -25,6 +25,20 @@ CREATE TABLE prompts (
     failure_detail_json text
 );
 
+ALTER TABLE prompts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE prompts FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format('REVOKE ALL ON TABLE prompts FROM %I', api_role_name);
+        END IF;
+    END LOOP;
+END $$;
+
 INSERT INTO prompts
     (id, session_id, created_at, updated_at, status,
      stop_reason, error_code, error_message, prompt_json,
@@ -43,7 +57,21 @@ CREATE INDEX IF NOT EXISTS prompts_session_idx
 CREATE INDEX IF NOT EXISTS prompts_status_updated_at_idx
     ON prompts (status, updated_at);
 
-CREATE OR REPLACE VIEW session_turns AS
+CREATE OR REPLACE VIEW session_turns
+WITH (security_invoker = true) AS
 SELECT id, session_id, status, stop_reason, error_code, error_message,
        created_at, updated_at, prompt_json
 FROM prompts;
+
+REVOKE ALL ON TABLE session_turns FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format('REVOKE ALL ON TABLE session_turns FROM %I', api_role_name);
+        END IF;
+    END LOOP;
+END $$;

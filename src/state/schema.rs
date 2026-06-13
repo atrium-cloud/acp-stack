@@ -690,6 +690,31 @@ mod tests {
         blocks
     }
 
+    fn iter_create_view_names(sql: &str) -> Vec<String> {
+        let mut views = Vec::new();
+        let upper = sql.to_ascii_uppercase();
+        let mut search_from = 0;
+        while let Some(rel) = upper[search_from..].find("CREATE") {
+            let start = search_from + rel;
+            let after_create = start + "CREATE".len();
+            let rest_upper = &upper[after_create..];
+            let name_start = if rest_upper.starts_with(" OR REPLACE VIEW") {
+                after_create + " OR REPLACE VIEW".len()
+            } else if rest_upper.starts_with(" VIEW") {
+                after_create + " VIEW".len()
+            } else {
+                search_from = after_create;
+                continue;
+            };
+            let rest = &sql[name_start..];
+            if let Some(name) = rest.split_whitespace().next() {
+                views.push(name.trim_matches('"').to_string());
+            }
+            search_from = name_start;
+        }
+        views
+    }
+
     fn parse_column_name(fragment: &str) -> Option<String> {
         let trimmed = fragment.trim();
         if trimmed.is_empty() {
@@ -815,6 +840,22 @@ mod tests {
             .join(",")
     }
 
+    fn normalized_sql(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn postgres_table_has_rls(sql: &str, table: &str) -> bool {
+        normalized_sql(sql).contains(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+    }
+
+    fn postgres_view_has_security_invoker(sql: &str, view: &str) -> bool {
+        normalized_sql(sql).contains(&format!(
+            "CREATE OR REPLACE VIEW {view} WITH (security_invoker = true) AS"
+        )) || normalized_sql(sql).contains(&format!(
+            "CREATE VIEW {view} WITH (security_invoker = true) AS"
+        ))
+    }
+
     #[test]
     fn dialects_have_matching_tables_columns_and_indexes_per_migration() {
         // Use the public accessor so any future caller of
@@ -834,6 +875,58 @@ mod tests {
                 "index mismatch in migration {} ({})",
                 migration.id, migration.name
             );
+        }
+    }
+
+    #[test]
+    fn postgres_created_tables_enable_row_level_security() {
+        for migration in migrations_postgres_ddl() {
+            let cleaned = strip_comments_and_checks(migration.postgres);
+            let tables = iter_create_table_blocks(&cleaned);
+            for (table, _) in tables {
+                assert!(
+                    postgres_table_has_rls(migration.postgres, &table),
+                    "Postgres migration {} ({}) creates table {table} without enabling RLS",
+                    migration.id,
+                    migration.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_created_views_use_security_invoker() {
+        for migration in migrations_postgres_ddl() {
+            let cleaned = strip_comments_and_checks(migration.postgres);
+            let views = iter_create_view_names(&cleaned);
+            for view in views {
+                assert!(
+                    postgres_view_has_security_invoker(migration.postgres, &view),
+                    "Postgres migration {} ({}) creates view {view} without security_invoker",
+                    migration.id,
+                    migration.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_migrations_do_not_require_supabase_api_roles() {
+        for migration in migrations_postgres_ddl() {
+            let sql = normalized_sql(&strip_comments_and_checks(migration.postgres));
+            for required_role_pattern in [
+                "FROM PUBLIC, \"anon\"",
+                "FROM PUBLIC, \"authenticated\"",
+                "FROM \"anon\"",
+                "FROM \"authenticated\"",
+            ] {
+                assert!(
+                    !sql.contains(required_role_pattern),
+                    "Postgres migration {} ({}) requires a Supabase API role via `{required_role_pattern}`",
+                    migration.id,
+                    migration.name
+                );
+            }
         }
     }
 }

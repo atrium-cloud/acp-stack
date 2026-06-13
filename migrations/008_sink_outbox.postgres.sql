@@ -25,3 +25,23 @@ CREATE TABLE IF NOT EXISTS sink_failures_summary (
     last_error text,
     last_observed_at timestamptz NOT NULL
 );
+
+ALTER TABLE sink_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sink_failures_summary ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE sink_outbox, sink_failures_summary
+FROM PUBLIC;
+
+DO $$
+DECLARE
+    api_role_name text;
+BEGIN
+    FOREACH api_role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = api_role_name) THEN
+            EXECUTE format(
+                'REVOKE ALL ON TABLE sink_outbox, sink_failures_summary FROM %I',
+                api_role_name
+            );
+        END IF;
+    END LOOP;
+END $$;

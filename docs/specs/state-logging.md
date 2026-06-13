@@ -138,6 +138,8 @@ Usage fields stay `null` when the configured agent does not report them. The sha
 
 When the Supabase sink is enabled, selected local rows are redacted and delivered to the configured external backend. The recommended `postgres` backend uses `[logging.supabase].db_url_ref`; the legacy `postgrest` backend uses `[logging.supabase].api_key_ref`. Delivery is asynchronous and retryable. Local SQLite writes do not depend on external delivery succeeding.
 
+`acps logging supabase setup` provisions RLS-enabled tables and private security-invoker views. Supabase `anon` and `authenticated` API roles are not granted access to mirrored rows. The provisioning SQL requires Postgres 15+ (for the `security_invoker` view option); every Supabase project qualifies.
+
 The security self-check reports persistent external logging delivery failures.
 
 Mirrored tables: `events`, `sessions`, `prompts`, `commands`, `permission_requests`, `permission_decisions`, `auth_failures`, and `agent_lifecycle`. Operator-facing "run history" tables — `installer_runs`, `init_runs`, `init_steps`, `deps_apply_runs`, `security_runs`, and `security_findings` — are kept local-only by design. `acps installer history` reads SQLite directly; `acps security history` and `acps security show` route through the admin HTTP API so the daemon's tier checks apply uniformly across the security surface. Adding selective sink mirroring for run-history tables is tracked as future work.
