@@ -3,7 +3,8 @@ name: release
 # Builds and publishes the Linux release artifacts on GitHub's runners. A single
 # Linux job cross-compiles both arches via cargo-zigbuild (glibc 2.17 floor),
 # reusing scripts/build-release.sh verbatim, then attaches the tarballs +
-# SHA256SUMS + install.sh to the GitHub Release.
+# SHA256SUMS + install.sh + acps-release.json (the self-updater manifest) to the
+# GitHub Release.
 #
 # Normal flow: push a tag.
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -55,4 +56,10 @@ jobs:
             dist/acp-stack-*.tar.gz
             dist/SHA256SUMS
             dist/install.sh
+            dist/acps-release.json
+          # Release notes come from the curated per-version changelog committed at
+          # the tag (docs/changelogs/<tag>.md, e.g. docs/changelogs/v0.1.1.md);
+          # generated commit/PR notes are appended below it. The release fails if
+          # the file is missing, which keeps every tag paired with a changelog.
+          body_path: docs/changelogs/${{ github.event.inputs.tag || github.ref_name }}.md
           generate_release_notes: true
