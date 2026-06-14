@@ -245,3 +245,122 @@ async fn append_update_lifecycle(
     guard.append_agent_lifecycle(kind, message, &payload)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::agent::supervisor::AgentSupervisor;
+
+    // A minimal valid config; the auto-updater only reads `agent.auto_update`,
+    // but loading goes through full validation so every required section is here.
+    const BASE_CONFIG: &str = r#"
+[api]
+bind = "127.0.0.1:7700"
+public_url = "http://127.0.0.1:7700"
+max_request_bytes = 1048576
+
+[auth]
+session_key_ref = "ACP_STACK_SESSION_KEY"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]
+max_request_bytes = 1048576
+rate_limit_per_minute = 120
+burst = 30
+auth_failures_per_minute = 5
+auth_block_duration = "15m"
+allowed_origins = []
+trust_proxy_headers = false
+trusted_proxies = []
+
+[workspace]
+root = "/workspace"
+uploads = "/workspace/uploads"
+default_shell = "/bin/bash"
+runtime_user = "acp"
+max_file_bytes = 8388608
+
+[logging]
+level = "info"
+local_retention_days = 30
+
+[agent]
+id = "placebo"
+name = "Placebo"
+command = "placebo-agent"
+args = []
+cwd = "/workspace"
+env = []
+restart = "on-crash"
+"#;
+
+    fn write_config(tempdir: &tempfile::TempDir, extra: &str) -> PathBuf {
+        let path = tempdir.path().join("acps-config.toml");
+        std::fs::write(&path, format!("{BASE_CONFIG}{extra}")).expect("write config");
+        path
+    }
+
+    #[test]
+    fn next_delay_uses_configured_frequency_when_enabled() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(
+            &tempdir,
+            "\n[agent.auto_update]\nenabled = true\nfrequency = \"2w\"\n",
+        );
+        let expected = parse_duration_string("2w").expect("2w parses");
+        assert_eq!(next_delay(&path), expected);
+        assert_ne!(next_delay(&path), DISABLED_POLL_INTERVAL);
+    }
+
+    #[test]
+    fn next_delay_falls_back_to_poll_when_disabled() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(
+            &tempdir,
+            "\n[agent.auto_update]\nenabled = false\nfrequency = \"1d\"\n",
+        );
+        assert_eq!(next_delay(&path), DISABLED_POLL_INTERVAL);
+    }
+
+    #[test]
+    fn next_delay_falls_back_to_poll_when_section_absent() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(&tempdir, "");
+        assert_eq!(next_delay(&path), DISABLED_POLL_INTERVAL);
+    }
+
+    #[test]
+    fn next_delay_falls_back_to_poll_when_config_missing() {
+        let path = PathBuf::from("/nonexistent/acp-stack/acps-config.toml");
+        assert_eq!(next_delay(&path), DISABLED_POLL_INTERVAL);
+    }
+
+    #[tokio::test]
+    async fn spawn_then_shutdown_returns_promptly() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        // Disabled auto-update => the loop parks on the 60s poll interval and
+        // never performs work; shutdown must cancel that sleep immediately
+        // rather than wait out the interval.
+        let config_path = write_config(
+            &tempdir,
+            "\n[agent.auto_update]\nenabled = false\nfrequency = \"1d\"\n",
+        );
+        let state_path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&state_path).expect("state open");
+        store.migrate().expect("migrate");
+        let state = Arc::new(TokioMutex::new(store));
+        let supervisor = Arc::new(AgentSupervisor::new());
+
+        let updater = AgentAutoUpdater::spawn(
+            tempdir.path().to_path_buf(),
+            config_path,
+            state_path,
+            state,
+            supervisor,
+        );
+
+        tokio::time::timeout(Duration::from_secs(10), updater.shutdown())
+            .await
+            .expect("shutdown should not hang");
+    }
+}
