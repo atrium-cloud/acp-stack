@@ -15,6 +15,9 @@ set -euo pipefail
 
 # ----- CONSTANTS -----
 readonly PROJECT="acp-stack"
+# Self-updater manifest asset name. Deliberately shorter than the tarball prefix
+# (`${PROJECT}-...`); the updater fetches it by this exact name.
+readonly MANIFEST_NAME="acps-release.json"
 readonly GLIBC="2.17"
 readonly TARGETS=(
   "x86_64-unknown-linux-gnu"
@@ -136,7 +139,7 @@ cp "${REPO_ROOT}/install.sh" "${DIST_DIR}/install.sh"
 )
 log "wrote ${DIST_DIR}/SHA256SUMS"
 
-manifest="${DIST_DIR}/${PROJECT}-release.json"
+manifest="${DIST_DIR}/${MANIFEST_NAME}"
 {
   printf '{\n'
   printf '  "schema_version": 1,\n'
@@ -163,7 +166,7 @@ manifest="${DIST_DIR}/${PROJECT}-release.json"
 log "wrote ${manifest}"
 (
   cd "${DIST_DIR}"
-  printf '%s  %s\n' "$(sha256_file "${PROJECT}-release.json")" "${PROJECT}-release.json" >> SHA256SUMS
+  printf '%s  %s\n' "$(sha256_file "${MANIFEST_NAME}")" "${MANIFEST_NAME}" >> SHA256SUMS
 )
 
 cat >&2 <<EOF
@@ -174,6 +177,6 @@ $(cd "${DIST_DIR}" && ls -1)
 To publish (after committing + tagging v${version}):
   gh release create v${version} \\
     dist/${PROJECT}-${version}-*.tar.gz \\
-    dist/SHA256SUMS dist/install.sh dist/${PROJECT}-release.json \\
+    dist/SHA256SUMS dist/install.sh dist/${MANIFEST_NAME} \\
     --title "v${version}" --notes "..."
 EOF
