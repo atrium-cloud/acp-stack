@@ -42,8 +42,7 @@ Cloudflare providers require companion env refs alongside the main API key. Set 
 
 ## Subagent Model
 
-OpenCode can call a `small_model` for background tasks such as title generation.
-It has been reported that OpenCode can call Anthropic Claude Haiku 4.5 when using `OPENROUTER_API_KEY` for auth even when the main model is not Haiku 4.5.
+OpenCode can call a `small_model` for background tasks such as title generation. It has been reported that OpenCode can call Anthropic Claude Haiku 4.5 when using `OPENROUTER_API_KEY` for auth even when the main model is not Haiku 4.5.
 - We have reproduced this behavior using an `OPENROUTER_API_KEY`.
 - GitHub issue [Openrouter unwated requests to Claude Haiku 4.5. #4579](https://github.com/anomalyco/opencode/issues/4579) remains open as of May 26, 2026.
 - GitHub PR [fix(provider): treat empty small_model as disabled #21184](https://github.com/anomalyco/opencode/pull/21184) has not been merged as of May 26, 2026.

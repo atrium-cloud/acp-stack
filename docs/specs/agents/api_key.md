@@ -1,7 +1,6 @@
 # Agent API Keys
 
-`acp-stack` stores provider credentials in the encrypted secret store and injects
-them into agents only through configured env refs.
+`acp-stack` stores provider credentials in the encrypted secret store and injects them into agents only through configured env refs.
 
 ## Secret Uptake
 
