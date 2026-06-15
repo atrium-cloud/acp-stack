@@ -5675,7 +5675,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success()
         .stdout(predicates::str::contains("config:    ok ("))
         .stdout(predicates::str::contains("state:     ok ("))
-        .stdout(predicates::str::contains("schema=19"))
+        .stdout(predicates::str::contains("schema=20"))
         .stdout(predicates::str::contains("latest_event="))
         .stdout(predicates::str::contains(format!(
             "workspace: ok ({workspace_str})"
@@ -7394,7 +7394,9 @@ async fn sessions_status_reports_no_active_session() {
         .args(["sessions", "status"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("No active session.\n"));
+        .stdout(predicates::str::contains(
+            "No session activity in window.\n",
+        ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -7430,10 +7432,30 @@ async fn sessions_status_renders_recent_active_session() {
         .args(["sessions", "status"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("recent "))
+        .stdout(predicates::str::contains("idle "))
         .stdout(predicates::str::contains("last_activity="))
         .stdout(predicates::str::contains("from=user"))
         .stdout(predicates::str::contains(session_id.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_status_format_json_returns_window() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+
+    let output = acps_command()
+        .env("HOME", home.path())
+        .args(["sessions", "status", "--window", "1m", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("sessions status json parses");
+    assert_eq!(body["window"], "1m");
+    assert!(body["window_start"].is_string(), "{body}");
+    assert!(body["sessions"].as_array().is_some(), "{body}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
-use crate::state::DEFAULT_SESSION_ACTIVITY_THRESHOLD;
+use crate::state::DEFAULT_SESSION_STATUS_WINDOW;
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Subcommand};
 
@@ -50,9 +50,12 @@ pub struct SessionsListArgs {
 
 #[derive(Debug, Args)]
 pub struct SessionsStatusArgs {
-    /// Recent-activity threshold. Accepts duration suffixes like 15m or 1h.
-    #[arg(long, default_value = DEFAULT_SESSION_ACTIVITY_THRESHOLD)]
-    threshold: String,
+    /// Rolling activity window. Accepts duration suffixes from 1m through 999h.
+    #[arg(long, default_value = DEFAULT_SESSION_STATUS_WINDOW)]
+    window: String,
+    /// Recent-activity threshold. Kept for compatibility; accepts values like 15m or 1h.
+    #[arg(long)]
+    threshold: Option<String>,
     #[arg(long, default_value_t = DEFAULT_SESSION_STATUS_LIMIT)]
     limit: u32,
 }
@@ -141,11 +144,15 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Status(args) => {
-                let path = format!(
-                    "/v1/sessions/-/status?threshold={}&limit={}",
-                    encode_query_value(&args.threshold),
+                let mut path = format!(
+                    "/v1/sessions/-/status?window={}&limit={}",
+                    encode_query_value(&args.window),
                     args.limit,
                 );
+                if let Some(threshold) = args.threshold.as_deref() {
+                    path.push_str("&threshold=");
+                    path.push_str(&encode_query_value(threshold));
+                }
                 let body =
                     daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
                 let sessions = body["data"]["sessions"]
@@ -153,30 +160,34 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                     .cloned()
                     .unwrap_or_default();
                 if output.is_json() {
-                    print_json(&serde_json::json!({ "sessions": sessions }))?;
+                    print_json(body.get("data").unwrap_or(&body))?;
                 } else if sessions.is_empty() {
-                    println!("No active session.");
+                    println!("No session activity in window.");
                 } else {
                     for session in sessions {
                         let id = session["id"].as_str().unwrap_or("?");
-                        let state = match session["recent"].as_bool() {
-                            Some(true) => "recent",
-                            Some(false) => "idle",
-                            None => "?",
-                        };
+                        let state = session["state"].as_str().unwrap_or("?");
                         let last = session["last_activity_at"].as_str().unwrap_or("?");
                         let actor = session["last_activity_from"].as_str().unwrap_or("?");
                         let cwd = session["cwd"].as_str().unwrap_or("");
+                        let prompt = session["prompt"]["id"].as_str();
+                        let permission = session["permission"]["id"].as_str();
+                        let prompt_part = prompt
+                            .map(|prompt_id| format!(" prompt={prompt_id}"))
+                            .unwrap_or_default();
+                        let permission_part = permission
+                            .map(|permission_id| format!(" permission={permission_id}"))
+                            .unwrap_or_default();
                         if let Some(title) = session["title"].as_str()
                             && !title.is_empty()
                         {
                             println!(
-                                "{state} last_activity={last} from={actor} session={id} title={title} cwd={cwd}"
+                                "{state} last_activity={last} from={actor} session={id}{prompt_part}{permission_part} title={title} cwd={cwd}"
                             );
                             continue;
                         }
                         println!(
-                            "{state} last_activity={last} from={actor} session={id} cwd={cwd}"
+                            "{state} last_activity={last} from={actor} session={id}{prompt_part}{permission_part} cwd={cwd}"
                         );
                     }
                 }

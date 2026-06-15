@@ -15,6 +15,12 @@ pub const SESSION_STATUS_AVAILABLE: &str = "available";
 pub const SESSION_STATUS_CLOSED: &str = "closed";
 /// Operator-facing activity threshold used by the compact session status view.
 pub const DEFAULT_SESSION_ACTIVITY_THRESHOLD: &str = "15m";
+/// Default rolling window for the multi-session turn status view.
+pub const DEFAULT_SESSION_STATUS_WINDOW: &str = "8h";
+/// Shorter windows are too noisy for human session monitoring.
+pub const MIN_SESSION_STATUS_WINDOW_SECS: i64 = 60;
+/// Keep status queries bounded while still allowing long workday views.
+pub const MAX_SESSION_STATUS_WINDOW_SECS: i64 = 999 * 60 * 60;
 /// Operator-view actor labels; these are not ACP protocol values.
 pub const SESSION_ACTIVITY_ACTOR_AGENT: &str = "agent";
 pub const SESSION_ACTIVITY_ACTOR_USER: &str = "user";
@@ -55,6 +61,42 @@ pub struct SessionActivityRecord {
     pub title: Option<String>,
     pub last_activity_at: String,
     pub last_activity_from: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatusRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub agent_id: String,
+    pub cwd: String,
+    pub title: Option<String>,
+    pub last_activity_at: String,
+    pub last_activity_from: String,
+    pub latest_prompt: Option<SessionStatusPromptRecord>,
+    pub pending_permission: Option<SessionStatusPermissionRecord>,
+    pub prompt_stream_started_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatusPromptRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub stop_reason: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub message_id: Option<String>,
+    pub message_id_acknowledged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatusPermissionRecord {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +480,199 @@ impl StateStore {
                     title: row.get(6)?,
                     last_activity_at: row.get(7)?,
                     last_activity_from: row.get(8)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn query_session_status_window(
+        &self,
+        since: &str,
+        limit: u32,
+    ) -> Result<Vec<SessionStatusRecord>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            WITH activity AS (
+                SELECT s.id AS session_id,
+                       s.updated_at AS activity_at,
+                       ?2 AS actor,
+                       0 AS priority
+                FROM sessions s
+                WHERE s.updated_at >= ?1
+                UNION ALL
+                SELECT p.session_id,
+                       p.created_at AS activity_at,
+                       ?2 AS actor,
+                       1 AS priority
+                FROM prompts p
+                WHERE p.created_at >= ?1
+                UNION ALL
+                SELECT p.session_id,
+                       p.updated_at AS activity_at,
+                       ?3 AS actor,
+                       2 AS priority
+                FROM prompts p
+                WHERE p.status <> 'pending'
+                  AND p.updated_at >= ?1
+                UNION ALL
+                SELECT e.session_id,
+                       e.created_at AS activity_at,
+                       CASE WHEN e.source = ?4 THEN ?3 ELSE ?2 END AS actor,
+                       3 AS priority
+                FROM events e
+                WHERE e.session_id IS NOT NULL
+                  AND e.created_at >= ?1
+                UNION ALL
+                SELECT pr.subject_id AS session_id,
+                       pr.created_at AS activity_at,
+                       ?3 AS actor,
+                       4 AS priority
+                FROM permission_requests pr
+                WHERE pr.status = 'pending'
+                  AND pr.source = 'acp'
+                  AND pr.subject_id IS NOT NULL
+                  AND pr.created_at >= ?1
+            ),
+            ranked_activity AS (
+                SELECT session_id,
+                       activity_at,
+                       actor,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY activity_at DESC, priority DESC
+                       ) AS row_number
+                FROM activity
+            ),
+            window_sessions AS (
+                SELECT session_id,
+                       activity_at,
+                       actor
+                FROM ranked_activity
+                WHERE row_number = 1
+            ),
+            latest_prompts AS (
+                SELECT id, session_id, created_at, updated_at, status,
+                       stop_reason, error_code, error_message, message_id,
+                       message_id_acknowledged
+                FROM (
+                    SELECT p.id, p.session_id, p.created_at, p.updated_at, p.status,
+                           p.stop_reason, p.error_code, p.error_message, p.message_id,
+                           p.message_id_acknowledged,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY p.session_id
+                               ORDER BY
+                                   CASE WHEN p.status IN ('pending', 'running') THEN 0 ELSE 1 END ASC,
+                                   CASE WHEN p.status IN ('pending', 'running') THEN p.created_at END ASC,
+                                   CASE WHEN p.status IN ('pending', 'running') THEN p.id END ASC,
+                                   CASE WHEN p.status NOT IN ('pending', 'running') THEN p.created_at END DESC,
+                                   CASE WHEN p.status NOT IN ('pending', 'running') THEN p.id END DESC
+                           ) AS row_number
+                    FROM prompts p
+                    JOIN window_sessions ws ON ws.session_id = p.session_id
+                )
+                WHERE row_number = 1
+            ),
+            pending_acp_permissions AS (
+                SELECT id, session_id, created_at, updated_at
+                FROM (
+                    SELECT pr.id, pr.subject_id AS session_id, pr.created_at, pr.updated_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY pr.subject_id
+                               ORDER BY pr.created_at ASC, pr.id ASC
+                           ) AS row_number
+                    FROM permission_requests pr
+                    JOIN window_sessions ws ON ws.session_id = pr.subject_id
+                    WHERE pr.status = 'pending'
+                      AND pr.source = 'acp'
+                      AND pr.subject_id IS NOT NULL
+                )
+                WHERE row_number = 1
+            )
+            SELECT s.id,
+                   s.created_at,
+                   s.updated_at,
+                   s.status,
+                   s.agent_id,
+                   s.cwd,
+                   s.title,
+                   r.activity_at,
+                   r.actor,
+                   lp.id,
+                   lp.created_at,
+                   lp.updated_at,
+                   lp.status,
+                   lp.stop_reason,
+                   lp.error_code,
+                   lp.error_message,
+                   lp.message_id,
+                   lp.message_id_acknowledged,
+                   pp.id,
+                   pp.created_at,
+                   pp.updated_at,
+                   (
+                       SELECT MIN(e.created_at)
+                       FROM events e
+                       WHERE e.session_id = s.id
+                         AND e.kind = 'session.update'
+                         AND e.source = ?4
+                         AND lp.id IS NOT NULL
+                         AND e.created_at >= lp.created_at
+                   ) AS prompt_stream_started_at
+            FROM sessions s
+            JOIN window_sessions r ON r.session_id = s.id
+            LEFT JOIN latest_prompts lp ON lp.session_id = s.id
+            LEFT JOIN pending_acp_permissions pp ON pp.session_id = s.id
+            ORDER BY r.activity_at DESC, s.id DESC
+            LIMIT ?5
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                since,
+                SESSION_ACTIVITY_ACTOR_USER,
+                SESSION_ACTIVITY_ACTOR_AGENT,
+                EVENT_SOURCE_ACP,
+                i64::from(limit),
+            ],
+            |row| {
+                let prompt_id: Option<String> = row.get(9)?;
+                let latest_prompt = match prompt_id {
+                    Some(id) => Some(SessionStatusPromptRecord {
+                        id,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
+                        status: row.get(12)?,
+                        stop_reason: row.get(13)?,
+                        error_code: row.get(14)?,
+                        error_message: row.get(15)?,
+                        message_id: row.get(16)?,
+                        message_id_acknowledged: row.get::<_, Option<i64>>(17)?.unwrap_or(0) != 0,
+                    }),
+                    None => None,
+                };
+                let permission_id: Option<String> = row.get(18)?;
+                let pending_permission = match permission_id {
+                    Some(id) => Some(SessionStatusPermissionRecord {
+                        id,
+                        created_at: row.get(19)?,
+                        updated_at: row.get(20)?,
+                    }),
+                    None => None,
+                };
+                Ok(SessionStatusRecord {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    status: row.get(3)?,
+                    agent_id: row.get(4)?,
+                    cwd: row.get(5)?,
+                    title: row.get(6)?,
+                    last_activity_at: row.get(7)?,
+                    last_activity_from: row.get(8)?,
+                    latest_prompt,
+                    pending_permission,
+                    prompt_stream_started_at: row.get(21)?,
                 })
             },
         )?;

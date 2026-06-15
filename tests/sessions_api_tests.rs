@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::config::{AgentProviderConfig, Config, load_config_from_str};
-use acp_stack::state::{NewPromptRecord, NewSessionRecord, StateStore};
+use acp_stack::state::{
+    NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptStatus, StateStore,
+};
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -1096,8 +1098,13 @@ async fn sessions_status_returns_compact_active_summary() {
         .expect("status json");
 
     assert_eq!(body["data"]["active_count"], 1);
+    assert_eq!(body["data"]["session_count"], 1);
+    assert_eq!(body["data"]["window"], "8h");
+    assert!(body["data"]["window_start"].is_string());
+    assert!(body["data"]["window_end"].is_string());
     let session = &body["data"]["sessions"][0];
     assert_eq!(session["id"], "sess_active");
+    assert_eq!(session["state"], "idle");
     assert_eq!(session["last_activity_from"], "agent");
     assert_eq!(session["recent"], true);
     assert!(session.get("metadata_json").is_none());
@@ -1120,21 +1127,11 @@ async fn sessions_status_marks_old_activity_idle() {
                 metadata_json: "{}".to_owned(),
             })
             .expect("session inserted");
-        store
-            .upsert_listed_sessions(vec![acp_stack::state::ListedSessionRecord {
-                id: "sess_active".to_owned(),
-                agent_id: "fake".to_owned(),
-                cwd: "/tmp/active".to_owned(),
-                title: None,
-                updated_at: Some("2026-01-01T00:00:00Z".to_owned()),
-                metadata_json: "{}".to_owned(),
-            }])
-            .expect("session updated");
     }
 
     let body: Value = http()
         .get(format!(
-            "{}/v1/sessions/-/status?threshold=1s",
+            "{}/v1/sessions/-/status?threshold=0s",
             harness.base_url
         ))
         .header("Authorization", session_bearer())
@@ -1164,6 +1161,148 @@ async fn sessions_status_rejects_malformed_threshold() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
+async fn sessions_status_rejects_window_outside_bounds() {
+    let harness = Harness::spawn().await;
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions/-/status?window=1000h",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
+async fn sessions_status_reports_turn_states() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        for session_id in [
+            "sess_prompt_sent",
+            "sess_working",
+            "sess_done",
+            "sess_error",
+            "sess_permission",
+        ] {
+            store
+                .insert_session(NewSessionRecord {
+                    id: session_id.to_owned(),
+                    agent_id: "fake".to_owned(),
+                    cwd: format!("/tmp/{session_id}"),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                })
+                .expect("session inserted");
+            let prompt_id = format!("prm_{session_id}");
+            store
+                .insert_prompt(NewPromptRecord {
+                    id: prompt_id.clone(),
+                    session_id: session_id.to_owned(),
+                    prompt_json: "[]".to_owned(),
+                })
+                .expect("prompt inserted");
+            store
+                .update_prompt_status(
+                    &prompt_id,
+                    PromptStatus::Running,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("prompt running");
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
+        for session_id in ["sess_working", "sess_permission"] {
+            store
+                .append_session_event_with_source(
+                    session_id,
+                    "info",
+                    "session.update",
+                    acp_stack::state::EVENT_SOURCE_ACP,
+                    "ACP session update",
+                    "{}",
+                )
+                .expect("session update");
+        }
+        store
+            .update_prompt_status(
+                "prm_sess_done",
+                PromptStatus::Completed,
+                Some("end_turn"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("prompt completed");
+        store
+            .update_prompt_status(
+                "prm_sess_error",
+                PromptStatus::Errored,
+                None,
+                Some("agent.request_failed"),
+                Some("failed"),
+                None,
+                None,
+            )
+            .expect("prompt errored");
+        store
+            .append_permission_request(NewPermissionRequest {
+                source: "acp",
+                requester: Some("agent"),
+                subject_id: Some("sess_permission"),
+                detail_json: "{}",
+                expires_at: None,
+            })
+            .expect("permission inserted");
+    }
+
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/sessions/-/status?window=1h",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+    let sessions = body["data"]["sessions"].as_array().expect("sessions array");
+    let state_for = |id: &str| {
+        sessions
+            .iter()
+            .find(|session| session["id"] == id)
+            .and_then(|session| session["state"].as_str())
+            .unwrap_or_else(|| panic!("missing state for {id}; body={body}"))
+    };
+
+    assert_eq!(state_for("sess_prompt_sent"), "prompt_sent");
+    assert_eq!(state_for("sess_working"), "working");
+    assert_eq!(state_for("sess_done"), "done");
+    assert_eq!(state_for("sess_error"), "error");
+    assert_eq!(state_for("sess_permission"), "permission_required");
+    let permission_session = sessions
+        .iter()
+        .find(|session| session["id"] == "sess_permission")
+        .expect("permission session");
+    assert!(permission_session["permission"]["id"].is_string());
 }
 
 #[tokio::test]

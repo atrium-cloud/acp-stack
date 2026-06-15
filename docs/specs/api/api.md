@@ -76,7 +76,7 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 | ------------------------------------------- | ------- | -------------------------------------------------------------- |
 | `POST /v1/sessions`                         | session | creates a new ACP session                                      |
 | `GET /v1/sessions`                          | session | lists durable sessions, optionally after ACP session-list sync |
-| `GET /v1/sessions/-/status`                 | session | returns compact active-session status                          |
+| `GET /v1/sessions/-/status`                 | session | returns compact windowed session turn status                    |
 | `GET /v1/sessions/{id}`                     | session | returns one session                                            |
 | `POST /v1/sessions/{id}/load`               | session | loads an existing agent session                                |
 | `POST /v1/sessions/{id}/resume`             | session | resumes a session                                              |
@@ -104,6 +104,8 @@ Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelle
 - `recent_events` — the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
 
 The intended reconnect flow is: `GET snapshot` once to recover state, subscribe to `sessions.{id}` over WebSocket, then use `GET events?after=last_event_id` to catch up on any events that landed between the snapshot read and the WebSocket subscribe. For deeper history (older than the 50-event snapshot window), additional pagination is not currently exposed; older events are reachable only through the durable logs endpoints.
+
+Session status defaults to a rolling `8h` activity window and accepts `window=<duration>` from `1m` through `999h`. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, `available`, or `closed`. `done` means the latest prompt completed with `stop_reason = "end_turn"`.
 
 Session list filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
 
