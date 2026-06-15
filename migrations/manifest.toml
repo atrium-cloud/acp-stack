@@ -111,3 +111,9 @@ id = 19
 name = "stack_update_runs"
 sqlite_file = "019_stack_update_runs.sqlite.sql"
 postgres_file = "019_stack_update_runs.postgres.sql"
+
+[[migration]]
+id = 20
+name = "prompt_status_indexes"
+sqlite_file = "020_prompt_status_indexes.sqlite.sql"
+postgres_file = "020_prompt_status_indexes.postgres.sql"

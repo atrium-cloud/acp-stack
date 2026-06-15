@@ -40,7 +40,36 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        19
+        20
+    );
+}
+
+#[test]
+fn migration_020_adds_prompt_status_window_indexes() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("sqlite should open for inspection");
+    let prompt_index_columns = |index_name: &str| -> Vec<String> {
+        connection
+            .prepare(&format!("PRAGMA index_info({index_name})"))
+            .and_then(|mut statement| {
+                let rows = statement.query_map([], |row| row.get::<_, String>(2))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .expect("prompt index columns should query")
+    };
+
+    assert_eq!(
+        prompt_index_columns("prompts_created_at_idx"),
+        vec!["created_at", "session_id", "id"]
+    );
+    assert_eq!(
+        prompt_index_columns("prompts_updated_at_idx"),
+        vec!["updated_at", "session_id", "id"]
     );
 }
 
@@ -828,7 +857,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 19")
+            .contains("state schema version 99 is newer than supported version 20")
     );
 }
 
@@ -1118,6 +1147,211 @@ fn fresh_state(name: &str) -> (tempfile::TempDir, StateStore) {
     let store = StateStore::open(&path).expect("state should open");
     store.migrate().expect("migrate");
     (tempdir, store)
+}
+
+#[test]
+fn session_status_window_reports_latest_prompt_and_stream_start() {
+    let (_dir, store) = fresh_state("session_status_prompt.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_status".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/status".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_status".to_owned(),
+            session_id: "sess_status".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    store
+        .update_prompt_status(
+            "prm_status",
+            PromptStatus::Running,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("prompt running");
+
+    let rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .expect("status rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "sess_status");
+    assert_eq!(
+        rows[0]
+            .latest_prompt
+            .as_ref()
+            .map(|prompt| prompt.id.as_str()),
+        Some("prm_status")
+    );
+    assert!(rows[0].prompt_stream_started_at.is_none());
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let event = store
+        .append_session_event_with_source(
+            "sess_status",
+            "info",
+            "session.update",
+            EVENT_SOURCE_ACP,
+            "ACP session update",
+            "{}",
+        )
+        .expect("session update");
+
+    let rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .expect("status rows");
+    assert_eq!(
+        rows[0].prompt_stream_started_at.as_deref(),
+        Some(event.created_at.as_str())
+    );
+}
+
+#[test]
+fn session_status_window_ignores_non_acp_session_update_for_stream_start() {
+    let (_dir, store) = fresh_state("session_status_non_acp_stream.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_non_acp".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/non-acp".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_non_acp".to_owned(),
+            session_id: "sess_non_acp".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    store
+        .append_session_event_with_source(
+            "sess_non_acp",
+            "info",
+            "session.update",
+            EVENT_SOURCE_SYSTEM,
+            "system session update",
+            "{}",
+        )
+        .expect("system session update");
+
+    let rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .expect("status rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .latest_prompt
+            .as_ref()
+            .map(|prompt| prompt.id.as_str()),
+        Some("prm_non_acp")
+    );
+    assert!(rows[0].prompt_stream_started_at.is_none());
+}
+
+#[test]
+fn session_status_window_uses_oldest_in_flight_prompt_for_streaming() {
+    let (_dir, store) = fresh_state("session_status_concurrent_prompt.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_concurrent".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/concurrent".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    for prompt_id in ["prm_first", "prm_second"] {
+        store
+            .insert_prompt(NewPromptRecord {
+                id: prompt_id.to_owned(),
+                session_id: "sess_concurrent".to_owned(),
+                prompt_json: "[]".to_owned(),
+            })
+            .expect("prompt inserted");
+        store
+            .update_prompt_status(
+                prompt_id,
+                PromptStatus::Running,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("prompt running");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let event = store
+        .append_session_event_with_source(
+            "sess_concurrent",
+            "info",
+            "session.update",
+            EVENT_SOURCE_ACP,
+            "ACP session update",
+            "{}",
+        )
+        .expect("session update");
+
+    let rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .expect("status rows");
+    assert_eq!(
+        rows[0]
+            .latest_prompt
+            .as_ref()
+            .map(|prompt| prompt.id.as_str()),
+        Some("prm_first")
+    );
+    assert_eq!(
+        rows[0].prompt_stream_started_at.as_deref(),
+        Some(event.created_at.as_str())
+    );
+}
+
+#[test]
+fn session_status_window_includes_pending_acp_permission() {
+    let (_dir, store) = fresh_state("session_status_permission.sqlite");
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_permission".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/permission".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    let permission = store
+        .append_permission_request(NewPermissionRequest {
+            source: "acp",
+            requester: Some("agent"),
+            subject_id: Some("sess_permission"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("permission inserted");
+
+    let rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .expect("status rows");
+    assert_eq!(
+        rows[0]
+            .pending_permission
+            .as_ref()
+            .map(|pending| pending.id.as_str()),
+        Some(permission.id.as_str())
+    );
+    assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_AGENT);
 }
 
 #[test]
@@ -2357,7 +2591,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        19
+        20
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

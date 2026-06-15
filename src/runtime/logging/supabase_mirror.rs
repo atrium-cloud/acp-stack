@@ -231,6 +231,8 @@ CREATE INDEX IF NOT EXISTS {idx_events_kind_created} ON {events}(kind, created_a
 CREATE INDEX IF NOT EXISTS {idx_sessions_updated} ON {sessions}(updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS {idx_prompts_session} ON {prompts}(session_id, created_at, id);
 CREATE INDEX IF NOT EXISTS {idx_prompts_status} ON {prompts}(status, updated_at);
+CREATE INDEX IF NOT EXISTS {idx_prompts_created} ON {prompts}(created_at, session_id, id);
+CREATE INDEX IF NOT EXISTS {idx_prompts_updated} ON {prompts}(updated_at, session_id, id);
 CREATE INDEX IF NOT EXISTS {idx_commands_progress} ON {commands}(status, last_progress_at);
 CREATE INDEX IF NOT EXISTS {idx_permission_requests_status} ON {permission_requests}(status, created_at);
 CREATE INDEX IF NOT EXISTS {idx_permission_decisions_request} ON {permission_decisions}(request_id);
@@ -339,6 +341,8 @@ ON CONFLICT (version) DO UPDATE SET
         idx_sessions_updated = index_name(table_prefix, "sessions_updated_at_idx"),
         idx_prompts_session = index_name(table_prefix, "prompts_session_idx"),
         idx_prompts_status = index_name(table_prefix, "prompts_status_updated_at_idx"),
+        idx_prompts_created = index_name(table_prefix, "prompts_created_at_idx"),
+        idx_prompts_updated = index_name(table_prefix, "prompts_updated_at_idx"),
         idx_commands_progress = index_name(table_prefix, "commands_last_progress_idx"),
         idx_permission_requests_status =
             index_name(table_prefix, "permission_requests_status_created_idx"),

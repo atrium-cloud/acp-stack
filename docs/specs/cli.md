@@ -161,7 +161,7 @@ acps agent update set --frequency 3d
 
 ```sh
 acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>]
-acps sessions status [--threshold <duration>] [--limit <n>]
+acps sessions status [--window <duration>] [--threshold <duration>] [--limit <n>]
 acps sessions new
 acps sessions fork <session-id> [--message-id <id>] [--cwd <path>]
 acps sessions prompt <session-id>
@@ -171,7 +171,7 @@ acps sessions close <session-id>
 
 `sessions list` shows the durable local session list after any supported ACP session-list sync. Sessions discovered from the agent but not loaded locally are shown as `available`.
 
-`sessions status` prints active sessions with recent or idle state. The default recent threshold is `15m`.
+`sessions status` prints sessions with activity in a rolling window and a derived turn state such as `prompt_sent`, `working`, `permission_required`, `done`, or `error`. The default window is `8h`; `--window` accepts `1m` through `999h`. `--threshold` remains as the recency threshold for the `recent` field.
 
 Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
