@@ -312,7 +312,7 @@ mod tests {
     fn tool_set_is_exactly_the_spec_list() {
         // The spec deny list is enforced by what is NOT here. If you add a tool,
         // ensure it does not breach the deny rules in
-        // `docs/specs/acpctl/acpctl.md` and `docs/todos/phase_3.md:64-69`.
+        // `docs/specs/acpctl/acpctl.md` and `docs/todos/v0.1.0/phase_3.md:64-69`.
         let tools = all();
         let mut got: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
         let mut expected: Vec<String> = TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect();

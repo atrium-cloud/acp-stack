@@ -47,8 +47,7 @@ flowchart LR
 - External telemetry sinks consume the same normalized event stream as local SQLite logging.
 - Agent behavior stays behind ACP; `acp-stack` owns runtime mediation around it.
 - `acpctl` is local and allowlisted; public admin APIs are not exposed through it.
-- Deployment profiles should not change runtime behavior, only process and edge
-  shape.
+- Deployment profiles should not change runtime behavior, only process and edge shape.
 
 ## Maintainer Notes
 
