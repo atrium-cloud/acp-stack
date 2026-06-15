@@ -11,8 +11,10 @@ use crate::error::{Result, StackError};
 use crate::runtime::agent::supervisor::parse_prompt_blocks;
 use crate::runtime::agent::supervisor::{SessionListSyncResult, resolve_session_cwd};
 use crate::state::{
-    DEFAULT_SESSION_ACTIVITY_THRESHOLD, PromptRecord, SESSION_STATUS_ACTIVE, SessionActivityRecord,
-    SessionRecord, SessionUpdateBounds,
+    DEFAULT_SESSION_ACTIVITY_THRESHOLD, DEFAULT_SESSION_STATUS_WINDOW,
+    MAX_SESSION_STATUS_WINDOW_SECS, MIN_SESSION_STATUS_WINDOW_SECS, PromptRecord,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionRecord,
+    SessionStatusRecord, SessionUpdateBounds,
 };
 
 #[derive(Serialize)]
@@ -191,12 +193,18 @@ fn parse_normalized_time_bound(raw: &str, field: &'static str) -> Result<chrono:
 pub(crate) struct SessionsStatusParams {
     #[serde(default = "default_session_status_threshold")]
     threshold: String,
+    #[serde(default = "default_session_status_window")]
+    window: String,
     #[serde(default = "default_session_status_limit")]
     limit: u32,
 }
 
 fn default_session_status_threshold() -> String {
     DEFAULT_SESSION_ACTIVITY_THRESHOLD.to_owned()
+}
+
+fn default_session_status_window() -> String {
+    DEFAULT_SESSION_STATUS_WINDOW.to_owned()
 }
 
 fn default_session_status_limit() -> u32 {
@@ -207,6 +215,10 @@ fn default_session_status_limit() -> u32 {
 pub(crate) struct SessionsStatusResponse {
     generated_at: String,
     threshold: String,
+    window: String,
+    window_start: String,
+    window_end: String,
+    session_count: usize,
     active_count: usize,
     truncated: bool,
     sessions: Vec<SessionStatusSessionResponse>,
@@ -215,6 +227,7 @@ pub(crate) struct SessionsStatusResponse {
 #[derive(Serialize)]
 pub(crate) struct SessionStatusSessionResponse {
     id: String,
+    state: &'static str,
     status: String,
     agent_id: String,
     cwd: String,
@@ -222,11 +235,34 @@ pub(crate) struct SessionStatusSessionResponse {
     last_activity_at: String,
     last_activity_from: String,
     recent: bool,
+    prompt: Option<SessionStatusPromptResponse>,
+    permission: Option<SessionStatusPermissionResponse>,
+    prompt_stream_started_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SessionStatusPromptResponse {
+    id: String,
+    created_at: String,
+    updated_at: String,
+    status: String,
+    stop_reason: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    message_id: Option<String>,
+    message_id_acknowledged: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SessionStatusPermissionResponse {
+    id: String,
+    created_at: String,
+    updated_at: String,
 }
 
 impl SessionStatusSessionResponse {
     fn from_record(
-        record: SessionActivityRecord,
+        record: SessionStatusRecord,
         cutoff: chrono::DateTime<Utc>,
     ) -> std::result::Result<Self, StackError> {
         let last_activity = chrono::DateTime::parse_from_rfc3339(&record.last_activity_at)
@@ -235,8 +271,31 @@ impl SessionStatusSessionResponse {
                 reason: format!("stored session activity timestamp is invalid: {err}"),
             })?
             .with_timezone(&Utc);
+        let state = derived_session_state(&record);
+        let prompt = record
+            .latest_prompt
+            .map(|prompt| SessionStatusPromptResponse {
+                id: prompt.id,
+                created_at: prompt.created_at,
+                updated_at: prompt.updated_at,
+                status: prompt.status,
+                stop_reason: prompt.stop_reason,
+                error_code: prompt.error_code,
+                error_message: prompt.error_message,
+                message_id: prompt.message_id,
+                message_id_acknowledged: prompt.message_id_acknowledged,
+            });
+        let permission =
+            record
+                .pending_permission
+                .map(|permission| SessionStatusPermissionResponse {
+                    id: permission.id,
+                    created_at: permission.created_at,
+                    updated_at: permission.updated_at,
+                });
         Ok(Self {
             id: record.id,
+            state,
             status: record.status,
             agent_id: record.agent_id,
             cwd: record.cwd,
@@ -244,7 +303,38 @@ impl SessionStatusSessionResponse {
             last_activity_at: record.last_activity_at,
             last_activity_from: record.last_activity_from,
             recent: last_activity >= cutoff,
+            prompt,
+            permission,
+            prompt_stream_started_at: record.prompt_stream_started_at,
         })
+    }
+}
+
+fn derived_session_state(record: &SessionStatusRecord) -> &'static str {
+    match record.status.as_str() {
+        SESSION_STATUS_CLOSED => return "closed",
+        SESSION_STATUS_AVAILABLE => return "available",
+        _ => {}
+    }
+    if record.pending_permission.is_some() {
+        return "permission_required";
+    }
+    let Some(prompt) = record.latest_prompt.as_ref() else {
+        return "idle";
+    };
+    match prompt.status.as_str() {
+        "pending" | "running" => {
+            if record.prompt_stream_started_at.is_some() {
+                "working"
+            } else {
+                "prompt_sent"
+            }
+        }
+        "completed" if prompt.stop_reason.as_deref() == Some("end_turn") => "done",
+        "completed" => "stopped",
+        "errored" | "stalled" => "error",
+        "cancelled" => "cancelled",
+        _ => "idle",
     }
 }
 
@@ -262,17 +352,29 @@ pub(crate) async fn sessions_status_handler(
                 ),
             }
         })?;
+    let window = parse_session_status_window(&params.window)?;
     let generated_at = Utc::now();
     let cutoff = generated_at - threshold;
+    let window_start = generated_at
+        .checked_sub_signed(window)
+        .ok_or(StackError::InvalidParam {
+            field: "window",
+            reason: "duration window underflowed the timestamp range".to_owned(),
+        })?;
+    let window_start_text = window_start.to_rfc3339_opts(SecondsFormat::Nanos, true);
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let query_limit = limit.saturating_add(1);
     let store = state.state.lock().await;
-    let mut rows = store.query_active_session_activity(query_limit)?;
+    let mut rows = store.query_session_status_window(&window_start_text, query_limit)?;
     drop(store);
     let truncated = rows.len() > limit as usize;
     if truncated {
         rows.truncate(limit as usize);
     }
+    let active_count = rows
+        .iter()
+        .filter(|row| row.status == SESSION_STATUS_ACTIVE)
+        .count();
     let sessions = rows
         .into_iter()
         .map(|row| SessionStatusSessionResponse::from_record(row, cutoff))
@@ -280,10 +382,30 @@ pub(crate) async fn sessions_status_handler(
     Ok(ApiSuccess::new(SessionsStatusResponse {
         generated_at: generated_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
         threshold: params.threshold,
-        active_count: sessions.len(),
+        window: params.window,
+        window_start: window_start_text,
+        window_end: generated_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+        session_count: sessions.len(),
+        active_count,
         truncated,
         sessions,
     }))
+}
+
+fn parse_session_status_window(raw: &str) -> Result<chrono::Duration> {
+    let duration =
+        crate::time_util::parse_duration_suffix(raw).ok_or_else(|| StackError::InvalidParam {
+            field: "window",
+            reason: format!("not a valid duration; expected values between 1m and 999h, got {raw}"),
+        })?;
+    let seconds = duration.num_seconds();
+    if !(MIN_SESSION_STATUS_WINDOW_SECS..=MAX_SESSION_STATUS_WINDOW_SECS).contains(&seconds) {
+        return Err(StackError::InvalidParam {
+            field: "window",
+            reason: format!("duration must be between 1m and 999h inclusive, got {raw}"),
+        });
+    }
+    Ok(duration)
 }
 
 fn resolve_time_bound(

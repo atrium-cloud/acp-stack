@@ -217,6 +217,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../migrations/019_stack_update_runs.sqlite.sql"),
         postgres: include_str!("../../migrations/019_stack_update_runs.postgres.sql"),
     },
+    Migration {
+        id: 20,
+        name: "prompt_status_indexes",
+        sqlite_file: "020_prompt_status_indexes.sqlite.sql",
+        postgres_file: "020_prompt_status_indexes.postgres.sql",
+        sqlite: include_str!("../../migrations/020_prompt_status_indexes.sqlite.sql"),
+        postgres: include_str!("../../migrations/020_prompt_status_indexes.postgres.sql"),
+    },
 ];
 
 /// Read-only accessor for the migration registry, including bundled Postgres
