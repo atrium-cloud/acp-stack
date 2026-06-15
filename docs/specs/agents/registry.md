@@ -31,6 +31,4 @@ The embedded registry is the default source. Operators may provide a local overr
 
 ## Skills Catalog
 
-Agent Skills sources are cataloged separately in `data/skills.toml`. During
-`acps init`, selected skills are copied into the selected agent's
-`agent_skills_install_dir`.
+Agent Skills sources are cataloged separately in `data/skills.toml`. During `acps init`, selected skills are copied into the selected agent's `agent_skills_install_dir`.

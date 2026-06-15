@@ -62,8 +62,7 @@ api_key_ref = "<provider-api-key-ref>"
 - Custom-provider model ids are accepted as supplied.
 - API-key refs must be valid secret-ref names and are added to `[agent].env`.
 - Switch does not migrate custom providers in place; configure the target provider explicitly.
-- Agent-owned config provisioning must succeed before canonical config is
-  updated.
+- Agent-owned config provisioning must succeed before canonical config is updated.
 
 ## Agent Behavior
 

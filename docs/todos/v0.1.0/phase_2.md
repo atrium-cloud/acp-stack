@@ -2,10 +2,10 @@
 
 ## References
 
-- [project-spec](../specs/project-spec.md)
-- [api](../specs/api/api.md)
-- [acp-bridge](../specs/acp/acp-bridge.md)
-- [roadmap](../mgmt/roadmap.md)
+- [project-spec](../../specs/project-spec.md)
+- [api](../../specs/api/api.md)
+- [acp-bridge](../../specs/acp/acp-bridge.md)
+- [roadmap](../../mgmt/roadmap.md)
 
 ## Secrets
 

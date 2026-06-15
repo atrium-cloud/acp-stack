@@ -2,11 +2,11 @@
 
 ## References
 
-- [project-spec](../specs/project-spec.md)
-- [api](../specs/api/api.md)
-- [acp-bridge](../specs/acp/acp-bridge.md)
-- [architecture](../mgmt/architecture.md)
-- [roadmap](../mgmt/roadmap.md)
+- [project-spec](../../specs/project-spec.md)
+- [api](../../specs/api/api.md)
+- [acp-bridge](../../specs/acp/acp-bridge.md)
+- [architecture](../../mgmt/architecture.md)
+- [roadmap](../../mgmt/roadmap.md)
 
 ## Runtime And Project Skeleton
 
