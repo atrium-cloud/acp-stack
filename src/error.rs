@@ -182,16 +182,6 @@ pub enum StackError {
     SecretNotFound { name: String },
 
     #[error(
-        "secret store is non-empty but does not contain the session key reference `{name}`; reset and re-init"
-    )]
-    MissingSessionKey { name: String },
-
-    #[error(
-        "secret store is non-empty but does not contain the admin key reference `{name}`; reset and re-init"
-    )]
-    MissingAdminKey { name: String },
-
-    #[error(
         "secret store is non-empty but does not contain the Supabase secret API key reference `{name}`"
     )]
     MissingSupabaseApiKey { name: String },
@@ -367,25 +357,6 @@ pub enum StackError {
 
     #[error("{field} must start with https://")]
     UrlMustBeHttps { field: &'static str },
-
-    #[error(
-        "auth.session_key_ref and auth.admin_key_ref must be different names; aliasing them would collapse the session/admin boundary"
-    )]
-    AuthRefsNotDistinct,
-
-    #[error(
-        "secret `{name}` is the configured {kind} key reference; use `acps auth regenerate-session-key` or `acps reset --yes` instead of `acps secrets`"
-    )]
-    SecretReservedForAuth { name: String, kind: &'static str },
-
-    #[error(
-        "config import would change `[auth].{field}` from `{current}` to `{incoming}`; run `acps reset --yes` and re-init to rotate auth references"
-    )]
-    ImportChangesAuthRef {
-        field: &'static str,
-        current: String,
-        incoming: String,
-    },
 
     // === serve (http listener) ===
     #[error("failed to bind {bind}: {source}")]
@@ -673,14 +644,6 @@ pub enum StackError {
     CommandTimeout,
 
     // === secrets: ref-shape validation ===
-    #[error(
-        "secret ref `{ref_name}` (referenced from {kind}) collides with the configured auth key ref; rename the secret"
-    )]
-    SecretRefReservedForAuth {
-        ref_name: String,
-        kind: &'static str,
-    },
-
     #[error("secret ref name `{name}` is invalid; use ASCII letters, digits, and underscores")]
     InvalidSecretRefName { name: String },
 
@@ -825,11 +788,6 @@ impl StackError {
             | StackError::MissingSupabaseApiKey { .. }
             | StackError::MissingSupabaseDbUrl { .. } => {
                 "store the missing secret with `acps secrets set <name>`"
-            }
-            StackError::MissingSessionKey { name } | StackError::MissingAdminKey { name } => {
-                return Some(format!(
-                    "the auth secret ref `{name}` is missing; restore the secret store or run `acps reset --yes` and re-init"
-                ));
             }
             StackError::ConfigExists { .. } => "use `--force` only when replacing the config is intentional",
             StackError::ResetNotConfirmed => "re-run with `--yes` to confirm reset",

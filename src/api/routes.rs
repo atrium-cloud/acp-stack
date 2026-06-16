@@ -1,4 +1,5 @@
 pub(crate) mod agent;
+pub(crate) mod auth;
 pub(crate) mod commands;
 pub(crate) mod config;
 pub(crate) mod deps;

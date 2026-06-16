@@ -3,11 +3,12 @@ use std::path::Path;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::auth::generate_api_key;
-use crate::config::Config;
+use crate::auth::{
+    AuthVerifierEnsureOutcome, AuthVerifierSet, ensure_auth_verifier_pair, generate_api_key,
+};
+use crate::config::{Config, LegacyAuthConfig};
 use crate::error::{Result, StackError};
 use crate::runtime::init_runner::{self, begin_run, finalize_run, find_resumable_run};
-use crate::secrets::SecretStore;
 use crate::state::{
     INIT_RUN_FAILED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, InitRunRecord,
     InitStepRecord, StateStore,
@@ -195,13 +196,11 @@ fn step_report_timestamp(step: &InitStepRecord) -> &str {
 /// workspace / testflight scroll buries it. `Zeroizing` wipes the plaintext on
 /// drop.
 pub(super) struct FreshKeys {
-    pub(super) session_ref: String,
-    pub(super) admin_ref: String,
     pub(super) session_value: Zeroizing<String>,
     pub(super) admin_value: Zeroizing<String>,
 }
 
-pub(super) struct SecretsInitOutcome {
+pub(super) struct AuthInitOutcome {
     pub(super) status: &'static str,
     /// `Some` only on fresh generation. Existing stores must never surface
     /// plaintext keys again.
@@ -209,51 +208,33 @@ pub(super) struct SecretsInitOutcome {
     pub(super) generated_keys: bool,
 }
 
-pub(super) fn perform_secrets_init(
-    store_existed: bool,
-    session_ref: &str,
-    admin_ref: &str,
-    secret_store: &mut SecretStore,
-) -> Result<SecretsInitOutcome> {
-    let session_present = secret_store.contains(session_ref);
-    let admin_present = secret_store.contains(admin_ref);
-    if store_existed {
-        if !admin_present {
-            return Err(StackError::MissingAdminKey {
-                name: admin_ref.to_owned(),
-            });
-        }
-        if !session_present {
-            return Err(StackError::MissingSessionKey {
-                name: session_ref.to_owned(),
-            });
-        }
-        return Ok(SecretsInitOutcome {
+pub(super) fn perform_auth_init(
+    store: &StateStore,
+    legacy_auth: Option<&LegacyAuthConfig>,
+    home: &Path,
+) -> Result<AuthInitOutcome> {
+    match ensure_auth_verifier_pair(store, legacy_auth, home)? {
+        AuthVerifierEnsureOutcome::Preserved
+        | AuthVerifierEnsureOutcome::BackfilledLegacySecrets => Ok(AuthInitOutcome {
             status: "preserved existing API keys",
             fresh_keys: None,
             generated_keys: false,
-        });
-    }
-    // The plaintext is deliberately NOT printed here. The driver renders the
-    // operator handover at the end of init (see `KeyHandover` in init.rs) so a
-    // long install/workspace/testflight scroll cannot bury it; the values ride
-    // back in `fresh_keys`.
-    let session_value = generate_api_key();
-    let admin_value = generate_api_key();
-    secret_store.set_many([
-        (session_ref, session_value.as_str()),
-        (admin_ref, admin_value.as_str()),
-    ])?;
-    Ok(SecretsInitOutcome {
-        status: "generated session and admin API keys",
-        generated_keys: true,
-        fresh_keys: Some(FreshKeys {
-            session_ref: session_ref.to_owned(),
-            admin_ref: admin_ref.to_owned(),
-            session_value: Zeroizing::new(session_value),
-            admin_value: Zeroizing::new(admin_value),
         }),
-    })
+        AuthVerifierEnsureOutcome::Missing => {
+            let session_value = generate_api_key();
+            let admin_value = generate_api_key();
+            let verifiers = AuthVerifierSet::create(&session_value, &admin_value);
+            store.insert_auth_key_pair(&verifiers)?;
+            Ok(AuthInitOutcome {
+                status: "generated session and admin API keys",
+                generated_keys: true,
+                fresh_keys: Some(FreshKeys {
+                    session_value: Zeroizing::new(session_value),
+                    admin_value: Zeroizing::new(admin_value),
+                }),
+            })
+        }
+    }
 }
 
 pub(super) fn installer_postcondition_holds(
@@ -343,18 +324,15 @@ mod tests {
     }
 
     #[test]
-    fn perform_secrets_init_preserves_existing_keys_without_handover() {
+    fn perform_auth_init_preserves_existing_keys_without_handover() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
-        secret_store
-            .set_many([
-                ("SESSION_REF", "session-value"),
-                ("ADMIN_REF", "admin-value"),
-            ])
-            .expect("seed keys");
+        let state_path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&state_path).expect("state");
+        store.migrate().expect("migrate");
+        let verifiers = AuthVerifierSet::create("session-value", "admin-value");
+        store.insert_auth_key_pair(&verifiers).expect("seed keys");
 
-        let outcome = perform_secrets_init(true, "SESSION_REF", "ADMIN_REF", &mut secret_store)
-            .expect("outcome");
+        let outcome = perform_auth_init(&store, None, tempdir.path()).expect("outcome");
 
         assert_eq!(outcome.status, "preserved existing API keys");
         assert!(!outcome.generated_keys);

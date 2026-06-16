@@ -29,11 +29,11 @@ pub enum AgentCommand {
     /// Install the configured ACP agent or adapter.
     Install(AgentInstallArgs),
     /// Ask the running daemon to start the configured agent.
-    Start,
+    Start(AgentDaemonArgs),
     /// Ask the running daemon to stop the configured agent.
-    Stop,
+    Stop(AgentDaemonArgs),
     /// Ask the running daemon to restart the configured agent.
-    Restart,
+    Restart(AgentDaemonArgs),
     /// Print the latest persisted agent state from SQLite.
     Status,
     /// Report whether the installed managed harness/adapter is stale against upstream.
@@ -66,6 +66,16 @@ pub struct AgentInstallArgs {
     /// Accepted for script consistency; install is already non-interactive.
     #[arg(long)]
     pub(super) yes: bool,
+    /// Admin API key. Required when stdin is not a terminal.
+    #[arg(long = "admin-key")]
+    pub(super) admin_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentDaemonArgs {
+    /// Admin API key. Required when stdin is not a terminal.
+    #[arg(long = "admin-key")]
+    pub(super) admin_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -76,6 +86,9 @@ pub struct AgentUpdateArgs {
     /// If the daemon has a running agent, stop it before update and start it afterwards.
     #[arg(long)]
     pub(super) restart: bool,
+    /// Admin API key. Required with --restart when stdin is not a terminal.
+    #[arg(long = "admin-key", global = true)]
+    pub(super) admin_key: Option<String>,
     #[command(subcommand)]
     pub(super) command: Option<AgentUpdateSubcommand>,
 }
@@ -157,15 +170,21 @@ pub struct AgentSwitchArgs {
 pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoice) -> Result<()> {
     match command {
         AgentCommand::Install(args) => self::install::run_agent_install(args, output.effective()),
-        AgentCommand::Start => {
-            self::install::run_agent_daemon_post("/v1/agent/start", "start", output.effective())
+        AgentCommand::Start(args) => self::install::run_agent_daemon_post(
+            args,
+            "/v1/agent/start",
+            "start",
+            output.effective(),
+        ),
+        AgentCommand::Stop(args) => {
+            self::install::run_agent_daemon_post(args, "/v1/agent/stop", "stop", output.effective())
         }
-        AgentCommand::Stop => {
-            self::install::run_agent_daemon_post("/v1/agent/stop", "stop", output.effective())
-        }
-        AgentCommand::Restart => {
-            self::install::run_agent_daemon_post("/v1/agent/restart", "restart", output.effective())
-        }
+        AgentCommand::Restart(args) => self::install::run_agent_daemon_post(
+            args,
+            "/v1/agent/restart",
+            "restart",
+            output.effective(),
+        ),
         AgentCommand::Status => self::status::run_agent_status(output.effective()),
         AgentCommand::Check => self::check::run_agent_check(output.effective()),
         AgentCommand::Update(args) => self::update::run_agent_update(args, output.effective()),

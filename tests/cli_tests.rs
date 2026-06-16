@@ -1,8 +1,10 @@
 #![cfg(all(feature = "dev-tools", feature = "test-fixtures"))]
 
 use acp_stack::api::{self, AppState, RuntimePaths};
+use acp_stack::auth::{AuthVerifierSet, KeyKind};
 use acp_stack::config::{
-    DependencyInstallScope, McpServerConfig, StackUpdatePolicy, load_config_from_str,
+    AgentInstallConfig, DependencyInstallScope, McpServerConfig, StackUpdatePolicy,
+    load_config_from_str,
 };
 use acp_stack::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV;
 use acp_stack::secrets::SecretStore;
@@ -20,7 +22,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::task::JoinHandle;
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-opencode-stack.toml");
@@ -44,20 +46,24 @@ fn acps_command_without_placebo() -> Command {
 
 struct AgentCliHarness {
     base_url: String,
+    socket_path: std::path::PathBuf,
     state_path: std::path::PathBuf,
     join: JoinHandle<acp_stack::error::Result<()>>,
+    local_join: JoinHandle<acp_stack::error::Result<()>>,
     _tempdir: TempDir,
 }
 
 struct HealthProbeHarness {
-    base_url: String,
+    socket_path: std::path::PathBuf,
     join: JoinHandle<std::io::Result<()>>,
+    _tempdir: TempDir,
 }
 
 impl HealthProbeHarness {
     async fn spawn(status: StatusCode, body: Value) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let base_url = format!("http://{}", listener.local_addr().expect("local"));
+        let tempdir = TempDir::new().expect("tempdir");
+        let socket_path = tempdir.path().join("probe.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind local probe");
         let app = Router::new().route(
             "/v1/health/ready",
             get(move || {
@@ -66,7 +72,11 @@ impl HealthProbeHarness {
             }),
         );
         let join = tokio::spawn(async move { axum::serve(listener, app).await });
-        Self { base_url, join }
+        Self {
+            socket_path,
+            join,
+            _tempdir: tempdir,
+        }
     }
 }
 
@@ -97,6 +107,7 @@ impl AgentCliHarness {
         let config_path = create_runtime_files(tempdir.path(), &path);
         let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
         let mut config = load_config_from_str(VALID_PLACEBO_CONFIG).expect("config parses");
+        let socket_path = tempdir.path().join("acpctl.sock");
         let workspace = tempdir.path().join("workspace");
         let uploads = workspace.join("uploads");
         fs::create_dir_all(&uploads).expect("workspace uploads should be created");
@@ -107,6 +118,7 @@ impl AgentCliHarness {
         config.agent.env = vec![];
         config.agent.cwd = Some(config.workspace.root.clone());
         config.agent.expected_sha256 = None;
+        config.acpctl.socket_path = Some(socket_path.to_string_lossy().into_owned());
         fs::write(
             &config_path,
             config.to_canonical_toml().expect("canonical test config"),
@@ -130,13 +142,25 @@ impl AgentCliHarness {
                 runtime_paths,
             ),
         };
+        let bound_local = acp_stack::local_listener::bind_local(
+            &socket_path,
+            acp_stack::local_listener::ParentPolicy::RepairOwnerOnly,
+        )
+        .await
+        .expect("bind local listener");
+        let local_join = tokio::spawn(acp_stack::local_listener::serve_local(
+            app_state.clone(),
+            bound_local,
+        ));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local"));
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
         Self {
             base_url,
+            socket_path,
             state_path: path,
             join,
+            local_join,
             _tempdir: tempdir,
         }
     }
@@ -145,6 +169,7 @@ impl AgentCliHarness {
 impl Drop for AgentCliHarness {
     fn drop(&mut self) {
         self.join.abort();
+        self.local_join.abort();
     }
 }
 
@@ -177,32 +202,82 @@ fn create_runtime_files(
 }
 
 fn write_cli_home(home: &std::path::Path, base_url: &str, admin_key: &str) {
+    write_cli_home_with_socket(home, base_url, admin_key, None);
+}
+
+fn write_cli_home_with_socket(
+    home: &std::path::Path,
+    base_url: &str,
+    admin_key: &str,
+    socket_path: Option<&std::path::Path>,
+) {
     let config_dir = home.join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
-    let config = VALID_CONFIG
+    let mut config = VALID_CONFIG
         .replace(
             r#"public_url = "https://agent.example.com""#,
             &format!(r#"public_url = "{base_url}""#),
         )
         .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []");
+    if let Some(socket_path) = socket_path {
+        config.push_str(&format!(
+            "\n[acpctl]\nsocket_path = {:?}\n",
+            socket_path.to_string_lossy()
+        ));
+    }
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
-    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    seed_auth_verifiers(home, SESSION_KEY, admin_key);
+}
+
+fn seed_auth_verifiers(home: &std::path::Path, session_key: &str, admin_key: &str) {
+    let state_path = default_state_path(home);
+    fs::create_dir_all(state_path.parent().expect("state parent")).expect("state dir");
+    let store = StateStore::open(&state_path).expect("state store should open");
+    store.migrate().expect("state schema should migrate");
+    let verifiers = AuthVerifierSet::create(session_key, admin_key);
     store
-        .set_many([
-            ("ACP_STACK_SESSION_KEY", SESSION_KEY),
-            ("ACP_STACK_ADMIN_KEY", admin_key),
-        ])
-        .expect("auth keys should be stored");
+        .upsert_auth_key(KeyKind::Session, &verifiers.session)
+        .expect("session auth verifier should be stored");
+    store
+        .upsert_auth_key(KeyKind::Admin, &verifiers.admin)
+        .expect("admin auth verifier should be stored");
+}
+
+fn parse_key_line(stdout: &str, label: &'static str) -> String {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(label))
+        .unwrap_or_else(|| panic!("missing {label} in stdout: {stdout}"))
+        .trim()
+        .to_owned()
+}
+
+fn parse_init_keys(stdout: &str) -> (String, String) {
+    (
+        parse_key_line(stdout, "session key: "),
+        parse_key_line(stdout, "admin key: "),
+    )
+}
+
+fn run_init_with_home(home: &std::path::Path) -> (String, String) {
+    let stdout = acps_command()
+        .env("HOME", home)
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(stdout).expect("init stdout utf8");
+    parse_init_keys(&stdout)
 }
 
 fn seed_init_secrets(home: &std::path::Path, extra: &[(&str, &str)]) {
+    seed_auth_verifiers(home, SESSION_KEY, ADMIN_KEY);
     let mut store = SecretStore::open_or_create(home).expect("secret store should open");
-    let mut entries = vec![
-        ("ACP_STACK_SESSION_KEY", SESSION_KEY),
-        ("ACP_STACK_ADMIN_KEY", ADMIN_KEY),
-    ];
-    entries.extend_from_slice(extra);
-    store.set_many(entries).expect("secrets should be stored");
+    store
+        .set_many(extra.iter().copied())
+        .expect("secrets should be stored");
 }
 
 fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
@@ -449,7 +524,7 @@ fn init_creates_config_and_state() {
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("progress: initializing secrets"))
+        .stdout(predicates::str::contains("progress: initializing auth"))
         .stdout(predicates::str::contains("initialized acp-stack"));
 
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
@@ -1520,30 +1595,12 @@ fn init_rejects_invalid_mcp_declarations() {
         ),
         (
             &[
-                "--mcp-stdio",
-                "local=local-mcp",
-                "--mcp-stdio-env",
-                "local=ACP_STACK_SESSION_KEY",
-            ],
-            "collides with the configured auth key ref",
-        ),
-        (
-            &[
                 "--mcp-http",
                 "remote=https://mcp.example/mcp",
                 "--mcp-http-header",
                 "remote=Authorization:BAD REF",
             ],
             "secret ref name",
-        ),
-        (
-            &[
-                "--mcp-http",
-                "remote=https://mcp.example/mcp",
-                "--mcp-http-header",
-                "remote=Authorization:ACP_STACK_ADMIN_KEY",
-            ],
-            "collides with the configured auth key ref",
         ),
         (
             &[
@@ -4407,6 +4464,7 @@ fn subagent_set_rejects_registry_override_for_non_opencode_agent() {
         .replace(r#"name = "OpenCode""#, r#"name = "Goose""#)
         .replace(r#"command = "opencode""#, r#"command = "goose""#);
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
     fs::write(
         config_dir.join("agents.toml"),
         r#"
@@ -5534,6 +5592,7 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
     fs::write(
         config_dir.join("agents.toml"),
         format!(
@@ -5558,7 +5617,7 @@ creates = "cli-registry-agent"
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["agent", "install", "--yes"])
+        .args(["agent", "install", "--yes", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains(
@@ -5675,7 +5734,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success()
         .stdout(predicates::str::contains("config:    ok ("))
         .stdout(predicates::str::contains("state:     ok ("))
-        .stdout(predicates::str::contains("schema=20"))
+        .stdout(predicates::str::contains("schema=21"))
         .stdout(predicates::str::contains("latest_event="))
         .stdout(predicates::str::contains(format!(
             "workspace: ok ({workspace_str})"
@@ -5786,7 +5845,12 @@ async fn status_reports_ready_daemon_when_health_probe_is_healthy() {
     )
     .await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &probe.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        "http://127.0.0.1:9",
+        ADMIN_KEY,
+        Some(&probe.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
@@ -5810,7 +5874,12 @@ async fn status_reports_degraded_daemon_without_failing_command() {
     )
     .await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &probe.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        "http://127.0.0.1:9",
+        ADMIN_KEY,
+        Some(&probe.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
@@ -6175,10 +6244,19 @@ fn deps_apply_prints_before_and_after_status() {
     let store = StateStore::open(&state_path).expect("state should open");
     store.migrate().expect("migration should pass");
     drop(store);
+    seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
 
     let output = acps_command()
         .env("HOME", tempdir.path())
-        .args(["deps", "apply", "--yes", "--feature", feature])
+        .args([
+            "deps",
+            "apply",
+            "--yes",
+            "--feature",
+            feature,
+            "--admin-key",
+            ADMIN_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -6224,6 +6302,18 @@ fn deps_apply_prints_before_and_after_status() {
         stdout[after_index..].contains(&format!("  OK   {dependency_two_name}")),
         "after section must report available dependency, got:\n{stdout}",
     );
+}
+
+#[test]
+fn deps_apply_requires_admin_key() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["deps", "apply", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--admin-key"));
 }
 
 #[test]
@@ -6288,10 +6378,19 @@ creates = {}
     let store = StateStore::open(&state_path).expect("state should open");
     store.migrate().expect("migration should pass");
     drop(store);
+    seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
 
     let output = acps_command()
         .env("HOME", tempdir.path())
-        .args(["deps", "apply", "--yes", "--format", "json"])
+        .args([
+            "deps",
+            "apply",
+            "--yes",
+            "--format",
+            "json",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
         .assert()
         .failure()
         .get_output()
@@ -6364,10 +6463,11 @@ creates = {}
     let store = StateStore::open(&state_path).expect("state should open");
     store.migrate().expect("migration should pass");
     drop(store);
+    seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["deps", "apply", "--yes"])
+        .args(["deps", "apply", "--yes", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
@@ -6814,11 +6914,16 @@ fn agent_status_reports_all_supported_params_unset() {
 async fn agent_start_and_stop_call_running_daemon() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent start: running"))
@@ -6826,7 +6931,14 @@ async fn agent_start_and_stop_call_running_daemon() {
 
     let output = acps_command()
         .env("HOME", home.path())
-        .args(["agent", "restart", "--format", "json"])
+        .args([
+            "agent",
+            "restart",
+            "--format",
+            "json",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -6839,7 +6951,7 @@ async fn agent_start_and_stop_call_running_daemon() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "stop"])
+        .args(["agent", "stop", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent stop: stopped"));
@@ -6868,11 +6980,16 @@ fn agent_switch_accepts_drop_flag() {
 async fn security_check_calls_running_daemon_with_admin_key() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "check"])
+        .args(["security", "check", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains("ok: "))
@@ -6888,11 +7005,16 @@ async fn security_check_renders_hint_line_for_each_finding() {
     // remediation prose.
     let harness = AgentCliHarness::spawn_with_effective_bind("0.0.0.0:7700").await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "check"])
+        .args(["security", "check", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains("api.public_bind"))
@@ -6906,11 +7028,16 @@ async fn security_check_renders_hint_line_for_each_finding() {
 async fn security_check_uses_admin_key_not_session_key() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "check"])
+        .args(["security", "check", "--admin-key", SESSION_KEY])
         .assert()
         .failure()
         .stderr(predicates::str::contains("/v1/security/check"))
@@ -6921,14 +7048,26 @@ async fn security_check_uses_admin_key_not_session_key() {
 async fn security_history_renders_table_and_next_page_cursor() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let _first_run_id = run_security_check_and_extract_run_id(home.path());
     let second_run_id = run_security_check_and_extract_run_id(home.path());
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "history", "--limit", "1"])
+        .args([
+            "security",
+            "history",
+            "--limit",
+            "1",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("id"))
@@ -6947,14 +7086,27 @@ async fn security_history_renders_table_and_next_page_cursor() {
 async fn security_history_json_renders_runs_and_cursor() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let _first_run_id = run_security_check_and_extract_run_id(home.path());
     let second_run_id = run_security_check_and_extract_run_id(home.path());
 
     let output = acps_command()
         .env("HOME", home.path())
-        .args(["security", "history", "--limit", "1", "--json"])
+        .args([
+            "security",
+            "history",
+            "--limit",
+            "1",
+            "--json",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -6974,13 +7126,25 @@ async fn security_history_json_renders_runs_and_cursor() {
 async fn security_history_global_format_json_matches_json_alias() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let run_id = run_security_check_and_extract_run_id(home.path());
 
     let output = acps_command()
         .env("HOME", home.path())
-        .args(["security", "history", "--format", "json"])
+        .args([
+            "security",
+            "history",
+            "--format",
+            "json",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -6995,7 +7159,12 @@ async fn security_history_global_format_json_matches_json_alias() {
 async fn security_history_json_alias_conflicts_with_explicit_text_format() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
@@ -7028,13 +7197,18 @@ async fn security_show_renders_run_findings_hints_and_details() {
     std::fs::set_permissions(&harness.state_path, fs::Permissions::from_mode(0o644))
         .expect("loosen state db mode");
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let run_id = run_security_check_and_extract_run_id(home.path());
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "show", &run_id])
+        .args(["security", "show", &run_id, "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .stdout(predicates::str::contains(format!("run_id: {run_id}")))
@@ -7061,6 +7235,22 @@ fn security_show_rejects_invalid_run_id_before_daemon_request() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("expected an alphanumeric run id"))
+        .stderr(predicates::str::contains("--admin-key").not())
+        .stderr(predicates::str::contains("/v1/security/history").not());
+}
+
+#[test]
+fn security_history_rejects_invalid_limit_before_admin_key() {
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
+
+    acps_command()
+        .env("HOME", home.path())
+        .args(["security", "history", "--limit", "0"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("limit must be"))
+        .stderr(predicates::str::contains("--admin-key").not())
         .stderr(predicates::str::contains("/v1/security/history").not());
 }
 
@@ -7068,11 +7258,16 @@ fn security_show_rejects_invalid_run_id_before_daemon_request() {
 async fn security_history_uses_admin_key_not_session_key() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "history"])
+        .args(["security", "history", "--admin-key", SESSION_KEY])
         .assert()
         .failure()
         .stderr(predicates::str::contains("/v1/security/history"))
@@ -7083,11 +7278,22 @@ async fn security_history_uses_admin_key_not_session_key() {
 async fn security_show_uses_admin_key_not_session_key() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, SESSION_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "show", "srun_does_not_exist"])
+        .args([
+            "security",
+            "show",
+            "srun_does_not_exist",
+            "--admin-key",
+            SESSION_KEY,
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("/v1/security/history/{run_id}"))
@@ -7097,7 +7303,7 @@ async fn security_show_uses_admin_key_not_session_key() {
 fn run_security_check_and_extract_run_id(home: &std::path::Path) -> String {
     let output = acps_command()
         .env("HOME", home)
-        .args(["security", "check"])
+        .args(["security", "check", "--admin-key", ADMIN_KEY])
         .assert()
         .success()
         .get_output()
@@ -7116,7 +7322,12 @@ fn run_security_check_and_extract_run_id(home: &std::path::Path) -> String {
 async fn metrics_summary_format_json_returns_summary() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let output = acps_command()
         .env("HOME", home.path())
@@ -7135,7 +7346,12 @@ async fn metrics_summary_format_json_returns_summary() {
 async fn ws_common_commands_format_json() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let connections_output = acps_command()
         .env("HOME", home.path())
@@ -7176,6 +7392,8 @@ async fn ws_common_commands_format_json() {
             "missing",
             "--format",
             "json",
+            "--admin-key",
+            ADMIN_KEY,
         ])
         .assert()
         .success()
@@ -7187,22 +7405,41 @@ async fn ws_common_commands_format_json() {
     assert_eq!(disconnect_body["requested"], 0);
 }
 
+#[test]
+fn ws_disconnect_requires_target_before_admin_key() {
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
+
+    acps_command()
+        .env("HOME", home.path())
+        .args(["ws", "disconnect"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--connection-id or --session-id"))
+        .stderr(predicates::str::contains("--admin-key").not());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_new_list_prompt_close_round_trip() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     // Start the agent first so /v1/sessions has a live ACP connection.
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
     let new_output = acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "new"])
+        .args(["sessions", "new", "--session-key", SESSION_KEY])
         .assert()
         .success()
         .get_output()
@@ -7225,7 +7462,14 @@ async fn sessions_new_list_prompt_close_round_trip() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "prompt", &session_id, "hello"])
+        .args([
+            "sessions",
+            "prompt",
+            &session_id,
+            "hello",
+            "--session-key",
+            SESSION_KEY,
+        ])
         .timeout(std::time::Duration::from_secs(30))
         .assert()
         .success()
@@ -7234,27 +7478,69 @@ async fn sessions_new_list_prompt_close_round_trip() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "close", &session_id])
+        .args([
+            "sessions",
+            "close",
+            &session_id,
+            "--session-key",
+            SESSION_KEY,
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("session close: closed"));
+}
+
+#[test]
+fn sessions_mutating_commands_require_explicit_session_key() {
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home(home.path(), "http://127.0.0.1:9", ADMIN_KEY);
+
+    for args in [
+        vec!["sessions", "new"],
+        vec!["sessions", "fork", "sess_test"],
+        vec!["sessions", "prompt", "sess_test", "hello"],
+        vec!["sessions", "cancel", "sess_test"],
+        vec!["sessions", "close", "sess_test"],
+    ] {
+        acps_command()
+            .env("HOME", home.path())
+            .env_remove("ACP_STACK_SESSION_KEY")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "--session-key or ACP_STACK_SESSION_KEY",
+            ));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_new_format_json_returns_session_object() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
     let output = acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "new", "--format", "json"])
+        .args([
+            "sessions",
+            "new",
+            "--format",
+            "json",
+            "--session-key",
+            SESSION_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -7269,17 +7555,29 @@ async fn sessions_new_format_json_returns_session_object() {
 async fn sessions_common_commands_format_json() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
     let new_output = acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "new", "--format", "json"])
+        .args([
+            "sessions",
+            "new",
+            "--format",
+            "json",
+            "--session-key",
+            SESSION_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -7327,7 +7625,13 @@ async fn sessions_common_commands_format_json() {
         .arg("prompt")
         .arg(&session_id)
         .arg("hello")
-        .args(["--no-wait", "--format", "json"])
+        .args([
+            "--no-wait",
+            "--format",
+            "json",
+            "--session-key",
+            SESSION_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -7342,7 +7646,7 @@ async fn sessions_common_commands_format_json() {
         .arg("sessions")
         .arg("cancel")
         .arg(&session_id)
-        .args(["--format", "json"])
+        .args(["--format", "json", "--session-key", SESSION_KEY])
         .assert()
         .success()
         .get_output()
@@ -7354,7 +7658,14 @@ async fn sessions_common_commands_format_json() {
 
     let close_session_output = acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "new", "--format", "json"])
+        .args([
+            "sessions",
+            "new",
+            "--format",
+            "json",
+            "--session-key",
+            SESSION_KEY,
+        ])
         .assert()
         .success()
         .get_output()
@@ -7372,7 +7683,7 @@ async fn sessions_common_commands_format_json() {
         .arg("sessions")
         .arg("close")
         .arg(&close_session_id)
-        .args(["--format", "json"])
+        .args(["--format", "json", "--session-key", SESSION_KEY])
         .assert()
         .success()
         .get_output()
@@ -7387,7 +7698,12 @@ async fn sessions_common_commands_format_json() {
 async fn sessions_status_reports_no_active_session() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
@@ -7403,17 +7719,22 @@ async fn sessions_status_reports_no_active_session() {
 async fn sessions_status_renders_recent_active_session() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
     let new_output = acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "new"])
+        .args(["sessions", "new", "--session-key", SESSION_KEY])
         .assert()
         .success()
         .get_output()
@@ -7442,7 +7763,12 @@ async fn sessions_status_renders_recent_active_session() {
 async fn sessions_status_format_json_returns_window() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     let output = acps_command()
         .env("HOME", home.path())
@@ -7462,17 +7788,22 @@ async fn sessions_status_format_json_returns_window() {
 async fn sessions_prompt_no_wait_returns_immediately() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home(home.path(), &harness.base_url, ADMIN_KEY);
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
         .assert()
         .success();
 
     let new_output = acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "new"])
+        .args(["sessions", "new", "--session-key", SESSION_KEY])
         .assert()
         .success()
         .get_output()
@@ -7488,7 +7819,15 @@ async fn sessions_prompt_no_wait_returns_immediately() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "prompt", &session_id, "ping", "--no-wait"])
+        .args([
+            "sessions",
+            "prompt",
+            &session_id,
+            "ping",
+            "--no-wait",
+            "--session-key",
+            SESSION_KEY,
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("prompt: pending"))
@@ -7507,7 +7846,12 @@ async fn agent_start_reports_daemon_auth_failure() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["agent", "start"])
+        .args([
+            "agent",
+            "start",
+            "--admin-key",
+            "acps_admin_wrongwrongwrongwrongwrongwrongwrongwrongwrong",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -8221,14 +8565,6 @@ fn write_acp_config_options(
 
 // ----- 0.0.1 auth/secrets/reset/config-import tests -----
 
-fn run_init_with_home(home: &std::path::Path) {
-    acps_command()
-        .env("HOME", home)
-        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
-        .assert()
-        .success();
-}
-
 fn run_operator_init_with_home(home: &std::path::Path, extra: &[&str]) {
     write_supabase_init_registry(home);
     let workspace = home.join("workspace");
@@ -8524,8 +8860,8 @@ fn init_prints_session_and_admin_keys_on_first_run() {
         .stdout
         .clone();
     let stdout = String::from_utf8(output).expect("utf8");
-    assert!(stdout.contains("session key (ACP_STACK_SESSION_KEY): acps_"));
-    assert!(stdout.contains("admin key (ACP_STACK_ADMIN_KEY): acps_"));
+    assert!(stdout.contains("session key: acps_"));
+    assert!(stdout.contains("admin key: acps_"));
     assert!(stdout.contains("save the admin key now"));
 }
 
@@ -8563,42 +8899,111 @@ fn init_is_idempotent_and_preserves_keys() {
 }
 
 #[test]
-fn init_fails_fast_when_store_exists_with_both_auth_refs_missing() {
+fn init_backfills_legacy_auth_refs_without_reprinting_keys() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir");
+    let legacy_config = VALID_PLACEBO_CONFIG.replace(
+        "[security.http]",
+        r#"[auth]
+session_key_ref = "ACP_STACK_SESSION_KEY"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]"#,
+    );
+    fs::write(config_dir.join("acps-config.toml"), legacy_config).expect("legacy config");
+    let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secret_store
+        .set_many([
+            ("ACP_STACK_SESSION_KEY", SESSION_KEY),
+            ("ACP_STACK_ADMIN_KEY", ADMIN_KEY),
+        ])
+        .expect("legacy auth secrets");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(
+        stdout.contains("preserved existing API keys"),
+        "legacy init must preserve old keys, got: {stdout}",
+    );
+    assert!(!stdout.contains("session key: acps_"));
+    assert!(!stdout.contains("admin key: acps_"));
+    assert!(!stdout.contains("save the admin key now"));
+
+    let state_path = default_state_path(tempdir.path());
+    let store = StateStore::open(&state_path).expect("state store");
+    let verifiers = store.load_auth_verifier_pair().expect("auth verifiers");
+    assert_eq!(verifiers.verify(SESSION_KEY), Some(KeyKind::Session));
+    assert_eq!(verifiers.verify(ADMIN_KEY), Some(KeyKind::Admin));
+}
+
+#[test]
+fn init_fails_fast_when_only_one_auth_verifier_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    // Delete both auth refs via the library API (the CLI guard rejects this,
-    // which is itself a separate test) and add an unrelated secret so the
-    // store is non-empty. The new init logic must refuse to silently
-    // re-generate the admin key in this corrupted state.
-    let mut store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
+    let state_path = default_state_path(tempdir.path());
+    fs::remove_file(&state_path).expect("state db should be removable");
+    let store = StateStore::open(&state_path).expect("state store should open");
+    store.migrate().expect("state schema should migrate");
     store
-        .set("UNRELATED_API_KEY", "xyz")
-        .expect("set unrelated");
-    store
-        .delete("ACP_STACK_SESSION_KEY")
-        .expect("delete session");
-    store.delete("ACP_STACK_ADMIN_KEY").expect("delete admin");
-    drop(store);
+        .upsert_auth_key(
+            KeyKind::Admin,
+            &AuthVerifierSet::create(SESSION_KEY, ADMIN_KEY).admin,
+        )
+        .expect("admin verifier should replace pair");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "does not contain the admin key reference",
-        ));
+        .stderr(predicates::str::contains("auth_keys.session"));
+}
+
+#[test]
+fn init_fails_fast_when_auth_verifier_is_malformed() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let state_path = default_state_path(tempdir.path());
+    let connection = rusqlite::Connection::open(&state_path).expect("state db should open");
+    connection
+        .execute(
+            "UPDATE auth_keys SET algorithm = 'sha256-v0' WHERE key_kind = 'session'",
+            [],
+        )
+        .expect("auth verifier should be corruptible");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("auth_keys.algorithm"));
 }
 
 #[test]
 fn secrets_set_only_captures_first_line_of_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "set", "MULTILINE_TEST"])
+        .args([
+            "secrets",
+            "set",
+            "MULTILINE_TEST",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .write_stdin("first-line\nsecond-line\n")
         .assert()
         .success();
@@ -9061,72 +9466,89 @@ fn logging_supabase_enable_rejects_invalid_url_before_writing() {
 }
 
 #[test]
-fn init_fails_fast_when_admin_key_missing_in_existing_store() {
+fn init_fails_fast_when_admin_verifier_missing() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    // Delete the admin key via the library API (the CLI guard refuses to do
-    // so directly, which is a separate test). The store now contains the
-    // session key only, mimicking a partial wipe.
-    let mut store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
-    store.delete("ACP_STACK_ADMIN_KEY").expect("delete admin");
-    drop(store);
+    let state_path = default_state_path(tempdir.path());
+    fs::remove_file(&state_path).expect("state db should be removable");
+    let store = StateStore::open(&state_path).expect("state store should open");
+    store.migrate().expect("state schema should migrate");
+    store
+        .upsert_auth_key(
+            KeyKind::Session,
+            &AuthVerifierSet::create(SESSION_KEY, ADMIN_KEY).session,
+        )
+        .expect("session verifier should be stored");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "does not contain the admin key reference",
-        ));
+        .stderr(predicates::str::contains("auth_keys.admin"));
 }
 
 #[test]
-fn secrets_set_refuses_to_mutate_session_key_ref() {
+fn secrets_set_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "set", "ACP_STACK_SESSION_KEY"])
+        .args(["secrets", "set", "OPENCODE_API_KEY"])
         .write_stdin("attacker-supplied")
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "is the configured session key reference",
+        .stderr(predicates::str::contains("--admin-key"));
+}
+
+#[test]
+fn secrets_set_allows_old_auth_ref_names_with_admin_key() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (_, admin_key) = run_init_with_home(tempdir.path());
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "secrets",
+            "set",
+            "ACP_STACK_SESSION_KEY",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
+        .write_stdin("ordinary-secret")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "set secret: ACP_STACK_SESSION_KEY",
         ));
 }
 
 #[test]
-fn secrets_set_refuses_to_mutate_admin_key_ref() {
+fn secrets_delete_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "set", "ACP_STACK_ADMIN_KEY"])
-        .write_stdin("attacker-supplied")
+        .args([
+            "secrets",
+            "set",
+            "TEMP_VALUE",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
+        .write_stdin("abc")
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "is the configured admin key reference",
-        ));
-}
-
-#[test]
-fn secrets_delete_refuses_to_remove_admin_key_ref() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+        .success();
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "delete", "ACP_STACK_ADMIN_KEY"])
+        .args(["secrets", "delete", "TEMP_VALUE"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "is the configured admin key reference",
-        ));
+        .stderr(predicates::str::contains("--admin-key"));
 }
 
 #[test]
@@ -9139,19 +9561,27 @@ fn secrets_list_shows_session_and_admin_names_only_after_init() {
         .args(["secrets", "list"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("ACP_STACK_ADMIN_KEY"))
-        .stdout(predicates::str::contains("ACP_STACK_SESSION_KEY"))
+        .stdout(predicates::str::contains("ACP_STACK_ADMIN_KEY").not())
+        .stdout(predicates::str::contains("ACP_STACK_SESSION_KEY").not())
         .stdout(predicates::str::contains("acps_").not());
 }
 
 #[test]
 fn secrets_commands_format_json_never_print_values() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     let set_output = acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "set", "OPENCODE_API_KEY", "--format", "json"])
+        .args([
+            "secrets",
+            "set",
+            "OPENCODE_API_KEY",
+            "--format",
+            "json",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .write_stdin("super-secret-value\n")
         .assert()
         .success()
@@ -9180,7 +9610,15 @@ fn secrets_commands_format_json_never_print_values() {
 
     let delete_output = acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "delete", "OPENCODE_API_KEY", "--format", "json"])
+        .args([
+            "secrets",
+            "delete",
+            "OPENCODE_API_KEY",
+            "--format",
+            "json",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
         .success()
         .get_output()
@@ -9194,11 +9632,17 @@ fn secrets_commands_format_json_never_print_values() {
 #[test]
 fn secrets_set_reads_value_from_stdin() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "set", "OPENCODE_API_KEY"])
+        .args([
+            "secrets",
+            "set",
+            "OPENCODE_API_KEY",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .write_stdin("super-secret-value\n")
         .assert()
         .success()
@@ -9215,87 +9659,59 @@ fn secrets_set_reads_value_from_stdin() {
 #[test]
 fn secrets_delete_removes_named_secret() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "set", "TEMP_VALUE"])
+        .args([
+            "secrets",
+            "set",
+            "TEMP_VALUE",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .write_stdin("abc")
         .assert()
         .success();
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "delete", "TEMP_VALUE"])
+        .args([
+            "secrets",
+            "delete",
+            "TEMP_VALUE",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("deleted secret: TEMP_VALUE"));
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["secrets", "delete", "TEMP_VALUE"])
+        .args([
+            "secrets",
+            "delete",
+            "TEMP_VALUE",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("was not found"));
 }
 
 #[test]
-fn auth_regenerate_session_key_rotates_only_session() {
+fn auth_regenerate_session_key_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let first_init_stdout = acps_command()
-        .env("HOME", tempdir.path())
-        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let first_init = String::from_utf8(first_init_stdout).expect("utf8");
-    let admin_line = first_init
-        .lines()
-        .find(|l| l.starts_with("admin key (ACP_STACK_ADMIN_KEY): "))
-        .expect("init must print admin key");
-    let admin_value_before = admin_line
-        .trim_start_matches("admin key (ACP_STACK_ADMIN_KEY): ")
-        .trim();
-    let session_line = first_init
-        .lines()
-        .find(|l| l.starts_with("session key (ACP_STACK_SESSION_KEY): "))
-        .expect("init must print session key");
-    let session_before = session_line
-        .trim_start_matches("session key (ACP_STACK_SESSION_KEY): ")
-        .trim();
+    run_init_with_home(tempdir.path());
 
-    let rotate_stdout = acps_command()
+    acps_command()
         .env("HOME", tempdir.path())
         .args(["auth", "regenerate-session-key"])
         .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let rotate = String::from_utf8(rotate_stdout).expect("utf8");
-    assert!(rotate.contains("session key rotated"));
-    let rotated_line = rotate
-        .lines()
-        .find(|l| l.starts_with("value: "))
-        .expect("rotate must print new value");
-    let session_after = rotated_line.trim_start_matches("value: ").trim();
-
-    assert_ne!(
-        session_before, session_after,
-        "session key must change on rotation",
-    );
-
-    // Read the admin key via the store layer to confirm it wasn't touched.
-    let store = acp_stack::secrets::SecretStore::open(tempdir.path()).expect("open store");
-    assert_eq!(
-        store
-            .get("ACP_STACK_ADMIN_KEY")
-            .expect("admin key still present"),
-        admin_value_before,
-        "admin key must NOT change on session rotation",
-    );
+        .failure()
+        .stderr(predicates::str::contains("--admin-key"));
 }
 
 #[test]
@@ -9395,7 +9811,7 @@ fn reset_with_yes_wipes_config_state_age_key_and_secret_store() {
         .stdout
         .clone();
     let stdout = String::from_utf8(init_after).expect("utf8");
-    assert!(stdout.contains("admin key (ACP_STACK_ADMIN_KEY): acps_"));
+    assert!(stdout.contains("admin key: acps_"));
 }
 
 #[test]
@@ -9420,13 +9836,14 @@ fn config_import_refuses_without_force_when_config_exists() {
         .assert()
         .failure()
         .stdout("")
-        .stderr(predicates::str::contains("config already exists"));
+        .stderr(predicates::str::contains("config already exists"))
+        .stderr(predicates::str::contains("--admin-key").not());
 }
 
 #[test]
 fn config_import_with_force_replaces_existing_config() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     // Build an alternate config with a recognizable bind addr.
     let modified =
@@ -9436,7 +9853,14 @@ fn config_import_with_force_replaces_existing_config() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["config", "import", import_path.to_str().unwrap(), "--force"])
+        .args([
+            "config",
+            "import",
+            import_path.to_str().unwrap(),
+            "--force",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("imported config (replaced)"));
@@ -9449,7 +9873,7 @@ fn config_import_with_force_replaces_existing_config() {
 #[test]
 fn config_validate_and_import_dry_run_format_json() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
     let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
 
     let validate_output = acps_command()
@@ -9470,7 +9894,13 @@ fn config_validate_and_import_dry_run_format_json() {
         .arg("config")
         .arg("import")
         .arg(&config_path)
-        .args(["--dry-run", "--format", "json"])
+        .args([
+            "--dry-run",
+            "--format",
+            "json",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
         .success()
         .get_output()
@@ -9478,8 +9908,8 @@ fn config_validate_and_import_dry_run_format_json() {
         .clone();
     let import_body: Value = serde_json::from_slice(&import_output).expect("import json parses");
     assert_eq!(import_body["dry_run"], true);
-    assert_eq!(import_body["auth_refs_unchanged"], true);
     assert_eq!(import_body["target_exists"], true);
+    assert!(import_body.get("auth_refs_unchanged").is_none());
 }
 
 #[test]
@@ -9499,7 +9929,8 @@ fn config_export_format_json_wraps_toml_without_leaking_secret_values() {
     assert_eq!(body["format"], "toml");
     assert!(body["bytes"].as_u64().unwrap_or(0) > 0);
     let value = body["value"].as_str().expect("exported value is string");
-    assert!(value.contains("ACP_STACK_SESSION_KEY"));
+    assert!(!value.contains("ACP_STACK_SESSION_KEY"));
+    assert!(!value.contains("ACP_STACK_ADMIN_KEY"));
     assert!(!value.contains(SESSION_KEY));
     assert!(!value.contains(ADMIN_KEY));
 }
@@ -9523,20 +9954,29 @@ fn config_export_to_output_reports_progress() {
         .stdout(predicates::str::contains("progress: writing config export"));
 
     let exported = fs::read_to_string(output_path).expect("export should be written");
-    assert!(exported.contains("ACP_STACK_SESSION_KEY"));
+    assert!(!exported.contains("ACP_STACK_SESSION_KEY"));
+    assert!(!exported.contains("ACP_STACK_ADMIN_KEY"));
 }
 
 #[test]
 fn config_import_supports_base64_input() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    // No init first; we want to exercise the create-fresh import path.
+    let (_, admin_key) = run_init_with_home(tempdir.path());
     let modified =
         VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7788""#);
     let encoded = base64::engine::general_purpose::STANDARD.encode(modified);
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["config", "import", "--base64", &encoded])
+        .args([
+            "config",
+            "import",
+            "--base64",
+            &encoded,
+            "--force",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("progress: reading config import"))
@@ -9544,7 +9984,7 @@ fn config_import_supports_base64_input() {
             "progress: validating config import",
         ))
         .stdout(predicates::str::contains("progress: writing config import"))
-        .stdout(predicates::str::contains("imported config:"));
+        .stdout(predicates::str::contains("imported config"));
 
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config readable");
@@ -9666,17 +10106,12 @@ fn init_from_base64_rejects_invalid_base64() {
 }
 
 #[test]
-fn config_import_refuses_to_change_auth_refs() {
+fn config_import_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
 
-    // Build an alternate config that changes admin_key_ref. Import must
-    // refuse, otherwise an operator could swap which secret is treated as
-    // the admin key without going through `acps reset --yes`.
-    let modified = VALID_PLACEBO_CONFIG.replace(
-        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
-        r#"admin_key_ref = "MY_NEW_ADMIN""#,
-    );
+    let modified =
+        VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7781""#);
     let import_path = tempdir.path().join("rotated.toml");
     fs::write(&import_path, &modified).expect("write rotated");
 
@@ -9686,32 +10121,44 @@ fn config_import_refuses_to_change_auth_refs() {
         .assert()
         .failure()
         .stdout("")
-        .stderr(predicates::str::contains(
-            "would change `[auth].admin_key_ref`",
-        ));
+        .stderr(predicates::str::contains("--admin-key"));
 }
 
 #[test]
-fn config_import_refuses_to_change_session_ref() {
+fn config_import_strips_legacy_auth_section() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    run_init_with_home(tempdir.path());
+    let (_, admin_key) = run_init_with_home(tempdir.path());
 
     let modified = VALID_PLACEBO_CONFIG.replace(
-        r#"session_key_ref = "ACP_STACK_SESSION_KEY""#,
-        r#"session_key_ref = "MY_NEW_SESSION""#,
+        "[security.http]",
+        r#"[auth]
+session_key_ref = "ACP_STACK_SESSION_KEY"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]"#,
     );
     let import_path = tempdir.path().join("rotated-session.toml");
     fs::write(&import_path, &modified).expect("write rotated session");
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["config", "import", import_path.to_str().unwrap(), "--force"])
+        .args([
+            "config",
+            "import",
+            import_path.to_str().unwrap(),
+            "--force",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
         .assert()
-        .failure()
-        .stdout("")
-        .stderr(predicates::str::contains(
-            "would change `[auth].session_key_ref`",
-        ));
+        .success()
+        .stdout(predicates::str::contains("imported config (replaced)"));
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config");
+    assert!(!written.contains("[auth]"));
+    assert!(!written.contains("session_key_ref"));
+    assert!(!written.contains("admin_key_ref"));
 }
 
 #[test]
@@ -9753,7 +10200,6 @@ fn config_import_dry_run_with_path() {
     assert!(stdout.contains("import dry-run complete"));
     assert!(stdout.contains("config_version:"));
     assert!(stdout.contains("canonical TOML size:"));
-    assert!(stdout.contains("auth refs unchanged:"));
     assert!(stdout.contains("would write to:"));
     let current_config = fs::read_to_string(&config_path).expect("config readable");
     assert_eq!(current_config, original_config);
@@ -9762,6 +10208,9 @@ fn config_import_dry_run_with_path() {
 #[test]
 fn config_import_dry_run_with_base64() {
     let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    let original_config = fs::read_to_string(&config_path).expect("config readable");
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(VALID_PLACEBO_CONFIG);
 
@@ -9777,13 +10226,8 @@ fn config_import_dry_run_with_base64() {
     assert!(stdout.contains("import dry-run complete"));
     assert!(stdout.contains("config_version:"));
     assert!(stdout.contains("would write to:"));
-    assert!(
-        !tempdir
-            .path()
-            .join(".config/acp-stack/acps-config.toml")
-            .exists(),
-        "dry-run must not create a config file"
-    );
+    let current_config = fs::read_to_string(&config_path).expect("config readable");
+    assert_eq!(current_config, original_config);
 }
 
 #[test]
@@ -9943,6 +10387,29 @@ fn init_resume_targets_specific_pending_run_by_id() {
 fn init_resume_retries_failed_agent_install_even_without_install_flag() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     run_init_with_home(tempdir.path());
+
+    let workspace = tempdir.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace dir should be created");
+    let missing_creates = tempdir.path().join("missing-resume-install-marker");
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    let mut config =
+        load_config_from_str(&fs::read_to_string(&config_path).expect("config should be readable"))
+            .expect("config should validate");
+    config.workspace.root = workspace.to_string_lossy().into_owned();
+    config.agent.id = "resume-install-test".to_owned();
+    config.agent.name = "Resume Install Test".to_owned();
+    config.agent.command = "resume-install-test-agent".to_owned();
+    config.agent.args.clear();
+    config.agent.install = Some(AgentInstallConfig {
+        install_type: "shell".to_owned(),
+        creates: missing_creates.to_string_lossy().into_owned(),
+        shell: Some("true".to_owned()),
+    });
+    fs::write(
+        &config_path,
+        config.to_canonical_toml().expect("canonical config"),
+    )
+    .expect("config should be written");
 
     let state_path = tempdir.path().join(".local/share/acp-stack/state.sqlite");
     let store = acp_stack::state::StateStore::open(&state_path).expect("state opens");

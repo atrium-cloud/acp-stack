@@ -9,9 +9,10 @@ use tower_http::limit::RequestBodyLimitLayer;
 use crate::api::{
     self, AppState, commands_cancel_handler, commands_get_handler, commands_list_handler,
     commands_output_handler, commands_submit_handler, config_export_handler, deps_check_handler,
-    files_content_get_handler, files_content_put_handler, files_list_handler, logs_events_handler,
-    permissions_pending_handler, security_check_handler, status_handler, ws_connections_handler,
-    ws_sessions_handler,
+    files_content_get_handler, files_content_put_handler, files_list_handler, health_ready_handler,
+    logs_events_handler, metrics_summary_handler, permissions_pending_handler,
+    security_check_handler, sessions_list_handler, sessions_status_handler, status_agent_handler,
+    status_handler, ws_connections_handler, ws_sessions_handler,
 };
 use crate::auth::KeyKind;
 
@@ -23,9 +24,15 @@ pub fn build_local_router(state: AppState) -> Router {
 
     let routes = Router::new()
         .route("/v1/status", get(status_handler))
+        .route("/v1/status/agent", get(status_agent_handler))
+        .route("/v1/agent/status", get(status_agent_handler))
+        .route("/v1/health/ready", get(health_ready_handler))
         .route("/v1/security/check", get(security_check_handler))
         .route("/v1/deps/check", post(deps_check_handler))
         .route("/v1/logs/events", get(logs_events_handler))
+        .route("/v1/metrics/summary", get(metrics_summary_handler))
+        .route("/v1/sessions", get(sessions_list_handler))
+        .route("/v1/sessions/-/status", get(sessions_status_handler))
         .route("/v1/files", get(files_list_handler))
         .route(
             "/v1/files/content",

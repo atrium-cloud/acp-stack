@@ -259,10 +259,6 @@ bind = "127.0.0.1:7700"
 public_url = "http://127.0.0.1:7700"
 max_request_bytes = 1048576
 
-[auth]
-session_key_ref = "ACP_STACK_SESSION_KEY"
-admin_key_ref = "ACP_STACK_ADMIN_KEY"
-
 [security.http]
 max_request_bytes = 1048576
 rate_limit_per_minute = 120

@@ -7,7 +7,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use acp_stack::config::Config;
-use acp_stack::secrets::SecretStore;
 use assert_cmd::Command;
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
@@ -47,9 +46,18 @@ fn config_path(home: &Path) -> PathBuf {
     home.join(".config/acp-stack/acps-config.toml")
 }
 
-fn run_fixture_init(home: &Path, workspace: &Path) {
+fn parse_key_line(stdout: &str, label: &'static str) -> String {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(label))
+        .unwrap_or_else(|| panic!("missing {label} in stdout: {stdout}"))
+        .trim()
+        .to_owned()
+}
+
+fn run_fixture_init(home: &Path, workspace: &Path) -> (String, String) {
     std::fs::create_dir_all(workspace.join("uploads")).expect("workspace dirs");
-    acps_command(home)
+    let stdout = acps_command(home)
         .args([
             "init",
             "--agent",
@@ -65,12 +73,20 @@ fn run_fixture_init(home: &Path, workspace: &Path) {
             "--skip-testflight",
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(stdout).expect("init stdout UTF-8");
+    (
+        parse_key_line(&stdout, "session key: "),
+        parse_key_line(&stdout, "admin key: "),
+    )
 }
 
-fn set_secret(home: &Path, name: &str, value: &str) {
+fn set_secret(home: &Path, name: &str, value: &str, admin_key: &str) {
     acps_command(home)
-        .args(["secrets", "set", name])
+        .args(["secrets", "set", name, "--admin-key", admin_key])
         .write_stdin(format!("{value}\n"))
         .assert()
         .success();
@@ -125,26 +141,16 @@ fn export_config(home: &Path, output: &Path) -> String {
 fn import_config_into_home(home: &Path, input: &Path) {
     acps_command(home)
         .args([
-            "config",
-            "import",
+            "dev",
+            "init",
+            "--from-file",
             input.to_str().expect("import path is UTF-8"),
+            "--non-interactive",
+            "--skip-workspace-init",
+            "--skip-testflight",
         ])
         .assert()
         .success();
-}
-
-fn generated_keys(home: &Path) -> (String, String) {
-    let config = Config::load_from_path(config_path(home)).expect("config loads");
-    let store = SecretStore::open(home).expect("secret store opens");
-    let session_key = store
-        .get(&config.auth.session_key_ref)
-        .expect("session key")
-        .to_owned();
-    let admin_key = store
-        .get(&config.auth.admin_key_ref)
-        .expect("admin key")
-        .to_owned();
-    (session_key, admin_key)
 }
 
 fn start_serve(home: &Path) -> (ServeProcess, String) {
@@ -399,13 +405,17 @@ async fn release_acceptance_fixture_first_test() {
         .assert()
         .success();
 
-    run_fixture_init(home.path(), &workspace);
-    set_secret(home.path(), ACCEPTANCE_KEY_REF, ACCEPTANCE_KEY_VALUE);
+    let (session_key, admin_key) = run_fixture_init(home.path(), &workspace);
+    set_secret(
+        home.path(),
+        ACCEPTANCE_KEY_REF,
+        ACCEPTANCE_KEY_VALUE,
+        &admin_key,
+    );
     configure_fixture_secret_assertion(home.path());
 
     let export_path = home.path().join("exported-acps-config.toml");
     let exported = export_config(home.path(), &export_path);
-    let (session_key, admin_key) = generated_keys(home.path());
     assert!(exported.contains(ACCEPTANCE_KEY_REF));
     assert!(!exported.contains(ACCEPTANCE_KEY_VALUE));
     assert!(!exported.contains(&session_key));

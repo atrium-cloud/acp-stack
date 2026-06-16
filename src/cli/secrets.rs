@@ -1,11 +1,11 @@
-use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::secrets::{SecretStore, reject_auth_ref_mutation};
 use clap::{Args, Subcommand};
 use std::io::BufRead as _;
+use std::io::IsTerminal;
 
-use super::core::{OutputFormat, print_json};
+use super::core::{OutputFormat, print_json, resolve_admin_key, validate_local_admin_key};
 
 #[derive(Debug, Subcommand)]
 pub enum SecretsCommand {
@@ -20,11 +20,17 @@ pub enum SecretsCommand {
 #[derive(Debug, Args)]
 pub struct SecretsSetArgs {
     name: String,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct SecretsDeleteArgs {
     name: String,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat) -> Result<()> {
@@ -43,8 +49,9 @@ pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat)
             Ok(())
         }
         SecretsCommand::Set(args) => {
-            let config = Config::load_from_default_path()?;
-            reject_auth_ref_mutation(&args.name, &config)?;
+            let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
+            validate_local_admin_key(&admin_key)?;
+            reject_auth_ref_mutation(&args.name)?;
             // Read a single line from stdin; trailing CR/LF stripped. Values
             // are single-line text by spec — multi-line input would silently
             // store the rest of stdin, which is surprising.
@@ -64,8 +71,9 @@ pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat)
             Ok(())
         }
         SecretsCommand::Delete(args) => {
-            let config = Config::load_from_default_path()?;
-            reject_auth_ref_mutation(&args.name, &config)?;
+            let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
+            validate_local_admin_key(&admin_key)?;
+            reject_auth_ref_mutation(&args.name)?;
             let mut store = SecretStore::open(&home)?;
             store.delete(&args.name)?;
             if output.is_json() {

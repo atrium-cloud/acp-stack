@@ -5,9 +5,10 @@ use crate::fs_util::{
 };
 use base64::Engine;
 use clap::{Args, Subcommand};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use super::core::{OutputFormat, print_json};
+use super::core::{OutputFormat, print_json, resolve_admin_key, validate_local_admin_key};
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
@@ -42,6 +43,9 @@ pub struct ConfigImportArgs {
     /// Validate and report without writing or auditing.
     #[arg(long)]
     dry_run: bool,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 pub(super) enum ConfigImportSource<'a> {
@@ -143,19 +147,12 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
     let target = config::default_config_path()?;
 
     if args.dry_run {
-        let auth_refs_ok = if target.exists() {
-            let current = Config::load_from_path(&target)?;
-            config::compare_auth_refs(&current.auth, &payload.config.auth).is_ok()
-        } else {
-            true
-        };
         if output.is_json() {
             print_json(&serde_json::json!({
                 "dry_run": true,
                 "config_version": payload.config.config_version,
                 "canonical_toml_bytes": payload.canonical.len(),
                 "input_bytes": payload.input_bytes,
-                "auth_refs_unchanged": auth_refs_ok,
                 "target_path": target.display().to_string(),
                 "target_exists": target.exists(),
             }))?;
@@ -165,15 +162,11 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
             println!("  config_version: {}", payload.config.config_version);
             println!("  canonical TOML size: {} bytes", payload.canonical.len());
             println!("  input size: {} bytes", payload.input_bytes);
-            println!("  auth refs unchanged: {auth_refs_ok}");
             println!("  would write to: {}", target.display());
             println!("  target exists: {}", target.exists());
         }
         return Ok(());
     }
-
-    let target_dir = parent_dir(&target)?;
-    create_dir_owner_only(target_dir)?;
 
     if target.exists() {
         if !args.force {
@@ -181,8 +174,16 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
                 path: target.clone(),
             });
         }
-        let current = Config::load_from_path(&target)?;
-        config::compare_auth_refs(&current.auth, &payload.config.auth)?;
+        Config::load_from_path(&target)?;
+    }
+
+    let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
+    validate_local_admin_key(&admin_key)?;
+
+    let target_dir = parent_dir(&target)?;
+    create_dir_owner_only(target_dir)?;
+
+    if target.exists() {
         if !output.is_json() {
             print_config_import_progress(true);
         }
@@ -297,6 +298,7 @@ mod tests {
                 base64: Some(encoded),
                 force: false,
                 dry_run: true,
+                admin_key: None,
             },
             OutputFormat::Text,
         )

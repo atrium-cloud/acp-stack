@@ -12,10 +12,6 @@ bind = "127.0.0.1:7700"
 public_url = "https://agent.example.com"
 max_request_bytes = 104857600
 
-[auth]
-session_key_ref = "ACP_STACK_SESSION_KEY"
-admin_key_ref = "ACP_STACK_ADMIN_KEY"
-
 [security.http]
 allowed_origins = ["https://agent.example.com"]
 rate_limit_per_minute = 120
@@ -75,7 +71,6 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | Section            | Purpose                                                              |
 | ------------------ | -------------------------------------------------------------------- |
 | `[api]`            | HTTP bind address, public URL, and request size cap                  |
-| `[auth]`           | secret reference names for session and admin API keys                |
 | `[security.http]`  | origin checks, rate limits, proxy trust, and auth-failure blocking   |
 | `[workspace]`      | workspace root, uploads path, shell, runtime user, and file limits   |
 | `[agent]`          | configured ACP agent process and injected secret refs                |
@@ -99,7 +94,7 @@ Both `[api].max_request_bytes` and `[security.http].max_request_bytes` can cap H
 
 ## Auth And Secrets
 
-The `[auth]` fields name secret-store entries, not plaintext keys. `acps init` generates the session and admin keys on first run and stores them under these refs. Config import/export never includes secret values.
+Auth keys are not config fields and are not stored in `secrets.age`. `acps init` generates the session and admin keys on first run, prints their plaintext values once, and stores only non-recoverable verifier rows in local state.
 
 Fields that expect secret refs reject likely pasted secret values. Use `acps secrets set <name>` to store the value, then reference `<name>` in config.
 

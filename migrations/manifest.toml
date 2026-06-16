@@ -117,3 +117,9 @@ id = 20
 name = "prompt_status_indexes"
 sqlite_file = "020_prompt_status_indexes.sqlite.sql"
 postgres_file = "020_prompt_status_indexes.postgres.sql"
+
+[[migration]]
+id = 21
+name = "auth_keys"
+sqlite_file = "021_auth_keys.sqlite.sql"
+postgres_file = "021_auth_keys.postgres.sql"

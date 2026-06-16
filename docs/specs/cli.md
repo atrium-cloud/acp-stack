@@ -70,11 +70,13 @@ Cloudflare `generated` mode writes tunnel artifacts for operator-managed setup. 
 
 First initialization prints two API keys:
 
-- Session key: normal sessions, workspace, commands, logs, and status.
+- Session key: session-driving and prompt-driving API calls.
 - Admin key: secrets, config import, agent process control, and other elevated
   operations.
 
-`acps auth regenerate-session-key` rotates only the session key. The admin key is not regenerated in place; `acps reset --yes` destroys local config, state, age key, and secret store so a new instance can be initialized.
+The plaintext values are not stored in config or `secrets.age`; local state stores only verifiers. Commands that need the session key accept `--session-key` or `ACP_STACK_SESSION_KEY`. Commands that need the admin key accept `--admin-key`; interactive terminals prompt without echo when it is omitted.
+
+`acps auth regenerate-session-key --admin-key <key>` rotates only the session key through the running daemon and prints the new plaintext value once. The admin key is not regenerated in place; `acps reset --yes` destroys local config, state, age key, and secret store so a new instance can be initialized.
 
 ## Config Commands
 
@@ -82,11 +84,21 @@ First initialization prints two API keys:
 acps config validate [path]
 acps config export [--output path]
 acps config export --base64
-acps config import <path> [--force] [--dry-run]
-acps config import --base64 <code> [--force] [--dry-run]
+acps config import <path> [--force] [--dry-run] [--admin-key <key>]
+acps config import --base64 <code> [--force] [--dry-run] [--admin-key <key>]
 ```
 
-Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it and requires the admin key. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+
+## Secret Commands
+
+```sh
+acps secrets list
+acps secrets set <name> [--admin-key <key>]
+acps secrets delete <name> [--admin-key <key>]
+```
+
+`secrets list` prints secret names only and does not require an auth key. `secrets set` and `secrets delete` mutate the encrypted secret store and require the admin key.
 
 ## Update Commands
 
@@ -116,7 +128,7 @@ acps logging supabase set-db-url [--db-url-ref <ref>]
 
 ## Agent Commands
 
-`acps agent install [--yes]` installs the configured supported agent from the embedded catalog. Unsupported entries fail before installation. `--yes` is accepted for scripts; install currently runs non-interactively.
+`acps agent install [--yes] [--admin-key <key>]` installs the configured supported agent from the embedded catalog. Unsupported entries fail before installation. `--yes` is accepted for scripts; install currently runs non-interactively.
 
 `acps agent switch <agent>` migrates to another supported harness through the running daemon:
 
@@ -126,7 +138,7 @@ acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <re
 
 The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider secret refs that will be copied if missing, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses the current provider/API-key ref only when compatible, copies installed Agent Skills into the target skills directory when needed, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
 
-Switch preserves runtime-scoped config, including workspace, MCP declarations, permissions, auth, secrets config, and sessions. By default, it also preserves source agent-owned config, secrets, and installed harnesses/adapters so switching back is fast. `--drop` removes only source agent-owned config after the target switch succeeds. It does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
+Switch preserves runtime-scoped config, including workspace, MCP declarations, permissions, secrets config, and sessions. By default, it also preserves source agent-owned config, secrets, and installed harnesses/adapters so switching back is fast. `--drop` removes only source agent-owned config after the target switch succeeds. It does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
 
 `acps agent set` updates provider, model, mode, and custom-provider metadata:
 
@@ -141,7 +153,7 @@ Mapped model and mode values are validated against the configured agent's ACP-ad
 
 `acps subagent *` is OpenCode-only and manages the OpenCode small-model lane. `acps subagent match` makes `small_model` follow the main agent model.
 
-`acps agent update [--force] [--restart]` updates stale managed agent steps. By default it skips when the daemon reports an active agent process. `--restart` stops the running agent, updates, then starts it again. `--restart` runs the update offline while the daemon is live, so avoid invoking it during a scheduled daemon auto-update window: both write the same install destination and have no cross-process lock.
+`acps agent update [--force] [--restart]` updates stale managed agent steps. By default it skips when the daemon reports an active agent process. `--restart` stops the running agent, updates, then starts it again and requires the admin key. `--restart` runs the update offline while the daemon is live, so avoid invoking it during a scheduled daemon auto-update window: both write the same install destination and have no cross-process lock.
 
 `acps agent update set` edits the automatic update policy:
 
@@ -153,7 +165,7 @@ acps agent update set --frequency 3d
 
 `--frequency` accepts duration suffixes such as `12h`, `1d`, `3d`, and `4w`.
 
-`acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information. `acps agent check` reports whether managed install steps are present and current.
+`acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information through the local read-only route. `acps agent check` reports whether managed install steps are present and current.
 
 `acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional.
 
@@ -162,32 +174,34 @@ acps agent update set --frequency 3d
 ```sh
 acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>]
 acps sessions status [--window <duration>] [--threshold <duration>] [--limit <n>]
-acps sessions new
-acps sessions fork <session-id> [--message-id <id>] [--cwd <path>]
-acps sessions prompt <session-id>
-acps sessions cancel <session-id>
-acps sessions close <session-id>
+acps sessions new [--session-key <key>]
+acps sessions fork <session-id> [--message-id <id>] [--cwd <path>] [--session-key <key>]
+acps sessions prompt <session-id> [--session-key <key>]
+acps sessions cancel <session-id> [--session-key <key>]
+acps sessions close <session-id> [--session-key <key>]
 ```
 
-`sessions list` shows the durable local session list after any supported ACP session-list sync. Sessions discovered from the agent but not loaded locally are shown as `available`.
+`sessions list` shows the durable local session list after any supported ACP session-list sync. Sessions discovered from the agent but not loaded locally are shown as `available`. `sessions list` and `sessions status` use the local read-only socket and do not require a session key.
 
 `sessions status` prints sessions with activity in a rolling window and a derived turn state such as `prompt_sent`, `working`, `permission_required`, `done`, or `error`. The default window is `8h`; `--window` accepts `1m` through `999h`. `--threshold` remains as the recency threshold for the `recent` field.
 
 Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
-`sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
+`sessions new`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY`. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
 
 ## Logs, Metrics, And Health
 
-`acps status` validates local config and state, prints workspace and agent status, and probes daemon readiness when the daemon is reachable.
+`acps status` validates local config and state, prints workspace and agent status, and probes daemon readiness through the local socket when the daemon is reachable.
 
-`acps logs query` reads durable events. Filters include level, kind or kind prefix, source, session id, command id, permission id, security category, time bounds, and cursor. `--order <asc|desc>` flips sort direction (default `desc`). `--json` emits the `{ events, next_cursor }` envelope to stdout and suppresses the human "more rows" hint. `--category <rate_limit|origin_cors|ip_block|oversized_request>` scopes to one security category. `--follow` subscribes to the daemon's `logs` WebSocket topic, drains matching durable backlog in ascending pages, then continues with live events. With `--json --follow`, stdout is newline-delimited `EventJson` objects rather than the non-follow envelope.
+`acps logs query` reads durable events without a session key. Filters include level, kind or kind prefix, source, session id, command id, permission id, security category, time bounds, and cursor. `--order <asc|desc>` flips sort direction (default `desc`). `--json` emits the `{ events, next_cursor }` envelope to stdout and suppresses the human "more rows" hint. `--category <rate_limit|origin_cors|ip_block|oversized_request>` scopes to one security category. `--follow` subscribes to the daemon's `logs` WebSocket topic, drains matching durable backlog in ascending pages, then continues with live events and requires the session key. With `--json --follow`, stdout is newline-delimited `EventJson` objects rather than the non-follow envelope.
 
-`acps logs tail` opens a WebSocket subscription to the running daemon.
+`acps logs tail` opens a WebSocket subscription to the running daemon and requires the session key.
 
-`acps metrics summary` prints the daemon's summary metrics for a time window.
+`acps metrics summary` prints the daemon's summary metrics for a time window through the local read-only route.
 
-`acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config and requires confirmation unless `--yes` is passed. Apply output includes the durable `apply_run_id`; failed runs point operators to `acps installer history --agent deps_apply`.
+`acps ws connections` and `acps ws sessions` use the local read-only route. `acps ws disconnect` mutates live public WebSocket state and requires the admin key.
+
+`acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. Security commands require the admin key. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config, requires the admin key, and requires confirmation unless `--yes` is passed. Apply output includes the durable `apply_run_id`; failed runs point operators to `acps installer history --agent deps_apply`.
 
 ## Shell Completion
 

@@ -224,23 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn from_stack_error_sanitizes_auth_ref_import_names() {
-        let err = StackError::ImportChangesAuthRef {
-            field: "admin_key_ref",
-            current: "ACP_STACK_ADMIN_KEY".into(),
-            incoming: "OTHER_ADMIN_KEY".into(),
-        };
-        let env = ApiError::from_stack_error(&err);
-        assert_eq!(env.code, "config.import_changes_auth_ref");
-        assert_eq!(
-            env.message,
-            "config import would change auth key references"
-        );
-        assert!(!env.message.contains("ACP_STACK_ADMIN_KEY"));
-        assert!(!env.message.contains("OTHER_ADMIN_KEY"));
-    }
-
-    #[test]
     fn workspace_path_invalid_maps_to_400() {
         let err = StackError::WorkspacePathInvalid {
             reason: "contains ..".into(),

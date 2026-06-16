@@ -44,14 +44,14 @@ pub(crate) struct ConfigImportQuery {
 }
 
 /// POST /v1/config/import (admin-tier). Parses TOML from the raw body,
-/// rejects auth-ref changes, atomically writes the canonical form to the
-/// default config path, and records a `server.config_imported` audit event.
+/// atomically writes the canonical form to the default config path, and records
+/// a `server.config_imported` audit event.
 /// The running daemon retains its old `AppState`; the client must restart
 /// the daemon for the new config to take effect.
 ///
 /// Query params:
-/// - `dry_run=true`: validates, canonicalizes, compares auth refs, and
-///   reports metadata without writing or auditing.
+/// - `dry_run=true`: validates, canonicalizes, and reports metadata without
+///   writing or auditing.
 pub(crate) async fn config_import_handler(
     State(state): State<AppState>,
     query: Query<ConfigImportQuery>,
@@ -66,8 +66,6 @@ pub(crate) async fn config_import_handler(
     }
 
     let incoming = crate::config::load_config_from_str(&body)?;
-    let auth_refs_unchanged =
-        crate::config::compare_auth_refs(&state.config.auth, &incoming.auth).is_ok();
     let canonical = incoming.to_canonical_toml()?;
     let target = state.runtime_paths.config_path.clone();
 
@@ -77,13 +75,11 @@ pub(crate) async fn config_import_handler(
             "config_version": incoming.config_version,
             "canonical_toml_size": canonical.len(),
             "input_size": input_size,
-            "auth_refs_unchanged": auth_refs_unchanged,
             "target": target.to_string_lossy(),
             "target_exists": target.exists(),
         })));
     }
 
-    crate::config::compare_auth_refs(&state.config.auth, &incoming.auth)?;
     if let Some(parent) = target.parent() {
         crate::fs_util::create_dir_owner_only(parent)?;
     }
@@ -150,10 +146,10 @@ pub(crate) async fn secrets_list_handler(
 }
 
 pub(crate) async fn secrets_set_handler(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(body): Json<SecretsSetBody>,
 ) -> std::result::Result<ApiSuccess<SecretsSetResponse>, StackError> {
-    crate::secrets::reject_auth_ref_mutation(&body.name, &state.config)?;
+    crate::secrets::reject_auth_ref_mutation(&body.name)?;
     let home = home_dir()?;
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let action = if store.contains(&body.name) {
@@ -170,9 +166,9 @@ pub(crate) async fn secrets_set_handler(
 
 pub(crate) async fn secrets_delete_handler(
     Path(name): Path<String>,
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SecretsDeleteResponse>, StackError> {
-    crate::secrets::reject_auth_ref_mutation(&name, &state.config)?;
+    crate::secrets::reject_auth_ref_mutation(&name)?;
     let home = home_dir()?;
     let mut store = crate::secrets::SecretStore::open(&home)?;
     store.delete(&name)?;

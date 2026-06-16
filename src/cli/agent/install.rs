@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -11,18 +12,19 @@ use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 
-use super::AgentInstallArgs;
-use crate::cli::core::{OutputFormat, daemon_base_url, print_json};
+use super::{AgentDaemonArgs, AgentInstallArgs};
+use crate::cli::core::{
+    OutputFormat, daemon_base_url, print_json, resolve_admin_key, validate_local_admin_key,
+};
 
 pub(super) fn run_agent_daemon_post(
+    args: AgentDaemonArgs,
     path: &'static str,
     label: &'static str,
     output: OutputFormat,
 ) -> Result<()> {
-    let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    let store = SecretStore::open(&home)?;
-    let admin_key = store.get(&config.auth.admin_key_ref)?.to_owned();
+    let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -76,7 +78,9 @@ pub(super) async fn post_agent_daemon(
     })
 }
 
-pub(super) fn run_agent_install(_args: AgentInstallArgs, output: OutputFormat) -> Result<()> {
+pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) -> Result<()> {
+    let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
+    validate_local_admin_key(&admin_key)?;
     if !output.is_json() {
         println!("progress: preparing agent install");
     }

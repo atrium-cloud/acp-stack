@@ -1,11 +1,15 @@
+use crate::auth::{AuthVerifierEnsureOutcome, ensure_auth_verifier_pair};
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{home_dir, set_owner_only_file};
-use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
 use super::agent::AgentCommand;
 use super::auth::AuthCommand;
@@ -356,16 +360,7 @@ pub(super) fn print_json(data: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Tier of the API key used for a daemon-RPC call. Session-tier matches the
-/// strict-tiering invariant: read/operate on session state with the session
-/// key; never use the admin key for routine session operations. The single
-/// variant is an enum so future admin-tier CLI helpers slot in without
-/// reshaping the helper signatures.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum CliKey {
-    Session,
-    Admin,
-}
+pub(super) const SESSION_KEY_ENV: &str = "ACP_STACK_SESSION_KEY";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CliMethod {
@@ -374,8 +369,7 @@ pub(super) enum CliMethod {
     Delete,
 }
 
-/// Generalized daemon-RPC helper. Loads the configured key from the secret
-/// store, builds the URL, dispatches, and parses the success envelope.
+/// Generalized daemon-RPC helper. Callers supply the explicit bearer key.
 pub(super) async fn daemon_request(
     base_url: &str,
     method: CliMethod,
@@ -427,6 +421,49 @@ pub(super) async fn daemon_request(
     })
 }
 
+pub(super) async fn local_daemon_request(
+    config: &Config,
+    method: CliMethod,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let (status, body) = local_daemon_json_response(config, method, path, body).await?;
+    if !status.is_success() {
+        return Err(StackError::AgentApiStatus {
+            path: static_path_label(path),
+            status,
+            body: body.to_string(),
+        });
+    }
+    Ok(body)
+}
+
+pub(super) async fn local_daemon_json_response(
+    config: &Config,
+    method: CliMethod,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<(http::StatusCode, serde_json::Value)> {
+    let socket_path = acpctl_socket_path(config)?;
+    let body_bytes = body.map(serde_json::to_vec).transpose().map_err(|source| {
+        StackError::AgentInitializeFailed {
+            reason: format!("serialize local daemon request body: {source}"),
+        }
+    })?;
+    let response = local_http_request(&socket_path, method.as_str(), path, body_bytes).await?;
+    let status = http::StatusCode::from_u16(response.status)
+        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+    let body_text =
+        String::from_utf8(response.body).map_err(|source| StackError::AgentInitializeFailed {
+            reason: format!("local daemon response was not UTF-8: {source}"),
+        })?;
+    let body =
+        serde_json::from_str(&body_text).map_err(|err| StackError::AgentInitializeFailed {
+            reason: format!("local daemon response was not JSON: {err}"),
+        })?;
+    Ok((status, body))
+}
+
 fn static_path_label(path: &str) -> &'static str {
     // Strip the query string before bucketing so callers passing `?limit=` etc.
     // still resolve to the canonical path label.
@@ -445,6 +482,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/health/ready"
     } else if bare == "/v1/config/export" {
         "/v1/config/export"
+    } else if bare == "/v1/auth/session-key/regenerate" {
+        "/v1/auth/session-key/regenerate"
     } else if bare == "/v1/config/validate" {
         "/v1/config/validate"
     } else if bare == "/v1/agent/capabilities" {
@@ -546,6 +585,16 @@ fn static_path_label(path: &str) -> &'static str {
     }
 }
 
+impl CliMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            CliMethod::Get => "GET",
+            CliMethod::Post => "POST",
+            CliMethod::Delete => "DELETE",
+        }
+    }
+}
+
 /// Percent-encode a single URL path segment using the "unreserved" RFC 3986
 /// allowlist. ACP session and prompt IDs are opaque strings — an agent that
 /// returned `sess_a/b` (with a slash) would otherwise be routed as a
@@ -566,13 +615,168 @@ pub(super) fn encode_path_segment(segment: &str) -> String {
     out
 }
 
-pub(super) fn open_cli_key(config: &Config, home: &std::path::Path, key: CliKey) -> Result<String> {
-    let store = SecretStore::open(home)?;
-    let name = match key {
-        CliKey::Session => &config.auth.session_key_ref,
-        CliKey::Admin => &config.auth.admin_key_ref,
+pub(super) fn resolve_session_key(value: Option<String>) -> Result<String> {
+    if let Some(key) = value {
+        return validate_key_input("--session-key", key);
+    }
+    if let Ok(key) = std::env::var(SESSION_KEY_ENV) {
+        return validate_key_input(SESSION_KEY_ENV, key);
+    }
+    Err(StackError::MissingField {
+        field: "--session-key or ACP_STACK_SESSION_KEY",
+    })
+}
+
+pub(super) fn resolve_admin_key(value: Option<String>, interactive: bool) -> Result<String> {
+    if let Some(key) = value {
+        return validate_key_input("--admin-key", key);
+    }
+    if interactive && std::io::stdin().is_terminal() {
+        let key = rpassword::prompt_password("admin key: ")
+            .map_err(|source| StackError::ServeIo { source })?;
+        return validate_key_input("--admin-key", key);
+    }
+    Err(StackError::MissingField {
+        field: "--admin-key",
+    })
+}
+
+pub(super) fn validate_local_admin_key(key: &str) -> Result<()> {
+    let home = home_dir()?;
+    let loaded_config = Config::load_from_default_path_with_legacy()?;
+    let state_path = default_state_path(&home);
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    match ensure_auth_verifier_pair(&store, loaded_config.legacy_auth.as_ref(), &home)? {
+        AuthVerifierEnsureOutcome::Preserved
+        | AuthVerifierEnsureOutcome::BackfilledLegacySecrets => {}
+        AuthVerifierEnsureOutcome::Missing => {
+            return Err(StackError::MissingField {
+                field: "auth_keys.session and auth_keys.admin",
+            });
+        }
+    }
+    let verifiers = store.load_auth_verifier_pair()?;
+    if verifiers.verify(key) == Some(crate::auth::KeyKind::Admin) {
+        Ok(())
+    } else {
+        Err(StackError::InvalidParam {
+            field: "--admin-key",
+            reason: "admin key did not validate against local auth verifier".to_owned(),
+        })
+    }
+}
+
+fn validate_key_input(field: &'static str, value: String) -> Result<String> {
+    if value.trim().is_empty() || value.trim().len() != value.len() {
+        return Err(StackError::MissingField { field });
+    }
+    Ok(value)
+}
+
+pub(super) fn acpctl_socket_path(config: &Config) -> Result<PathBuf> {
+    if let Some(path) = config.acpctl.socket_path.as_deref() {
+        return Ok(PathBuf::from(path));
+    }
+    crate::local_listener::default_socket_path()
+}
+
+struct LocalHttpResponse {
+    status: u16,
+    body: Vec<u8>,
+}
+
+async fn local_http_request(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<LocalHttpResponse> {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .map_err(|source| StackError::ServeIo { source })?;
+    let body_bytes = body.unwrap_or_default();
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: acpctl.local\r\nConnection: close\r\n");
+    if !body_bytes.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+    }
+    request.push_str(&format!("Content-Length: {}\r\n\r\n", body_bytes.len()));
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|source| StackError::ServeIo { source })?;
+    if !body_bytes.is_empty() {
+        stream
+            .write_all(&body_bytes)
+            .await
+            .map_err(|source| StackError::ServeIo { source })?;
+    }
+    let mut raw = Vec::with_capacity(4096);
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|source| StackError::ServeIo { source })?;
+    parse_local_http_response(&raw)
+}
+
+fn parse_local_http_response(raw: &[u8]) -> Result<LocalHttpResponse> {
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| StackError::AgentInitializeFailed {
+            reason: "local daemon response missing header terminator".to_owned(),
+        })?;
+    let header_text = std::str::from_utf8(&raw[..header_end]).map_err(|source| {
+        StackError::AgentInitializeFailed {
+            reason: format!("local daemon response headers were not UTF-8: {source}"),
+        }
+    })?;
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| StackError::AgentInitializeFailed {
+            reason: "local daemon response missing status line".to_owned(),
+        })?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| StackError::AgentInitializeFailed {
+            reason: "local daemon response status code missing".to_owned(),
+        })?
+        .parse::<u16>()
+        .map_err(|source| StackError::AgentInitializeFailed {
+            reason: format!("local daemon response status code was invalid: {source}"),
+        })?;
+    let mut content_length: Option<usize> = None;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = Some(value.trim().parse::<usize>().map_err(|source| {
+                StackError::AgentInitializeFailed {
+                    reason: format!("local daemon response Content-Length was invalid: {source}"),
+                }
+            })?);
+        }
+    }
+    let body_start = header_end + 4;
+    let body = match content_length {
+        Some(length) => {
+            let end = body_start + length;
+            if raw.len() < end {
+                return Err(StackError::AgentInitializeFailed {
+                    reason: format!(
+                        "local daemon response truncated: Content-Length={length}, available={}",
+                        raw.len().saturating_sub(body_start)
+                    ),
+                });
+            }
+            raw[body_start..end].to_vec()
+        }
+        None => raw[body_start..].to_vec(),
     };
-    Ok(store.get(name)?.to_owned())
+    Ok(LocalHttpResponse { status, body })
 }
 
 pub(super) fn daemon_base_url(public_url: Option<&str>, bind: &str) -> Result<String> {

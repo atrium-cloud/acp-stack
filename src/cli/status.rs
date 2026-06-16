@@ -14,7 +14,7 @@ use crate::runtime::health::{
 };
 use crate::state::{StateStore, default_state_path};
 
-use super::core::{CliKey, OutputFormat, daemon_base_url, open_cli_key, print_json};
+use super::core::{CliMethod, OutputFormat, local_daemon_json_response, print_json};
 
 // `acps status` should not hang behind a dead listener or half-open tunnel.
 // Other daemon-facing commands can wait for their operation; status is a
@@ -314,14 +314,7 @@ enum DaemonStatus {
 }
 
 fn probe_daemon_status(config: &Config, home: &Path) -> DaemonStatus {
-    let key = match open_cli_key(config, home, CliKey::Session) {
-        Ok(key) => key,
-        Err(err) => return DaemonStatus::Unavailable(err.public_message()),
-    };
-    let base_url = match daemon_base_url(config.api.public_url.as_deref(), &config.api.bind) {
-        Ok(url) => url,
-        Err(err) => return DaemonStatus::Unavailable(err.public_message()),
-    };
+    let _ = home;
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -329,37 +322,23 @@ fn probe_daemon_status(config: &Config, home: &Path) -> DaemonStatus {
         Ok(runtime) => runtime,
         Err(err) => return DaemonStatus::Unavailable(format!("runtime unavailable: {err}")),
     };
-    runtime.block_on(async move { probe_daemon_status_async(&base_url, &key).await })
+    runtime.block_on(async move { probe_daemon_status_async(config).await })
 }
 
-async fn probe_daemon_status_async(base_url: &str, session_key: &str) -> DaemonStatus {
-    let url = format!("{}{}", base_url.trim_end_matches('/'), "/v1/health/ready");
-    let client = match reqwest::Client::builder()
-        .timeout(STATUS_DAEMON_PROBE_TIMEOUT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => return DaemonStatus::Unavailable(format!("client unavailable: {err}")),
-    };
-    let response = match client.get(url).bearer_auth(session_key).send().await {
-        Ok(response) => response,
-        Err(err) => return DaemonStatus::Unavailable(format!("request failed: {err}")),
-    };
-    let status = response.status();
-    let body_text = match response.text().await {
-        Ok(body) => body,
-        Err(err) => return DaemonStatus::Unavailable(format!("response read failed: {err}")),
-    };
-    if status != reqwest::StatusCode::OK && status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        return DaemonStatus::Unavailable(format!("HTTP {status}"));
-    }
-    let body: serde_json::Value = match serde_json::from_str(&body_text) {
-        Ok(body) => body,
-        Err(err) => return DaemonStatus::Unavailable(format!("invalid JSON: {err}")),
+async fn probe_daemon_status_async(config: &Config) -> DaemonStatus {
+    let result = tokio::time::timeout(
+        STATUS_DAEMON_PROBE_TIMEOUT,
+        local_daemon_json_response(config, CliMethod::Get, "/v1/health/ready", None),
+    )
+    .await;
+    let body = match result {
+        Ok(Ok((_status, body))) => body,
+        Ok(Err(err)) => return DaemonStatus::Unavailable(err.public_message()),
+        Err(_) => return DaemonStatus::Unavailable("request timed out".to_owned()),
     };
     let data = body.get("data").unwrap_or(&body);
     let ok = data.get("ok").and_then(serde_json::Value::as_bool);
-    if status == reqwest::StatusCode::OK && ok != Some(false) {
+    if ok != Some(false) {
         return DaemonStatus::Ready;
     }
     DaemonStatus::Degraded(failing_list(data))

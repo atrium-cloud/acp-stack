@@ -38,11 +38,9 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         | InvalidAgentInstallType
         | UrlMustBeHttp { .. }
         | UrlMustBeHttps { .. }
-        | AuthRefsNotDistinct
         | InvalidPermissionsMode
         | InvalidDurationField { .. }
         | InvalidEnvName { .. } => "config.invalid",
-        ImportChangesAuthRef { .. } => "config.import_changes_auth_ref",
         ImportTooLarge { .. } => "import.too_large",
         UnsupportedConfigVersion { .. } => "config.unsupported_version",
         SecretRefLooksLikeValue { .. } => "config.invalid",
@@ -89,10 +87,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         }
         UrlMustBeHttp { field } => format!("{field} must start with http:// or https://"),
         UrlMustBeHttps { field } => format!("{field} must start with https://"),
-        AuthRefsNotDistinct => {
-            "auth.session_key_ref and auth.admin_key_ref must be different names".to_owned()
-        }
-        ImportChangesAuthRef { .. } => "config import would change auth key references".to_owned(),
         InvalidPermissionsMode => {
             "permissions.mode must be one of auto, supervised, locked".to_owned()
         }
@@ -135,8 +129,6 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | InvalidAgentInstallType
         | UrlMustBeHttp { .. }
         | UrlMustBeHttps { .. }
-        | AuthRefsNotDistinct
-        | ImportChangesAuthRef { .. }
         | InvalidPermissionsMode
         | InvalidDurationField { .. }
         | InvalidEnvName { .. } => StatusCode::BAD_REQUEST,

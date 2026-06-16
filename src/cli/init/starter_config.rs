@@ -4,10 +4,10 @@ use std::path::Path;
 use http::header::HeaderName;
 
 use crate::config::{
-    self, AgentConfig, AgentInstallConfig, ApiConfig, AuthConfig, CodeSourceConfig, Config,
-    DataSourceConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope, EdgeConfig,
-    HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
-    SecurityConfig, SecurityHttpConfig, StackUpdatePolicy, SupabaseLoggingConfig, WorkspaceConfig,
+    self, AgentConfig, AgentInstallConfig, ApiConfig, CodeSourceConfig, Config, DataSourceConfig,
+    DependencyEntry, DependencyInstallAction, DependencyInstallScope, EdgeConfig, HttpHeaderRef,
+    LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer, SecurityConfig,
+    SecurityHttpConfig, StackUpdatePolicy, SupabaseLoggingConfig, WorkspaceConfig,
     is_valid_secret_ref_name, normalize_day_or_week_duration,
 };
 use crate::error::{Result, StackError};
@@ -21,13 +21,12 @@ use super::super::logging::{
     enabled_supabase_config,
 };
 use super::{
-    InitArgs, STARTER_ADMIN_KEY_REF, STARTER_AGENT_COMMAND, STARTER_AGENT_ID,
-    STARTER_AGENT_INSTALL_COMMAND, STARTER_AGENT_INSTALL_CREATES, STARTER_AGENT_INSTALL_TYPE,
-    STARTER_AGENT_NAME, STARTER_AGENT_RESTART, STARTER_AUTH_BLOCK_DURATION,
-    STARTER_AUTH_FAILURES_PER_MINUTE, STARTER_DEFAULT_SHELL, STARTER_LOCAL_RETENTION_DAYS,
-    STARTER_LOG_LEVEL, STARTER_MAX_REQUEST_BYTES, STARTER_RATE_LIMIT_BURST,
-    STARTER_RATE_LIMIT_PER_MINUTE, STARTER_SESSION_KEY_REF, STARTER_WORKSPACE_MAX_FILE_BYTES,
-    prompt, prompts_enabled,
+    InitArgs, STARTER_AGENT_COMMAND, STARTER_AGENT_ID, STARTER_AGENT_INSTALL_COMMAND,
+    STARTER_AGENT_INSTALL_CREATES, STARTER_AGENT_INSTALL_TYPE, STARTER_AGENT_NAME,
+    STARTER_AGENT_RESTART, STARTER_AUTH_BLOCK_DURATION, STARTER_AUTH_FAILURES_PER_MINUTE,
+    STARTER_DEFAULT_SHELL, STARTER_LOCAL_RETENTION_DAYS, STARTER_LOG_LEVEL,
+    STARTER_MAX_REQUEST_BYTES, STARTER_RATE_LIMIT_BURST, STARTER_RATE_LIMIT_PER_MINUTE,
+    STARTER_WORKSPACE_MAX_FILE_BYTES, prompt, prompts_enabled,
 };
 
 pub(super) fn validate_deployment_overrides_match_existing(
@@ -61,8 +60,8 @@ pub(super) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) 
 
 /// Operator-supplied agent environment variable references collected during
 /// init. `flag_refs` (from `--agent-env-ref`) must already exist in the secret
-/// store; `fresh` holds interactively-entered name+value pairs to write. Values
-/// are `Zeroizing` and never echoed or recorded in the init run args.
+/// store; `fresh` holds interactively-entered name+value pairs to write.
+/// Values are `Zeroizing` and never echoed or recorded in the init run args.
 #[derive(Default)]
 pub(super) struct AgentEnvCollection {
     flag_refs: Vec<String>,
@@ -174,11 +173,8 @@ pub(super) fn apply_agent_env_collection(
     secret_store: &mut SecretStore,
     collection: &AgentEnvCollection,
 ) -> Result<()> {
-    // Guard the store before writing. The session/admin auth keys and any
-    // provider/MCP secrets live in this same store, and `set_many` upserts, so
-    // a fresh name that collides would silently overwrite (and corrupt) an
-    // existing secret — including the never-regenerable admin key. Validate the
-    // ref-name format and reject collisions BEFORE the write, not after.
+    // Guard the store before writing. `set_many` upserts, so a fresh name that
+    // collides would silently overwrite an existing provider/MCP secret.
     for (name, _) in &collection.fresh {
         if !is_valid_secret_ref_name(name) {
             return Err(StackError::InvalidParam {
@@ -192,7 +188,7 @@ pub(super) fn apply_agent_env_collection(
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",
                 reason: format!(
-                    "secret `{name}` already exists in the store; refusing to overwrite it (the auth keys and provider/MCP secrets share this store). Choose a new ref name, or update the value with `acps secrets set`."
+                    "secret `{name}` already exists in the store; refusing to overwrite it. Choose a new ref name, or update the value with `acps secrets set`."
                 ),
             });
         }
@@ -645,10 +641,6 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
             public_url: Some(format!("http://{}", config::DEFAULT_API_BIND)),
             max_request_bytes: STARTER_MAX_REQUEST_BYTES,
         },
-        auth: AuthConfig {
-            session_key_ref: STARTER_SESSION_KEY_REF.to_owned(),
-            admin_key_ref: STARTER_ADMIN_KEY_REF.to_owned(),
-        },
         security: SecurityConfig {
             http: SecurityHttpConfig {
                 max_request_bytes: STARTER_MAX_REQUEST_BYTES,
@@ -1050,8 +1042,7 @@ mod tests {
     }
 
     // A fresh agent-env name that collides with a secret already in the store
-    // (the auth keys live here too) must be rejected before the upsert, leaving
-    // the existing secret untouched.
+    // must be rejected before the upsert, leaving the existing secret untouched.
     #[test]
     fn apply_agent_env_refuses_to_overwrite_existing_secret() {
         let home = tempdir().expect("tempdir");

@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 pub use self::schema::{
     AcpctlConfig, AgentAdapterConfig, AgentAutoUpdateConfig, AgentConfig,
     AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig,
-    ApiConfig, AuthConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig,
-    CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    ApiConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig, CustomProviderApi,
+    DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
     DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL,
@@ -31,9 +31,7 @@ pub use self::schema::{
     SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
 };
 pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
-pub use self::validate::primitives::{
-    compare_auth_refs, is_valid_secret_ref_name, parse_duration_string,
-};
+pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
 pub(crate) use self::validate::validate_supabase_identifiers;
 
@@ -43,7 +41,6 @@ pub struct Config {
     #[serde(default = "default_config_version")]
     pub config_version: u64,
     pub api: ApiConfig,
-    pub auth: AuthConfig,
     pub security: SecurityConfig,
     #[serde(default, skip_serializing_if = "EdgeConfig::is_empty")]
     pub edge: EdgeConfig,
@@ -64,6 +61,19 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub acpctl: AcpctlConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyAuthConfig {
+    pub(crate) session_key_ref: String,
+    pub(crate) admin_key_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoadedConfig {
+    pub(crate) config: Config,
+    pub(crate) legacy_auth: Option<LegacyAuthConfig>,
 }
 
 pub const SUPPORTED_CONFIG_VERSION: u64 = 1;
@@ -92,7 +102,6 @@ struct RawConfig {
     #[serde(default)]
     config_version: Option<u64>,
     api: Option<ApiConfig>,
-    auth: Option<AuthConfig>,
     security: Option<RawSecurityConfig>,
     #[serde(default)]
     edge: Option<EdgeConfig>,
@@ -113,6 +122,8 @@ struct RawConfig {
     mcp: Option<McpConfig>,
     #[serde(default)]
     acpctl: Option<AcpctlConfig>,
+    #[serde(default)]
+    auth: Option<LegacyAuthConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,14 +137,22 @@ impl Config {
         Self::load_from_path(default_config_path()?)
     }
 
+    pub(crate) fn load_from_default_path_with_legacy() -> Result<LoadedConfig> {
+        Self::load_from_path_with_legacy(default_config_path()?)
+    }
+
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::load_from_path_with_legacy(path)?.config)
+    }
+
+    pub(crate) fn load_from_path_with_legacy(path: impl AsRef<Path>) -> Result<LoadedConfig> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
             path: path.to_path_buf(),
             source,
         })?;
 
-        load_config_from_str(&content)
+        load_config_from_str_with_legacy(&content)
     }
 
     pub fn to_canonical_toml(&self) -> Result<String> {
@@ -175,6 +194,10 @@ pub fn default_config_path() -> Result<PathBuf> {
 }
 
 pub fn load_config_from_str(input: &str) -> Result<Config> {
+    Ok(load_config_from_str_with_legacy(input)?.config)
+}
+
+pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
     // Phase 4 removed the legacy single `[workspace.source]` block in favor
     // of `[[workspace.code_sources]]` / `[[workspace.data_sources]]`. The
     // serde error for an unknown field is correct but unhelpful for
@@ -198,6 +221,9 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
         });
     }
     let raw: RawConfig = toml::from_str(input)?;
+    if let Some(auth) = raw.auth.as_ref() {
+        validate_legacy_auth(auth)?;
+    }
     let security = raw.security.ok_or(StackError::MissingSection {
         section: "security",
     })?;
@@ -207,9 +233,6 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
         api: raw
             .api
             .ok_or(StackError::MissingSection { section: "api" })?,
-        auth: raw
-            .auth
-            .ok_or(StackError::MissingSection { section: "auth" })?,
         security: SecurityConfig {
             http: security.http.ok_or(StackError::MissingSection {
                 section: "security.http",
@@ -235,5 +258,32 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
     };
 
     config.validate()?;
-    Ok(config)
+    Ok(LoadedConfig {
+        config,
+        legacy_auth: raw.auth,
+    })
+}
+
+fn validate_legacy_auth(auth: &LegacyAuthConfig) -> Result<()> {
+    validate_legacy_auth_ref("auth.session_key_ref", &auth.session_key_ref)?;
+    validate_legacy_auth_ref("auth.admin_key_ref", &auth.admin_key_ref)?;
+    if auth.session_key_ref == auth.admin_key_ref {
+        return Err(StackError::InvalidParam {
+            field: "auth",
+            reason: "legacy auth session_key_ref and admin_key_ref must be different".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_legacy_auth_ref(field: &'static str, value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.trim().len() != value.len() {
+        return Err(StackError::MissingField { field });
+    }
+    self::validate::primitives::validate_secret_ref_name_value(value).map_err(|error| {
+        StackError::InvalidParam {
+            field,
+            reason: error.to_string(),
+        }
+    })
 }

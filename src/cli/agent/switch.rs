@@ -13,7 +13,7 @@ use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
 use super::install::operator_registry_override;
 use super::{AgentSetArgs, AgentSwitchArgs};
-use crate::cli::core::{CliMethod, daemon_base_url, daemon_request};
+use crate::cli::core::{CliMethod, daemon_base_url, daemon_request, resolve_admin_key};
 
 pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     let interactive = io::stdin().is_terminal();
@@ -185,32 +185,6 @@ fn print_switch_plan(
             }
         }
     }
-}
-
-fn resolve_admin_key(value: Option<String>, interactive: bool) -> Result<String> {
-    if let Some(value) = value {
-        return validate_admin_key(value);
-    }
-    if !interactive {
-        return Err(StackError::MissingField {
-            field: "--admin-key",
-        });
-    }
-    let key = rpassword::prompt_password("admin key: ")
-        .map_err(|source| StackError::ServeIo { source })?;
-    validate_admin_key(key)
-}
-
-fn validate_admin_key(value: String) -> Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() != value.len() {
-        return Err(StackError::InvalidParam {
-            field: "admin-key",
-            reason: "admin key must be non-empty and must not contain surrounding whitespace"
-                .to_owned(),
-        });
-    }
-    Ok(value)
 }
 
 fn print_switch_result(data: &Value) {

@@ -105,8 +105,6 @@ pub(crate) async fn security_check_handler(
     let inputs_snapshot = redacted_inputs_snapshot(
         state.effective_bind.as_str(),
         &state.config.security.http,
-        state.session_key.is_empty(),
-        state.admin_key.is_empty(),
         recent_auth_failures,
         sink_open_failures,
         process_euid,
@@ -123,13 +121,9 @@ pub(crate) async fn security_check_handler(
     let findings = crate::security::check(crate::security::SecurityCheckInputs {
         effective_bind: state.effective_bind.as_str(),
         http: &state.config.security.http,
-        session_key_empty: state.session_key.is_empty(),
-        admin_key_empty: state.admin_key.is_empty(),
         recent_auth_failures,
         sink_open_failures,
         sink_last_error: sink_last_error.as_deref(),
-        session_key_value: Some(state.session_key.as_str()),
-        admin_key_value: Some(state.admin_key.as_str()),
         path_postures: &path_postures,
         path_issues: &path_issues,
         process_euid,
@@ -264,8 +258,6 @@ fn security_finding_from_row(
 fn redacted_inputs_snapshot(
     effective_bind: &str,
     http: &crate::config::SecurityHttpConfig,
-    session_key_empty: bool,
-    admin_key_empty: bool,
     recent_auth_failures: i64,
     sink_open_failures: i64,
     process_euid: u32,
@@ -281,8 +273,6 @@ fn redacted_inputs_snapshot(
 ) -> String {
     let snapshot = serde_json::json!({
         "effective_bind": effective_bind,
-        "session_key_empty": session_key_empty,
-        "admin_key_empty": admin_key_empty,
         "recent_auth_failures": recent_auth_failures,
         "sink_open_failures": sink_open_failures,
         "process_euid": process_euid,

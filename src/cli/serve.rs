@@ -1,4 +1,5 @@
 use crate::api::{self, AppState, RuntimePaths};
+use crate::auth::{AuthVerifierEnsureOutcome, ensure_auth_verifier_pair};
 use crate::config::SupabaseLoggingBackend;
 use crate::config::{self, Config};
 use crate::error::{Result, StackError};
@@ -52,19 +53,13 @@ impl ServeArgs {
     }
 }
 
-/// Refuse to serve as root unless explicitly opted in, and never allow the
-/// daemon to run as root with an unset admin API key — the admin key gates
-/// every mutating route, and an empty admin key combined with root execution
-/// is an open back door.
-fn check_root_constraints(euid: u32, allow_root: bool, admin_key_empty: bool) -> Result<()> {
+/// Refuse to serve as root unless explicitly opted in.
+fn check_root_constraints(euid: u32, allow_root: bool) -> Result<()> {
     if euid != 0 {
         return Ok(());
     }
     if !allow_root {
         return Err(StackError::ServeRefusedAsRoot);
-    }
-    if admin_key_empty {
-        return Err(StackError::ServeRootRequiresAdminKey);
     }
     Ok(())
 }
@@ -100,7 +95,8 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     if config_path.exists() {
         set_owner_only_file(&config_path)?;
     }
-    let config = Config::load_from_path(&config_path)?;
+    let loaded_config = Config::load_from_path_with_legacy(&config_path)?;
+    let config = loaded_config.config;
 
     let state_path = default_state_path(&home);
     let state_dir = parent_dir(&state_path)?;
@@ -109,6 +105,16 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     let mut store = StateStore::open(&state_path)?;
     store.migrate()?;
     set_owner_only_file(&state_path)?;
+    match ensure_auth_verifier_pair(&store, loaded_config.legacy_auth.as_ref(), &home)? {
+        AuthVerifierEnsureOutcome::Preserved
+        | AuthVerifierEnsureOutcome::BackfilledLegacySecrets => {}
+        AuthVerifierEnsureOutcome::Missing => {
+            return Err(StackError::MissingField {
+                field: "auth_keys.session and auth_keys.admin",
+            });
+        }
+    }
+    let auth_verifiers = store.load_auth_verifier_pair()?;
 
     // Open the secret store + resolve any Supabase settings BEFORE running
     // startup reconciles. The reconciles transition orphaned prompt/command/
@@ -116,21 +122,11 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     // the flag isn't flipped yet, those terminal writes don't enqueue into
     // the outbox and Supabase would never see the post-crash settlement.
     let secret_store = SecretStore::open(&home)?;
-    let session_ref = config.auth.session_key_ref.clone();
-    let admin_ref = config.auth.admin_key_ref.clone();
-    if !secret_store.contains(&session_ref) {
-        return Err(StackError::MissingSessionKey { name: session_ref });
-    }
-    if !secret_store.contains(&admin_ref) {
-        return Err(StackError::MissingAdminKey { name: admin_ref });
-    }
-    let session_key = secret_store.get(&session_ref)?.to_owned();
-    let admin_key = secret_store.get(&admin_ref)?.to_owned();
 
     // Gate root execution behind a dev-only opt-in. The daemon never drops
     // privileges itself, so a `User=` directive in the systemd unit or a
     // non-root `USER` in the Dockerfile is the production path.
-    check_root_constraints(process_euid, allow_root, admin_key.is_empty())?;
+    check_root_constraints(process_euid, allow_root)?;
     if process_euid == 0 {
         tracing::warn!("acps dev serve running as root with explicit development opt-in");
     }
@@ -252,11 +248,10 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         let bound_local = crate::local_listener::bind_local(&socket_path, parent_policy).await?;
         let lifecycle = ServerLifecycle::starting(&store, &local)?;
         let runtime_paths = RuntimePaths::new(config_path, state_path);
-        let app_state = AppState::with_effective_bind_and_runtime_paths(
+        let app_state = AppState::with_auth_verifiers_and_runtime_paths(
             config,
             store,
-            session_key,
-            admin_key,
+            auth_verifiers,
             local.clone(),
             runtime_paths,
         );
@@ -373,26 +368,18 @@ mod tests {
 
     #[test]
     fn non_root_euid_passes_unconditionally() {
-        check_root_constraints(1000, false, false).expect("non-root euid bypasses the gate");
-        check_root_constraints(1000, false, true).expect("non-root euid bypasses the gate");
+        check_root_constraints(1000, false).expect("non-root euid bypasses the gate");
     }
 
     #[test]
     fn root_without_opt_in_is_refused() {
-        let err = check_root_constraints(0, false, false).expect_err("root must be refused");
+        let err = check_root_constraints(0, false).expect_err("root must be refused");
         assert!(matches!(err, StackError::ServeRefusedAsRoot));
     }
 
     #[test]
-    fn root_with_opt_in_but_empty_admin_key_is_refused() {
-        let err = check_root_constraints(0, true, true)
-            .expect_err("root + empty admin key must be refused");
-        assert!(matches!(err, StackError::ServeRootRequiresAdminKey));
-    }
-
-    #[test]
     fn root_with_opt_in_and_admin_key_is_allowed() {
-        check_root_constraints(0, true, false).expect("root + admin key + opt-in is allowed");
+        check_root_constraints(0, true).expect("root + opt-in is allowed");
     }
 
     #[test]

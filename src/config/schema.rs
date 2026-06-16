@@ -22,7 +22,7 @@ pub const DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY: &str = "1d";
 pub const DEFAULT_STACK_UPDATE_FREQUENCY: &str = "1d";
 pub const DEFAULT_STACK_UPDATE_POLICY: StackUpdatePolicy = StackUpdatePolicy::SecurityCritical;
 
-// API / AUTH / SECURITY
+// API / SECURITY
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,13 +31,6 @@ pub struct ApiConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     pub max_request_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    pub session_key_ref: String,
-    pub admin_key_ref: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,13 +1,12 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use crate::state::DEFAULT_SESSION_STATUS_WINDOW;
 use chrono::{SecondsFormat, Utc};
 use clap::{Args, Subcommand};
 
 use super::core::{
-    CliKey, CliMethod, OutputFormat, daemon_base_url, daemon_request, encode_path_segment,
-    open_cli_key, print_json,
+    CliMethod, OutputFormat, daemon_base_url, daemon_request, encode_path_segment,
+    local_daemon_request, print_json, resolve_session_key,
 };
 
 const DEFAULT_SESSION_LIST_LIMIT: u32 = 50;
@@ -66,6 +65,9 @@ pub struct SessionsNewArgs {
     /// `workspace.root` configured for the runtime.
     #[arg(long)]
     cwd: Option<String>,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -77,6 +79,9 @@ pub struct SessionsForkArgs {
     /// Optional ACP prompt message id to fork from.
     #[arg(long)]
     message_id: Option<String>,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -91,17 +96,21 @@ pub struct SessionsPromptArgs {
     /// `--no-wait` is set). The daemon keeps the task running regardless.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct SessionsTargetArgs {
     session_id: String,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
 }
 
 pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputFormat) -> Result<()> {
-    let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    let session_key = open_cli_key(&config, &home, CliKey::Session)?;
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -111,8 +120,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
         match command {
             SessionsCommand::List(args) => {
                 let path = sessions_list_path(&args, args.limit.saturating_add(1))?;
-                let body =
-                    daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
+                let body = local_daemon_request(&config, CliMethod::Get, &path, None).await?;
                 let mut sessions = body["data"]["sessions"]
                     .as_array()
                     .cloned()
@@ -153,8 +161,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                     path.push_str("&threshold=");
                     path.push_str(&encode_query_value(threshold));
                 }
-                let body =
-                    daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
+                let body = local_daemon_request(&config, CliMethod::Get, &path, None).await?;
                 let sessions = body["data"]["sessions"]
                     .as_array()
                     .cloned()
@@ -194,6 +201,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::New(args) => {
+                let session_key = resolve_session_key(args.session_key)?;
                 let body = serde_json::json!({
                     "cwd": args.cwd,
                     "mcp_servers": [],
@@ -219,6 +227,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Fork(args) => {
+                let session_key = resolve_session_key(args.session_key.clone())?;
                 let body = serde_json::json!({
                     "cwd": args.cwd,
                     "message_id": args.message_id,
@@ -242,9 +251,11 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Prompt(args) => {
+                let session_key = resolve_session_key(args.session_key.clone())?;
                 run_sessions_prompt(&base_url, &session_key, args, output).await
             }
             SessionsCommand::Cancel(args) => {
+                let session_key = resolve_session_key(args.session_key)?;
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}/cancel");
                 daemon_request(&base_url, CliMethod::Post, &path, &session_key, None).await?;
@@ -260,6 +271,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Close(args) => {
+                let session_key = resolve_session_key(args.session_key)?;
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}");
                 let response =

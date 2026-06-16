@@ -19,12 +19,6 @@ use crate::config::SecurityHttpConfig;
 use crate::ownership::PathPosture;
 use crate::runtime::dependencies::deps::DepsReport;
 
-/// Minimum acceptable length for the session and admin API keys. Set to 32
-/// because the keys generated at `acps init` time are 32-byte random values
-/// rendered as 43-char base64. Shorter keys typically come from operator
-/// edits and are flagged with `auth.*_key_weak`.
-pub const MIN_API_KEY_LEN: usize = 32;
-
 /// Maximum dependency rows copied into the `deps.required_unavailable` details
 /// payload. Operators still get the complete report from `acps deps check`;
 /// the self-check detail stays bounded so one oversized config cannot bloat
@@ -58,8 +52,6 @@ pub fn dependency_security_failures(report: &DepsReport) -> Vec<DependencySecuri
 pub struct SecurityCheckInputs<'a> {
     pub effective_bind: &'a str,
     pub http: &'a SecurityHttpConfig,
-    pub session_key_empty: bool,
-    pub admin_key_empty: bool,
     pub recent_auth_failures: i64,
     /// Count of `sink_outbox` rows that are stuck in pending+failing state.
     /// Non-zero means the Supabase sink has unfinished work and has retried
@@ -69,12 +61,6 @@ pub struct SecurityCheckInputs<'a> {
     /// `sink_failures_summary.last_error`. Truncated by the worker before
     /// it lands in the table, so passing through here is safe.
     pub sink_last_error: Option<&'a str>,
-    /// Plaintext session key, used to surface `auth.session_key_weak` when
-    /// the operator has substituted a short or placeholder value. Never
-    /// echoed in finding messages.
-    pub session_key_value: Option<&'a str>,
-    /// Plaintext admin key, same handling as `session_key_value`.
-    pub admin_key_value: Option<&'a str>,
     /// Inspection result for each runtime-managed path; produced by the
     /// caller via `ownership::inspect`. The check emits one
     /// `runtime.path_mode_loose` / `runtime.path_ownership` finding per
@@ -148,13 +134,9 @@ mod tests {
         SecurityCheckInputs {
             effective_bind: "127.0.0.1:8080",
             http,
-            session_key_empty: false,
-            admin_key_empty: false,
             recent_auth_failures: 0,
             sink_open_failures: 0,
             sink_last_error: None,
-            session_key_value: None,
-            admin_key_value: None,
             path_postures: &[],
             path_issues: &[],
             process_euid: 1000,
@@ -169,11 +151,6 @@ mod tests {
             recent_missing_cloudflare_header_requests: 0,
             dependency_failures: &[],
         }
-    }
-
-    fn long_key() -> String {
-        // 64-char value, well above MIN_API_KEY_LEN.
-        "a".repeat(64)
     }
 
     fn cloudflare_edge() -> CloudflareEdgeConfig {
@@ -339,42 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_session_key_is_critical() {
-        let http = baseline_http();
-        let mut inputs = baseline_inputs(&http);
-        inputs.session_key_empty = true;
-        let findings = check(inputs);
-        let finding = findings
-            .iter()
-            .find(|f| f.code == "auth.session_key_empty")
-            .expect("session_key_empty finding");
-        assert!(
-            finding
-                .remediation
-                .as_deref()
-                .is_some_and(|r| r.contains("regenerate-session-key"))
-        );
-    }
-
-    #[test]
-    fn empty_admin_key_is_critical_with_reset_hint() {
-        let http = baseline_http();
-        let mut inputs = baseline_inputs(&http);
-        inputs.admin_key_empty = true;
-        let findings = check(inputs);
-        let finding = findings
-            .iter()
-            .find(|f| f.code == "auth.admin_key_empty")
-            .expect("admin_key_empty finding");
-        assert!(
-            finding
-                .remediation
-                .as_deref()
-                .is_some_and(|r| r.contains("acps reset"))
-        );
-    }
-
-    #[test]
     fn auth_failure_threshold_warns_when_met() {
         let http = baseline_http();
         let mut inputs = baseline_inputs(&http);
@@ -389,77 +330,6 @@ mod tests {
                 .remediation
                 .as_deref()
                 .is_some_and(|r| r.contains("/v1/logs/security"))
-        );
-    }
-
-    #[test]
-    fn weak_session_key_short_value_is_flagged() {
-        let http = baseline_http();
-        let mut inputs = baseline_inputs(&http);
-        let short = "abc";
-        inputs.session_key_value = Some(short);
-        let findings = check(inputs);
-        let finding = findings
-            .iter()
-            .find(|f| f.code == "auth.session_key_weak")
-            .expect("weak session key finding");
-        // Never echo the key value.
-        assert!(!finding.message.contains(short));
-        assert!(!finding.remediation.as_deref().unwrap_or("").contains(short));
-        assert!(
-            finding
-                .remediation
-                .as_deref()
-                .is_some_and(|r| r.contains("regenerate-session-key"))
-        );
-    }
-
-    #[test]
-    fn weak_admin_key_placeholder_is_flagged() {
-        let http = baseline_http();
-        let mut inputs = baseline_inputs(&http);
-        inputs.admin_key_value = Some("CHANGEME");
-        let findings = check(inputs);
-        let finding = findings
-            .iter()
-            .find(|f| f.code == "auth.admin_key_weak")
-            .expect("admin_key_weak finding");
-        assert!(
-            finding
-                .remediation
-                .as_deref()
-                .is_some_and(|r| r.contains("acps reset"))
-        );
-    }
-
-    #[test]
-    fn weak_check_skipped_when_empty_already_flagged() {
-        // The empty check is already a critical finding; the weak check must
-        // not pile on with a duplicate warning for the same key.
-        let http = baseline_http();
-        let mut inputs = baseline_inputs(&http);
-        inputs.session_key_empty = true;
-        inputs.session_key_value = Some(""); // also "weak", but empty wins
-        let findings = check(inputs);
-        assert!(findings.iter().any(|f| f.code == "auth.session_key_empty"));
-        assert!(
-            !findings.iter().any(|f| f.code == "auth.session_key_weak"),
-            "{findings:?}"
-        );
-    }
-
-    #[test]
-    fn long_random_key_passes() {
-        let http = baseline_http();
-        let mut inputs = baseline_inputs(&http);
-        let key = long_key();
-        inputs.session_key_value = Some(&key);
-        inputs.admin_key_value = Some(&key);
-        let findings = check(inputs);
-        assert!(
-            !findings
-                .iter()
-                .any(|f| f.code.starts_with("auth.") && f.code.ends_with("_weak"))
         );
     }
 
@@ -921,10 +791,8 @@ mod tests {
     /// every finding, so we lint the entire set in one place.
     #[test]
     fn every_finding_has_a_non_empty_remediation() {
-        // Construct an input that triggers every check at once. Some checks
-        // are mutually exclusive (empty vs weak for the same key) so we run
-        // two passes: one for "empty" findings, one for "weak" findings, and
-        // assert remediation across both.
+        // Construct an input that triggers every check at once and assert
+        // remediation across the resulting finding set.
         let mut http = baseline_http();
         http.allowed_origins = vec!["*".to_owned()];
         http.trust_proxy_headers = true;
@@ -951,17 +819,12 @@ mod tests {
             reason: Some("`cloudflared` not found on PATH".to_owned()),
         }];
 
-        // Pass 1: empty keys.
-        let mut empty_inputs = SecurityCheckInputs {
+        let inputs = SecurityCheckInputs {
             effective_bind: "0.0.0.0:8080",
             http: &http,
-            session_key_empty: true,
-            admin_key_empty: true,
             recent_auth_failures: 50,
             sink_open_failures: 2,
             sink_last_error: Some("HTTP 503"),
-            session_key_value: None,
-            admin_key_value: None,
             path_postures: &postures,
             path_issues: &path_issues,
             process_euid: 1000,
@@ -976,34 +839,21 @@ mod tests {
             recent_missing_cloudflare_header_requests: 0,
             dependency_failures: &dependency_failures,
         };
-        let empty_findings = check(empty_inputs.clone_for_test());
-        assert_remediations_present(&empty_findings);
+        let findings = check(inputs);
+        assert_remediations_present(&findings);
 
-        // Pass 2: weak (non-empty) keys.
-        let weak_key = "CHANGEME";
-        empty_inputs.session_key_empty = false;
-        empty_inputs.admin_key_empty = false;
-        empty_inputs.session_key_value = Some(weak_key);
-        empty_inputs.admin_key_value = Some(weak_key);
-        let weak_findings = check(empty_inputs);
-        assert_remediations_present(&weak_findings);
-
-        // Make sure both passes together cover every code that `check()` can
+        // Make sure this input covers every code that `check()` can
         // emit, so a future code with no remediation can't sneak past.
         let mut codes: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        for f in empty_findings.iter().chain(weak_findings.iter()) {
+        for f in &findings {
             codes.insert(f.code.as_str());
         }
         for expected in [
             "api.public_bind",
             "http.wildcard_origin_public_bind",
             "http.trust_proxy_without_trusted_proxies",
-            "auth.session_key_empty",
-            "auth.admin_key_empty",
             "auth.failure_threshold",
             "logging.supabase.delivery_failing",
-            "auth.session_key_weak",
-            "auth.admin_key_weak",
             "runtime.path_ownership",
             "runtime.path_mode_loose",
             "runtime.path_uninspectable",
@@ -1029,39 +879,6 @@ mod tests {
                 "finding {} has empty remediation",
                 finding.code
             );
-        }
-    }
-
-    impl<'a> SecurityCheckInputs<'a> {
-        /// Test-only shallow copy. `SecurityCheckInputs` holds non-`Copy`
-        /// borrowed slices so the standard `Clone` derive does not fit; we
-        /// reconstruct the borrows verbatim.
-        fn clone_for_test(&self) -> SecurityCheckInputs<'a> {
-            SecurityCheckInputs {
-                effective_bind: self.effective_bind,
-                http: self.http,
-                session_key_empty: self.session_key_empty,
-                admin_key_empty: self.admin_key_empty,
-                recent_auth_failures: self.recent_auth_failures,
-                sink_open_failures: self.sink_open_failures,
-                sink_last_error: self.sink_last_error,
-                session_key_value: self.session_key_value,
-                admin_key_value: self.admin_key_value,
-                path_postures: self.path_postures,
-                path_issues: self.path_issues,
-                process_euid: self.process_euid,
-                runtime_user_uid: self.runtime_user_uid,
-                runtime_user_name: self.runtime_user_name,
-                workspace_writable: self.workspace_writable,
-                workspace_root: self.workspace_root,
-                railway_platform: self.railway_platform,
-                cloudflare: self.cloudflare,
-                cloudflared_available: self.cloudflared_available,
-                recent_direct_cloudflare_mode_requests: self.recent_direct_cloudflare_mode_requests,
-                recent_missing_cloudflare_header_requests: self
-                    .recent_missing_cloudflare_header_requests,
-                dependency_failures: self.dependency_failures,
-            }
         }
     }
 }
