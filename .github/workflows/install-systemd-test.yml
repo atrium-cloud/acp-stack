@@ -61,7 +61,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --release --features test-fixtures --bin acps --bin acpctl --bin placebo-agent --locked
+        run: cargo build --release --features test-fixtures --bin acps --bin placebo-agent --locked
 
       - name: Run install-systemd-test.sh
         env:

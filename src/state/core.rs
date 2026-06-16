@@ -29,7 +29,7 @@ pub struct StateStore {
     event_hub: Option<EventHub>,
     /// When true, every persist call site enqueues into `sink_outbox` in the
     /// same transaction as the source write. Set by `acps serve` only when
-    /// `[logging.supabase].enabled = true`; CLI tools and acpctl leave it
+    /// `[logging.supabase].enabled = true`; standalone CLI tools leave it
     /// off so they don't write an outbox row the daemon will then re-send.
     external_logging_enabled: bool,
 }

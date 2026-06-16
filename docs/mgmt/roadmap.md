@@ -12,7 +12,7 @@ This roadmap is a planning document for maintainers. Product contracts live unde
 | MCP              | declared stdio/HTTP servers attached to sessions with secret refs                                 |
 | Logs and metrics | local SQLite history, live WebSocket events, optional external analytics sink                     |
 | Packaging        | Docker image, systemd installer, reverse-proxy and tunnel guidance                                |
-| Operations       | readiness/status checks, dependency checks, security self-check, local `acpctl` surface           |
+| Operations       | readiness/status checks, dependency checks, security self-check, keyless local `acps` views       |
 | Client polish    | SDKs, stronger session UX, richer log filters, operational health summaries                       |
 
 ## Later Scope

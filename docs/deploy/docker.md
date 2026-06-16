@@ -10,7 +10,7 @@ The Docker image runs `acps serve` as the unprivileged `acp` user and stores all
 | Working directory | `/workspace`                              |
 | Default port      | `7700` or `$PORT` when set                |
 | Default command   | `acps serve --bind 0.0.0.0:${PORT:-7700}` |
-| Included binaries | `acps`, `acpctl`                          |
+| Included binaries | `acps`                                    |
 
 Mount these paths for a persistent instance:
 

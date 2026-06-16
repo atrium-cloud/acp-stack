@@ -8,7 +8,6 @@ readonly DEFAULT_UPDATE_SERVICE_TEMPLATE="${REPO_ROOT}/packaging/systemd/acp-sta
 readonly DEFAULT_UPDATE_TIMER_TEMPLATE="${REPO_ROOT}/packaging/systemd/acp-stack-update.timer"
 
 acps_binary=""
-acpctl_binary=""
 user_name="acp"
 home_dir=""
 workspace_root="/workspace"
@@ -28,7 +27,7 @@ current_step="startup"
 usage() {
   cat <<'USAGE'
 Usage: sudo bash scripts/install-systemd.sh \
-         --acps-binary <path> --acpctl-binary <path> [options]
+         --acps-binary <path> [options]
 
 Installs acp-stack as a systemd service on a Linux host. Idempotent: re-runs
 preserve user data; pass --force to overwrite an existing unit file or re-run
@@ -36,7 +35,6 @@ acps init on an already-initialized instance.
 
 Required:
   --acps-binary <path>     Path to a built acps binary on this host
-  --acpctl-binary <path>   Path to a built acpctl binary on this host
 
 Options:
   --user <name>            Runtime user (default: acp)
@@ -87,11 +85,6 @@ while [[ $# -gt 0 ]]; do
     --acps-binary)
       [[ $# -ge 2 ]] || { usage >&2; exit 1; }
       acps_binary="$2"
-      shift 2
-      ;;
-    --acpctl-binary)
-      [[ $# -ge 2 ]] || { usage >&2; exit 1; }
-      acpctl_binary="$2"
       shift 2
       ;;
     --user)
@@ -173,17 +166,14 @@ if [[ "${EUID}" -ne 0 ]]; then
   fail "must run as root; re-run with sudo bash scripts/install-systemd.sh ..."
 fi
 
-if [[ -z "${acps_binary}" || -z "${acpctl_binary}" ]]; then
-  printf 'install-systemd: --acps-binary and --acpctl-binary are required.\n' >&2
+if [[ -z "${acps_binary}" ]]; then
+  printf 'install-systemd: --acps-binary is required.\n' >&2
   usage >&2
   exit 1
 fi
 
 if [[ ! -x "${acps_binary}" ]]; then
   fail "acps binary not found or not executable: ${acps_binary}"
-fi
-if [[ ! -x "${acpctl_binary}" ]]; then
-  fail "acpctl binary not found or not executable: ${acpctl_binary}"
 fi
 if [[ ! -f "${unit_template}" ]]; then
   fail "unit template not found: ${unit_template}"
@@ -305,8 +295,11 @@ install -d -o "${user_name}" -g "${user_name}" -m 0700 "${home_dir}/.local/share
 current_step="install_binaries"
 
 install -o root -g root -m 0755 "${acps_binary}" /usr/local/bin/acps
-install -o root -g root -m 0755 "${acpctl_binary}" /usr/local/bin/acpctl
-log "installed /usr/local/bin/acps and /usr/local/bin/acpctl."
+if [[ -e /usr/local/bin/acpctl ]]; then
+  rm -f /usr/local/bin/acpctl
+  log "removed stale /usr/local/bin/acpctl."
+fi
+log "installed /usr/local/bin/acps."
 
 current_step="acps_init"
 

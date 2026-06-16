@@ -147,7 +147,7 @@ fn redact_commands_row(row: &mut Map<String, Value>) -> Result<()> {
     // Command lines and cwd routinely carry inline credentials
     // (`curl -u user:token`, `psql postgres://user:pass@host`,
     // `/tmp/secrets/...`). The local SQLite store keeps the full value for
-    // acpctl audit; the external mirror gets a length stamp only.
+    // local audit; the external mirror gets a length stamp only.
     let command_byte_len = row
         .get("command")
         .and_then(|v| v.as_str())

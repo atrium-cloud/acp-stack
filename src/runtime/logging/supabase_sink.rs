@@ -5,7 +5,7 @@
 //! JSON to the project's PostgREST endpoint with
 //! `Prefer: resolution=merge-duplicates,return=minimal` for idempotent
 //! replay. Local SQLite writes never block on the sink; transient failures
-//! land in `sink_failures_summary` so `acpctl security check` can surface
+//! land in `sink_failures_summary` so `acps security check` can surface
 //! them.
 
 use std::sync::Arc;

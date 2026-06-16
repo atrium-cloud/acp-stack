@@ -1,11 +1,10 @@
 # Project Spec
 
-`acp-stack` is a standalone Linux runtime for ACP-compatible agents. It is distributed as a Rust binary plus CLIs and is designed to be self-hosted.
+`acp-stack` is a standalone Linux runtime for ACP-compatible agents. It is distributed as a single Rust binary and is designed to be self-hosted.
 
 ## Product Shape
 
 - `acps`: operator CLI and daemon entry point.
-- `acpctl`: constrained local interface for agents and local shell users.
 - HTTP/WebSocket API: remote client interface.
 - ACP bridge: client-side ACP connection to the configured agent.
 - SQLite state: durable local history and operational records.
@@ -38,7 +37,7 @@ The initial release focuses on:
 - encrypted secrets and two-tier API keys
 - workspace files and mediated commands
 - durable logs, metrics, and session history
-- local `acpctl` and MCP introspection
+- keyless local `acps` observability
 
 Out of scope for the initial release:
 

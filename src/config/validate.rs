@@ -108,8 +108,8 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
             });
         }
     }
-    if let Some(socket_path) = &config.acpctl.socket_path {
-        validate_optional_config_path("acpctl.socket_path", socket_path)?;
+    if let Some(socket_path) = &config.local.socket_path {
+        validate_optional_config_path("local.socket_path", socket_path)?;
     }
     validate_code_sources(&config.workspace.code_sources)?;
     validate_data_sources(&config.workspace.data_sources)?;

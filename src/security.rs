@@ -2,8 +2,8 @@
 //!
 //! Examines effective config plus a recent auth-failure count and returns a
 //! list of `SecurityFinding`s. The same helper is called by both
-//! `GET /v1/security/check` on the admin-tier HTTP API and `acpctl security
-//! check` on the local UDS surface, so the policy stays in one place.
+//! `GET /v1/security/check` on both the admin-tier HTTP API and the local UDS
+//! surface, so the policy stays in one place.
 //!
 //! The individual checks live under `rules::*`; this file is the orchestrator
 //! that wires inputs through the rules in the order the original linear

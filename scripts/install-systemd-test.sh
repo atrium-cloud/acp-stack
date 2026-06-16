@@ -29,7 +29,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/install-systemd-test.sh
 
-Builds the acps + acpctl binaries (or reuses an existing release build when
+Builds the acps binary (or reuses an existing release build when
 ACP_STACK_SKIP_BUILD=1), builds the default systemd test image when no custom
 image is supplied, starts a privileged container running /sbin/init, runs
 scripts/install-systemd.sh inside it, enables the unit, waits for it to become
@@ -38,7 +38,7 @@ output.
 
 Env knobs:
   ACP_STACK_SKIP_BUILD=1         Skip cargo build (binaries must already exist
-                                 at target/release/acps and acpctl)
+                                 at target/release/acps)
   ACP_STACK_SYSTEMD_TEST_PORT   Host port mapped to container 7700 (default 17700)
   ACP_STACK_SYSTEMD_TEST_BASE_IMAGE
                                  Base OS for the repo-built systemd test image
@@ -85,15 +85,14 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 acps_binary="${REPO_ROOT}/target/release/acps"
-acpctl_binary="${REPO_ROOT}/target/release/acpctl"
 
 if [[ "${ACP_STACK_SKIP_BUILD:-0}" != "1" ]]; then
-  echo "install-systemd-test: cargo build --release --bin acps --bin acpctl..."
-  (cd "${REPO_ROOT}" && cargo build --release --bin acps --bin acpctl)
+  echo "install-systemd-test: cargo build --release --bin acps..."
+  (cd "${REPO_ROOT}" && cargo build --release --bin acps)
 fi
 
-if [[ ! -x "${acps_binary}" || ! -x "${acpctl_binary}" ]]; then
-  echo "install-systemd-test: built binaries missing at ${acps_binary} or ${acpctl_binary}." >&2
+if [[ ! -x "${acps_binary}" ]]; then
+  echo "install-systemd-test: built binary missing at ${acps_binary}." >&2
   exit 1
 fi
 
@@ -145,7 +144,6 @@ stdout_capture="$(mktemp)"
 docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
     --acps-binary /src/target/release/acps \
-    --acpctl-binary /src/target/release/acpctl \
     --user "${RUNTIME_USER}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
@@ -174,7 +172,6 @@ echo "install-systemd-test: verifying idempotent installer re-run..."
 docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
     --acps-binary /src/target/release/acps \
-    --acpctl-binary /src/target/release/acpctl \
     --user "${RUNTIME_USER}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
@@ -187,7 +184,6 @@ echo "install-systemd-test: verifying --force cannot drift config-managed paths.
 if docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
     --acps-binary /src/target/release/acps \
-    --acpctl-binary /src/target/release/acpctl \
     --user "${RUNTIME_USER}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}-drift" \
@@ -204,7 +200,6 @@ docker exec "${CONTAINER_NAME}" bash -c "printf '\n# drift\n' >> ${UNIT_PATH}"
 if docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
     --acps-binary /src/target/release/acps \
-    --acpctl-binary /src/target/release/acpctl \
     --user "${RUNTIME_USER}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \
@@ -217,7 +212,6 @@ fi
 docker exec "${CONTAINER_NAME}" \
   bash /src/scripts/install-systemd.sh \
     --acps-binary /src/target/release/acps \
-    --acpctl-binary /src/target/release/acpctl \
     --user "${RUNTIME_USER}" \
     --home "${HOME_DIR}" \
     --workspace "${WORKSPACE_ROOT}" \

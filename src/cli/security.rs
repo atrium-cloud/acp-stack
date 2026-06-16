@@ -5,7 +5,8 @@ use serde_json::Value;
 use std::io::IsTerminal;
 
 use super::core::{
-    CliMethod, OutputFormatChoice, daemon_base_url, daemon_request, print_json, resolve_admin_key,
+    CliMethod, OutputFormatChoice, daemon_base_url, daemon_request, local_daemon_request,
+    print_json, resolve_admin_key,
 };
 
 const DEFAULT_HISTORY_LIMIT: u32 = 20;
@@ -22,11 +23,7 @@ pub enum SecurityCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct SecurityCheckArgs {
-    /// Admin API key. If omitted on a TTY, prompts without echo.
-    #[arg(long = "admin-key")]
-    admin_key: Option<String>,
-}
+pub struct SecurityCheckArgs {}
 
 #[derive(Debug, Args)]
 pub struct SecurityHistoryArgs {
@@ -80,17 +77,11 @@ pub(super) fn run_security_command(
         .map_err(|source| StackError::ServeIo { source })?;
     runtime.block_on(async move {
         match command {
-            SecurityCommand::Check(args) => {
-                let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
+            SecurityCommand::Check(_) => {
                 let format = output.effective();
-                let body = daemon_request(
-                    &base_url,
-                    CliMethod::Get,
-                    "/v1/security/check",
-                    &admin_key,
-                    None,
-                )
-                .await?;
+                let body =
+                    local_daemon_request(&config, CliMethod::Get, "/v1/security/check", None)
+                        .await?;
                 if format.is_json() {
                     print_json(body.get("data").unwrap_or(&body))?;
                 } else if let Some(data) = body.get("data") {

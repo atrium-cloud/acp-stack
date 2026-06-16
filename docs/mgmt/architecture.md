@@ -1,15 +1,15 @@
 # Architecture
 
-`acp-stack` is a Rust runtime with one daemon-facing CLI (`acps`), one local agent-facing CLI (`acpctl`), and a shared library behind both binaries.
+`acp-stack` is a Rust runtime with one CLI and daemon binary (`acps`) backed by shared runtime modules.
 
 ## Runtime Shape
 
 ```mermaid
 flowchart LR
     Operator["Operator / remote client"] --> API["HTTP + WebSocket API"]
-    Local["Local agent / shell"] --> ACPCTL["acpctl local socket"]
+    Local["Local acps views"] --> LocalSocket["internal local socket"]
     API --> Runtime["Runtime services"]
-    ACPCTL --> Runtime
+    LocalSocket --> Runtime
     Runtime --> State["SQLite state"]
     Runtime --> Secrets["Encrypted secret store"]
     Runtime --> Workspace["Workspace"]
@@ -24,7 +24,7 @@ flowchart LR
 | Config           | load, validate, import, export, and canonicalize TOML             |
 | Auth             | API key validation, auth tiers, and request envelopes             |
 | API              | HTTP routes, WebSocket subscriptions, and client-facing contracts |
-| Local listener   | owner-only Unix-socket surface for `acpctl`                       |
+| Local listener   | owner-only Unix-socket surface for keyless low-risk `acps` routes |
 | State            | SQLite migrations and repositories for durable runtime records    |
 | Secrets          | age-compatible key management and encrypted values                |
 | Agent supervisor | process lifecycle for the configured ACP agent                    |
@@ -46,7 +46,7 @@ flowchart LR
 - The secret store is the only source for secret values.
 - External telemetry sinks consume the same normalized event stream as local SQLite logging.
 - Agent behavior stays behind ACP; `acp-stack` owns runtime mediation around it.
-- `acpctl` is local and allowlisted; public admin APIs are not exposed through it.
+- The local socket is allowlisted for low-risk observability; public admin APIs are not exposed through it.
 - Deployment profiles should not change runtime behavior, only process and edge shape.
 
 ## Maintainer Notes

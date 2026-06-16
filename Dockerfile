@@ -12,7 +12,7 @@ COPY migrations ./migrations
 RUN cargo build --locked --release
 
 FROM builder AS builder-test
-RUN cargo build --locked --release --features test-fixtures --bin acps --bin acpctl --bin placebo-agent
+RUN cargo build --locked --release --features test-fixtures --bin acps --bin placebo-agent
 
 FROM debian:bookworm-slim AS runtime
 
@@ -30,7 +30,6 @@ RUN mkdir -p /workspace \
     && chown -R acp:acp /workspace /home/acp/.config /home/acp/.local/share
 
 COPY --from=builder /app/target/release/acps /usr/local/bin/acps
-COPY --from=builder /app/target/release/acpctl /usr/local/bin/acpctl
 COPY LICENSE NOTICE TRADEMARKS.md /usr/share/doc/acp-stack/
 COPY scripts/docker-entrypoint.sh /usr/local/bin/acp-stack-docker-entrypoint
 RUN chmod 0755 /usr/local/bin/acp-stack-docker-entrypoint
@@ -45,5 +44,4 @@ CMD ["sh", "-c", "acps serve --bind 0.0.0.0:${PORT:-7700}"]
 
 FROM runtime AS test-runtime
 COPY --from=builder-test /app/target/release/acps /usr/local/bin/acps
-COPY --from=builder-test /app/target/release/acpctl /usr/local/bin/acpctl
 COPY --from=builder-test /app/target/release/placebo-agent /usr/local/bin/placebo-agent
