@@ -33,9 +33,9 @@ use self::edge::validate_edge;
 use self::mcp::validate_mcp;
 use self::permissions::{validate_permissions, validate_trusted_proxies};
 use self::primitives::{
-    secret_ref_looks_like_value, validate_absolute_path, validate_auth_refs,
-    validate_expected_sha256, validate_no_parent_dir_segments, validate_nonzero,
-    validate_optional_config_path, validate_secret_ref_name_value, validate_socket_address,
+    secret_ref_looks_like_value, validate_absolute_path, validate_expected_sha256,
+    validate_no_parent_dir_segments, validate_nonzero, validate_optional_config_path,
+    validate_secret_ref_name_value, validate_socket_address,
 };
 use self::prompts::validate_prompts;
 use self::sources::{validate_code_sources, validate_data_sources};
@@ -49,7 +49,6 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_socket_address("api.bind", &config.api.bind)?;
     validate_stack_updates(config)?;
     validate_nonzero("api.max_request_bytes", config.api.max_request_bytes)?;
-    validate_auth_refs(&config.auth)?;
     validate_nonzero(
         "security.http.max_request_bytes",
         config.security.http.max_request_bytes,
@@ -182,24 +181,14 @@ fn validate_stack_updates(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Walk every secret-ref name in the config and ensure:
-///   1. The name itself is a syntactically valid identifier.
-///   2. No non-auth ref aliases the configured session or admin key ref.
-///   3. The same name is not declared twice across the agent env, workspace
-///      source refs, supabase ref, MCP envs, and MCP header value_refs.
+/// Walk every secret-ref name in the config and ensure the name itself is a
+/// syntactically valid identifier and is not declared twice.
 fn validate_secret_refs(config: &Config) -> Result<()> {
-    let auth_session = config.auth.session_key_ref.as_str();
-    let auth_admin = config.auth.admin_key_ref.as_str();
     let mut seen: HashSet<String> = HashSet::new();
 
     let mut record = |name: &str, kind: &'static str| -> Result<()> {
         validate_secret_ref_name_value(name)?;
-        if name == auth_session || name == auth_admin {
-            return Err(StackError::SecretRefReservedForAuth {
-                ref_name: name.to_owned(),
-                kind,
-            });
-        }
+        let _ = kind;
         if !seen.insert(name.to_owned()) {
             return Err(StackError::DuplicateSecretRef {
                 name: name.to_owned(),
@@ -291,8 +280,6 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
             }
         }
     }
-    check(&config.auth.session_key_ref, "auth.session_key_ref")?;
-    check(&config.auth.admin_key_ref, "auth.admin_key_ref")?;
     if let Some(provider) = &config.agent.provider
         && let Some(api_key_ref) = provider.api_key_ref.as_deref()
     {

@@ -23,29 +23,14 @@ use std::str::FromStr;
 use age::secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, parent_dir, set_owner_only_file, write_new_file_owner_only,
 };
 
-/// `acps secrets set/delete` and `POST/DELETE /v1/secrets` must not touch the
-/// configured auth refs. Direct manipulation would bypass the
-/// regenerate-session-key flow and the "admin key never regenerable in place"
-/// invariant.
-pub fn reject_auth_ref_mutation(name: &str, config: &Config) -> Result<()> {
-    if name == config.auth.session_key_ref {
-        return Err(StackError::SecretReservedForAuth {
-            name: name.to_owned(),
-            kind: "session",
-        });
-    }
-    if name == config.auth.admin_key_ref {
-        return Err(StackError::SecretReservedForAuth {
-            name: name.to_owned(),
-            kind: "admin",
-        });
-    }
+/// Kept as a no-op guard at mutation call sites. Auth keys are stored as
+/// non-recoverable state verifiers, so no secret-store name is reserved for auth.
+pub fn reject_auth_ref_mutation(_name: &str) -> Result<()> {
     Ok(())
 }
 
@@ -216,8 +201,7 @@ impl SecretStore {
 
     /// Insert several name/value pairs and persist them together as a single
     /// atomic write. Lets the caller avoid leaving the store in a partial
-    /// state if a later `set` would have failed — relevant for `acps init`
-    /// generating both the session and admin keys.
+    /// state if a later `set` would have failed.
     pub fn set_many<'a, I>(&mut self, pairs: I) -> Result<()>
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,

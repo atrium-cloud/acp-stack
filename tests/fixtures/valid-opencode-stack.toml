@@ -3,10 +3,6 @@ bind = "127.0.0.1:7700"
 public_url = "https://agent.example.com"
 max_request_bytes = 104857600
 
-[auth]
-session_key_ref = "ACP_STACK_SESSION_KEY"
-admin_key_ref = "ACP_STACK_ADMIN_KEY"
-
 [security.http]
 max_request_bytes = 104857600
 rate_limit_per_minute = 120

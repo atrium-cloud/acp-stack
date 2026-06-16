@@ -16,8 +16,6 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         | SecretStorePlaintextSerialize(_)
         | SecretStorePlaintextNotUtf8 { .. } => "secrets.plaintext_invalid",
         SecretNotFound { .. } => "secrets.not_found",
-        SecretReservedForAuth { .. } => "secrets.reserved_for_auth",
-        SecretRefReservedForAuth { .. } => "secrets.reserved_for_auth",
         InvalidSecretRefName { .. } | DuplicateSecretRef { .. } => "config.invalid",
         _ => return None,
     })
@@ -37,10 +35,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         | SecretStorePlaintextSerialize(_)
         | SecretStorePlaintextNotUtf8 { .. } => "secret store plaintext is invalid".to_owned(),
         SecretNotFound { .. } => "secret was not found".to_owned(),
-        SecretReservedForAuth { .. } => "secret is reserved for auth".to_owned(),
-        SecretRefReservedForAuth { ref_name, kind } => {
-            format!("secret ref `{ref_name}` (from {kind}) collides with the auth key ref")
-        }
         InvalidSecretRefName { name } => format!("secret ref name `{name}` is invalid"),
         DuplicateSecretRef { name } => {
             format!("secret ref `{name}` is declared more than once")
@@ -52,7 +46,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
 pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
-        SecretReservedForAuth { .. } => StatusCode::BAD_REQUEST,
         SecretNotFound { .. } => StatusCode::NOT_FOUND,
         AgeKeyRead { .. }
         | AgeKeyWrite { .. }
@@ -64,9 +57,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SecretStorePlaintextParse(_)
         | SecretStorePlaintextSerialize(_)
         | SecretStorePlaintextNotUtf8 { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-        SecretRefReservedForAuth { .. }
-        | InvalidSecretRefName { .. }
-        | DuplicateSecretRef { .. } => StatusCode::BAD_REQUEST,
+        InvalidSecretRefName { .. } | DuplicateSecretRef { .. } => StatusCode::BAD_REQUEST,
         _ => return None,
     })
 }

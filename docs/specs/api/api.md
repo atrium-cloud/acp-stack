@@ -14,7 +14,7 @@ Authorization: Bearer <key>
 | Admin key   | secrets, config import, agent process control, security-sensitive operations    |
 | Local       | `acpctl` over the local Unix socket only                                        |
 
-`acps init` creates the session and admin keys on first run. The session key can be rotated. The admin key is regenerated only by resetting and reinitializing the instance.
+`acps init` creates the session and admin keys on first run, prints the plaintext once, and stores only local verifier rows. The session key can be rotated by an admin-authenticated daemon call. The admin key is regenerated only by resetting and reinitializing the instance.
 
 ## Response Envelope
 
@@ -49,8 +49,9 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 | `GET /v1/secrets`           | admin   | lists secret names only                                      |
 | `POST /v1/secrets`          | admin   | stores or replaces a secret value                            |
 | `DELETE /v1/secrets/{name}` | admin   | deletes a secret                                             |
+| `POST /v1/auth/session-key/regenerate` | admin | replaces the session verifier and returns the new plaintext key once |
 
-Secret values are never returned by the API.
+Secret values are never returned by the API. Auth keys are not secret-store entries.
 
 ## Agent And Providers
 
@@ -108,6 +109,8 @@ The intended reconnect flow is: `GET snapshot` once to recover state, subscribe 
 Session status defaults to a rolling `8h` activity window and accepts `window=<duration>` from `1m` through `999h`. Each row includes a derived `state`: `idle`, `prompt_sent`, `working`, `permission_required`, `done`, `stopped`, `error`, `cancelled`, `available`, or `closed`. `done` means the latest prompt completed with `stop_reason = "end_turn"`.
 
 Session list filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
+
+The local Unix-socket router also exposes `GET /v1/sessions` and `GET /v1/sessions/-/status` without bearer auth for read-only observability. Session mutation routes are not registered on the local socket.
 
 ### Prompt-Path Error Codes
 

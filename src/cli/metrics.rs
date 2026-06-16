@@ -1,11 +1,8 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use clap::{Args, Subcommand};
 
-use super::core::{
-    CliKey, CliMethod, OutputFormat, daemon_base_url, daemon_request, open_cli_key, print_json,
-};
+use super::core::{CliMethod, OutputFormat, local_daemon_request, print_json};
 
 #[derive(Debug, Subcommand)]
 pub enum MetricsCommand {
@@ -25,10 +22,7 @@ pub struct MetricsSummaryArgs {
 }
 
 pub(super) fn run_metrics_command(command: MetricsCommand, output: OutputFormat) -> Result<()> {
-    let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    let session_key = open_cli_key(&config, &home, CliKey::Session)?;
-    let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -51,8 +45,7 @@ pub(super) fn run_metrics_command(command: MetricsCommand, output: OutputFormat)
                 } else {
                     format!("/v1/metrics/summary?{query}")
                 };
-                let body =
-                    daemon_request(&base_url, CliMethod::Get, &path, &session_key, None).await?;
+                let body = local_daemon_request(&config, CliMethod::Get, &path, None).await?;
                 if let Some(data) = body.get("data") {
                     if output.is_json() {
                         print_json(data)?;

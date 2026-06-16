@@ -1,8 +1,7 @@
 //! HTTP-edge auth and request-shape error helpers.
 //!
-//! Covers the runtime `auth.*` namespace (missing auth keys, rate limit, IP
-//! block, origin allowlist) plus the `request.invalid_param` query-validation
-//! shape.
+//! Covers the runtime `auth.*` namespace (rate limit, IP block, origin
+//! allowlist) plus the `request.invalid_param` query-validation shape.
 
 use http::StatusCode;
 
@@ -11,8 +10,6 @@ use super::StackError;
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
     Some(match err {
-        MissingSessionKey { .. } => "auth.missing_session_key",
-        MissingAdminKey { .. } => "auth.missing_admin_key",
         RateLimited => "auth.rate_limited",
         IpBlocked { .. } => "auth.ip_blocked",
         OriginNotAllowed { .. } => "auth.origin_not_allowed",
@@ -24,8 +21,6 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
 pub(super) fn public_message(err: &StackError) -> Option<String> {
     use StackError::*;
     Some(match err {
-        MissingSessionKey { .. } => "secret store is missing session key reference".to_owned(),
-        MissingAdminKey { .. } => "secret store is missing admin key reference".to_owned(),
         RateLimited => "rate limit exceeded".to_owned(),
         IpBlocked { .. } => "client IP is temporarily blocked".to_owned(),
         OriginNotAllowed { .. } => "origin is not allowed".to_owned(),
@@ -37,7 +32,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
 pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
-        MissingSessionKey { .. } | MissingAdminKey { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         RateLimited | IpBlocked { .. } => StatusCode::TOO_MANY_REQUESTS,
         OriginNotAllowed { .. } => StatusCode::FORBIDDEN,
         InvalidParam { .. } => StatusCode::BAD_REQUEST,

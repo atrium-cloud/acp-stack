@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
+use acp_stack::auth::{AuthVerifierSet, KeyKind};
 use acp_stack::config::{
     AgentAdapterConfig, Config, DependenciesConfig, DependencyEntry, HttpHeaderRef, McpConfig,
     McpHttpServer, McpServerConfig, McpStdioServer, load_config_from_str,
@@ -70,6 +71,9 @@ impl ServerHarness {
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
+        store
+            .insert_auth_key_pair(&AuthVerifierSet::create(SESSION_KEY, ADMIN_KEY))
+            .expect("seed auth verifiers");
         let config_path = create_runtime_files(tempdir.path(), &path);
         std::fs::write(
             &config_path,
@@ -2781,7 +2785,7 @@ async fn config_import_dry_run_returns_metadata() {
     assert_eq!(body["data"]["config_version"], Value::Number(1.into()));
     assert!(body["data"]["canonical_toml_size"].is_number());
     assert!(body["data"]["input_size"].is_number());
-    assert!(body["data"]["auth_refs_unchanged"].is_boolean());
+    assert!(body["data"].get("auth_refs_unchanged").is_none());
     assert!(body["data"]["target"].is_string());
     assert!(body["data"]["target_exists"].is_boolean());
 
@@ -2799,12 +2803,16 @@ async fn config_import_dry_run_returns_metadata() {
 }
 
 #[tokio::test]
-async fn config_import_dry_run_reports_auth_ref_mismatch_without_mutation() {
+async fn config_import_dry_run_accepts_legacy_auth_section_without_mutation() {
     let harness = ServerHarness::spawn().await;
     let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
     let toml = include_str!("fixtures/valid-placebo-stack.toml").replace(
-        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
-        r#"admin_key_ref = "ROTATED_ADMIN_KEY""#,
+        "[security.http]",
+        r#"[auth]
+session_key_ref = "ACP_STACK_SESSION_KEY"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]"#,
     );
     let response = reqwest::Client::new()
         .post(format!(
@@ -2819,7 +2827,7 @@ async fn config_import_dry_run_reports_auth_ref_mismatch_without_mutation() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], Value::Bool(true));
-    assert_eq!(body["data"]["auth_refs_unchanged"], Value::Bool(false));
+    assert!(body["data"]["canonical_toml_size"].is_number());
 
     let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert_eq!(current_config, original_config);
@@ -2835,39 +2843,49 @@ async fn config_import_dry_run_reports_auth_ref_mismatch_without_mutation() {
 }
 
 #[tokio::test]
-async fn config_import_rejects_auth_ref_mismatch_before_write() {
+async fn auth_regenerate_session_key_replaces_old_session_verifier() {
     let harness = ServerHarness::spawn().await;
-    let original_config = std::fs::read_to_string(&harness.config_path).expect("read config");
-    let toml = include_str!("fixtures/valid-placebo-stack.toml").replace(
-        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
-        r#"admin_key_ref = "ROTATED_ADMIN_KEY""#,
-    );
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/config/import", harness.base_url))
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/v1/auth/session-key/regenerate",
+            harness.base_url
+        ))
         .header("Authorization", format!("Bearer {ADMIN_KEY}"))
-        .body(toml)
         .send()
         .await
         .expect("send");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: Value = response.json().await.expect("json");
-    assert_eq!(body["ok"], Value::Bool(false));
-    assert_eq!(body["error"]["code"], "config.import_changes_auth_ref");
+    let new_session_key = body["data"]["session_key"]
+        .as_str()
+        .expect("new session key");
+    assert!(new_session_key.starts_with("acps_"));
+    assert_ne!(new_session_key, SESSION_KEY);
 
-    let current_config = std::fs::read_to_string(&harness.config_path).expect("read config");
-    assert_eq!(current_config, original_config);
     let guard = harness.state.lock().await;
-    let events = guard
-        .query_events(EventFilter {
-            limit: 10,
-            kind: Some("server.config_imported"),
-            ..EventFilter::default()
-        })
-        .expect("query events");
-    assert!(
-        events.is_empty(),
-        "rejected import must not audit config import"
-    );
+    let verifiers = guard.load_auth_verifier_pair().expect("auth verifiers");
+    assert_eq!(verifiers.verify(SESSION_KEY), None);
+    assert_eq!(verifiers.verify(new_session_key), Some(KeyKind::Session));
+    assert_eq!(verifiers.verify(ADMIN_KEY), Some(KeyKind::Admin));
+}
+
+#[tokio::test]
+async fn auth_regenerate_session_key_rejects_session_key() {
+    let harness = ServerHarness::spawn().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/v1/auth/session-key/regenerate",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "auth.wrong_kind");
 }
 
 #[tokio::test]

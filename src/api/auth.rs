@@ -10,7 +10,7 @@ use http::StatusCode;
 use http::header::AUTHORIZATION;
 
 use super::core::AppState;
-use crate::auth::{AuthFailureReason, KeyKind, constant_time_eq, record_auth_failure_with_origin};
+use crate::auth::{AuthFailureReason, KeyKind, record_auth_failure_with_origin};
 use crate::envelope::ApiError;
 
 // ----- Middleware -----------------------------------------------------------
@@ -166,14 +166,7 @@ pub(super) async fn authenticate(
         }
     };
 
-    let bearer_bytes = bearer.as_bytes();
-    let matched = if constant_time_eq(bearer_bytes, state.session_key.as_bytes()) {
-        Some(KeyKind::Session)
-    } else if constant_time_eq(bearer_bytes, state.admin_key.as_bytes()) {
-        Some(KeyKind::Admin)
-    } else {
-        None
-    };
+    let matched = state.auth_verifiers.read().await.verify(&bearer);
 
     match matched {
         Some(kind) => {

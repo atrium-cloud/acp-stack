@@ -774,10 +774,6 @@ config_version = 1
 bind = "127.0.0.1:7700"
 max_request_bytes = 1048576
 
-[auth]
-session_key_ref = "SESSION_KEY"
-admin_key_ref = "ADMIN_KEY"
-
 [security.http]
 max_request_bytes = 1048576
 rate_limit_per_minute = 60

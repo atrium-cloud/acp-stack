@@ -29,7 +29,7 @@ use crate::runtime::install::agent_installer::InstallerOutcome;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::SkillInstallReport;
 use crate::runtime::install::skill_registry::SkillCatalog;
-use crate::secrets::{SecretStore, age_key_path, secret_store_path};
+use crate::secrets::{SecretStore, age_key_path};
 use crate::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
     StateStore, default_state_path,
@@ -57,7 +57,7 @@ use self::registry_apply::{
 };
 use self::resume::{
     FreshKeys, finalize_with_error, init_complete_event_already_recorded,
-    installer_postcondition_holds, perform_secrets_init, recorded_init_args, resolve_init_run,
+    installer_postcondition_holds, perform_auth_init, recorded_init_args, resolve_init_run,
     step_needs_resume, workspace_postcondition_holds,
 };
 use self::skills::{
@@ -468,8 +468,6 @@ pub(super) const STARTER_RATE_LIMIT_PER_MINUTE: u64 = 120;
 pub(super) const STARTER_RATE_LIMIT_BURST: u64 = 30;
 pub(super) const STARTER_AUTH_FAILURES_PER_MINUTE: u64 = 5;
 pub(super) const STARTER_AUTH_BLOCK_DURATION: &str = "15m";
-pub(super) const STARTER_SESSION_KEY_REF: &str = "ACP_STACK_SESSION_KEY";
-pub(super) const STARTER_ADMIN_KEY_REF: &str = "ACP_STACK_ADMIN_KEY";
 pub(super) const STARTER_DEFAULT_SHELL: &str = "/bin/bash";
 pub(super) const STARTER_WORKSPACE_MAX_FILE_BYTES: u64 = 8_388_608;
 pub(super) const STARTER_LOCAL_RETENTION_DAYS: u64 = 30;
@@ -657,27 +655,18 @@ impl Drop for KeyHandover {
 impl KeyHandover {
     fn print(&mut self) -> Option<(String, String)> {
         let keys = self.keys.take()?;
-        let refs = (keys.session_ref.clone(), keys.admin_ref.clone());
         println!("---");
-        println!(
-            "session key ({}): {}",
-            keys.session_ref,
-            keys.session_value.as_str()
-        );
-        println!(
-            "admin key ({}): {}",
-            keys.admin_ref,
-            keys.admin_value.as_str()
-        );
+        println!("session key: {}", keys.session_value.as_str());
+        println!("admin key: {}", keys.admin_value.as_str());
         println!(
             "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
         );
         println!("---");
-        Some(refs)
+        Some(("session".to_owned(), "admin".to_owned()))
     }
 
     fn print_and_record(&mut self, store: &StateStore, run_id: &str) -> Result<()> {
-        if let Some((session_ref, admin_ref)) = self.print() {
+        if self.print().is_some() {
             store.append_event_with_source(
                 "info",
                 KEY_HANDOVER_PRINTED_EVENT,
@@ -685,8 +674,7 @@ impl KeyHandover {
                 "session and admin API keys were shown to the operator",
                 &serde_json::json!({
                     "init_run_id": run_id,
-                    "session_key_ref": session_ref,
-                    "admin_key_ref": admin_ref,
+                    "key_kinds": ["session", "admin"],
                 })
                 .to_string(),
             )?;
@@ -899,11 +887,14 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         AgentEnvCollection::default()
     };
 
+    let mut legacy_auth = None;
     let config_status = if config_path.exists() {
         // Repair perms before validation so a failure to parse the file does not
         // leave a permissive config on disk; matches the behavior of `acps status`.
         set_owner_only_file(&config_path)?;
-        let existing_config = Config::load_from_path(&config_path)?;
+        let loaded_config = Config::load_from_path_with_legacy(&config_path)?;
+        legacy_auth = loaded_config.legacy_auth;
+        let existing_config = loaded_config.config;
         validate_deployment_overrides_match_existing(&args, &existing_config)?;
         reject_starter_only_mcp_args_for_existing_config(&args)?;
         if imported_config {
@@ -1189,40 +1180,21 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
 
     let mut auth_status: &'static str = "preserved existing API keys";
     let mut key_handover = KeyHandover { keys: None };
-    let session_ref_str = config.auth.session_key_ref.clone();
-    let admin_ref_str = config.auth.admin_key_ref.clone();
 
     // -----------------------------------------------------------------
-    // Step 1: secrets_init — generate or preserve session + admin keys.
-    // Verifier: both refs present in the secret store.
-    //
-    // `store_existed` must be captured BEFORE `open_or_create` so the
-    // "fresh store" branch fires when the file doesn't yet exist; the
-    // open call writes the empty store and would otherwise make the
-    // existence probe always succeed.
+    // Step 1: secrets_init — generate or preserve session + admin verifiers.
+    // Verifier: both verifier rows present in state.
     // -----------------------------------------------------------------
-    let store_existed_before_open = secret_store_path(&home).exists();
     let mut secret_store = SecretStore::open_or_create(&home)?;
-    let verify_session_ref = session_ref_str.clone();
-    let verify_admin_ref = admin_ref_str.clone();
-    let verify_home = home.clone();
-    println!("progress: initializing secrets");
+    println!("progress: initializing auth");
     let step_result = record_step(
         &store,
         &init_run,
         1,
         step_kind::SECRETS_INIT,
+        || store.auth_key_pair_present(),
         || {
-            let store = SecretStore::open(&verify_home)?;
-            Ok(store.contains(&verify_session_ref) && store.contains(&verify_admin_ref))
-        },
-        || {
-            let outcome = perform_secrets_init(
-                store_existed_before_open,
-                &session_ref_str,
-                &admin_ref_str,
-                &mut secret_store,
-            )?;
+            let outcome = perform_auth_init(&store, legacy_auth.as_ref(), &home)?;
             auth_status = outcome.status;
             let generated_keys = outcome.generated_keys;
             key_handover.keys = outcome.fresh_keys;
@@ -1233,16 +1205,18 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                     crate::state::EVENT_SOURCE_CLI,
                     "generated session and admin API keys",
                     &serde_json::json!({
-                        "session_key_ref": session_ref_str,
-                        "admin_key_ref": admin_ref_str,
+                        "key_kinds": ["session", "admin"],
                     })
                     .to_string(),
                 )?;
             }
-            Ok(StepOutcome::with_payload(format!(
-                r#"{{"session_key_ref":"{}","admin_key_ref":"{}","status":"{}"}}"#,
-                session_ref_str, admin_ref_str, auth_status
-            )))
+            Ok(StepOutcome::with_payload(
+                serde_json::json!({
+                    "key_kinds": ["session", "admin"],
+                    "status": auth_status,
+                })
+                .to_string(),
+            ))
         },
     );
     let disposition = match step_result {

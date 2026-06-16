@@ -11,7 +11,7 @@ use crate::runtime::dependencies::deps_apply::{
 };
 use crate::state::{StateStore, default_state_path};
 
-use super::core::{OutputFormat, print_json};
+use super::core::{OutputFormat, print_json, resolve_admin_key, validate_local_admin_key};
 
 #[derive(Debug, Subcommand)]
 pub enum DepsCommand {
@@ -30,6 +30,9 @@ pub struct DepsApplyArgs {
     /// Apply only deps whose `feature` matches this string.
     #[arg(long, value_name = "FEATURE")]
     feature: Option<String>,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 pub(super) fn run_deps_command(command: DepsCommand, output: OutputFormat) -> Result<()> {
@@ -76,6 +79,8 @@ fn run_check(output: OutputFormat) -> Result<()> {
 }
 
 fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
+    let admin_key = resolve_admin_key(args.admin_key.clone(), io::stdin().is_terminal())?;
+    validate_local_admin_key(&admin_key)?;
     let config = Config::load_from_default_path()?;
     let candidates = candidates_for(&config, args.feature.as_deref());
     if candidates.is_empty() {
