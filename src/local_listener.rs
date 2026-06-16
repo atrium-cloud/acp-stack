@@ -1,4 +1,4 @@
-//! Internal Unix-domain-socket listener for keyless low-risk local `acps` routes.
+//! Internal Unix-domain-socket listener for keyless local `acps` routes.
 //!
 //! The local listener exposes an explicit allowlist of operations from the API
 //! router on a separate Unix-domain socket. Access control is filesystem based:

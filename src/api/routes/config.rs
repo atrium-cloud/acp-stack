@@ -46,8 +46,10 @@ pub(crate) struct ConfigImportQuery {
 /// POST /v1/config/import (admin-tier). Parses TOML from the raw body,
 /// atomically writes the canonical form to the default config path, and records
 /// a `server.config_imported` audit event.
-/// The running daemon retains its old `AppState`; the client must restart
-/// the daemon for the new config to take effect.
+/// Most of the running daemon retains its old `AppState`; the client must
+/// restart the daemon for general config changes to take effect. Local
+/// session-tier auth is the exception because it is a runtime gate that this
+/// handler updates immediately after the canonical config write succeeds.
 ///
 /// Query params:
 /// - `dry_run=true`: validates, canonicalizes, and reports metadata without
@@ -84,10 +86,14 @@ pub(crate) async fn config_import_handler(
         crate::fs_util::create_dir_owner_only(parent)?;
     }
     crate::fs_util::atomic_write_owner_only(&target, canonical.as_bytes())?;
+    state
+        .set_local_session_auth(incoming.local.session_auth)
+        .await;
 
     let payload = serde_json::json!({
         "path": target.to_string_lossy(),
         "size_bytes": canonical.len(),
+        "local_session_auth": incoming.local.session_auth,
     });
     match serde_json::to_string(&payload) {
         Ok(payload_text) => {
@@ -109,6 +115,7 @@ pub(crate) async fn config_import_handler(
 
     Ok(ApiSuccess::new(serde_json::json!({
         "imported": true,
+        "local_session_auth": incoming.local.session_auth,
         "restart_required": true,
     })))
 }

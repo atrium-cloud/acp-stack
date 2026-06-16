@@ -6,8 +6,9 @@ use std::sync::Arc;
 use acp_stack::api::{self, AppState, RuntimePaths};
 use acp_stack::auth::{AuthVerifierSet, KeyKind};
 use acp_stack::config::{
-    AgentAdapterConfig, Config, DependenciesConfig, DependencyEntry, HttpHeaderRef, McpConfig,
-    McpHttpServer, McpServerConfig, McpStdioServer, load_config_from_str,
+    AgentAdapterConfig, Config, DependenciesConfig, DependencyEntry, HttpHeaderRef,
+    LocalSessionAuth, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
+    load_config_from_str,
 };
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{AuthFailureFilter, EventFilter, StateStore};
@@ -25,6 +26,7 @@ const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 struct ServerHarness {
     base_url: String,
     state: Arc<TokioMutex<StateStore>>,
+    local_session_auth: Arc<tokio::sync::RwLock<LocalSessionAuth>>,
     config_path: PathBuf,
     state_path: PathBuf,
     join: JoinHandle<acp_stack::error::Result<()>>,
@@ -91,12 +93,14 @@ impl ServerHarness {
             runtime_paths,
         );
         let state = app_state.state.clone();
+        let local_session_auth = app_state.local_session_auth.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let local = listener.local_addr().expect("local addr");
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
         Self {
             base_url: format!("http://{local}"),
             state,
+            local_session_auth,
             config_path,
             state_path: path,
             join,
@@ -1959,12 +1963,14 @@ async fn security_check_uses_effective_bind_and_recent_auth_failures_only() {
         RuntimePaths::new(config_path.clone(), path.clone()),
     );
     let state = app_state.state.clone();
+    let local_session_auth = app_state.local_session_auth.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let local = listener.local_addr().expect("local addr");
     let join = tokio::spawn(async move { api::serve(app_state, listener).await });
     let harness = ServerHarness {
         base_url: format!("http://{local}"),
         state,
+        local_session_auth,
         config_path,
         state_path: path,
         join,
@@ -2843,6 +2849,35 @@ admin_key_ref = "ACP_STACK_ADMIN_KEY"
 }
 
 #[tokio::test]
+async fn config_import_applies_local_session_auth_to_runtime() {
+    let harness = ServerHarness::spawn().await;
+    assert_eq!(
+        *harness.local_session_auth.read().await,
+        LocalSessionAuth::SessionKey
+    );
+
+    let toml = format!(
+        "{}\n[local]\nsession_auth = \"keyless\"\n",
+        include_str!("fixtures/valid-placebo-stack.toml")
+    );
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/config/import", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .body(toml)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["imported"], true);
+    assert_eq!(body["data"]["local_session_auth"], "keyless");
+    assert_eq!(
+        *harness.local_session_auth.read().await,
+        LocalSessionAuth::Keyless
+    );
+}
+
+#[tokio::test]
 async fn auth_regenerate_session_key_replaces_old_session_verifier() {
     let harness = ServerHarness::spawn().await;
     let client = reqwest::Client::new();
@@ -2886,6 +2921,56 @@ async fn auth_regenerate_session_key_rejects_session_key() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["error"]["code"], "auth.wrong_kind");
+}
+
+#[tokio::test]
+async fn local_session_access_update_requires_admin_key() {
+    let harness = ServerHarness::spawn().await;
+    let response = reqwest::Client::new()
+        .put(format!("{}/v1/auth/local-session-access", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .json(&serde_json::json!({ "session_auth": "keyless" }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "auth.wrong_kind");
+}
+
+#[tokio::test]
+async fn local_session_access_update_persists_and_updates_runtime_state() {
+    let harness = ServerHarness::spawn().await;
+    assert_eq!(
+        *harness.local_session_auth.read().await,
+        LocalSessionAuth::SessionKey
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .put(format!("{}/v1/auth/local-session-access", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .json(&serde_json::json!({ "session_auth": "keyless" }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["session_auth"], "keyless");
+    assert_eq!(
+        *harness.local_session_auth.read().await,
+        LocalSessionAuth::Keyless
+    );
+
+    let config = std::fs::read_to_string(&harness.config_path).expect("read config");
+    assert!(config.contains("session_auth = \"keyless\""));
+
+    let response = client
+        .get(format!("{}/v1/status", harness.base_url))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

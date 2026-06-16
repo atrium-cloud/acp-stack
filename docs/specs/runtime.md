@@ -1,6 +1,6 @@
 # Runtime
 
-The runtime starts from config, prepares local state and secrets, launches the configured ACP agent, and exposes the public API/WebSocket surface plus an internal local socket for keyless low-risk `acps` routes.
+The runtime starts from config, prepares local state and secrets, launches the configured ACP agent, and exposes the public API/WebSocket surface plus an internal local socket for keyless local `acps` routes.
 
 ## Supervisor
 

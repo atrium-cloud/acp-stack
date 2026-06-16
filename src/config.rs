@@ -24,10 +24,11 @@ pub use self::schema::{
     DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
     DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY,
     DataSourceConfig, DependenciesConfig, DependencyEntry, DependencyInstallAction,
-    DependencyInstallScope, EdgeConfig, HttpHeaderRef, LocalConfig, LoggingConfig, McpConfig,
-    McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
-    PromptsConfig, SecurityConfig, SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy,
-    SupabaseLoggingBackend, SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
+    DependencyInstallScope, EdgeConfig, HttpHeaderRef, LocalConfig, LocalSessionAuth,
+    LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
+    PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SecurityConfig, SecurityHttpConfig,
+    StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig,
+    UpdatesConfig, WorkspaceConfig,
 };
 pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
