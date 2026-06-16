@@ -21,6 +21,8 @@ Tiering is strict and non-superset: the admin key is rejected on session-tier ro
 
 Session-tier routes cover public API operations that are not management or destructive: config export, workspace operations, command runs, session and prompt lifecycle, and permission approve/deny. Session operations stay session-tier even when they write rows.
 
+`[local].session_auth = "keyless"` is a local Unix-socket exception, not a public API tier change. When enabled, same-user local callers can reach session-tier HTTP routes without bearer auth through `acps`; public HTTP routes still require the session key and still reject the admin key.
+
 Both keys are presented as `Authorization: Bearer <key>` and validated against stored verifiers in constant time.
 
 ## Secret Store
@@ -85,7 +87,7 @@ Workspace paths are resolved under `[workspace].root`. The runtime rejects absol
 
 ## Local Interface
 
-Keyless local `acps` read-only views use a local Unix socket protected by filesystem permissions. They do not use the public session or admin API keys. The local surface is allowlisted for low-risk observability and cannot read secret values, rotate keys, import or export config, access workspace files, run commands, decide permissions, control public WebSocket disconnections, or mutate sessions.
+Keyless local `acps` views use a local Unix socket protected by filesystem permissions. Low-risk observability routes are always available without public session or admin API keys. When `[local].session_auth = "keyless"` is enabled by an admin, same-user local callers can also reach session-tier HTTP routes without bearer auth. Admin-tier operations remain unavailable on the local socket: callers cannot read secret values, rotate keys, import config, apply dependencies, or control public WebSocket disconnections locally.
 
 ## Deployment Posture
 

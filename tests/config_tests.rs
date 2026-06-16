@@ -1,7 +1,7 @@
 use acp_stack::config::{
     AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
-    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, default_config_path,
-    load_config_from_str, parse_duration_string,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, LocalSessionAuth,
+    default_config_path, load_config_from_str, parse_duration_string,
 };
 
 const VALID_CONFIG: &str = include_str!("fixtures/valid-opencode-stack.toml");
@@ -1394,6 +1394,33 @@ fn allows_local_socket_path_absolute() {
     assert_eq!(
         config.local.socket_path.as_deref(),
         Some("/tmp/acps-local.sock")
+    );
+}
+
+#[test]
+fn local_session_auth_defaults_to_session_key() {
+    let config = load_config_from_str(VALID_CONFIG).expect("valid config");
+    assert_eq!(config.local.session_auth, LocalSessionAuth::SessionKey);
+    let canonical = config.to_canonical_toml().expect("canonical");
+    assert!(!canonical.contains("session_auth"));
+}
+
+#[test]
+fn local_session_auth_accepts_keyless_and_exports() {
+    let input = format!("{VALID_CONFIG}\n[local]\nsession_auth = \"keyless\"\n");
+    let config = load_config_from_str(&input).expect("keyless local session auth should parse");
+    assert_eq!(config.local.session_auth, LocalSessionAuth::Keyless);
+    let canonical = config.to_canonical_toml().expect("canonical");
+    assert!(canonical.contains("session_auth = \"keyless\""));
+}
+
+#[test]
+fn local_session_auth_rejects_invalid_values() {
+    let input = format!("{VALID_CONFIG}\n[local]\nsession_auth = \"admin\"\n");
+    let error = load_config_from_str(&input).expect_err("invalid local session auth should reject");
+    assert!(
+        error.to_string().contains("session_auth") && error.to_string().contains("admin"),
+        "{error}"
     );
 }
 

@@ -7,7 +7,7 @@ CREATE INDEX IF NOT EXISTS idx_events_kind_created ON events(kind, created_at);
 -- Analytics views over the raw mirror. Names mirror the spec's initial
 -- Supabase table list (docs/specs/state-logging.md). These views exist only
 -- in the Postgres dialect because Supabase consumes them for hosted dashboards;
--- the SQLite store is queried by acpctl via the raw tables.
+-- the SQLite store is queried locally via the raw tables.
 CREATE OR REPLACE VIEW session_turns
 WITH (security_invoker = true) AS
 SELECT id, session_id, status, stop_reason, error_code, error_message,

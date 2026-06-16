@@ -59,8 +59,8 @@
 
 - [x] Prevent local socket callers from reading secret values.
 - [x] Prevent local socket callers from rotating API keys.
-- [x] Prevent local socket callers from importing or exporting config.
-- [x] Prevent local socket callers from mutating workspace files, commands, permissions, or sessions.
+- [x] Prevent default local socket callers from importing or exporting config.
+- [x] Prevent default local socket callers from mutating workspace files, commands, permissions, or sessions.
 - [x] Prevent local socket callers from disabling permissions, rate limits, origin checks, or security logging.
 
 ## Acceptance

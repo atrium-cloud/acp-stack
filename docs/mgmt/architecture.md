@@ -24,7 +24,7 @@ flowchart LR
 | Config           | load, validate, import, export, and canonicalize TOML             |
 | Auth             | API key validation, auth tiers, and request envelopes             |
 | API              | HTTP routes, WebSocket subscriptions, and client-facing contracts |
-| Local listener   | owner-only Unix-socket surface for keyless low-risk `acps` routes |
+| Local listener   | owner-only Unix-socket surface for keyless local `acps` routes    |
 | State            | SQLite migrations and repositories for durable runtime records    |
 | Secrets          | age-compatible key management and encrypted values                |
 | Agent supervisor | process lifecycle for the configured ACP agent                    |
@@ -46,7 +46,7 @@ flowchart LR
 - The secret store is the only source for secret values.
 - External telemetry sinks consume the same normalized event stream as local SQLite logging.
 - Agent behavior stays behind ACP; `acp-stack` owns runtime mediation around it.
-- The local socket is allowlisted for low-risk observability; public admin APIs are not exposed through it.
+- The local socket is allowlisted for low-risk observability plus admin-enabled session-tier HTTP access; public admin APIs are not exposed through it.
 - Deployment profiles should not change runtime behavior, only process and edge shape.
 
 ## Maintainer Notes

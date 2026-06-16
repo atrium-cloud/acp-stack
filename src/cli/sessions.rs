@@ -5,8 +5,8 @@ use chrono::{SecondsFormat, Utc};
 use clap::{Args, Subcommand};
 
 use super::core::{
-    CliMethod, OutputFormat, daemon_base_url, daemon_request, encode_path_segment,
-    local_daemon_request, print_json, resolve_session_key,
+    CliMethod, OutputFormat, SessionAccess, daemon_base_url, daemon_request, encode_path_segment,
+    local_daemon_request, print_json, resolve_session_access,
 };
 
 const DEFAULT_SESSION_LIST_LIMIT: u32 = 50;
@@ -201,16 +201,17 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::New(args) => {
-                let session_key = resolve_session_key(args.session_key)?;
+                let session_access = resolve_session_access(&config, args.session_key)?;
                 let body = serde_json::json!({
                     "cwd": args.cwd,
                     "mcp_servers": [],
                 });
-                let response = daemon_request(
+                let response = session_daemon_request(
+                    &config,
                     &base_url,
+                    &session_access,
                     CliMethod::Post,
                     "/v1/sessions",
-                    &session_key,
                     Some(&body),
                 )
                 .await?;
@@ -227,16 +228,22 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Fork(args) => {
-                let session_key = resolve_session_key(args.session_key.clone())?;
+                let session_access = resolve_session_access(&config, args.session_key.clone())?;
                 let body = serde_json::json!({
                     "cwd": args.cwd,
                     "message_id": args.message_id,
                 });
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}/fork");
-                let response =
-                    daemon_request(&base_url, CliMethod::Post, &path, &session_key, Some(&body))
-                        .await?;
+                let response = session_daemon_request(
+                    &config,
+                    &base_url,
+                    &session_access,
+                    CliMethod::Post,
+                    &path,
+                    Some(&body),
+                )
+                .await?;
                 let id = response["data"]["id"].as_str().unwrap_or("?");
                 let cwd = response["data"]["cwd"].as_str().unwrap_or("");
                 if output.is_json() {
@@ -251,14 +258,22 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Prompt(args) => {
-                let session_key = resolve_session_key(args.session_key.clone())?;
-                run_sessions_prompt(&base_url, &session_key, args, output).await
+                let session_access = resolve_session_access(&config, args.session_key.clone())?;
+                run_sessions_prompt(&config, &base_url, &session_access, args, output).await
             }
             SessionsCommand::Cancel(args) => {
-                let session_key = resolve_session_key(args.session_key)?;
+                let session_access = resolve_session_access(&config, args.session_key)?;
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}/cancel");
-                daemon_request(&base_url, CliMethod::Post, &path, &session_key, None).await?;
+                session_daemon_request(
+                    &config,
+                    &base_url,
+                    &session_access,
+                    CliMethod::Post,
+                    &path,
+                    None,
+                )
+                .await?;
                 if output.is_json() {
                     print_json(&serde_json::json!({
                         "status": "requested",
@@ -271,11 +286,18 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 Ok(())
             }
             SessionsCommand::Close(args) => {
-                let session_key = resolve_session_key(args.session_key)?;
+                let session_access = resolve_session_access(&config, args.session_key)?;
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}");
-                let response =
-                    daemon_request(&base_url, CliMethod::Delete, &path, &session_key, None).await?;
+                let response = session_daemon_request(
+                    &config,
+                    &base_url,
+                    &session_access,
+                    CliMethod::Delete,
+                    &path,
+                    None,
+                )
+                .await?;
                 let status = response["data"]["status"].as_str().unwrap_or("closed");
                 if output.is_json() {
                     print_json(response.get("data").unwrap_or(&response))?;
@@ -386,8 +408,9 @@ fn encode_query_value(input: &str) -> String {
 }
 
 async fn run_sessions_prompt(
+    config: &Config,
     base_url: &str,
-    session_key: &str,
+    session_access: &SessionAccess,
     args: SessionsPromptArgs,
     output: OutputFormat,
 ) -> Result<()> {
@@ -403,8 +426,15 @@ async fn run_sessions_prompt(
     let body = serde_json::json!({ "prompt": prompt_text });
     let encoded_session = encode_path_segment(&args.session_id);
     let path = format!("/v1/sessions/{encoded_session}/prompt");
-    let response =
-        daemon_request(base_url, CliMethod::Post, &path, session_key, Some(&body)).await?;
+    let response = session_daemon_request(
+        config,
+        base_url,
+        session_access,
+        CliMethod::Post,
+        &path,
+        Some(&body),
+    )
+    .await?;
     let prompt_id = response["data"]["prompt_id"]
         .as_str()
         .ok_or_else(|| StackError::AgentInitializeFailed {
@@ -437,8 +467,15 @@ async fn run_sessions_prompt(
                 ),
             });
         }
-        let poll =
-            daemon_request(base_url, CliMethod::Get, &status_path, session_key, None).await?;
+        let poll = session_daemon_request(
+            config,
+            base_url,
+            session_access,
+            CliMethod::Get,
+            &status_path,
+            None,
+        )
+        .await?;
         let status = poll["data"]["status"].as_str().unwrap_or("");
         match status {
             "completed" => {
@@ -476,6 +513,22 @@ async fn run_sessions_prompt(
                 delay_ms = (delay_ms + 250).min(2000);
             }
         }
+    }
+}
+
+async fn session_daemon_request(
+    config: &Config,
+    base_url: &str,
+    session_access: &SessionAccess,
+    method: CliMethod,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    match session_access {
+        SessionAccess::Bearer(session_key) => {
+            daemon_request(base_url, method, path, session_key, body).await
+        }
+        SessionAccess::Local => local_daemon_request(config, method, path, body).await,
     }
 }
 

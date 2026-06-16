@@ -83,7 +83,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[[mcp.servers]]`  | MCP servers attached to ACP sessions                                 |
 | `[edge.cloudflare]` | Cloudflare Tunnel edge profile and managed provisioning refs         |
 | `[logging]`        | local logging and optional external sink settings                    |
-| `[local]`          | optional internal Unix socket override                               |
+| `[local]`          | internal Unix socket override and local session-tier access mode      |
 
 ## API And Security
 
@@ -93,7 +93,9 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 Both `[api].max_request_bytes` and `[security.http].max_request_bytes` can cap HTTP request bodies. When both are present, the tighter limit is enforced.
 
-`[local].socket_path` optionally overrides the internal Unix socket used by keyless low-risk local `acps` routes. When omitted, the daemon binds `~/.local/share/acp-stack/acps-local.sock`.
+`[local].socket_path` optionally overrides the internal Unix socket used by keyless local `acps` routes. When omitted, the daemon binds `~/.local/share/acp-stack/acps-local.sock`.
+
+`[local].session_auth` controls local Unix-socket access to session-tier HTTP routes. The default `session-key` keeps those routes unavailable locally unless callers provide `--session-key` or `ACP_STACK_SESSION_KEY` and use the public API. `keyless` lets same-user local `acps` commands use session-tier HTTP routes through the socket without a bearer key. Admin-tier routes are unaffected.
 
 ## Auth And Secrets
 

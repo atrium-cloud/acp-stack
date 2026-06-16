@@ -74,9 +74,11 @@ First initialization prints two API keys:
 - Admin key: secrets, config import, agent process control, and other elevated
   operations.
 
-The plaintext values are not stored in config or `secrets.age`; local state stores only verifiers. Commands that need the session key accept `--session-key` or `ACP_STACK_SESSION_KEY`. Commands that need the admin key accept `--admin-key`; interactive terminals prompt without echo when it is omitted.
+The plaintext values are not stored in config or `secrets.age`; local state stores only verifiers. Commands that need the session key accept `--session-key` or `ACP_STACK_SESSION_KEY`. When `[local].session_auth = "keyless"`, session-tier HTTP commands without an explicit session key use the local Unix socket instead. Commands that need the admin key accept `--admin-key`; interactive terminals prompt without echo when it is omitted.
 
 `acps auth regenerate-session-key --admin-key <key>` rotates only the session key through the running daemon and prints the new plaintext value once. The admin key is not regenerated in place; `acps reset --yes` destroys local config, state, age key, and secret store so a new instance can be initialized.
+
+`acps auth local-session-access status` prints the configured local session-tier mode. `enable --admin-key <key>` sets `[local].session_auth = "keyless"` through the running daemon; `disable --admin-key <key>` restores `session-key`. Both update the daemon immediately after the config write succeeds.
 
 ## Config Commands
 
@@ -88,7 +90,7 @@ acps config import <path> [--force] [--dry-run] [--admin-key <key>]
 acps config import --base64 <code> [--force] [--dry-run] [--admin-key <key>]
 ```
 
-Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it and requires the admin key. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing.
+Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it and requires the admin key. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing. After a successful replace, import asks the currently configured daemon to apply `[local].session_auth`; if the daemon is unreachable, the value applies on next daemon start.
 
 ## Secret Commands
 
@@ -187,7 +189,7 @@ acps sessions close <session-id> [--session-key <key>]
 
 Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
-`sessions new`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY`. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
+`sessions new`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY` unless `[local].session_auth = "keyless"` is active. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
 
 ## Logs, Metrics, And Health
 

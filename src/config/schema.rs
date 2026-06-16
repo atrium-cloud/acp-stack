@@ -647,6 +647,21 @@ pub enum DependencyInstallScope {
 
 // LOCAL DAEMON SOCKET
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LocalSessionAuth {
+    #[serde(rename = "session-key")]
+    #[default]
+    SessionKey,
+    #[serde(rename = "keyless")]
+    Keyless,
+}
+
+impl LocalSessionAuth {
+    pub fn is_default(value: &Self) -> bool {
+        *value == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
@@ -656,6 +671,10 @@ pub struct LocalConfig {
     /// unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<String>,
+    /// Controls whether local Unix-socket session-tier HTTP routes require an
+    /// explicit session key. Public HTTP tiering is unaffected.
+    #[serde(default, skip_serializing_if = "LocalSessionAuth::is_default")]
+    pub session_auth: LocalSessionAuth,
 }
 
 // MCP

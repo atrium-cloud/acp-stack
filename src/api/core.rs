@@ -28,7 +28,7 @@ use std::sync::atomic::AtomicU64;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -42,7 +42,7 @@ use super::routes::agent::{
     agent_capabilities_handler, agent_install_handler, agent_restart_handler, agent_start_handler,
     agent_stop_handler, agent_switch_handler,
 };
-use super::routes::auth::auth_regenerate_session_key_handler;
+use super::routes::auth::{auth_local_session_access_handler, auth_regenerate_session_key_handler};
 use super::routes::commands::{
     commands_cancel_handler, commands_get_handler, commands_list_handler, commands_output_handler,
     commands_submit_handler,
@@ -85,7 +85,7 @@ use super::routes::ws::{
 };
 use super::ws::ws_handler;
 use crate::auth::{AuthVerifierSet, KeyKind};
-use crate::config::Config;
+use crate::config::{Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::supervisor::AgentSupervisor;
@@ -108,6 +108,7 @@ pub struct AppState {
     pub runtime_paths: Arc<RuntimePaths>,
     pub state: Arc<TokioMutex<StateStore>>,
     pub auth_verifiers: Arc<TokioRwLock<AuthVerifierSet>>,
+    pub local_session_auth: Arc<TokioRwLock<LocalSessionAuth>>,
     pub max_request_bytes: usize,
     pub active_requests: Arc<AtomicU64>,
     pub agent_supervisor: Arc<AgentSupervisor>,
@@ -150,6 +151,14 @@ impl AppState {
             Some(KeyKind::Local) => crate::state::EVENT_SOURCE_LOCAL,
             _ => crate::state::EVENT_SOURCE_API,
         }
+    }
+
+    pub async fn local_session_auth(&self) -> LocalSessionAuth {
+        *self.local_session_auth.read().await
+    }
+
+    pub async fn set_local_session_auth(&self, value: LocalSessionAuth) {
+        *self.local_session_auth.write().await = value;
     }
 }
 
@@ -252,6 +261,7 @@ impl AppState {
         ));
         let ws_registry = Arc::new(super::ws_registry::WsRegistry::default());
         let live_agent_config = Arc::new(TokioMutex::new(config_arc.agent.clone()));
+        let local_session_auth = Arc::new(TokioRwLock::new(config_arc.local.session_auth));
         Self {
             config: config_arc,
             live_agent_config,
@@ -259,6 +269,7 @@ impl AppState {
             runtime_paths: Arc::new(runtime_paths),
             state: state_arc,
             auth_verifiers: Arc::new(TokioRwLock::new(auth_verifiers)),
+            local_session_auth,
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
             agent_supervisor: Arc::new(AgentSupervisor::new()),
@@ -439,6 +450,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/auth/session-key/regenerate",
             post(auth_regenerate_session_key_handler),
+        )
+        .route(
+            "/v1/auth/local-session-access",
+            put(auth_local_session_access_handler),
         )
         .route("/v1/config/import", post(config_import_handler))
         .route(
