@@ -342,7 +342,7 @@ pub(crate) async fn log_api_request(
     let resolved_kind = req.extensions().get::<KeyKind>().copied();
     let key_kind_label = resolved_kind.map(|k| k.as_wire_str());
     // Pick the `events.source` label up-front so the audit row's `source`
-    // column reflects the caller tier (`local` for UDS-driven acpctl calls,
+    // column reflects the caller tier (`local` for internal UDS calls,
     // `api` otherwise). The handler runs next; the source decision is fixed
     // at this point because the tier tag is set by `authenticate` /
     // `tag_local` BEFORE this middleware sees the request.
@@ -351,10 +351,8 @@ pub(crate) async fn log_api_request(
     let response = next.run(req).await;
 
     // The cardinality skip (`/v1/status*`, `/v1/ws`) targets public-API
-    // polling. `acpctl` calls arrive on the local UDS as one-shot operations
-    // and the spec (`docs/specs/acpctl/acpctl.md:47`) requires every action
-    // to be logged with `source = "local"`, so keep the audit row in that
-    // case.
+    // polling. Local UDS calls arrive as one-shot operations and should remain
+    // attributable as local activity, so keep the audit row in that case.
     let is_local_caller = matches!(resolved_kind, Some(KeyKind::Local));
     if !is_local_caller
         && (should_skip_api_request_log(&path) || should_skip_api_request_log(&raw_path))
@@ -711,7 +709,7 @@ async fn log_failure(
 ///
 /// `source` lets the caller attribute the event to either the public API
 /// (`EVENT_SOURCE_API`) or the local UDS (`EVENT_SOURCE_LOCAL`) so a security
-/// event triggered by an acpctl call lands with `source = "local"` to match
+/// event triggered by a local UDS call lands with `source = "local"` to match
 /// its `api.request` row.
 pub(super) async fn persist_security_event(
     state: &AppState,

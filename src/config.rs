@@ -16,19 +16,18 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 pub use self::schema::{
-    AcpctlConfig, AgentAdapterConfig, AgentAutoUpdateConfig, AgentConfig,
-    AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig,
-    ApiConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig, CustomProviderApi,
-    DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
-    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
-    DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
-    DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL,
-    DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig,
-    DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
-    EdgeConfig, HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig,
-    McpStdioServer, PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SecurityConfig,
-    SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend,
-    SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
+    AgentAdapterConfig, AgentAutoUpdateConfig, AgentConfig, AgentCustomProviderConfig,
+    AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig, ApiConfig, CloudflareEdgeConfig,
+    CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY,
+    DEFAULT_COMMAND_PROGRESS_INTERVAL, DEFAULT_CUSTOM_MODEL_CONTEXT,
+    DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
+    DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
+    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY,
+    DataSourceConfig, DependenciesConfig, DependencyEntry, DependencyInstallAction,
+    DependencyInstallScope, EdgeConfig, HttpHeaderRef, LocalConfig, LoggingConfig, McpConfig,
+    McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
+    PromptsConfig, SecurityConfig, SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy,
+    SupabaseLoggingBackend, SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
 };
 pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
@@ -60,7 +59,7 @@ pub struct Config {
     #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
-    pub acpctl: AcpctlConfig,
+    pub local: LocalConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -121,7 +120,7 @@ struct RawConfig {
     #[serde(default)]
     mcp: Option<McpConfig>,
     #[serde(default)]
-    acpctl: Option<AcpctlConfig>,
+    local: Option<LocalConfig>,
     #[serde(default)]
     auth: Option<LegacyAuthConfig>,
 }
@@ -254,7 +253,7 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
         prompts: raw.prompts.unwrap_or_default(),
         dependencies: raw.dependencies.unwrap_or_default(),
         mcp: raw.mcp.unwrap_or_default(),
-        acpctl: raw.acpctl.unwrap_or_default(),
+        local: raw.local.unwrap_or_default(),
     };
 
     config.validate()?;

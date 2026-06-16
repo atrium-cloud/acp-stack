@@ -444,7 +444,7 @@ pub(super) async fn local_daemon_json_response(
     path: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<(http::StatusCode, serde_json::Value)> {
-    let socket_path = acpctl_socket_path(config)?;
+    let socket_path = local_socket_path(config)?;
     let body_bytes = body.map(serde_json::to_vec).transpose().map_err(|source| {
         StackError::AgentInitializeFailed {
             reason: format!("serialize local daemon request body: {source}"),
@@ -674,8 +674,8 @@ fn validate_key_input(field: &'static str, value: String) -> Result<String> {
     Ok(value)
 }
 
-pub(super) fn acpctl_socket_path(config: &Config) -> Result<PathBuf> {
-    if let Some(path) = config.acpctl.socket_path.as_deref() {
+pub(super) fn local_socket_path(config: &Config) -> Result<PathBuf> {
+    if let Some(path) = config.local.socket_path.as_deref() {
         return Ok(PathBuf::from(path));
     }
     crate::local_listener::default_socket_path()
@@ -697,7 +697,7 @@ async fn local_http_request(
         .map_err(|source| StackError::ServeIo { source })?;
     let body_bytes = body.unwrap_or_default();
     let mut request =
-        format!("{method} {path} HTTP/1.1\r\nHost: acpctl.local\r\nConnection: close\r\n");
+        format!("{method} {path} HTTP/1.1\r\nHost: acps.local\r\nConnection: close\r\n");
     if !body_bytes.is_empty() {
         request.push_str("Content-Type: application/json\r\n");
     }

@@ -83,6 +83,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[[mcp.servers]]`  | MCP servers attached to ACP sessions                                 |
 | `[edge.cloudflare]` | Cloudflare Tunnel edge profile and managed provisioning refs         |
 | `[logging]`        | local logging and optional external sink settings                    |
+| `[local]`          | optional internal Unix socket override                               |
 
 ## API And Security
 
@@ -91,6 +92,8 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 `[security.http].allowed_origins` is the browser origin allowlist. Empty means no browser origins are allowed. `trust_proxy_headers = true` accepts forwarded client metadata only from exact IPs listed in `trusted_proxies`.
 
 Both `[api].max_request_bytes` and `[security.http].max_request_bytes` can cap HTTP request bodies. When both are present, the tighter limit is enforced.
+
+`[local].socket_path` optionally overrides the internal Unix socket used by keyless low-risk local `acps` routes. When omitted, the daemon binds `~/.local/share/acp-stack/acps-local.sock`.
 
 ## Auth And Secrets
 

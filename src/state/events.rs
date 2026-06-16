@@ -22,8 +22,7 @@ pub const EVENT_SOURCE_ACP: &str = "acp";
 pub const EVENT_SOURCE_COMMAND: &str = "command";
 pub const EVENT_SOURCE_PERMISSION: &str = "permission";
 pub const EVENT_SOURCE_CLI: &str = "cli";
-/// Reserved for the `acpctl` local-agent CLI (Phase 3 batch D); no in-tree
-/// writers should emit with this source today.
+/// Internal local Unix-socket calls use this source.
 pub const EVENT_SOURCE_LOCAL: &str = "local";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

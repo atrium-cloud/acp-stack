@@ -1,12 +1,12 @@
 # systemd Deployment
 
-Use the systemd installer when you want `acps` to run as an unprivileged service on a Linux host. The installer creates the runtime user, prepares directories, installs the binaries, initializes the instance, and writes a hardened unit.
+Use the systemd installer when you want `acps` to run as an unprivileged service on a Linux host. The installer creates the runtime user, prepares directories, installs the binary, initializes the instance, and writes a hardened unit.
 
 ## Prerequisites
 
 - Linux host running systemd.
 - Root access for user creation and unit installation.
-- Local `acps` and `acpctl` release binaries.
+- Local `acps` release binary.
 
 ## Install
 
@@ -14,8 +14,7 @@ Place the release binaries on the host, then run the installer:
 
 ```sh
 sudo bash scripts/install-systemd.sh \
-  --acps-binary /path/to/acps \
-  --acpctl-binary /path/to/acpctl
+  --acps-binary /path/to/acps
 ```
 
 During first initialization, the installer prints the session and admin API keys. Save them immediately. Later runs preserve existing keys and do not print them again.
@@ -25,7 +24,6 @@ During first initialization, the installer prints the session and admin API keys
 | Flag                     | Default                                 | Purpose                                 |
 | ------------------------ | --------------------------------------- | --------------------------------------- |
 | `--acps-binary <path>`   | required                                | local path to `acps`                    |
-| `--acpctl-binary <path>` | required                                | local path to `acpctl`                  |
 | `--user <name>`          | `acp`                                   | runtime user                            |
 | `--home <dir>`           | `/home/<user>`                          | runtime home                            |
 | `--workspace <dir>`      | `/workspace`                            | workspace root                          |
@@ -45,7 +43,6 @@ Use `--no-init` when you want to inspect config or prepare secrets before the fi
 ```sh
 sudo bash scripts/install-systemd.sh \
   --acps-binary /path/to/acps \
-  --acpctl-binary /path/to/acpctl \
   --no-init
 
 sudo -u acp -H /usr/local/bin/acps init \
@@ -103,7 +100,7 @@ journalctl -u acp-stack --since "1 hour ago"
 journalctl -u acp-stack -p warning
 ```
 
-Use `acpctl logs query` or `acps logs query` for structured runtime history.
+Use `acps logs query` for structured runtime history.
 
 ## Reverse Proxy
 
@@ -123,7 +120,6 @@ Manual binary replacement remains available:
 
 ```sh
 sudo install -m 0755 /path/to/acps /usr/local/bin/acps
-sudo install -m 0755 /path/to/acpctl /usr/local/bin/acpctl
 sudo systemctl restart acp-stack
 ```
 
@@ -144,7 +140,7 @@ sudo rm /etc/systemd/system/acp-stack.service
 sudo rm /etc/systemd/system/acp-stack-update.service
 sudo rm /etc/systemd/system/acp-stack-update.timer
 sudo systemctl daemon-reload
-sudo rm /usr/local/bin/acps /usr/local/bin/acpctl
+sudo rm /usr/local/bin/acps
 ```
 
 Instance data is intentionally left in place. Remove `/workspace` and `/home/acp` only when you intend to destroy the instance.

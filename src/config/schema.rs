@@ -645,15 +645,15 @@ pub enum DependencyInstallScope {
     System,
 }
 
-// ACPCTL
+// LOCAL DAEMON SOCKET
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AcpctlConfig {
-    /// Override path for the `acpctl` Unix-domain socket. When unset the
-    /// daemon binds `~/.local/share/acp-stack/acpctl.sock`. Override is
-    /// intended for integration tests; a deployed instance should leave it
-    /// unset so the socket path matches the spec.
+pub struct LocalConfig {
+    /// Override path for the internal local Unix-domain socket. When unset the
+    /// daemon binds `~/.local/share/acp-stack/acps-local.sock`. Override is
+    /// intended for integration tests; deployed instances should leave it
+    /// unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<String>,
 }

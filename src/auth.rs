@@ -35,10 +35,10 @@ pub const AUTH_VERIFIER_DIGEST_BYTES: usize = 32;
 pub enum KeyKind {
     Session,
     Admin,
-    /// Stamped by the Unix-domain-socket listener that serves `acpctl`. It is
-    /// not derivable from any bearer; route handlers reuse the same code path
-    /// as session/admin requests but `enforce_tier` will never accept Local on
-    /// the TCP router, so a Local tag leaking into the public API is a 401.
+    /// Stamped by the internal Unix-domain-socket listener. It is not
+    /// derivable from any bearer; route handlers reuse the same code path as
+    /// session/admin requests but `enforce_tier` will never accept Local on the
+    /// TCP router, so a Local tag leaking into the public API is a 401.
     Local,
     Unknown,
 }

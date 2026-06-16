@@ -231,7 +231,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             .local_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| bind.clone());
-        let (socket_path, parent_policy) = match config.acpctl.socket_path.as_deref() {
+        let (socket_path, parent_policy) = match config.local.socket_path.as_deref() {
             Some(path) => (
                 std::path::PathBuf::from(path),
                 crate::local_listener::ParentPolicy::ValidateOwnerOnly,
@@ -241,7 +241,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
                 crate::local_listener::ParentPolicy::RepairOwnerOnly,
             ),
         };
-        // Bind the acpctl UDS *and* record `server.starting` only after every
+        // Bind the local UDS *and* record `server.starting` only after every
         // listener is ready. A bind failure here is a startup-time error, not
         // a post-start regression — emitting `server.starting` first would
         // leave a dangling lifecycle row whenever the UDS bind fails.
@@ -259,7 +259,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;
         eprintln!("acps serve: listening on {local}");
-        eprintln!("acps serve: acpctl socket at {}", socket_path.display());
+        eprintln!("acps serve: local socket at {}", socket_path.display());
         let agent_supervisor = app_state.agent_supervisor.clone();
 
         // Spawn the Supabase sink once the runtime + shared state are ready.
@@ -295,7 +295,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             agent_supervisor.clone(),
         );
 
-        // The acpctl UDS server runs alongside the TCP server. Both subscribe
+        // The local UDS server runs alongside the TCP server. Both subscribe
         // to the same SIGTERM/SIGINT handler via `axum::serve.with_graceful_shutdown`,
         // so a single signal stops both. If the TCP serve exits first, the
         // local task is aborted; its `SocketGuard::drop` unlinks the socket.
@@ -307,10 +307,10 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         local_handle.abort();
         match local_handle.await {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::warn!(error = %err, "acpctl local listener exited with error"),
+            Ok(Err(err)) => tracing::warn!(error = %err, "local listener exited with error"),
             Err(join_err) if join_err.is_cancelled() => {}
             Err(join_err) => {
-                tracing::warn!(error = %join_err, "acpctl local listener task panicked")
+                tracing::warn!(error = %join_err, "local listener task panicked")
             }
         }
         // Tear down the agent BEFORE recording server.stopped so the

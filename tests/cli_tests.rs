@@ -107,7 +107,7 @@ impl AgentCliHarness {
         let config_path = create_runtime_files(tempdir.path(), &path);
         let runtime_paths = RuntimePaths::new(config_path.clone(), path.clone());
         let mut config = load_config_from_str(VALID_PLACEBO_CONFIG).expect("config parses");
-        let socket_path = tempdir.path().join("acpctl.sock");
+        let socket_path = tempdir.path().join("acp-stack").join("acps-local.sock");
         let workspace = tempdir.path().join("workspace");
         let uploads = workspace.join("uploads");
         fs::create_dir_all(&uploads).expect("workspace uploads should be created");
@@ -118,7 +118,7 @@ impl AgentCliHarness {
         config.agent.env = vec![];
         config.agent.cwd = Some(config.workspace.root.clone());
         config.agent.expected_sha256 = None;
-        config.acpctl.socket_path = Some(socket_path.to_string_lossy().into_owned());
+        config.local.socket_path = Some(socket_path.to_string_lossy().into_owned());
         fs::write(
             &config_path,
             config.to_canonical_toml().expect("canonical test config"),
@@ -221,7 +221,7 @@ fn write_cli_home_with_socket(
         .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []");
     if let Some(socket_path) = socket_path {
         config.push_str(&format!(
-            "\n[acpctl]\nsocket_path = {:?}\n",
+            "\n[local]\nsocket_path = {:?}\n",
             socket_path.to_string_lossy()
         ));
     }
@@ -6977,7 +6977,7 @@ fn agent_switch_accepts_drop_flag() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn security_check_calls_running_daemon_with_admin_key() {
+async fn security_check_calls_running_daemon_without_auth_key() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
     write_cli_home_with_socket(
@@ -6989,7 +6989,7 @@ async fn security_check_calls_running_daemon_with_admin_key() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "check", "--admin-key", ADMIN_KEY])
+        .args(["security", "check"])
         .assert()
         .success()
         .stdout(predicates::str::contains("ok: "))
@@ -7014,7 +7014,7 @@ async fn security_check_renders_hint_line_for_each_finding() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["security", "check", "--admin-key", ADMIN_KEY])
+        .args(["security", "check"])
         .assert()
         .success()
         .stdout(predicates::str::contains("api.public_bind"))
@@ -7024,24 +7024,14 @@ async fn security_check_renders_hint_line_for_each_finding() {
         );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn security_check_uses_admin_key_not_session_key() {
-    let harness = AgentCliHarness::spawn().await;
-    let home = tempfile::tempdir().expect("tempdir should be created");
-    write_cli_home_with_socket(
-        home.path(),
-        &harness.base_url,
-        ADMIN_KEY,
-        Some(&harness.socket_path),
-    );
-
+#[test]
+fn security_check_does_not_accept_admin_key_flag() {
     acps_command()
-        .env("HOME", home.path())
         .args(["security", "check", "--admin-key", SESSION_KEY])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("/v1/security/check"))
-        .stderr(predicates::str::contains("401"));
+        .stderr(predicates::str::contains("unexpected argument"))
+        .stderr(predicates::str::contains("--admin-key"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -7303,7 +7293,7 @@ async fn security_show_uses_admin_key_not_session_key() {
 fn run_security_check_and_extract_run_id(home: &std::path::Path) -> String {
     let output = acps_command()
         .env("HOME", home)
-        .args(["security", "check", "--admin-key", ADMIN_KEY])
+        .args(["security", "check"])
         .assert()
         .success()
         .get_output()

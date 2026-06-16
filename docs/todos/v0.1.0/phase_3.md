@@ -4,7 +4,6 @@
 
 - [project-spec](../../specs/project-spec.md)
 - [api](../../specs/api/api.md)
-- [acpctl](../../specs/acpctl/acpctl.md)
 - [roadmap](../../mgmt/roadmap.md)
 
 ## External Logging Schema
@@ -44,34 +43,29 @@
 - [x] Implement `acps logs query --session <session-id>`.
 - [x] Implement `acps logs query --kind <kind>`.
 
-## Local Agent CLI
+## Local Observability
 
-- [x] Implement `acpctl status`.
-- [x] Implement `acpctl security check`.
-- [x] Implement `acpctl deps check`.
-- [x] Implement `acpctl logs query --since <duration>`.
-- [x] Implement `acpctl workspace list <path>`.
-- [x] Implement `acpctl workspace read <path>`.
-- [x] Implement `acpctl workspace write <path>`.
-- [x] Implement `acpctl command run <command>`.
-- [x] Implement `acpctl config export`.
-- [x] Implement `acpctl permissions pending`.
-- [x] Ensure `acpctl` uses a local capability mechanism rather than public session/admin API keys.
-- [x] Ensure `acpctl` actions are logged with source `local`.
+- [x] Implement keyless local `acps status`.
+- [x] Implement keyless local `acps security check`.
+- [x] Implement keyless local `acps deps check`.
+- [x] Implement keyless local `acps logs query --since <duration>`.
+- [x] Implement keyless local `acps metrics summary`.
+- [x] Implement keyless local `acps sessions list`.
+- [x] Implement keyless local `acps sessions status`.
+- [x] Ensure daemon-backed local observability uses the internal Unix socket rather than public session/admin API keys.
+- [x] Ensure local socket actions are logged with source `local`.
 
-## Local MCP Introspection
+## Local Socket Restrictions
 
-- [x] Implement `acpctl mcp serve`.
-- [x] Expose status, dependency, log, workspace, command, config export, and pending-permission tools.
-- [x] Enforce the same permission and logging rules as the `acpctl` CLI.
-- [x] Prevent agents from reading secret values through the local MCP interface.
-- [x] Prevent agents from rotating API keys through the local MCP interface.
-- [x] Prevent agents from disabling permissions, rate limits, origin checks, or security logging.
+- [x] Prevent local socket callers from reading secret values.
+- [x] Prevent local socket callers from rotating API keys.
+- [x] Prevent local socket callers from importing or exporting config.
+- [x] Prevent local socket callers from mutating workspace files, commands, permissions, or sessions.
+- [x] Prevent local socket callers from disabling permissions, rate limits, origin checks, or security logging.
 
 ## Acceptance
 
 - [x] SQLite remains the local source of truth when external logging is enabled.
 - [x] Supabase logging can be enabled and inspected.
 - [x] Derived session, turn, token, context, command, duration, permission, API, WebSocket, and security metrics are queryable.
-- [x] Agents can use `acpctl` for constrained local inspection.
-- [x] `acpctl mcp serve` exposes the same constrained local interface through MCP.
+- [x] Keyless local `acps` views cover constrained local inspection.
