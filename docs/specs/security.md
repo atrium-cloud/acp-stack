@@ -85,7 +85,7 @@ Workspace paths are resolved under `[workspace].root`. The runtime rejects absol
 
 ## Local Interface
 
-`acpctl` and keyless local `acps` read-only views use a local Unix socket protected by filesystem permissions. They do not use the public session or admin API keys. The local surface is allowlisted and cannot read secret values, rotate keys, import config, approve its own high-risk requests, control public WebSocket disconnections, or mutate sessions.
+Keyless local `acps` read-only views use a local Unix socket protected by filesystem permissions. They do not use the public session or admin API keys. The local surface is allowlisted for low-risk observability and cannot read secret values, rotate keys, import or export config, access workspace files, run commands, decide permissions, control public WebSocket disconnections, or mutate sessions.
 
 ## Deployment Posture
 
@@ -100,7 +100,7 @@ Production deployments should:
 
 ## Security Self-Check
 
-`GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, unavailable required dependencies, and external logging delivery failures.
+The admin-tier public `GET /v1/security/check` route and keyless local `acps security check` diagnostic report findings for common misconfiguration: unsafe binds, wildcard browser origins, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, unavailable required dependencies, and external logging delivery failures.
 
 Findings include severity (`warning` or `critical`), code, message, an optional structured `details` payload for findings with machine-readable context, and remediation when an operator action is available.
 

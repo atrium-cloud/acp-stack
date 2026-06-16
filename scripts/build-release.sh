@@ -23,7 +23,7 @@ readonly TARGETS=(
   "x86_64-unknown-linux-gnu"
   "aarch64-unknown-linux-gnu"
 )
-readonly BINARIES=(acps acpctl)
+readonly BINARIES=(acps)
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly DIST_DIR="${REPO_ROOT}/dist"
@@ -103,7 +103,7 @@ for target in "${TARGETS[@]}"; do
   target_args+=(--target "${target}.${GLIBC}")
 done
 
-cargo zigbuild --release "${target_args[@]}" --bin acps --bin acpctl
+cargo zigbuild --release "${target_args[@]}" --bin acps
 
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"

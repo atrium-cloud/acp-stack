@@ -6,7 +6,7 @@ set -euo pipefail
 #   curl -fsSL https://raw.githubusercontent.com/atrium-cloud/acp-stack/main/install.sh | bash
 #
 # Detects the host architecture, downloads the matching release tarball from
-# GitHub Releases, checksum-verifies it, and installs `acps` + `acpctl`. By
+# GitHub Releases, checksum-verifies it, and installs `acps`. By
 # default it installs the binaries only and leaves you to run `acps init`. Pass
 # --systemd to chain into the systemd installer (creates the runtime user, the
 # unit file, and optionally runs init).
@@ -25,7 +25,7 @@ set -euo pipefail
 # ----- CONSTANTS -----
 REPO="atrium-cloud/acp-stack"
 PROJECT="acp-stack"
-BINARIES="acps acpctl"
+BINARIES="acps"
 GITHUB="https://github.com"
 RAW="https://raw.githubusercontent.com"
 BIN_DIR_ROOT="/usr/local/bin"
@@ -130,7 +130,7 @@ if [ "$DO_SYSTEMD" = true ]; then
   download "${RAW}/${REPO}/${tag}/packaging/systemd/acp-stack-update.service" "${tmp}/acp-stack-update.service"
   download "${RAW}/${REPO}/${tag}/packaging/systemd/acp-stack-update.timer" "${tmp}/acp-stack-update.timer"
 
-  set -- --acps-binary "${tmp}/acps" --acpctl-binary "${tmp}/acpctl" \
+  set -- --acps-binary "${tmp}/acps" \
          --unit-template "${tmp}/acp-stack.service" \
          --update-service-template "${tmp}/acp-stack-update.service" \
          --update-timer-template "${tmp}/acp-stack-update.timer"
@@ -165,7 +165,11 @@ for binary in $BINARIES; do
   install -m 0755 "${tmp}/${binary}" "${dir}/${binary}" \
     || fail "could not install ${binary} to ${dir} (try --bin-dir or sudo)"
 done
-log "installed acps + acpctl to ${dir}"
+if [ -e "${dir}/acpctl" ]; then
+  rm -f "${dir}/acpctl" || fail "could not remove stale acpctl from ${dir}"
+  log "removed stale acpctl from ${dir}"
+fi
+log "installed acps to ${dir}"
 
 case ":${PATH}:" in
   *":${dir}:"*) ;;

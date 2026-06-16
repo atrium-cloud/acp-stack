@@ -1,6 +1,6 @@
 # CLI
 
-`acps` is the operator CLI for initializing, running, and inspecting an `acp-stack` instance. `acpctl` is the constrained local interface for agents and local shell users; see [acpctl](acpctl/acpctl.md).
+`acps` is the CLI for initializing, running, inspecting, and operating an `acp-stack` instance.
 
 ## Command Groups
 
@@ -109,7 +109,7 @@ acps update install --version <tag> [--allow-breaking]
 acps update set --policy security-critical|compatible|manual [--frequency 1d]
 ```
 
-`acps update` checks and installs `acp-stack` releases from `atrium-cloud/acp-stack`. Every check and install attempt writes a local update-history row and a `stack.update.*` event. Container deployments are check-only. Host installs replace `acps` and `acpctl` only when the current binary directory is writable; systemd deployments use the root-owned updater unit installed by `scripts/install-systemd.sh`.
+`acps update` checks and installs `acp-stack` releases from `atrium-cloud/acp-stack`. Every check and install attempt writes a local update-history row and a `stack.update.*` event. Container deployments are check-only. Host installs replace `acps` only when the current binary directory is writable; systemd deployments use the root-owned updater unit installed by `scripts/install-systemd.sh`.
 
 ## Logging Commands
 
@@ -201,7 +201,7 @@ Session CWD values must be existing absolute directories that canonicalize under
 
 `acps ws connections` and `acps ws sessions` use the local read-only route. `acps ws disconnect` mutates live public WebSocket state and requires the admin key.
 
-`acps security check` runs the security self-check and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. Security commands require the admin key. `acps deps check` reports declared dependency status. `acps deps apply` runs only install actions declared in config, requires the admin key, and requires confirmation unless `--yes` is passed. Apply output includes the durable `apply_run_id`; failed runs point operators to `acps installer history --agent deps_apply`.
+`acps security check` runs the security self-check through the local diagnostic route and persists the run to history. `acps security history [--limit N] [--after <id>] [--json]` lists prior runs newest-first; `acps security show <run-id> [--json]` prints a single recorded run with its findings. Security history/show require the admin key. `acps deps check` reports declared dependency status from local config. `acps deps apply` runs only install actions declared in config, requires the admin key, and requires confirmation unless `--yes` is passed. Apply output includes the durable `apply_run_id`; failed runs point operators to `acps installer history --agent deps_apply`.
 
 ## Shell Completion
 

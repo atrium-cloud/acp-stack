@@ -24,7 +24,8 @@ const MANIFEST_ASSET: &str = "acps-release.json";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
-const BINARIES: &[&str] = &["acps", "acpctl"];
+const BINARIES: &[&str] = &["acps"];
+const REMOVED_BINARIES: &[&str] = &["acpctl"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackUpdateTarget {
@@ -759,6 +760,24 @@ fn replace_binaries(stage: &Path, binary_dir: &Path) -> Result<()> {
         }
         backed_up.push((dest, backup));
     }
+    for binary in REMOVED_BINARIES {
+        let dest = binary_dir.join(binary);
+        let backup = backups.path().join(binary);
+        match fs::symlink_metadata(&dest) {
+            Ok(_) => {
+                if let Err(source) = fs::rename(&dest, &backup) {
+                    let rollback = rollback_binary_swap(&[], &backed_up);
+                    return Err(binary_swap_error(dest, source, rollback));
+                }
+                backed_up.push((dest, backup));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                let rollback = rollback_binary_swap(&[], &backed_up);
+                return Err(binary_swap_error(dest, source, rollback));
+            }
+        }
+    }
 
     let mut installed = Vec::new();
     for binary in BINARIES {
@@ -1242,13 +1261,14 @@ restart = "on-crash"
     }
 
     #[test]
-    fn install_archive_swaps_existing_binaries() {
+    fn install_archive_swaps_existing_binary_and_removes_stale_binary() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Seed the destination with old binaries to prove they are replaced.
         for binary in BINARIES {
             fs::write(dir.path().join(binary), b"old").expect("seed old binary");
         }
-        let archive = make_archive(&[("acps", b"new-acps"), ("acpctl", b"new-acpctl")]);
+        fs::write(dir.path().join("acpctl"), b"old-acpctl").expect("seed old acpctl");
+        let archive = make_archive(&[("acps", b"new-acps")]);
 
         install_archive(&archive, dir.path()).expect("install archive");
 
@@ -1256,9 +1276,9 @@ restart = "on-crash"
             fs::read(dir.path().join("acps")).expect("read acps"),
             b"new-acps"
         );
-        assert_eq!(
-            fs::read(dir.path().join("acpctl")).expect("read acpctl"),
-            b"new-acpctl"
+        assert!(
+            !dir.path().join("acpctl").exists(),
+            "stale acpctl should be removed"
         );
         #[cfg(unix)]
         {
@@ -1282,12 +1302,13 @@ restart = "on-crash"
         for binary in BINARIES {
             fs::write(dir.path().join(binary), b"old").expect("seed old binary");
         }
-        // `acpctl` is absent, so the extract step must fail before any swap.
-        let archive = make_archive(&[("acps", b"new-acps")]);
+        fs::write(dir.path().join("acpctl"), b"old-acpctl").expect("seed old acpctl");
+        // `acps` is absent, so the extract step must fail before any swap.
+        let archive = make_archive(&[]);
 
         let err =
             install_archive(&archive, dir.path()).expect_err("missing binary should fail install");
-        assert!(err.to_string().contains("acpctl"));
+        assert!(err.to_string().contains("acps"));
 
         // The pre-existing binaries are untouched because the swap never began.
         for binary in BINARIES {
@@ -1296,6 +1317,10 @@ restart = "on-crash"
                 b"old"
             );
         }
+        assert_eq!(
+            fs::read(dir.path().join("acpctl")).expect("read seeded acpctl"),
+            b"old-acpctl"
+        );
     }
 }
 
@@ -1462,10 +1487,7 @@ frequency = "1d"
         let tarball_name = format!("acp-stack-{TARGET_VERSION}-{target}.tar.gz");
 
         // Build the release artifacts the fixture serves.
-        let tarball = make_targz(&[
-            ("acps", b"new-acps-binary"),
-            ("acpctl", b"new-acpctl-binary"),
-        ]);
+        let tarball = make_targz(&[("acps", b"new-acps-binary")]);
         let tar_sha = sha256_hex(&tarball);
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
@@ -1513,6 +1535,7 @@ frequency = "1d"
         for binary in BINARIES {
             std::fs::write(bin_dir.join(binary), b"old").expect("seed old binary");
         }
+        std::fs::write(bin_dir.join("acpctl"), b"old-acpctl").expect("seed old acpctl");
 
         // Activate the fixture seams. SAFETY: set before any other thread is
         // spawned in this test; removed before the test returns. No other test
@@ -1557,11 +1580,10 @@ frequency = "1d"
             std::fs::read(bin_dir.join("acps")).expect("read acps"),
             b"new-acps-binary"
         );
-        assert_eq!(
-            std::fs::read(bin_dir.join("acpctl")).expect("read acpctl"),
-            b"new-acpctl-binary"
+        assert!(
+            !bin_dir.join("acpctl").exists(),
+            "stale acpctl should be removed"
         );
-
         let runs = store.query_stack_update_runs(10).expect("runs");
         assert!(
             runs.iter()

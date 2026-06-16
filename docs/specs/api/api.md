@@ -12,7 +12,7 @@ Authorization: Bearer <key>
 | ----------- | ------------------------------------------------------------------------------- |
 | Session key | sessions, workspace files, mediated commands, logs, status, pending permissions |
 | Admin key   | secrets, config import, agent process control, security-sensitive operations    |
-| Local       | `acpctl` over the local Unix socket only                                        |
+| Local       | internal Unix socket used by keyless low-risk local `acps` routes               |
 
 `acps init` creates the session and admin keys on first run, prints the plaintext once, and stores only local verifier rows. The session key can be rotated by an admin-authenticated daemon call. The admin key is regenerated only by resetting and reinitializing the instance.
 
@@ -110,7 +110,7 @@ Session status defaults to a rolling `8h` activity window and accepts `window=<d
 
 Session list filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
 
-The local Unix-socket router also exposes `GET /v1/sessions` and `GET /v1/sessions/-/status` without bearer auth for read-only observability. Session mutation routes are not registered on the local socket.
+The local Unix-socket router exposes selected low-risk daemon-backed routes without bearer auth for local `acps` commands, including `GET /v1/sessions`, `GET /v1/sessions/-/status`, metrics summary, WebSocket summaries, and the security diagnostic. Session mutation, workspace, command, config import/export, permission decision, secret, dependency mutation, log export, and auth rotation routes are not registered on the local socket.
 
 ### Prompt-Path Error Codes
 

@@ -40,17 +40,15 @@ Repository test scripts are maintainer tools, not deployment instructions:
 
 `placebo-agent` is a deterministic ACP fixture for integration tests. It is compiled only with `--features test-fixtures`. Tests invoke it through `CARGO_BIN_EXE_placebo-agent` with the `acp` subcommand, so they do not depend on a locally installed production agent or API key.
 
-The fixture is not a supported agent. Binary release packaging must continue to bundle only the runtime CLIs, `acps` and `acpctl`.
+The fixture is not a supported agent. Binary release packaging must continue to bundle only the runtime binary, `acps`.
 
 ## Dev Commands
 
 `acps dev ...` and hidden bypass flags are compiled only with `--features dev-tools`. Use this path for local maintainer loops such as `acps dev init --skip-workspace-init` or `acps dev serve --allow-root`; those commands must not appear in default builds.
 
-## Local Interface Coupling
+## Local Socket Coupling
 
-`acpctl` is intentionally allowlisted. Any change to the local command surface must keep these in sync:
+The internal local socket is intentionally allowlisted. Any change to daemon-backed keyless local `acps` routes must keep these in sync:
 
-- the documented allowlist in `docs/specs/acpctl/acpctl.md`
 - the local socket router
-- the MCP tool facade
 - deny-list coverage for high-risk routes

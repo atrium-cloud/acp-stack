@@ -5,7 +5,6 @@
 - [project-spec](../../specs/project-spec.md)
 - [api](../../specs/api/api.md)
 - [acp-bridge](../../specs/acp/acp-bridge.md)
-- [acpctl](../../specs/acpctl/acpctl.md)
 - [roadmap](../../mgmt/roadmap.md)
 
 ## CLI UX
@@ -98,7 +97,7 @@
 - [x] Add request/response counts by method, route, status bucket, key kind, source, origin kind, country, and region.
 - [x] Add live WebSocket connection registry with connection IDs, topics, derived `sessions.{id}` subscriptions, origin metadata, and disconnect reason tracking.
 - [x] Add admin `acps` commands to list WebSocket connections, list unique subscribed session IDs, disconnect selected connections, and disconnect all connections for selected session IDs.
-- [x] Add read-only `acpctl` and `acpctl mcp serve` surfaces for sanitized WebSocket connection/session reporting.
+- [x] Add keyless local `acps ws connections` and `acps ws sessions` views for sanitized WebSocket connection/session reporting.
 
 ## Security Self-Check History
 

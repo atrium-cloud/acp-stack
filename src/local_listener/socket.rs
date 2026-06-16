@@ -7,10 +7,10 @@ use crate::api::{self, AppState};
 use crate::error::{Result, StackError};
 use crate::fs_util::{create_dir_owner_only, home_dir, parent_dir, set_owner_only_dir};
 
-/// Default socket path: `~/.local/share/acp-stack/acpctl.sock`.
+/// Default socket path: `~/.local/share/acp-stack/acps-local.sock`.
 pub fn default_socket_path() -> Result<PathBuf> {
     let home = home_dir()?;
-    Ok(home.join(".local/share/acp-stack/acpctl.sock"))
+    Ok(home.join(".local/share/acp-stack/acps-local.sock"))
 }
 
 /// Unlinks the socket file on drop — but only if the inode at the path still
@@ -39,7 +39,7 @@ impl Drop for SocketGuard {
             Ok(inode) => inode,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
             Err(err) => {
-                tracing::warn!(error = %err, path = %self.path.display(), "stat acpctl socket on shutdown");
+                tracing::warn!(error = %err, path = %self.path.display(), "stat local socket on shutdown");
                 return;
             }
         };
@@ -48,14 +48,14 @@ impl Drop for SocketGuard {
                 path = %self.path.display(),
                 bound_inode = ?self.inode,
                 current_inode,
-                "acpctl socket inode changed since bind; refusing to unlink (another daemon may own it)",
+                "local socket inode changed since bind; refusing to unlink (another daemon may own it)",
             );
             return;
         }
         if let Err(err) = std::fs::remove_file(&self.path)
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            tracing::warn!(error = %err, path = %self.path.display(), "failed to unlink acpctl socket");
+            tracing::warn!(error = %err, path = %self.path.display(), "failed to unlink local socket");
         }
     }
 }
@@ -66,16 +66,6 @@ impl Drop for SocketGuard {
 pub struct BoundLocalListener {
     listener: UnixListener,
     guard: SocketGuard,
-}
-
-impl BoundLocalListener {
-    /// Consume the wrapper and return the bound `UnixListener` together with
-    /// the `SocketGuard` whose `Drop` impl unlinks the socket inode on exit.
-    /// Used by `acpctl mcp serve` (http-uds transport) to plumb a safely-bound
-    /// listener into rmcp's HTTP server without re-implementing the bind path.
-    pub fn into_parts(self) -> (UnixListener, SocketGuard) {
-        (self.listener, self.guard)
-    }
 }
 
 /// Whether the listener may chmod (`0o700`) an already-existing socket parent
@@ -113,7 +103,7 @@ pub async fn bind_local(
     let inode = current_inode(socket_path).ok();
     let guard = SocketGuard::new(socket_path.to_path_buf(), inode);
 
-    tracing::info!(path = %socket_path.display(), "acpctl UDS bound");
+    tracing::info!(path = %socket_path.display(), "local UDS bound");
     Ok(BoundLocalListener { listener, guard })
 }
 
@@ -154,7 +144,7 @@ fn validate_parent_dir_owner_only(parent: &Path) -> Result<()> {
             source: std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "acpctl socket parent is a symlink: {} (refusing to follow into an unverified directory)",
+                    "local socket parent is a symlink: {} (refusing to follow into an unverified directory)",
                     parent.display()
                 ),
             ),
@@ -165,7 +155,7 @@ fn validate_parent_dir_owner_only(parent: &Path) -> Result<()> {
             source: std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "acpctl socket parent is not a directory: {}",
+                    "local socket parent is not a directory: {}",
                     parent.display()
                 ),
             ),
@@ -180,7 +170,7 @@ fn validate_parent_dir_owner_only(parent: &Path) -> Result<()> {
             source: std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "acpctl socket parent {} has mode {:o}; require owner-only (0o700) for a custom socket_path",
+                    "local socket parent {} has mode {:o}; require owner-only (0o700) for a custom socket_path",
                     parent.display(),
                     mode & 0o777
                 ),
@@ -193,7 +183,7 @@ fn validate_parent_dir_owner_only(parent: &Path) -> Result<()> {
             source: std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "acpctl socket parent {} is not owned by the runtime user (uid {} != {})",
+                    "local socket parent {} is not owned by the runtime user (uid {} != {})",
                     parent.display(),
                     metadata.uid(),
                     euid
@@ -230,7 +220,7 @@ async fn handle_existing_socket(path: &Path) -> Result<()> {
                 source: std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     format!(
-                        "configured acpctl socket path is occupied by a non-socket: {}",
+                        "configured local socket path is occupied by a non-socket: {}",
                         path.display()
                     ),
                 ),
@@ -243,7 +233,7 @@ async fn handle_existing_socket(path: &Path) -> Result<()> {
             source: std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
                 format!(
-                    "another acpctl listener is already accepting on {}; refusing to take over",
+                    "another local listener is already accepting on {}; refusing to take over",
                     path.display()
                 ),
             ),
@@ -268,7 +258,7 @@ async fn handle_existing_socket(path: &Path) -> Result<()> {
                     source: std::io::Error::new(
                         std::io::ErrorKind::AddrInUse,
                         format!(
-                            "acpctl socket at {} was replaced concurrently; refusing to unlink another daemon's socket",
+                            "local socket at {} was replaced concurrently; refusing to unlink another daemon's socket",
                             path.display()
                         ),
                     ),
@@ -326,7 +316,7 @@ mod tests {
         let path = default_socket_path().expect("home resolves");
         let display = path.display().to_string();
         assert!(
-            display.ends_with("/.local/share/acp-stack/acpctl.sock"),
+            display.ends_with("/.local/share/acp-stack/acps-local.sock"),
             "{display}"
         );
     }

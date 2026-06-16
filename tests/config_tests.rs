@@ -1368,32 +1368,32 @@ fn export_includes_config_version() {
 }
 
 #[test]
-fn rejects_acpctl_socket_path_relative() {
-    let input = format!("{VALID_CONFIG}\n[acpctl]\nsocket_path = \"relative/path.sock\"\n");
+fn rejects_local_socket_path_relative() {
+    let input = format!("{VALID_CONFIG}\n[local]\nsocket_path = \"relative/path.sock\"\n");
     let error = load_config_from_str(&input).expect_err("relative path should be rejected");
     assert!(
-        error.to_string().contains("acpctl.socket_path") && error.to_string().contains("absolute"),
+        error.to_string().contains("local.socket_path") && error.to_string().contains("absolute"),
         "got: {error}"
     );
 }
 
 #[test]
-fn rejects_acpctl_socket_path_with_dot_dot() {
-    let input = format!("{VALID_CONFIG}\n[acpctl]\nsocket_path = \"/tmp/../etc/passwd.sock\"\n");
+fn rejects_local_socket_path_with_dot_dot() {
+    let input = format!("{VALID_CONFIG}\n[local]\nsocket_path = \"/tmp/../etc/passwd.sock\"\n");
     let error = load_config_from_str(&input).expect_err("dot dot path should be rejected");
     assert!(
-        error.to_string().contains("acpctl.socket_path") && error.to_string().contains(".."),
+        error.to_string().contains("local.socket_path") && error.to_string().contains(".."),
         "got: {error}"
     );
 }
 
 #[test]
-fn allows_acpctl_socket_path_absolute() {
-    let input = format!("{VALID_CONFIG}\n[acpctl]\nsocket_path = \"/tmp/acpctl.sock\"\n");
+fn allows_local_socket_path_absolute() {
+    let input = format!("{VALID_CONFIG}\n[local]\nsocket_path = \"/tmp/acps-local.sock\"\n");
     let config = load_config_from_str(&input).expect("absolute path should be accepted");
     assert_eq!(
-        config.acpctl.socket_path.as_deref(),
-        Some("/tmp/acpctl.sock")
+        config.local.socket_path.as_deref(),
+        Some("/tmp/acps-local.sock")
     );
 }
 

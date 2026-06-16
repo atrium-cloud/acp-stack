@@ -4,7 +4,6 @@
 
 - [project-spec](../../specs/project-spec.md)
 - [api](../../specs/api/api.md)
-- [acpctl](../../specs/acpctl/acpctl.md)
 - [roadmap](../../mgmt/roadmap.md)
 
 ## Docker
@@ -15,7 +14,7 @@
 - [x] Persist `/home/acp/.config/acp-stack`.
 - [x] Persist `/home/acp/.local/share/acp-stack`.
 - [x] Document required environment variables and volume mounts.
-- [x] Add smoke test for container startup and `GET /v1/status`.
+- [x] Add test for container startup and `GET /v1/status`.
 
 ## systemd
 
@@ -114,7 +113,7 @@
 - [x] After config and secrets are present, run a full init testflight that starts the agent and sends a minimal real prompt.
 - [x] Integrate the existing `acps agent test` runner into `acps init --testflight` after explicit confirmation.
 - [x] Testflight must verify session creation, prompt completion, streamed updates, and terminal prompt state, not just process startup.
-- [x] For each supported agent, smoke test at least one filesystem-visible tool action when the agent supports tools.
+- [x] For each supported agent, test at least one filesystem-visible tool action when the agent supports tools.
 - [x] Fail testflight if an agent appears active but emits no progress or terminal state within the configured timeout.
 - [x] Warn that real-prompt testflight may consume provider credits and provide an explicit skip/confirmation path.
 - [x] Hard-fail unsupported init paths early: browser OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, and missing required secrets.
@@ -134,12 +133,12 @@
 - [x] Check recent auth failure rate is below configured thresholds.
 - [x] Check external logging sink health when enabled.
 
-## acpctl Hardening
+## Local Socket Hardening
 
-- [x] Audit each `acpctl` command for permission boundaries.
+- [x] Audit each local socket route for permission boundaries.
 - [x] Ensure high-risk local commands cannot be self-approved unless policy explicitly allows it.
-- [x] Add durable audit records for all `acpctl` actions.
-- [x] Add tests proving `acpctl` cannot read secrets or rotate API keys.
+- [x] Add durable audit records for all local socket actions.
+- [x] Add tests proving the local socket cannot read secrets or rotate API keys.
 
 ## Acceptance
 
@@ -148,4 +147,4 @@
 - [x] Public deployments have documented reverse proxy and Cloudflare Tunnel configurations.
 - [x] `acps deps apply` supports only narrow, explicit installation behavior.
 - [x] Security self-checks are available through CLI and API.
-- [x] `acpctl` permission boundaries are tested and audited.
+- [x] Local socket permission boundaries are tested and audited.

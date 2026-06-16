@@ -696,7 +696,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
         prompts: Default::default(),
         dependencies: Default::default(),
         mcp: mcp_from_args(args)?,
-        acpctl: Default::default(),
+        local: Default::default(),
     };
 
     let canonical = starter.to_canonical_toml()?;
