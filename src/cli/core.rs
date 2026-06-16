@@ -1,4 +1,4 @@
-use crate::auth::{AuthVerifierEnsureOutcome, ensure_auth_verifier_pair};
+use crate::auth::{AuthVerifierEnsureOutcome, KeyKind, ensure_auth_verifier_pair};
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::{home_dir, set_owner_only_file};
@@ -366,6 +366,7 @@ pub(super) const SESSION_KEY_ENV: &str = "ACP_STACK_SESSION_KEY";
 pub(super) enum CliMethod {
     Get,
     Post,
+    Put,
     Delete,
 }
 
@@ -386,6 +387,7 @@ pub(super) async fn daemon_request(
     let request = match method {
         CliMethod::Get => client.get(&url),
         CliMethod::Post => client.post(&url),
+        CliMethod::Put => client.put(&url),
         CliMethod::Delete => client.delete(&url),
     }
     .bearer_auth(key);
@@ -484,6 +486,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/config/export"
     } else if bare == "/v1/auth/session-key/regenerate" {
         "/v1/auth/session-key/regenerate"
+    } else if bare == "/v1/auth/local-session-access" {
+        "/v1/auth/local-session-access"
     } else if bare == "/v1/config/validate" {
         "/v1/config/validate"
     } else if bare == "/v1/agent/capabilities" {
@@ -590,6 +594,7 @@ impl CliMethod {
         match self {
             CliMethod::Get => "GET",
             CliMethod::Post => "POST",
+            CliMethod::Put => "PUT",
             CliMethod::Delete => "DELETE",
         }
     }
@@ -627,6 +632,29 @@ pub(super) fn resolve_session_key(value: Option<String>) -> Result<String> {
     })
 }
 
+pub(super) enum SessionAccess {
+    Bearer(String),
+    Local,
+}
+
+pub(super) fn resolve_session_access(
+    config: &Config,
+    value: Option<String>,
+) -> Result<SessionAccess> {
+    if let Some(key) = value {
+        return validate_key_input("--session-key", key).map(SessionAccess::Bearer);
+    }
+    if let Ok(key) = std::env::var(SESSION_KEY_ENV) {
+        return validate_key_input(SESSION_KEY_ENV, key).map(SessionAccess::Bearer);
+    }
+    if config.local.session_auth == crate::config::LocalSessionAuth::Keyless {
+        return Ok(SessionAccess::Local);
+    }
+    Err(StackError::MissingField {
+        field: "--session-key or ACP_STACK_SESSION_KEY (or enable local session access with `acps auth local-session-access enable`)",
+    })
+}
+
 pub(super) fn resolve_admin_key(value: Option<String>, interactive: bool) -> Result<String> {
     if let Some(key) = value {
         return validate_key_input("--admin-key", key);
@@ -656,8 +684,20 @@ pub(super) fn validate_local_admin_key(key: &str) -> Result<()> {
             });
         }
     }
+    validate_admin_key_against_store(&store, key)
+}
+
+pub(super) fn validate_local_admin_key_from_state(key: &str) -> Result<()> {
+    let home = home_dir()?;
+    let state_path = default_state_path(&home);
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    validate_admin_key_against_store(&store, key)
+}
+
+fn validate_admin_key_against_store(store: &StateStore, key: &str) -> Result<()> {
     let verifiers = store.load_auth_verifier_pair()?;
-    if verifiers.verify(key) == Some(crate::auth::KeyKind::Admin) {
+    if verifiers.verify(key) == Some(KeyKind::Admin) {
         Ok(())
     } else {
         Err(StackError::InvalidParam {
@@ -911,6 +951,10 @@ mod tests {
             (
                 "/v1/sessions/sess_123/snapshot",
                 "/v1/sessions/{id}/snapshot",
+            ),
+            (
+                "/v1/auth/local-session-access",
+                "/v1/auth/local-session-access",
             ),
             ("/v1/agent/restart", "/v1/agent/restart"),
         ];

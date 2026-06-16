@@ -12,9 +12,11 @@ Authorization: Bearer <key>
 | ----------- | ------------------------------------------------------------------------------- |
 | Session key | sessions, workspace files, mediated commands, logs, status, pending permissions |
 | Admin key   | secrets, config import, agent process control, security-sensitive operations    |
-| Local       | internal Unix socket used by keyless low-risk local `acps` routes               |
+| Local       | internal Unix socket used by keyless local `acps` routes                        |
 
 `acps init` creates the session and admin keys on first run, prints the plaintext once, and stores only local verifier rows. The session key can be rotated by an admin-authenticated daemon call. The admin key is regenerated only by resetting and reinitializing the instance.
+
+Public HTTP tiering is strict. `[local].session_auth = "keyless"` only affects same-user Unix-socket access and never makes admin keys valid for public session routes.
 
 ## Response Envelope
 
@@ -41,15 +43,16 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 
 ## Config And Secrets
 
-| Route                       | Tier    | Contract                                                     |
-| --------------------------- | ------- | ------------------------------------------------------------ |
-| `GET /v1/config/export`     | session | returns current canonical TOML with secret refs only         |
-| `POST /v1/config/validate`  | session | validates raw TOML without writing                           |
-| `POST /v1/config/import`    | admin   | validates and writes canonical TOML; supports `dry_run=true` |
-| `GET /v1/secrets`           | admin   | lists secret names only                                      |
-| `POST /v1/secrets`          | admin   | stores or replaces a secret value                            |
-| `DELETE /v1/secrets/{name}` | admin   | deletes a secret                                             |
+| Route                                | Tier    | Contract                                                     |
+| ------------------------------------ | ------- | ------------------------------------------------------------ |
+| `GET /v1/config/export`              | session | returns current canonical TOML with secret refs only         |
+| `POST /v1/config/validate`           | session | validates raw TOML without writing                           |
+| `POST /v1/config/import`             | admin   | validates and writes canonical TOML; supports `dry_run=true` |
+| `GET /v1/secrets`                    | admin   | lists secret names only                                      |
+| `POST /v1/secrets`                   | admin   | stores or replaces a secret value                            |
+| `DELETE /v1/secrets/{name}`          | admin   | deletes a secret                                             |
 | `POST /v1/auth/session-key/regenerate` | admin | replaces the session verifier and returns the new plaintext key once |
+| `PUT /v1/auth/local-session-access`  | admin   | sets `[local].session_auth` and applies it to the running daemon |
 
 Secret values are never returned by the API. Auth keys are not secret-store entries.
 
@@ -110,7 +113,7 @@ Session status defaults to a rolling `8h` activity window and accepts `window=<d
 
 Session list filters accept `limit`, time bounds, and range values. Duration suffixes such as `30m`, `12h`, `60d`, `8w`, `6mo`, and `1y` are interpreted relative to request time.
 
-The local Unix-socket router exposes selected low-risk daemon-backed routes without bearer auth for local `acps` commands, including `GET /v1/sessions`, `GET /v1/sessions/-/status`, metrics summary, WebSocket summaries, and the security diagnostic. Session mutation, workspace, command, config import/export, permission decision, secret, dependency mutation, log export, and auth rotation routes are not registered on the local socket.
+The local Unix-socket router always exposes selected low-risk daemon-backed routes without bearer auth for local `acps` commands, including `GET /v1/sessions`, `GET /v1/sessions/-/status`, metrics summary, WebSocket summaries, and the security diagnostic. Session-tier HTTP routes are also mounted on the local socket but return 404 unless `[local].session_auth = "keyless"` is active. Admin-tier routes, auth rotation, config import, secret mutation, dependency apply, WebSocket disconnects, and WebSocket upgrades are not registered on the local socket.
 
 ### Prompt-Path Error Codes
 

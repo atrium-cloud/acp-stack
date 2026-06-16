@@ -47,6 +47,7 @@ fn acps_command_without_placebo() -> Command {
 struct AgentCliHarness {
     base_url: String,
     socket_path: std::path::PathBuf,
+    config_path: std::path::PathBuf,
     state_path: std::path::PathBuf,
     join: JoinHandle<acp_stack::error::Result<()>>,
     local_join: JoinHandle<acp_stack::error::Result<()>>,
@@ -158,6 +159,7 @@ impl AgentCliHarness {
         Self {
             base_url,
             socket_path,
+            config_path,
             state_path: path,
             join,
             local_join,
@@ -211,6 +213,16 @@ fn write_cli_home_with_socket(
     admin_key: &str,
     socket_path: Option<&std::path::Path>,
 ) {
+    write_cli_home_with_socket_and_session_auth(home, base_url, admin_key, socket_path, None);
+}
+
+fn write_cli_home_with_socket_and_session_auth(
+    home: &std::path::Path,
+    base_url: &str,
+    admin_key: &str,
+    socket_path: Option<&std::path::Path>,
+    session_auth: Option<&str>,
+) {
     let config_dir = home.join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let mut config = VALID_CONFIG
@@ -219,11 +231,17 @@ fn write_cli_home_with_socket(
             &format!(r#"public_url = "{base_url}""#),
         )
         .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []");
-    if let Some(socket_path) = socket_path {
-        config.push_str(&format!(
-            "\n[local]\nsocket_path = {:?}\n",
-            socket_path.to_string_lossy()
-        ));
+    if socket_path.is_some() || session_auth.is_some() {
+        config.push_str("\n[local]\n");
+        if let Some(socket_path) = socket_path {
+            config.push_str(&format!(
+                "socket_path = {:?}\n",
+                socket_path.to_string_lossy()
+            ));
+        }
+        if let Some(session_auth) = session_auth {
+            config.push_str(&format!("session_auth = \"{session_auth}\"\n"));
+        }
     }
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
     seed_auth_verifiers(home, SESSION_KEY, admin_key);
@@ -7505,6 +7523,162 @@ fn sessions_mutating_commands_require_explicit_session_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn auth_local_session_access_enable_and_disable_call_daemon() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
+
+    acps_command()
+        .env("HOME", home.path())
+        .args([
+            "auth",
+            "local-session-access",
+            "enable",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("local session access: keyless"));
+
+    let daemon_config = fs::read_to_string(&harness.config_path).expect("daemon config");
+    assert!(daemon_config.contains("session_auth = \"keyless\""));
+
+    acps_command()
+        .env("HOME", home.path())
+        .args([
+            "auth",
+            "local-session-access",
+            "disable",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "local session access: session-key",
+        ));
+}
+
+#[test]
+fn auth_local_session_access_status_reports_config() {
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home_with_socket_and_session_auth(
+        home.path(),
+        "http://127.0.0.1:9",
+        ADMIN_KEY,
+        None,
+        Some("keyless"),
+    );
+
+    acps_command()
+        .env("HOME", home.path())
+        .args(["auth", "local-session-access", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("local session access: keyless"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_new_uses_local_socket_without_key_when_enabled() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home_with_socket_and_session_auth(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+        Some("keyless"),
+    );
+
+    acps_command()
+        .env("HOME", home.path())
+        .args([
+            "auth",
+            "local-session-access",
+            "enable",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", home.path())
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", home.path())
+        .env_remove("ACP_STACK_SESSION_KEY")
+        .args(["sessions", "new"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session: "));
+
+    acps_command()
+        .env("HOME", home.path())
+        .args([
+            "auth",
+            "local-session-access",
+            "disable",
+            "--admin-key",
+            ADMIN_KEY,
+        ])
+        .assert()
+        .success();
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
+
+    acps_command()
+        .env("HOME", home.path())
+        .env_remove("ACP_STACK_SESSION_KEY")
+        .args(["sessions", "new"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--session-key or ACP_STACK_SESSION_KEY",
+        ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_new_explicit_key_uses_public_api_even_when_local_keyless() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    let missing_socket = home.path().join("missing.sock");
+    write_cli_home_with_socket_and_session_auth(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&missing_socket),
+        Some("keyless"),
+    );
+
+    acps_command()
+        .env("HOME", home.path())
+        .args(["agent", "start", "--admin-key", ADMIN_KEY])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", home.path())
+        .args(["sessions", "new", "--session-key", SESSION_KEY])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session: "));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sessions_new_format_json_returns_session_object() {
     let harness = AgentCliHarness::spawn().await;
     let home = tempfile::tempdir().expect("tempdir should be created");
@@ -9858,6 +10032,39 @@ fn config_import_with_force_replaces_existing_config() {
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config readable");
     assert!(written.contains("127.0.0.1:7777"));
+}
+
+#[test]
+fn config_import_force_replaces_invalid_existing_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (_, admin_key) = run_init_with_home(tempdir.path());
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    fs::write(&config_path, "not valid toml").expect("write invalid config");
+
+    let modified =
+        VALID_PLACEBO_CONFIG.replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7778""#);
+    let import_path = tempdir.path().join("replacement.toml");
+    fs::write(&import_path, &modified).expect("write replacement");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "config",
+            "import",
+            import_path.to_str().unwrap(),
+            "--force",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("imported config (replaced)"))
+        .stdout(predicates::str::contains(
+            "local session access will apply on next daemon start",
+        ));
+
+    let written = fs::read_to_string(config_path).expect("config readable");
+    assert!(written.contains("127.0.0.1:7778"));
 }
 
 #[test]

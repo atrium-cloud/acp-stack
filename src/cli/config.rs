@@ -1,4 +1,4 @@
-use crate::config::{self, Config};
+use crate::config::{self, Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, parent_dir, write_new_file_owner_only,
@@ -8,7 +8,10 @@ use clap::{Args, Subcommand};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use super::core::{OutputFormat, print_json, resolve_admin_key, validate_local_admin_key};
+use super::core::{
+    CliMethod, OutputFormat, daemon_base_url, daemon_request, print_json, resolve_admin_key,
+    validate_local_admin_key_from_state,
+};
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
@@ -168,35 +171,47 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
         return Ok(());
     }
 
-    if target.exists() {
+    let previous_config = if target.exists() {
         if !args.force {
             return Err(StackError::ConfigExists {
                 path: target.clone(),
             });
         }
-        Config::load_from_path(&target)?;
-    }
+        // This is only needed to find a running daemon for best-effort runtime
+        // notification. A broken existing file must not block a forced import.
+        Config::load_from_path(&target).ok()
+    } else {
+        None
+    };
 
     let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
-    validate_local_admin_key(&admin_key)?;
+    validate_local_admin_key_from_state(&admin_key)?;
 
     let target_dir = parent_dir(&target)?;
     create_dir_owner_only(target_dir)?;
 
-    if target.exists() {
+    let replaced = target.exists();
+    if replaced {
         if !output.is_json() {
             print_config_import_progress(true);
         }
         atomic_write_owner_only(&target, payload.canonical.as_bytes())?;
+        let runtime_applied = apply_imported_local_session_auth_to_running_daemon(
+            previous_config.as_ref(),
+            &admin_key,
+            payload.config.local.session_auth,
+        )?;
         if output.is_json() {
             print_json(&serde_json::json!({
                 "imported": true,
                 "replaced": true,
                 "path": target.display().to_string(),
                 "bytes": payload.canonical.len(),
+                "local_session_auth_runtime_applied": runtime_applied,
             }))?;
         } else {
             println!("imported config (replaced): {}", target.display());
+            print_local_session_auth_apply_status(runtime_applied);
         }
     } else {
         if !output.is_json() {
@@ -209,6 +224,7 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
                 "replaced": false,
                 "path": target.display().to_string(),
                 "bytes": payload.canonical.len(),
+                "local_session_auth_runtime_applied": false,
             }))?;
         } else {
             println!("imported config: {}", target.display());
@@ -216,6 +232,53 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
     }
 
     Ok(())
+}
+
+fn apply_imported_local_session_auth_to_running_daemon(
+    previous_config: Option<&Config>,
+    admin_key: &str,
+    session_auth: LocalSessionAuth,
+) -> Result<bool> {
+    let Some(previous_config) = previous_config else {
+        return Ok(false);
+    };
+    let base_url = daemon_base_url(
+        previous_config.api.public_url.as_deref(),
+        &previous_config.api.bind,
+    )?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    let result = runtime.block_on(async {
+        daemon_request(
+            &base_url,
+            CliMethod::Put,
+            "/v1/auth/local-session-access",
+            admin_key,
+            Some(&serde_json::json!({ "session_auth": session_auth })),
+        )
+        .await
+    });
+    match result {
+        Ok(_) => Ok(true),
+        Err(StackError::AgentApiRequest { .. }) => Ok(false),
+        Err(StackError::AgentApiStatus { status, .. })
+            if status == http::StatusCode::NOT_FOUND
+                || status == http::StatusCode::METHOD_NOT_ALLOWED =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn print_local_session_auth_apply_status(applied: bool) {
+    if applied {
+        println!("local session access applied to running daemon");
+    } else {
+        println!("local session access will apply on next daemon start");
+    }
 }
 
 pub(super) fn load_config_import_payload(

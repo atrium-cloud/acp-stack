@@ -6,7 +6,7 @@
 
 - Runtime: Rust-only, distributed as a single deployable binary.
 - CLI: `acps` is the human/operator-facing CLI.
-- Local agent interface: `acpctl` is the constrained local interface for agents running inside the instance.
+- Command boundary: `acps` is the sole supported command surface.
 - Protocol boundary: `acp-stack` acts as an ACP client and uses ACP as the agent protocol boundary.
 - State: SQLite is the local source of truth for runtime history.
 - Secrets: age-compatible encrypted storage, with secret references in config.
