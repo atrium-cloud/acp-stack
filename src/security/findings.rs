@@ -2,15 +2,12 @@
 //!
 //! `SecurityFinding` is the wire/CLI shape; `PathInspectionIssue` carries a
 //! per-path inspection failure from `ownership::inspect`. The `shell_quote`
-//! and `key_is_weak` helpers are used by multiple rule modules to render
-//! remediation strings and detect weak operator-supplied keys.
+//! helper is used by multiple rule modules to render remediation strings.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::Serialize;
-
-use crate::security::MIN_API_KEY_LEN;
 
 /// Returns true if `bind` parses to a socket address with an unspecified IP
 /// (e.g. `0.0.0.0` / `[::]`). Used by the bind/cors/cloudflare rules to gate
@@ -19,28 +16,6 @@ pub(super) fn bind_is_public(bind: &str) -> bool {
     bind.parse::<SocketAddr>()
         .map(|addr| addr.ip().is_unspecified())
         .unwrap_or(false)
-}
-
-/// Case-insensitive placeholder values rejected by the `auth.*_key_weak`
-/// check. Compared against the trimmed key value.
-pub(super) const WEAK_PLACEHOLDERS: &[&str] = &[
-    "changeme",
-    "default",
-    "placeholder",
-    "replace_me",
-    "replaceme",
-    "test",
-    "example",
-    "secret",
-];
-
-pub(super) fn key_is_weak(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.len() < MIN_API_KEY_LEN {
-        return true;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    WEAK_PLACEHOLDERS.iter().any(|p| lower == *p)
 }
 
 /// POSIX shell single-quote escape. Wraps `s` in `'...'` and replaces each

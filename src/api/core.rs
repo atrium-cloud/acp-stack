@@ -2,8 +2,8 @@
 //!
 //! The router exposes `/v1/*` routes behind a two-stage auth chain:
 //!
-//! 1. `authenticate` reads the Bearer token, constant-time compares against
-//!    the cached session and admin keys, tags the request with the resolved
+//! 1. `authenticate` reads the Bearer token, validates it against the cached
+//!    session/admin verifiers, tags the request with the resolved
 //!    `KeyKind`, and 401s on any failure (with a structured `auth_failures`
 //!    row written through `record_auth_failure`).
 //! 2. A per-route `require_tier` middleware reads the tag and rejects any
@@ -30,10 +30,9 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
-use zeroize::Zeroizing;
 
 use super::auth::{
     authenticate, enforce_http_origin, ensure_envelope, log_api_request, require_admin,
@@ -43,6 +42,7 @@ use super::routes::agent::{
     agent_capabilities_handler, agent_install_handler, agent_restart_handler, agent_start_handler,
     agent_stop_handler, agent_switch_handler,
 };
+use super::routes::auth::auth_regenerate_session_key_handler;
 use super::routes::commands::{
     commands_cancel_handler, commands_get_handler, commands_list_handler, commands_output_handler,
     commands_submit_handler,
@@ -84,7 +84,7 @@ use super::routes::ws::{
     ws_sessions_handler,
 };
 use super::ws::ws_handler;
-use crate::auth::KeyKind;
+use crate::auth::{AuthVerifierSet, KeyKind};
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
@@ -107,8 +107,7 @@ pub struct AppState {
     pub effective_bind: Arc<String>,
     pub runtime_paths: Arc<RuntimePaths>,
     pub state: Arc<TokioMutex<StateStore>>,
-    pub session_key: Arc<Zeroizing<String>>,
-    pub admin_key: Arc<Zeroizing<String>>,
+    pub auth_verifiers: Arc<TokioRwLock<AuthVerifierSet>>,
     pub max_request_bytes: usize,
     pub active_requests: Arc<AtomicU64>,
     pub agent_supervisor: Arc<AgentSupervisor>,
@@ -185,10 +184,27 @@ impl AppState {
     }
 
     pub fn with_effective_bind_and_runtime_paths(
-        mut config: Config,
-        mut state: StateStore,
+        config: Config,
+        state: StateStore,
         session_key: String,
         admin_key: String,
+        effective_bind: String,
+        runtime_paths: RuntimePaths,
+    ) -> Self {
+        let auth_verifiers = AuthVerifierSet::create(&session_key, &admin_key);
+        Self::with_auth_verifiers_and_runtime_paths(
+            config,
+            state,
+            auth_verifiers,
+            effective_bind,
+            runtime_paths,
+        )
+    }
+
+    pub fn with_auth_verifiers_and_runtime_paths(
+        mut config: Config,
+        mut state: StateStore,
+        auth_verifiers: AuthVerifierSet,
         effective_bind: String,
         runtime_paths: RuntimePaths,
     ) -> Self {
@@ -242,8 +258,7 @@ impl AppState {
             effective_bind: Arc::new(effective_bind),
             runtime_paths: Arc::new(runtime_paths),
             state: state_arc,
-            session_key: Arc::new(Zeroizing::new(session_key)),
-            admin_key: Arc::new(Zeroizing::new(admin_key)),
+            auth_verifiers: Arc::new(TokioRwLock::new(auth_verifiers)),
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
             agent_supervisor: Arc::new(AgentSupervisor::new()),
@@ -421,6 +436,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/agent/restart", post(agent_restart_handler))
         .route("/v1/agent/switch", post(agent_switch_handler))
         .route("/v1/deps/apply", post(deps_apply_handler))
+        .route(
+            "/v1/auth/session-key/regenerate",
+            post(auth_regenerate_session_key_handler),
+        )
         .route("/v1/config/import", post(config_import_handler))
         .route(
             "/v1/secrets",

@@ -1,6 +1,6 @@
 # Init
 
-`acps init` initializes an `acp-stack` instance: it creates and validates config and state, initializes the encrypted secret store, generates the API keys on first run, and optionally configures an agent, provider, workspace sources, MCP servers, Agent Skills, an edge profile, and a testflight. This document describes the end-to-end flow an operator goes through. The flag reference lives in [cli.md](cli.md#initialization); this guide describes the sequence and behavior those flags drive.
+`acps init` initializes an `acp-stack` instance: it creates and validates config and state, initializes the encrypted secret store, generates API keys as non-recoverable state verifiers on first run, and optionally configures an agent, provider, workspace sources, MCP servers, Agent Skills, an edge profile, and a testflight. This document describes the end-to-end flow an operator goes through. The flag reference lives in [cli.md](cli.md#initialization); this guide describes the sequence and behavior those flags drive.
 
 ## Interactive And Non-Interactive
 
@@ -64,9 +64,9 @@ The operator-facing sequence, in order:
     - Choose OpenAI, Anthropic, or `github:<owner>`.
     - Choose skills to install before testflight.
     - `--skills-source`, `--skills`, and `--no-skills` drive this without prompts.
-7. Secrets.
-    - Generate session and admin API keys on a fresh store.
-    - Preserve existing keys on re-run.
+7. Secrets and auth.
+    - Generate session and admin API keys when no auth verifier rows exist.
+    - Preserve existing verifier rows on re-run.
     - Show fresh plaintext keys once at final handover.
     - Store interactive agent env values and verify `--agent-env-ref` names before install.
 8. Agent install.
@@ -111,12 +111,12 @@ After the steps settle, init prints a summary: the config, state, secret-store, 
 
 ## Key Handover
 
-On a fresh store, init generates two API keys and shows their plaintext values to the operator exactly once:
+When no auth verifier rows exist, init generates two API keys and shows their plaintext values to the operator exactly once:
 
-- Session key — normal sessions, workspace, commands, logs, and status.
+- Session key — session-driving and prompt-driving API calls.
 - Admin key — secrets, config import, agent process control, and other elevated operations.
 
-The handover prints the two values with the reminder that the admin key is never regenerable and that `acps reset --yes` is the only way to rotate it by reinitializing the instance. The values are never stored in plaintext, never returned through the API, and never reprinted on a later run: a re-run or `--resume` over an existing store takes the preserved path and shows nothing. Save them when shown.
+The handover prints the two values with the reminder that the admin key is never regenerable and that `acps reset --yes` is the only way to rotate it by reinitializing the instance. The values are never stored in plaintext, never returned through the API, and never reprinted on a later run: a re-run or `--resume` over existing verifier rows takes the preserved path and shows nothing. Save them when shown.
 
 ## Testflight
 

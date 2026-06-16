@@ -1,12 +1,11 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use clap::{Args, Subcommand};
 use serde_json::Value;
+use std::io::IsTerminal;
 
 use super::core::{
-    CliKey, CliMethod, OutputFormatChoice, daemon_base_url, daemon_request, open_cli_key,
-    print_json,
+    CliMethod, OutputFormatChoice, daemon_base_url, daemon_request, print_json, resolve_admin_key,
 };
 
 const DEFAULT_HISTORY_LIMIT: u32 = 20;
@@ -15,11 +14,18 @@ const MAX_HISTORY_LIMIT: u32 = 500;
 #[derive(Debug, Subcommand)]
 pub enum SecurityCommand {
     /// Print findings from the runtime security self-check (also recorded to history).
-    Check,
+    Check(SecurityCheckArgs),
     /// List previously recorded self-check runs.
     History(SecurityHistoryArgs),
     /// Show a single recorded self-check run with its findings.
     Show(SecurityShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SecurityCheckArgs {
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -33,6 +39,9 @@ pub struct SecurityHistoryArgs {
     /// Print the raw JSON response instead of the operator table.
     #[arg(long)]
     json: bool,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -42,6 +51,9 @@ pub struct SecurityShowArgs {
     /// Print the raw JSON response instead of the formatted view.
     #[arg(long)]
     json: bool,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 pub(super) fn run_security_command(
@@ -49,18 +61,18 @@ pub(super) fn run_security_command(
     output: OutputFormatChoice,
 ) -> Result<()> {
     match &command {
-        SecurityCommand::Check => {}
+        SecurityCommand::Check(_) => {}
         SecurityCommand::History(args) => {
             output.resolve_json_alias(args.json, "json")?;
+            validate_history_args(args)?;
         }
         SecurityCommand::Show(args) => {
             output.resolve_json_alias(args.json, "json")?;
+            validate_run_id(&args.run_id, "run_id")?;
         }
     }
 
-    let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    let admin_key = open_cli_key(&config, &home, CliKey::Admin)?;
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -68,7 +80,8 @@ pub(super) fn run_security_command(
         .map_err(|source| StackError::ServeIo { source })?;
     runtime.block_on(async move {
         match command {
-            SecurityCommand::Check => {
+            SecurityCommand::Check(args) => {
+                let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
                 let format = output.effective();
                 let body = daemon_request(
                     &base_url,
@@ -88,9 +101,15 @@ pub(super) fn run_security_command(
                 Ok(())
             }
             SecurityCommand::History(args) => {
+                let admin_key =
+                    resolve_admin_key(args.admin_key.clone(), std::io::stdin().is_terminal())?;
                 run_history(&base_url, &admin_key, args, output).await
             }
-            SecurityCommand::Show(args) => run_show(&base_url, &admin_key, args, output).await,
+            SecurityCommand::Show(args) => {
+                let admin_key =
+                    resolve_admin_key(args.admin_key.clone(), std::io::stdin().is_terminal())?;
+                run_show(&base_url, &admin_key, args, output).await
+            }
         }
     })
 }
@@ -102,17 +121,10 @@ async fn run_history(
     output: OutputFormatChoice,
 ) -> Result<()> {
     let format = output.resolve_json_alias(args.json, "json")?;
-    if args.limit == 0 || args.limit > MAX_HISTORY_LIMIT {
-        return Err(StackError::InvalidParam {
-            field: "limit",
-            reason: format!("limit must be 1..={MAX_HISTORY_LIMIT}, got {}", args.limit),
-        });
-    }
     let mut path = format!("/v1/security/history?limit={}", args.limit);
     if let Some(after) = args.after.as_deref()
         && !after.is_empty()
     {
-        validate_run_id(after, "after")?;
         path.push_str("&after=");
         path.push_str(after);
     }
@@ -133,7 +145,6 @@ async fn run_show(
     output: OutputFormatChoice,
 ) -> Result<()> {
     let format = output.resolve_json_alias(args.json, "json")?;
-    validate_run_id(&args.run_id, "run_id")?;
     let path = format!("/v1/security/history/{}", args.run_id);
     let body = daemon_request(base_url, CliMethod::Get, &path, admin_key, None).await?;
     let data = body.get("data").unwrap_or(&body);
@@ -219,6 +230,21 @@ fn print_findings(findings: &[Value]) {
             println!("    details: {rendered}");
         }
     }
+}
+
+fn validate_history_args(args: &SecurityHistoryArgs) -> Result<()> {
+    if args.limit == 0 || args.limit > MAX_HISTORY_LIMIT {
+        return Err(StackError::InvalidParam {
+            field: "limit",
+            reason: format!("limit must be 1..={MAX_HISTORY_LIMIT}, got {}", args.limit),
+        });
+    }
+    if let Some(after) = args.after.as_deref()
+        && !after.is_empty()
+    {
+        validate_run_id(after, "after")?;
+    }
+    Ok(())
 }
 
 /// Reject any run id that would need URL encoding. The runtime emits ids of

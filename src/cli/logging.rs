@@ -518,7 +518,7 @@ fn run_supabase_set_secret(args: SupabaseSetSecretArgs, output: OutputFormat) ->
         })
         .unwrap_or_else(|| SUPABASE_DEFAULT_API_KEY_REF.to_owned());
     validate_secret_ref(&api_key_ref)?;
-    reject_auth_ref_mutation(&api_key_ref, &config)?;
+    reject_auth_ref_mutation(&api_key_ref)?;
     let value = read_secret_value(&api_key_ref)?;
     if value.is_empty() {
         return Err(StackError::InvalidParam {
@@ -554,7 +554,7 @@ fn run_supabase_set_db_url(args: SupabaseSetDbUrlArgs, output: OutputFormat) -> 
         })
         .unwrap_or_else(|| SUPABASE_DEFAULT_DB_URL_REF.to_owned());
     validate_secret_ref(&db_url_ref)?;
-    reject_auth_ref_mutation(&db_url_ref, &config)?;
+    reject_auth_ref_mutation(&db_url_ref)?;
     let value = read_secret_value(&db_url_ref)?;
     if value.is_empty() {
         return Err(StackError::InvalidParam {

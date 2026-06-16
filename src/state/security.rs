@@ -320,7 +320,11 @@ mod tests {
     #[test]
     fn record_run_with_warning_only_is_succeeded_but_not_ok() {
         let (_dir, store) = open_store();
-        let findings = vec![finding("auth.session_key_weak", "warning", "weak key")];
+        let findings = vec![finding(
+            "auth.failure_threshold",
+            "warning",
+            "auth failures",
+        )];
         let run = store
             .record_security_run(NewSecurityRun {
                 started_at: "2026-05-28T00:00:01Z",
@@ -337,7 +341,7 @@ mod tests {
 
         let rows = store.get_findings_for_run(&run.id).expect("findings");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].code, "auth.session_key_weak");
+        assert_eq!(rows[0].code, "auth.failure_threshold");
         assert_eq!(rows[0].ordinal, 0);
     }
 
@@ -345,8 +349,8 @@ mod tests {
     fn record_run_with_critical_marks_failed() {
         let (_dir, store) = open_store();
         let findings = vec![
-            finding("auth.session_key_empty", "critical", "empty"),
-            finding("auth.session_key_weak", "warning", "weak"),
+            finding("runtime.path_ownership", "critical", "ownership"),
+            finding("auth.failure_threshold", "warning", "auth failures"),
         ];
         let run = store
             .record_security_run(NewSecurityRun {
@@ -364,9 +368,9 @@ mod tests {
         let rows = store.get_findings_for_run(&run.id).expect("findings");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].ordinal, 0);
-        assert_eq!(rows[0].code, "auth.session_key_empty");
+        assert_eq!(rows[0].code, "runtime.path_ownership");
         assert_eq!(rows[1].ordinal, 1);
-        assert_eq!(rows[1].code, "auth.session_key_weak");
+        assert_eq!(rows[1].code, "auth.failure_threshold");
     }
 
     #[test]

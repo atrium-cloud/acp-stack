@@ -7,7 +7,6 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use crate::config::schema::AuthConfig;
 use crate::error::{Result, StackError};
 
 /// Parse a duration string like "10m", "5s", "2h", "1d", "4w", "750ms". Returns `None` on
@@ -103,56 +102,6 @@ pub(crate) fn normalize_day_or_week_duration(field: &'static str, raw: &str) -> 
     // with `parse_duration_string` when it schedules the next update.
     validate_duration_field(field, value)?;
     Ok(value.to_owned())
-}
-
-/// Compare two `[auth]` blocks and return an error if either ref name changed.
-/// Used by both `acps config import` (CLI) and `POST /v1/config/import` to
-/// uphold the "admin key never regenerable in place" + "session key only
-/// rotated via `acps auth regenerate-session-key`" invariants.
-pub fn compare_auth_refs(current: &AuthConfig, incoming: &AuthConfig) -> Result<()> {
-    if current.session_key_ref != incoming.session_key_ref {
-        return Err(StackError::ImportChangesAuthRef {
-            field: "session_key_ref",
-            current: current.session_key_ref.clone(),
-            incoming: incoming.session_key_ref.clone(),
-        });
-    }
-    if current.admin_key_ref != incoming.admin_key_ref {
-        return Err(StackError::ImportChangesAuthRef {
-            field: "admin_key_ref",
-            current: current.admin_key_ref.clone(),
-            incoming: incoming.admin_key_ref.clone(),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_auth_refs(auth: &AuthConfig) -> Result<()> {
-    let session = auth.session_key_ref.trim();
-    let admin = auth.admin_key_ref.trim();
-    if session.is_empty() {
-        return Err(StackError::MissingField {
-            field: "auth.session_key_ref",
-        });
-    }
-    if admin.is_empty() {
-        return Err(StackError::MissingField {
-            field: "auth.admin_key_ref",
-        });
-    }
-    // Distinct refs are a hard invariant: if they alias, generating both keys
-    // writes the second over the first, and `acps auth regenerate-session-key`
-    // rotates the admin key, collapsing the session/admin boundary.
-    if session == admin {
-        return Err(StackError::AuthRefsNotDistinct);
-    }
-    // Auth refs are themselves stored in the secret store under these names,
-    // so they must follow the same identifier rules as every other ref.
-    // Otherwise an auth_ref like "weird name" could silently fail to round-
-    // trip through the store on init.
-    validate_secret_ref_name_value(session)?;
-    validate_secret_ref_name_value(admin)?;
-    Ok(())
 }
 
 pub(crate) fn validate_socket_address(field: &'static str, value: &str) -> Result<()> {

@@ -31,7 +31,7 @@ pub use agent::{
     INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE,
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRun, InstallerRunInput, default_installer_log_base,
 };
-pub use auth::{AuthFailure, AuthFailureFilter};
+pub use auth::{AuthFailure, AuthFailureFilter, AuthKeyRecord};
 pub use commands::{CommandRecord, CommandStatus, NewCommandRecord};
 pub use core::{StateStore, default_state_path};
 pub use events::{

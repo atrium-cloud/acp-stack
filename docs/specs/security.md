@@ -8,18 +8,20 @@ Two API keys are generated on first init:
 
 | Key     | Scope                                                                   |
 | ------- | ----------------------------------------------------------------------- |
-| Session | normal sessions, workspace, commands, logs, status, pending permissions |
+| Session | public session-tier API calls, including session lifecycle and prompts   |
 | Admin   | secrets, config import, agent process control, and sensitive operations |
 
 The session key can be regenerated. The admin key is generated once and is replaced only by resetting and reinitializing the instance.
+
+Plaintext auth keys are printed only at init or session-key regeneration time. Local state stores non-recoverable verifier rows for the session and admin keys; config and `secrets.age` do not store auth keys.
 
 ## Key Tiering
 
 Tiering is strict and non-superset: the admin key is rejected on session-tier routes with `401 auth.wrong_kind`, and the session key is rejected on admin-tier routes with the same code. The admin key is not a superset of the session key.
 
-Session-tier routes cover everything that is not management or destructive: status reads, config export, log queries, workspace operations, command runs, session and prompt lifecycle, and permission approve/deny. Session operations stay session-tier even when they write rows.
+Session-tier routes cover public API operations that are not management or destructive: config export, workspace operations, command runs, session and prompt lifecycle, and permission approve/deny. Session operations stay session-tier even when they write rows.
 
-Both keys are presented as `Authorization: Bearer <key>` and compared against stored values in constant time.
+Both keys are presented as `Authorization: Bearer <key>` and validated against stored verifiers in constant time.
 
 ## Secret Store
 
@@ -31,6 +33,7 @@ Rules:
 - Config export returns refs only.
 - Agent and MCP secrets are injected only where explicitly referenced.
 - Secret-ref fields reject likely pasted secret values.
+- Auth keys are not secret-store entries.
 
 ## HTTP Hardening
 
@@ -82,7 +85,7 @@ Workspace paths are resolved under `[workspace].root`. The runtime rejects absol
 
 ## Local Interface
 
-`acpctl` uses a local Unix socket protected by filesystem permissions. It does not use the public session or admin API keys. The local surface is allowlisted and cannot read secret values, rotate keys, import config, approve its own high-risk requests, or control public WebSocket disconnections.
+`acpctl` and keyless local `acps` read-only views use a local Unix socket protected by filesystem permissions. They do not use the public session or admin API keys. The local surface is allowlisted and cannot read secret values, rotate keys, import config, approve its own high-risk requests, control public WebSocket disconnections, or mutate sessions.
 
 ## Deployment Posture
 
@@ -97,7 +100,7 @@ Production deployments should:
 
 ## Security Self-Check
 
-`GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, weak or missing cached keys, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, unavailable required dependencies, and external logging delivery failures.
+`GET /v1/security/check` and `acps security check` report findings for common misconfiguration: unsafe binds, wildcard browser origins, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, unavailable required dependencies, and external logging delivery failures.
 
 Findings include severity (`warning` or `critical`), code, message, an optional structured `details` payload for findings with machine-readable context, and remediation when an operator action is available.
 
@@ -116,7 +119,7 @@ Aggregate run status is `succeeded` when no critical findings were emitted and `
 
 Every emitted finding carries a non-empty remediation. The category-to-code map for the operator-facing self-check is:
 
-- key: `auth.session_key_empty`, `auth.admin_key_empty`, `auth.session_key_weak`, `auth.admin_key_weak`, `auth.failure_threshold`
+- key: `auth.failure_threshold`
 - file permission: `runtime.path_ownership`, `runtime.path_mode_loose`, `runtime.path_uninspectable`, `runtime.workspace_not_writable`
 - origin and CORS: `http.wildcard_origin_public_bind`, `edge.cloudflare.unsafe_origins`
 - proxy: `http.trust_proxy_without_trusted_proxies`, `edge.cloudflare.missing_local_trusted_proxies`

@@ -986,49 +986,56 @@ fn rejects_shell_agent_install_without_shell() {
 }
 
 #[test]
-fn rejects_aliased_auth_refs() {
-    // session and admin key references must be distinct; aliasing collapses
-    // the session/admin boundary because regenerate-session-key would also
-    // rotate whatever is stored under the admin name.
-    let aliased = VALID_CONFIG.replace(
-        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
-        r#"admin_key_ref = "ACP_STACK_SESSION_KEY""#,
+fn parses_legacy_auth_section_for_migration() {
+    let with_auth = VALID_CONFIG.replace(
+        "[security.http]",
+        r#"[auth]
+session_key_ref = "ACP_STACK_SESSION_KEY"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]"#,
     );
-    let error = load_config_from_str(&aliased).expect_err("aliased refs must be rejected");
+    let config = load_config_from_str(&with_auth).expect("legacy auth section should parse");
+    let canonical = config.to_canonical_toml().expect("canonical toml");
+    assert!(!canonical.contains("[auth]"));
+    assert!(!canonical.contains("session_key_ref"));
+    assert!(!canonical.contains("admin_key_ref"));
+}
+
+#[test]
+fn rejects_invalid_legacy_auth_ref() {
+    let with_auth = VALID_CONFIG.replace(
+        "[security.http]",
+        r#"[auth]
+session_key_ref = "not allowed"
+admin_key_ref = "ACP_STACK_ADMIN_KEY"
+
+[security.http]"#,
+    );
+    let error = load_config_from_str(&with_auth).expect_err("legacy auth ref should validate");
     assert!(
-        error
-            .to_string()
-            .contains("auth.session_key_ref and auth.admin_key_ref must be different names"),
-        "got: {error}",
+        error.to_string().contains("auth.session_key_ref"),
+        "{error}"
     );
 }
 
 #[test]
-fn rejects_empty_auth_session_key_ref() {
-    let blank = VALID_CONFIG.replace(
-        r#"session_key_ref = "ACP_STACK_SESSION_KEY""#,
-        r#"session_key_ref = """#,
-    );
-    let error = load_config_from_str(&blank).expect_err("empty session ref must be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("auth.session_key_ref is required"),
-        "got: {error}",
-    );
+fn canonical_export_omits_auth_section() {
+    let config = load_config_from_str(VALID_CONFIG).expect("valid config");
+    let canonical = config.to_canonical_toml().expect("canonical toml");
+    assert!(!canonical.contains("[auth]"));
+    assert!(!canonical.contains("session_key_ref"));
+    assert!(!canonical.contains("admin_key_ref"));
 }
 
 #[test]
-fn rejects_empty_auth_admin_key_ref() {
-    let blank = VALID_CONFIG.replace(
-        r#"admin_key_ref = "ACP_STACK_ADMIN_KEY""#,
-        r#"admin_key_ref = """#,
+fn allows_secret_ref_named_like_old_session_key_ref() {
+    let updated = VALID_CONFIG.replace(
+        r#"env = ["OPENCODE_API_KEY"]"#,
+        r#"env = ["ACP_STACK_SESSION_KEY"]"#,
     );
-    let error = load_config_from_str(&blank).expect_err("empty admin ref must be rejected");
-    assert!(
-        error.to_string().contains("auth.admin_key_ref is required"),
-        "got: {error}",
-    );
+    let config = load_config_from_str(&updated).expect("old auth ref names are no longer reserved");
+    assert_eq!(config.agent.env, ["ACP_STACK_SESSION_KEY"]);
 }
 
 #[test]
@@ -1117,18 +1124,13 @@ fn rejects_invalid_trusted_proxy() {
 }
 
 #[test]
-fn rejects_secret_ref_colliding_with_session_key() {
+fn allows_secret_ref_named_like_old_admin_key_ref() {
     let updated = VALID_CONFIG.replace(
         r#"env = ["OPENCODE_API_KEY"]"#,
-        r#"env = ["ACP_STACK_SESSION_KEY"]"#,
+        r#"env = ["ACP_STACK_ADMIN_KEY"]"#,
     );
-    let error = load_config_from_str(&updated).expect_err("ref aliasing auth must be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("collides with the configured auth key ref"),
-        "got: {error}",
-    );
+    let config = load_config_from_str(&updated).expect("old auth ref names are no longer reserved");
+    assert_eq!(config.agent.env, ["ACP_STACK_ADMIN_KEY"]);
 }
 
 #[test]

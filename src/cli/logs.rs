@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::str::FromStr;
 
-use super::core::{CliKey, OutputFormatChoice, daemon_base_url, open_cli_key};
+use super::core::{OutputFormatChoice, daemon_base_url, resolve_session_key};
 
 // === CONSTANTS ===
 
@@ -97,6 +97,9 @@ pub struct LogsQueryArgs {
     /// `--order` (direction is fixed).
     #[arg(long, conflicts_with = "after")]
     follow: bool,
+    /// Session API key for --follow. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +109,9 @@ pub struct LogsTailArgs {
     /// `sessions.{id}`, `commands.{id}`.
     #[arg(long = "topic")]
     topics: Vec<String>,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
 }
 
 /// JSON envelope returned by `acps logs query --json`. Mirrors the HTTP
@@ -222,7 +228,7 @@ fn run_logs_query(args: LogsQueryArgs, output: OutputFormatChoice) -> Result<()>
     };
 
     if args.follow {
-        let session_context = open_ws_session_context()?;
+        let session_context = open_ws_session_context(args.session_key.clone())?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -414,10 +420,9 @@ struct WsSessionContext {
     base_url: String,
 }
 
-fn open_ws_session_context() -> Result<WsSessionContext> {
-    let home = home_dir()?;
+fn open_ws_session_context(session_key: Option<String>) -> Result<WsSessionContext> {
     let config = Config::load_from_default_path()?;
-    let session_key = open_cli_key(&config, &home, CliKey::Session)?;
+    let session_key = resolve_session_key(session_key)?;
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     Ok(WsSessionContext {
         session_key,
@@ -426,7 +431,7 @@ fn open_ws_session_context() -> Result<WsSessionContext> {
 }
 
 fn run_logs_tail(args: LogsTailArgs) -> Result<()> {
-    let context = open_ws_session_context()?;
+    let context = open_ws_session_context(args.session_key)?;
     let topics = if args.topics.is_empty() {
         vec![WS_TOPIC_LOGS.to_owned()]
     } else {

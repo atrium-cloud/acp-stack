@@ -1,11 +1,12 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
 use clap::{Args, Subcommand};
 use serde_json::Value;
+use std::io::IsTerminal;
 
 use super::core::{
-    CliKey, CliMethod, OutputFormat, daemon_base_url, daemon_request, open_cli_key, print_json,
+    CliMethod, OutputFormat, daemon_base_url, daemon_request, local_daemon_request, print_json,
+    resolve_admin_key,
 };
 
 #[derive(Debug, Subcommand)]
@@ -26,16 +27,13 @@ pub struct WsDisconnectArgs {
     /// Disconnect every WebSocket subscribed to these session IDs.
     #[arg(long, conflicts_with = "connection_id")]
     session_id: Vec<String>,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
 }
 
 pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result<()> {
-    let home = home_dir()?;
     let config = Config::load_from_default_path()?;
-    let key_kind = match command {
-        WsCommand::Connections | WsCommand::Sessions => CliKey::Session,
-        WsCommand::Disconnect(_) => CliKey::Admin,
-    };
-    let key = open_cli_key(&config, &home, key_kind)?;
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -45,7 +43,7 @@ pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result
         match command {
             WsCommand::Connections => {
                 let body =
-                    daemon_request(&base_url, CliMethod::Get, "/v1/ws/connections", &key, None)
+                    local_daemon_request(&config, CliMethod::Get, "/v1/ws/connections", None)
                         .await?;
                 let data = body.get("data").unwrap_or(&body);
                 if output.is_json() {
@@ -55,8 +53,8 @@ pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result
                 }
             }
             WsCommand::Sessions => {
-                let body = daemon_request(&base_url, CliMethod::Get, "/v1/ws/sessions", &key, None)
-                    .await?;
+                let body =
+                    local_daemon_request(&config, CliMethod::Get, "/v1/ws/sessions", None).await?;
                 let data = body.get("data").unwrap_or(&body);
                 if output.is_json() {
                     print_json(data)?;
@@ -70,6 +68,8 @@ pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result
                         field: "--connection-id or --session-id",
                     });
                 }
+                let key =
+                    resolve_admin_key(args.admin_key.clone(), std::io::stdin().is_terminal())?;
                 let (path, body) = if !args.connection_id.is_empty() {
                     (
                         "/v1/ws/connections/disconnect",

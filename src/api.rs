@@ -15,9 +15,11 @@ pub(crate) use routes::commands::{
 pub(crate) use routes::config::config_export_handler;
 pub(crate) use routes::deps::deps_check_handler;
 pub(crate) use routes::logs::logs_events_handler;
+pub(crate) use routes::metrics::metrics_summary_handler;
 pub(crate) use routes::permissions::permissions_pending_handler;
 pub(crate) use routes::security::security_check_handler;
-pub(crate) use routes::status::status_handler;
+pub(crate) use routes::sessions::{sessions_list_handler, sessions_status_handler};
+pub(crate) use routes::status::{health_ready_handler, status_agent_handler, status_handler};
 pub(crate) use routes::workspace::{
     files_content_get_handler, files_content_put_handler, files_list_handler,
 };

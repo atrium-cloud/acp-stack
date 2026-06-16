@@ -27,7 +27,7 @@ const SESSION_KEY: &str = "acps_session_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const ADMIN_KEY: &str = "acps_admin_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[test]
-fn acpctl_binary_help_smoke_test() {
+fn acpctl_binary_help_test() {
     Command::cargo_bin("acpctl")
         .expect("binary should build")
         .arg("--help")
@@ -298,6 +298,36 @@ async fn logs_query_filters_by_since() {
 
     let last = harness.last_api_request().await.expect("api.request row");
     assert_eq!(last.source, acp_stack::state::EVENT_SOURCE_LOCAL);
+}
+
+#[tokio::test]
+async fn sessions_list_is_reachable_over_uds_without_bearer() {
+    let harness = Harness::spawn().await;
+    let resp = request(&harness.socket, "GET", "/v1/sessions?limit=10", None).await;
+    assert_eq!(resp.status, 200);
+    let json = resp.json();
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["sessions"].is_array());
+
+    let last = harness.last_api_request().await.expect("api.request row");
+    assert_eq!(last.source, acp_stack::state::EVENT_SOURCE_LOCAL);
+    assert_eq!(last.payload["path"], "/v1/sessions");
+    assert_eq!(last.payload["key_kind"], "local");
+}
+
+#[tokio::test]
+async fn sessions_status_is_reachable_over_uds_without_bearer() {
+    let harness = Harness::spawn().await;
+    let resp = request(&harness.socket, "GET", "/v1/sessions/-/status", None).await;
+    assert_eq!(resp.status, 200);
+    let json = resp.json();
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["sessions"].is_array());
+
+    let last = harness.last_api_request().await.expect("api.request row");
+    assert_eq!(last.source, acp_stack::state::EVENT_SOURCE_LOCAL);
+    assert_eq!(last.payload["path"], "/v1/sessions/-/status");
+    assert_eq!(last.payload["key_kind"], "local");
 }
 
 #[tokio::test]
@@ -572,47 +602,25 @@ async fn local_router_returns_404_for_secrets_delete() {
 
 #[tokio::test]
 async fn local_router_cannot_rotate_api_keys_via_secrets_write() {
-    // "Rotating API keys" through acpctl boils down to overwriting the
-    // session or admin key ref in the secret store. The fixture config uses
-    // `acps_session_key` and `acps_admin_key` as the canonical refs; both
-    // POSTs must 404 over the UDS regardless of payload so a compromised
-    // agent process cannot pivot a session-tier capability into admin-tier.
+    // Key rotation through acpctl must stay hard-blocked over the UDS so a
+    // compromised agent process cannot pivot into admin-tier auth control.
     let harness = Harness::spawn().await;
-    for ref_name in ["acps_session_key", "acps_admin_key"] {
-        let body = serde_json::json!({ "name": ref_name, "value": "evil" }).to_string();
-        let resp = request(
-            &harness.socket,
-            "POST",
-            "/v1/secrets",
-            Some(body.as_bytes()),
-        )
-        .await;
-        assert_eq!(
-            resp.status, 404,
-            "POST /v1/secrets must 404 for ref `{ref_name}` over UDS"
-        );
-        let resp = request(
-            &harness.socket,
-            "DELETE",
-            &format!("/v1/secrets/{ref_name}"),
-            None,
-        )
-        .await;
-        assert_eq!(
-            resp.status, 404,
-            "DELETE /v1/secrets/{ref_name} must 404 over UDS"
-        );
-    }
+    let resp = request(
+        &harness.socket,
+        "POST",
+        "/v1/auth/session-key/regenerate",
+        Some(b"{}"),
+    )
+    .await;
+    assert_eq!(resp.status, 404);
 }
 
 #[tokio::test]
 async fn local_router_cannot_read_api_keys_via_secrets_get() {
-    // Read-side companion: agents asking acpctl for the value of either auth
-    // ref must hit a hard 404 — the spec deny list says secrets read is
-    // off-allowlist, and the test pins the contract for the two refs the
-    // public API uses for authentication.
+    // Auth keys are not secret-store entries, and arbitrary secret reads remain
+    // off-allowlist over the local socket.
     let harness = Harness::spawn().await;
-    for ref_name in ["acps_session_key", "acps_admin_key"] {
+    for ref_name in ["OPENCODE_API_KEY", "LINEAR_API_KEY"] {
         let resp = request(
             &harness.socket,
             "GET",
@@ -646,10 +654,9 @@ async fn local_router_returns_404_for_permissions_deny() {
 
 #[tokio::test]
 async fn local_router_blocks_all_high_risk_routes() {
-    // Single declarative assertion covering every route the Phase 4 acpctl
-    // hardening section lists as off-limits to acpctl. A regression that
-    // accidentally adds one of these to `build_local_router` will fail this
-    // test even if no per-route test was added.
+    // Single declarative assertion covering high-risk routes that must not
+    // succeed over the local socket. Axum returns 405 for a denied method on an
+    // otherwise read-only path such as GET-only `/v1/sessions`.
     let harness = Harness::spawn().await;
     let cases: &[(&str, &str, Option<&[u8]>)] = &[
         ("GET", "/v1/secrets", None),
@@ -671,12 +678,25 @@ async fn local_router_blocks_all_high_risk_routes() {
             "/v1/ws/sessions/disconnect",
             Some(br#"{"session_id":"abc"}"#),
         ),
+        ("POST", "/v1/sessions", Some(b"{}")),
+        ("POST", "/v1/sessions/sess_abc/load", Some(b"{}")),
+        ("POST", "/v1/sessions/sess_abc/resume", Some(b"{}")),
+        ("POST", "/v1/sessions/sess_abc/fork", Some(b"{}")),
+        (
+            "POST",
+            "/v1/sessions/sess_abc/prompt",
+            Some(br#"{"prompt":"hello"}"#),
+        ),
+        ("POST", "/v1/sessions/sess_abc/cancel", Some(b"{}")),
+        ("DELETE", "/v1/sessions/sess_abc", None),
+        ("POST", "/v1/auth/session-key/regenerate", Some(b"{}")),
     ];
     for (method, path, body) in cases {
         let resp = request(&harness.socket, method, path, *body).await;
-        assert_eq!(
-            resp.status, 404,
-            "{method} {path} must not be reachable via acpctl UDS"
+        assert!(
+            matches!(resp.status, 404 | 405),
+            "{method} {path} must not be accepted via acpctl UDS, got {}",
+            resp.status,
         );
     }
 }
