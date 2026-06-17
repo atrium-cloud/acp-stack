@@ -123,7 +123,17 @@ persistent_session_key_file() {
 }
 
 extract_session_key() {
-  awk '/^session key \([^)]*\): / { print $NF; exit }'
+  awk '
+    /^session key: / {
+      sub(/^session key: /, "")
+      print
+      exit
+    }
+    /^session key \([^)]*\): / {
+      print $NF
+      exit
+    }
+  '
 }
 
 image_exists() {
