@@ -36,6 +36,14 @@ Repository test scripts are maintainer tools, not deployment instructions:
 - `scripts/docker-test.sh` validates the Docker image startup path.
 - `scripts/install-systemd-test.sh` validates the systemd installer path in a containerized systemd environment. Its default image is built from `packaging/systemd/installer-test.Dockerfile` so `/sbin/init` exists before the container boots.
 
+## Dev Builds
+
+The manual `dev-build` workflow uploads release-shaped Linux tarballs as Actions artifacts. It runs `scripts/build-release.sh --no-default-features`, so those binaries omit `acps update`; replace dev deployments manually from the artifact. `install.sh` remains tied to public GitHub Releases.
+
+## Public Releases
+
+Public releases are tag-driven and publish GitHub Release assets. Before tagging, add the release notes at `docs/changelogs/v<version>.md`, then have a human commit the release prep. The human-created `v<version>` tag must point at that commit so the release workflow can attach the changelog as the release body.
+
 ## Placebo Agent
 
 `placebo-agent` is a deterministic ACP fixture for integration tests. It is compiled only with `--features test-fixtures`. Tests invoke it through `CARGO_BIN_EXE_placebo-agent` with the `acp` subcommand, so they do not depend on a locally installed production agent or API key.

@@ -1,0 +1,52 @@
+name: dev-build
+
+# Manual maintainer build for release-shaped Linux artifacts that are not
+# published as GitHub Releases. These binaries intentionally omit acp-stack
+# self-update support so dev deployments cannot drift onto the public release
+# channel.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build (defaults to selected workflow ref)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dev-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Resolve artifact revision
+        id: revision
+        run: echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build dev artifacts
+        run: bash scripts/build-release.sh --no-default-features
+
+      - name: Upload dev artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: acp-stack-dev-${{ steps.revision.outputs.short_sha }}-${{ github.run_id }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
