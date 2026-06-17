@@ -677,12 +677,13 @@ struct InitHandoffContext {
 /// of printing at generation time) keeps the keys from scrolling off-screen
 /// behind install/workspace/testflight output; rendering on Drop means a fresh
 /// run that fails AFTER key generation still surfaces the otherwise
-/// unrecoverable, non-regenerable admin key before init exits. `None` (the
-/// preserved/resume path) renders nothing.
+/// unrecoverable, non-regenerable admin key before init exits. In handoff JSON
+/// mode, preserved keys are reported without reprinting plaintext material.
 struct KeyHandover {
     keys: Option<FreshKeys>,
     output_mode: InitOutputMode,
     failure_context: Option<InitHandoffContext>,
+    auth_ready: bool,
     emitted: bool,
 }
 
@@ -761,7 +762,7 @@ impl KeyHandover {
         let Some(context) = self.failure_context.as_ref() else {
             return;
         };
-        if self.keys.is_none() {
+        if !self.auth_ready {
             return;
         }
         let payload = init_handoff_payload("failed", context, self.keys.as_ref());
@@ -821,11 +822,14 @@ fn init_handoff_payload(
 }
 
 /// Whether init should drive interactive prompts: a real TTY and no
-/// `--non-interactive`. The single source of truth for the gate, so every
-/// prompt site honors `--non-interactive` (several previously checked only
-/// `is_terminal()`).
+/// prompt-suppressing automation flags. The single source of truth for the
+/// gate, so every prompt site honors the same contract.
+fn prompts_enabled_for(args: &InitArgs, stdin_is_terminal: bool) -> bool {
+    stdin_is_terminal && !args.non_interactive && !args.handoff_json
+}
+
 pub(super) fn prompts_enabled(args: &InitArgs) -> bool {
-    io::stdin().is_terminal() && !args.non_interactive && !args.handoff_json
+    prompts_enabled_for(args, io::stdin().is_terminal())
 }
 
 fn config_import_source_for_init(
@@ -1331,6 +1335,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         keys: None,
         output_mode,
         failure_context: None,
+        auth_ready: false,
         emitted: false,
     };
 
@@ -1360,6 +1365,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             auth_status = outcome.status;
             let generated_keys = outcome.generated_keys;
             key_handover.keys = outcome.fresh_keys;
+            key_handover.auth_ready = true;
             if generated_keys {
                 store.append_event_with_source(
                     "info",
@@ -1388,6 +1394,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // Honest "auth:" line for the skipped path — we did not generate keys
     // this run, we trusted the verifier instead.
     let auth_status = if matches!(disposition, StepDisposition::Skipped) {
+        key_handover.auth_ready = true;
         "preserved existing API keys"
     } else {
         auth_status
@@ -1421,7 +1428,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         let stored = match ensure_supabase_secret(
             &mut secret_store,
             &supabase.api_key_ref,
-            io::stdin().is_terminal() && !args.non_interactive,
+            prompts_enabled(&args),
         ) {
             Ok(stored) => stored,
             Err(error) => return finalize_with_error(&store, &init_run, error),
@@ -2112,4 +2119,31 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TestInitArgs {
+        #[command(flatten)]
+        args: InitArgs,
+    }
+
+    fn parse_init_args(args: &[&str]) -> InitArgs {
+        let mut argv = vec!["init-test"];
+        argv.extend_from_slice(args);
+        TestInitArgs::parse_from(argv).args
+    }
+
+    #[test]
+    fn handoff_json_disables_shared_prompt_gate_with_terminal_stdin() {
+        let interactive = parse_init_args(&[]);
+        assert!(prompts_enabled_for(&interactive, true));
+
+        let handoff = parse_init_args(&["--handoff-json"]);
+        assert!(!prompts_enabled_for(&handoff, true));
+    }
 }

@@ -9194,6 +9194,91 @@ fn init_handoff_json_preserves_keys_without_reprinting_material() {
 }
 
 #[test]
+fn init_handoff_json_failure_reports_fresh_keys_once() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--agent",
+            "placebo",
+            "--supabase-url",
+            "https://project-ref.supabase.co",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output.clone()).expect("utf8");
+    let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "failed");
+    assert_eq!(body["auth"]["generated_keys"], json!(["session", "admin"]));
+    assert_eq!(body["auth"]["preserved_keys"], json!([]));
+    let session_key = body["session_key"].as_str().expect("session key");
+    let admin_key = body["admin_key"].as_str().expect("admin key");
+    assert!(session_key.starts_with("acps_"));
+    assert!(admin_key.starts_with("acps_"));
+    assert!(!stdout.contains("session key:"));
+    assert!(!stdout.contains("admin key:"));
+
+    let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
+    let verifiers = store.load_auth_verifier_pair().expect("auth verifiers");
+    assert_eq!(verifiers.verify(session_key), Some(KeyKind::Session));
+    assert_eq!(verifiers.verify(admin_key), Some(KeyKind::Admin));
+}
+
+#[test]
+fn init_handoff_json_failure_reports_preserved_keys_without_reprinting_material() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (session_key, admin_key) = run_init_with_home(tempdir.path());
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    let mut config =
+        load_config_from_str(&fs::read_to_string(&config_path).expect("config readable"))
+            .expect("config parses");
+    let supabase = config.logging.supabase.as_mut().expect("supabase config");
+    supabase.enabled = true;
+    supabase.api_key_ref = "MISSING_SUPABASE_SECRET".to_owned();
+    fs::write(
+        &config_path,
+        config.to_canonical_toml().expect("canonical config"),
+    )
+    .expect("config writable");
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output.clone()).expect("utf8");
+    let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "failed");
+    assert_eq!(body["auth"]["generated_keys"], json!([]));
+    assert_eq!(body["auth"]["preserved_keys"], json!(["session", "admin"]));
+    assert!(body.get("session_key").is_none(), "{body}");
+    assert!(body.get("admin_key").is_none(), "{body}");
+    assert!(!stdout.contains(&session_key));
+    assert!(!stdout.contains(&admin_key));
+    assert!(!stdout.contains("session key:"));
+    assert!(!stdout.contains("admin key:"));
+}
+
+#[test]
 fn init_handoff_json_does_not_enable_global_format_json() {
     acps_command()
         .args(["init", "--handoff-json", "--format", "json"])
