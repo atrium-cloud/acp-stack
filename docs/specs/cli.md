@@ -12,7 +12,7 @@
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
 | Agents         | `acps agent install`, `update`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
-| Sessions       | `acps sessions list/status/new/fork/prompt/cancel/close`                    |
+| Sessions       | `acps sessions list/status/new/load/resume/fork/prompt/cancel/close`        |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
 | WebSockets     | `acps ws connections`, `ws sessions`, `ws disconnect`                       |
@@ -47,12 +47,15 @@ acps init \
   [--supabase-url <url>] [--supabase-schema <schema>] [--supabase-api-key-ref <ref>] [--no-supabase] \
   [--edge cloudflare --exposure tunnel --hostname <host>] [--cloudflare-mode generated|managed] \
   [--cloudflare-api-token-ref <ref> --cloudflare-account-id-ref <ref>] \
-  [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh]
+  [--testflight|--skip-testflight] [--resume [--run-id <id>] | --fresh] \
+  [--handoff-json]
 ```
 
 Interactive init may prompt for a config source, then for missing choices, including starter code sources, data sources, MCP declarations, provider, model, mode, and required secret values. `--from-file`, `--from-toml`, and `--from-base64` initialize from an existing `acps-config.toml`; the interactive source prompt offers file import and base64 paste, while `--from-toml` is for scripted raw TOML input. The base64 form is the same TOML content encoded for safer terminal paste. Agent, provider, and advertised model selectors are searchable. Non-interactive first runs require `--agent <id>`, the `--custom-agent-*` set, or a complete imported config; scripts should pass `--non-interactive` with the selected real agent id, explicit provider flags when provider setup is required, and resolvable secret refs. A custom (non-registry) agent is declared with `--custom-agent-id`, `--custom-agent-command`, and `--custom-agent-install` (optionally `--custom-agent-name`, repeatable `--custom-agent-arg`, and `--custom-agent-creates`); it writes an `[agent.install]` shell escape hatch, is also offered as a "Custom agent…" choice in the interactive picker, and conflicts with the `--provider`/`--model`/`--mode` init flags (custom agents configure those through their own environment). Repeatable `--agent-env-ref <name>` adds extra secret-backed environment variables to `[agent].env` (new config only); the named secret must already resolve in the store, while interactive runs also offer an add-loop that collects each value with masked entry. Repeatable `--dep <name=shell>` (user scope) and `--dep-system <name=shell>` (system scope) declare `[dependencies.commands]` install actions (new config only). `--deps-apply` runs the pending install actions during init; it confirms interactively, and non-interactive runs additionally require `--deps-apply-yes`. Apply outcomes are recorded under `acps installer history --agent deps_apply`. `--stack-update <on|security|off>` sets the `[updates.acp_stack]` policy (on = all compatible, security = security-critical only, off = manual); `--stack-update-frequency <freq>` sets the schedule at day/week granularity (minimum 1 day, e.g. `1d`, `3w`) for non-off policies. Omitting both in a non-interactive run keeps the defaults (security-critical, `1d`). Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
 
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
+
+`--handoff-json` is the platform automation output mode for init. It disables prompts and emits only the handoff JSON object described in [init.md](init.md#platform-handoff-json). `acps init --format json` remains rejected; scripts should use `--handoff-json` for this narrower contract.
 
 `acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Plain HTTP URLs are rejected.
 
@@ -177,6 +180,8 @@ acps agent update set --frequency 3d
 acps sessions list [--range <day|week|month|year|all|duration>] [--range-start <datetime>] [--range-end <datetime>] [--limit <n>]
 acps sessions status [--window <duration>] [--threshold <duration>] [--limit <n>]
 acps sessions new [--session-key <key>]
+acps sessions load <session-id> [--cwd <path>] [--session-key <key>]
+acps sessions resume <session-id> [--cwd <path>] [--session-key <key>]
 acps sessions fork <session-id> [--message-id <id>] [--cwd <path>] [--session-key <key>]
 acps sessions prompt <session-id> [--session-key <key>]
 acps sessions cancel <session-id> [--session-key <key>]
@@ -189,7 +194,7 @@ acps sessions close <session-id> [--session-key <key>]
 
 Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
-`sessions new`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY` unless `[local].session_auth = "keyless"` is active. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability.
+`sessions new`, `load`, `resume`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY` unless `[local].session_auth = "keyless"` is active. `sessions load` and `sessions resume` call the matching ACP session operation through the daemon. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability. `sessions close` closes the agent-side session and preserves local history; permanent deletion is deferred until product semantics are defined.
 
 ## Logs, Metrics, And Health
 

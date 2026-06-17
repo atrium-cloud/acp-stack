@@ -168,6 +168,9 @@ pub struct InitArgs {
     /// runs must also pass `--agent <id>`.
     #[arg(long)]
     pub(super) non_interactive: bool,
+    /// Emit the platform automation handoff payload as the only stdout output.
+    #[arg(long = "handoff-json")]
+    pub(super) handoff_json: bool,
     /// Initialize from an existing acps-config.toml file.
     #[arg(
         long = "from-file",
@@ -635,6 +638,40 @@ fn reject_supabase_init_args_for_existing_config(args: &InitArgs) -> Result<()> 
 
 const KEY_HANDOVER_PRINTED_EVENT: &str = "auth.keys_handover_printed";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitOutputMode {
+    Text,
+    HandoffJson,
+}
+
+impl InitOutputMode {
+    fn is_text(self) -> bool {
+        matches!(self, Self::Text)
+    }
+
+    fn is_handoff_json(self) -> bool {
+        matches!(self, Self::HandoffJson)
+    }
+}
+
+macro_rules! init_println {
+    ($output:expr, $($arg:tt)*) => {
+        if $output.is_text() {
+            println!($($arg)*);
+        }
+    };
+}
+
+#[derive(Debug, Clone)]
+struct InitHandoffContext {
+    config_path: PathBuf,
+    state_path: PathBuf,
+    secret_store_path: PathBuf,
+    age_key_path: PathBuf,
+    agent_id: String,
+    agent_name: String,
+}
+
 /// Drop guard that performs the session/admin key handover as the very last
 /// thing the operator sees. Holding the plaintext across the whole run (instead
 /// of printing at generation time) keeps the keys from scrolling off-screen
@@ -644,16 +681,29 @@ const KEY_HANDOVER_PRINTED_EVENT: &str = "auth.keys_handover_printed";
 /// preserved/resume path) renders nothing.
 struct KeyHandover {
     keys: Option<FreshKeys>,
+    output_mode: InitOutputMode,
+    failure_context: Option<InitHandoffContext>,
+    emitted: bool,
 }
 
 impl Drop for KeyHandover {
     fn drop(&mut self) {
-        self.print();
+        if self.emitted {
+            return;
+        }
+        match self.output_mode {
+            InitOutputMode::Text => {
+                self.print_text();
+            }
+            InitOutputMode::HandoffJson => {
+                self.print_failed_json();
+            }
+        }
     }
 }
 
 impl KeyHandover {
-    fn print(&mut self) -> Option<(String, String)> {
+    fn print_text(&mut self) -> Option<(String, String)> {
         let keys = self.keys.take()?;
         println!("---");
         println!("session key: {}", keys.session_value.as_str());
@@ -666,21 +716,108 @@ impl KeyHandover {
     }
 
     fn print_and_record(&mut self, store: &StateStore, run_id: &str) -> Result<()> {
-        if self.print().is_some() {
-            store.append_event_with_source(
-                "info",
-                KEY_HANDOVER_PRINTED_EVENT,
-                crate::state::EVENT_SOURCE_CLI,
-                "session and admin API keys were shown to the operator",
-                &serde_json::json!({
-                    "init_run_id": run_id,
-                    "key_kinds": ["session", "admin"],
-                })
-                .to_string(),
-            )?;
+        if self.keys.is_some() {
+            self.record(store, run_id)?;
+            self.print_text();
         }
         Ok(())
     }
+
+    fn record(&self, store: &StateStore, run_id: &str) -> Result<()> {
+        if self.keys.is_none() {
+            return Ok(());
+        }
+        store.append_event_with_source(
+            "info",
+            KEY_HANDOVER_PRINTED_EVENT,
+            crate::state::EVENT_SOURCE_CLI,
+            "session and admin API keys were shown to the operator",
+            &serde_json::json!({
+                "init_run_id": run_id,
+                "key_kinds": ["session", "admin"],
+            })
+            .to_string(),
+        )?;
+        Ok(())
+    }
+
+    fn print_handoff_json(
+        &mut self,
+        status: &'static str,
+        context: &InitHandoffContext,
+    ) -> Result<()> {
+        let payload = init_handoff_payload(status, context, self.keys.as_ref());
+        let rendered =
+            serde_json::to_string_pretty(&payload).map_err(|source| StackError::ServeIo {
+                source: std::io::Error::other(format!("serialize init handoff JSON: {source}")),
+            })?;
+        println!("{rendered}");
+        self.keys.take();
+        self.emitted = true;
+        Ok(())
+    }
+
+    fn print_failed_json(&mut self) {
+        let Some(context) = self.failure_context.as_ref() else {
+            return;
+        };
+        if self.keys.is_none() {
+            return;
+        }
+        let payload = init_handoff_payload("failed", context, self.keys.as_ref());
+        match serde_json::to_string_pretty(&payload) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(error) => eprintln!("failed to serialize init handoff JSON: {error}"),
+        }
+        self.keys.take();
+        self.emitted = true;
+    }
+}
+
+fn init_handoff_payload(
+    status: &'static str,
+    context: &InitHandoffContext,
+    fresh_keys: Option<&FreshKeys>,
+) -> serde_json::Value {
+    let generated_keys = if fresh_keys.is_some() {
+        serde_json::json!(["session", "admin"])
+    } else {
+        serde_json::json!([])
+    };
+    let preserved_keys = if fresh_keys.is_some() {
+        serde_json::json!([])
+    } else {
+        serde_json::json!(["session", "admin"])
+    };
+    let mut payload = serde_json::json!({
+        "status": status,
+        "config_path": context.config_path.display().to_string(),
+        "state_path": context.state_path.display().to_string(),
+        "secret_store_path": context.secret_store_path.display().to_string(),
+        "age_key_path": context.age_key_path.display().to_string(),
+        "agent": {
+            "id": context.agent_id,
+            "name": context.agent_name,
+        },
+        "auth": {
+            "generated_keys": generated_keys,
+            "preserved_keys": preserved_keys,
+        },
+    });
+    if let Some(keys) = fresh_keys {
+        let object = payload
+            .as_object_mut()
+            .expect("init handoff payload is an object");
+        object.insert(
+            "session_key".to_owned(),
+            serde_json::Value::String(keys.session_value.as_str().to_owned()),
+        );
+        object.insert(
+            "admin_key".to_owned(),
+            serde_json::Value::String(keys.admin_value.as_str().to_owned()),
+        );
+    }
+    payload
 }
 
 /// Whether init should drive interactive prompts: a real TTY and no
@@ -688,7 +825,7 @@ impl KeyHandover {
 /// prompt site honors `--non-interactive` (several previously checked only
 /// `is_terminal()`).
 pub(super) fn prompts_enabled(args: &InitArgs) -> bool {
-    io::stdin().is_terminal() && !args.non_interactive
+    io::stdin().is_terminal() && !args.non_interactive && !args.handoff_json
 }
 
 fn config_import_source_for_init(
@@ -796,7 +933,11 @@ fn resumable_init_exists(state_path: &Path) -> Result<bool> {
     Ok(crate::runtime::init_runner::find_resumable_run(&store)?.is_some())
 }
 
-fn import_config_for_init(args: &InitArgs, config_path: &Path) -> Result<bool> {
+fn import_config_for_init(
+    args: &InitArgs,
+    config_path: &Path,
+    output_mode: InitOutputMode,
+) -> Result<bool> {
     let Some(source) = config_import_source_for_init(args)? else {
         return Ok(false);
     };
@@ -806,13 +947,20 @@ fn import_config_for_init(args: &InitArgs, config_path: &Path) -> Result<bool> {
         });
     }
     let payload = cli_config::load_config_import_payload(source)?;
-    cli_config::print_config_import_progress(true);
+    if output_mode.is_text() {
+        cli_config::print_config_import_progress(true);
+    }
     write_new_file_owner_only(config_path, payload.canonical.as_bytes())?;
-    println!("imported config: {}", config_path.display());
+    init_println!(output_mode, "imported config: {}", config_path.display());
     Ok(true)
 }
 
 pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
+    let output_mode = if args.handoff_json {
+        InitOutputMode::HandoffJson
+    } else {
+        InitOutputMode::Text
+    };
     if args.skip_workspace_init() && mode != InitMode::Dev {
         return Err(StackError::InvalidParam {
             field: "--skip-workspace-init",
@@ -836,7 +984,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     create_dir_owner_only(config_dir)?;
     create_dir_owner_only(state_dir)?;
     prompt_config_source_if_needed(&mut args, &config_path, &state_path)?;
-    let imported_config = import_config_for_init(&args, &config_path)?;
+    let imported_config = import_config_for_init(&args, &config_path, output_mode)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
 
     // Preflight (untracked): new configs must start with a real registry
@@ -859,7 +1007,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         reject_registry_id_for_custom_agent(&spec.id, &registry)?;
     }
     if creating_config && !args.resume && args.agent.is_none() && custom_agent_spec.is_none() {
-        if !io::stdin().is_terminal() {
+        if !prompts_enabled(&args) {
             return Err(StackError::InvalidParam {
                 field: "--agent",
                 reason: "non-interactive init requires selecting a real agent; run `acps init` in a TTY or pass `--non-interactive --agent <id>` or the `--custom-agent-*` flags".to_owned(),
@@ -932,9 +1080,9 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let prior_init_steps = store.query_init_steps(&init_run.id)?;
     let resumed = args.resume;
     if resumed {
-        println!("resuming init run {}", init_run.id);
+        init_println!(output_mode, "resuming init run {}", init_run.id);
     } else {
-        println!("init run {}", init_run.id);
+        init_println!(output_mode, "init run {}", init_run.id);
     }
 
     let recorded_args = if resumed {
@@ -1179,14 +1327,28 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog)?;
 
     let mut auth_status: &'static str = "preserved existing API keys";
-    let mut key_handover = KeyHandover { keys: None };
+    let mut key_handover = KeyHandover {
+        keys: None,
+        output_mode,
+        failure_context: None,
+        emitted: false,
+    };
 
     // -----------------------------------------------------------------
     // Step 1: secrets_init — generate or preserve session + admin verifiers.
     // Verifier: both verifier rows present in state.
     // -----------------------------------------------------------------
     let mut secret_store = SecretStore::open_or_create(&home)?;
-    println!("progress: initializing auth");
+    let handoff_context = InitHandoffContext {
+        config_path: config_path.clone(),
+        state_path: state_path.clone(),
+        secret_store_path: secret_store.store_path().to_path_buf(),
+        age_key_path: age_key_path(&home),
+        agent_id: config.agent.id.clone(),
+        agent_name: config.agent.name.clone(),
+    };
+    key_handover.failure_context = Some(handoff_context.clone());
+    init_println!(output_mode, "progress: initializing auth");
     let step_result = record_step(
         &store,
         &init_run,
@@ -1265,9 +1427,17 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             Err(error) => return finalize_with_error(&store, &init_run, error),
         };
         if stored {
-            println!("supabase secret: set ({})", supabase.api_key_ref);
+            init_println!(
+                output_mode,
+                "supabase secret: set ({})",
+                supabase.api_key_ref
+            );
         } else {
-            println!("supabase secret: preserved ({})", supabase.api_key_ref);
+            init_println!(
+                output_mode,
+                "supabase secret: preserved ({})",
+                supabase.api_key_ref
+            );
         }
     }
 
@@ -1314,13 +1484,16 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                                 install_configured_agent(&home, &config, &registry, &store)
                             })
                         } else {
-                            println!("progress: {message}");
+                            init_println!(output_mode, "progress: {message}");
                             install_configured_agent(&home, &config, &registry, &store)
                         }
                     },
                     |attempt, error, delay| {
-                        println!("agent install attempt {attempt} failed: {error}");
-                        println!("retrying in {}s…", delay.as_secs());
+                        init_println!(
+                            output_mode,
+                            "agent install attempt {attempt} failed: {error}"
+                        );
+                        init_println!(output_mode, "retrying in {}s…", delay.as_secs());
                         std::thread::sleep(delay);
                     },
                 )?;
@@ -1357,7 +1530,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let skill_step_needs_resume =
         step_needs_resume(&prior_init_steps, step_kind::AGENT_SKILLS_INSTALL);
     if skill_install_plan.is_some() || skill_step_needs_resume {
-        println!("progress: installing agent skills");
+        init_println!(output_mode, "progress: installing agent skills");
         let Some(plan) = skill_install_plan.clone() else {
             return finalize_with_error(
                 &store,
@@ -1403,7 +1576,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     if !args.skip_workspace_init()
         || step_needs_resume(&prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
     {
-        println!("progress: materializing workspace sources");
+        init_println!(output_mode, "progress: materializing workspace sources");
         let log_paths =
             crate::runtime::workspace_sources::workspace_init::WorkspaceLogPaths::for_run(
                 &crate::runtime::workspace_sources::workspace_init::default_workspace_init_log_base(
@@ -1443,7 +1616,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             return finalize_with_error(&store, &init_run, error);
         }
     } else {
-        println!("workspace: skipped (--skip-workspace-init)");
+        init_println!(output_mode, "workspace: skipped (--skip-workspace-init)");
     }
 
     // -----------------------------------------------------------------
@@ -1462,7 +1635,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             Err(error) => return finalize_with_error(&store, &init_run, error),
         };
     if deps_apply_requested || step_needs_resume(&prior_init_steps, step_kind::DEPS_APPLY) {
-        println!("progress: applying dependencies");
+        init_println!(output_mode, "progress: applying dependencies");
         let result = record_step(
             &store,
             &init_run,
@@ -1476,7 +1649,10 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                     Some(&store),
                     &config.workspace.default_shell,
                     |current, total, name| {
-                        println!("progress: applying dependency {current}/{total}: {name}");
+                        init_println!(
+                            output_mode,
+                            "progress: applying dependency {current}/{total}: {name}"
+                        );
                         Ok(())
                     },
                 )?;
@@ -1522,7 +1698,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // Step 4: provider_configure — write provider/model into the config
     // and persist canonical TOML if anything changed.
     // -----------------------------------------------------------------
-    println!("progress: configuring provider and model");
+    init_println!(output_mode, "progress: configuring provider and model");
     let provider_verify_config = config.clone();
     let provider_verify_home = home.clone();
     let result = record_step(
@@ -1568,7 +1744,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             // otherwise never spawn during init. Gate on an ACP session here so a
             // non-ACP or broken custom binary is caught now, not at first session.
             if is_custom_agent(&config, &registry) {
-                verify_agent_acp_connection(&home, &config)?;
+                verify_agent_acp_connection(&home, &config, output_mode.is_text())?;
             }
             let model_mode_changed =
                 matches!(model_mode_outcome.model_action, ModelModeAction::Set)
@@ -1623,7 +1799,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // files so the harness can start without first-run prompts.
     // -----------------------------------------------------------------
     let mut provisioned_agent_configs = Vec::new();
-    println!("progress: writing agent headless config");
+    init_println!(output_mode, "progress: writing agent headless config");
     let result = record_step(
         &store,
         &init_run,
@@ -1671,7 +1847,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     // -----------------------------------------------------------------
     let mut provisioned_edge_artifacts = Vec::new();
     if edge_requested || step_needs_resume(&prior_init_steps, step_kind::EDGE_ARTIFACTS) {
-        println!("progress: preparing Cloudflare edge artifacts");
+        init_println!(output_mode, "progress: preparing Cloudflare edge artifacts");
         let result = record_step(
             &store,
             &init_run,
@@ -1770,48 +1946,78 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         return finalize_with_error(&store, &init_run, error);
     }
 
-    println!("initialized acp-stack");
-    println!("{config_status}: {}", config_path.display());
-    println!("state: {}", state_path.display());
-    println!("secrets: {}", secret_store.store_path().display());
-    println!("age key: {}", age_key_path(&home).display());
-    println!("auth: {auth_status}");
-    println!("agent: {} ({})", config.agent.name, config.agent.id);
+    init_println!(output_mode, "initialized acp-stack");
+    init_println!(output_mode, "{config_status}: {}", config_path.display());
+    init_println!(output_mode, "state: {}", state_path.display());
+    init_println!(
+        output_mode,
+        "secrets: {}",
+        secret_store.store_path().display()
+    );
+    init_println!(output_mode, "age key: {}", age_key_path(&home).display());
+    init_println!(output_mode, "auth: {auth_status}");
+    init_println!(
+        output_mode,
+        "agent: {} ({})",
+        config.agent.name,
+        config.agent.id
+    );
     if let Some(outcome) = install_outcome {
-        println!("agent install: {}", outcome.label());
-        println!("agent path: {}", outcome.path().display());
-        println!("agent sha256: {}", outcome.sha256());
+        init_println!(output_mode, "agent install: {}", outcome.label());
+        init_println!(output_mode, "agent path: {}", outcome.path().display());
+        init_println!(output_mode, "agent sha256: {}", outcome.sha256());
     }
     if let Some(report) = skill_install_report {
         for entry in report.installed {
-            println!(
+            init_println!(
+                output_mode,
                 "skill installed: {} -> {}",
                 entry.name,
                 entry.path.display()
             );
         }
         for entry in report.skipped {
-            println!("skill already installed: {}", entry.name);
+            init_println!(output_mode, "skill already installed: {}", entry.name);
         }
     }
     for provisioned in provisioned_agent_configs {
-        println!("{}: {}", provisioned.label, provisioned.path.display());
+        init_println!(
+            output_mode,
+            "{}: {}",
+            provisioned.label,
+            provisioned.path.display()
+        );
     }
     for artifact in provisioned_edge_artifacts {
-        println!("{}: {}", artifact.label, artifact.path.display());
+        init_println!(
+            output_mode,
+            "{}: {}",
+            artifact.label,
+            artifact.path.display()
+        );
     }
     if let Some(materialize) = &materialize_report {
-        println!("workspace root: {}", materialize.root.display());
-        println!("workspace uploads: {}", materialize.uploads.display());
+        init_println!(
+            output_mode,
+            "workspace root: {}",
+            materialize.root.display()
+        );
+        init_println!(
+            output_mode,
+            "workspace uploads: {}",
+            materialize.uploads.display()
+        );
         for entry in &materialize.code {
-            println!(
+            init_println!(
+                output_mode,
                 "code source ({:?}): {}",
                 entry.outcome,
                 entry.destination.display()
             );
         }
         for entry in &materialize.data {
-            println!(
+            init_println!(
+                output_mode,
                 "data source ({:?}): {}",
                 entry.outcome,
                 entry.destination.display()
@@ -1833,23 +2039,30 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             || {
                 match decision {
                     TestflightDecision::Run => {
-                        println!("---");
-                        println!("running real-prompt agent testflight");
-                        crate::cli::agent::run_init_testflight(&home, &config, &registry)?;
+                        init_println!(output_mode, "---");
+                        init_println!(output_mode, "running real-prompt agent testflight");
+                        crate::cli::agent::run_init_testflight(
+                            &home,
+                            &config,
+                            &registry,
+                            output_mode.is_text(),
+                        )?;
                     }
                     TestflightDecision::SkipExplicit => {
-                        println!("testflight: skipped (--skip-testflight)");
+                        init_println!(output_mode, "testflight: skipped (--skip-testflight)");
                     }
                     TestflightDecision::SkipNonInteractive => {
-                        println!(
+                        init_println!(
+                            output_mode,
                             "testflight: skipped (non-interactive run; pass --testflight to opt in)"
                         );
                     }
                     TestflightDecision::SkipDeclined => {
-                        println!("testflight: skipped (declined at prompt)");
+                        init_println!(output_mode, "testflight: skipped (declined at prompt)");
                     }
                     TestflightDecision::SkipUnsupported => {
-                        println!(
+                        init_println!(
+                            output_mode,
                             "testflight: skipped (agent does not support headless testflight)"
                         );
                     }
@@ -1890,7 +2103,13 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             ),
         });
     }
-    key_handover.print_and_record(&store, &init_run.id)?;
-    crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
+    if output_mode.is_handoff_json() {
+        key_handover.record(&store, &init_run.id)?;
+        crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
+        key_handover.print_handoff_json("initialized", &handoff_context)?;
+    } else {
+        key_handover.print_and_record(&store, &init_run.id)?;
+        crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
+    }
     Ok(())
 }
