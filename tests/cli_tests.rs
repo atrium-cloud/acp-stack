@@ -7472,6 +7472,34 @@ async fn sessions_new_list_prompt_close_round_trip() {
         .env("HOME", home.path())
         .args([
             "sessions",
+            "load",
+            &session_id,
+            "--session-key",
+            SESSION_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session load: active"))
+        .stdout(predicates::str::contains(session_id.as_str()));
+
+    acps_command()
+        .env("HOME", home.path())
+        .args([
+            "sessions",
+            "resume",
+            &session_id,
+            "--session-key",
+            SESSION_KEY,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("session resume: active"))
+        .stdout(predicates::str::contains(session_id.as_str()));
+
+    acps_command()
+        .env("HOME", home.path())
+        .args([
+            "sessions",
             "prompt",
             &session_id,
             "hello",
@@ -7505,6 +7533,8 @@ fn sessions_mutating_commands_require_explicit_session_key() {
 
     for args in [
         vec!["sessions", "new"],
+        vec!["sessions", "load", "sess_test"],
+        vec!["sessions", "resume", "sess_test"],
         vec!["sessions", "fork", "sess_test"],
         vec!["sessions", "prompt", "sess_test", "hello"],
         vec!["sessions", "cancel", "sess_test"],
@@ -7782,6 +7812,38 @@ async fn sessions_common_commands_format_json() {
         status_body["sessions"].as_array().is_some(),
         "{status_body}"
     );
+
+    let load_output = acps_command()
+        .env("HOME", home.path())
+        .arg("sessions")
+        .arg("load")
+        .arg(&session_id)
+        .args(["--format", "json", "--session-key", SESSION_KEY])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let load_body: Value = serde_json::from_slice(&load_output).expect("load json parses");
+    assert_eq!(load_body["id"], session_id);
+    assert_eq!(load_body["status"], "active");
+    assert!(load_body["cwd"].as_str().is_some(), "{load_body}");
+
+    let resume_output = acps_command()
+        .env("HOME", home.path())
+        .arg("sessions")
+        .arg("resume")
+        .arg(&session_id)
+        .args(["--format", "json", "--session-key", SESSION_KEY])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resume_body: Value = serde_json::from_slice(&resume_output).expect("resume json parses");
+    assert_eq!(resume_body["id"], session_id);
+    assert_eq!(resume_body["status"], "active");
+    assert!(resume_body["cwd"].as_str().is_some(), "{resume_body}");
 
     let prompt_output = acps_command()
         .env("HOME", home.path())
@@ -9027,6 +9089,119 @@ fn init_prints_session_and_admin_keys_on_first_run() {
     assert!(stdout.contains("session key: acps_"));
     assert!(stdout.contains("admin key: acps_"));
     assert!(stdout.contains("save the admin key now"));
+}
+
+#[test]
+fn init_handoff_json_prints_fresh_keys_once() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "initialized");
+    assert_eq!(
+        body["config_path"],
+        tempdir
+            .path()
+            .join(".config/acp-stack/acps-config.toml")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(
+        body["state_path"],
+        tempdir
+            .path()
+            .join(".local/share/acp-stack/state.sqlite")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(
+        body["secret_store_path"],
+        tempdir
+            .path()
+            .join(".local/share/acp-stack/secrets.age")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(
+        body["age_key_path"],
+        tempdir
+            .path()
+            .join(".config/acp-stack/age.key")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(body["agent"]["id"], "placebo");
+    assert_eq!(body["agent"]["name"], "Placebo Agent");
+    assert_eq!(body["auth"]["generated_keys"], json!(["session", "admin"]));
+    assert_eq!(body["auth"]["preserved_keys"], json!([]));
+    let session_key = body["session_key"].as_str().expect("session key");
+    let admin_key = body["admin_key"].as_str().expect("admin key");
+    assert!(session_key.starts_with("acps_"));
+    assert!(admin_key.starts_with("acps_"));
+
+    let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
+    let verifiers = store.load_auth_verifier_pair().expect("auth verifiers");
+    assert_eq!(verifiers.verify(session_key), Some(KeyKind::Session));
+    assert_eq!(verifiers.verify(admin_key), Some(KeyKind::Admin));
+}
+
+#[test]
+fn init_handoff_json_preserves_keys_without_reprinting_material() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (session_key, admin_key) = run_init_with_home(tempdir.path());
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output.clone()).expect("utf8");
+    let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "initialized");
+    assert_eq!(body["auth"]["generated_keys"], json!([]));
+    assert_eq!(body["auth"]["preserved_keys"], json!(["session", "admin"]));
+    assert!(body.get("session_key").is_none(), "{body}");
+    assert!(body.get("admin_key").is_none(), "{body}");
+    assert!(!stdout.contains(&session_key));
+    assert!(!stdout.contains(&admin_key));
+    assert!(!stdout.contains("session key:"));
+    assert!(!stdout.contains("admin key:"));
+}
+
+#[test]
+fn init_handoff_json_does_not_enable_global_format_json() {
+    acps_command()
+        .args(["init", "--handoff-json", "--format", "json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "init does not support --format json",
+        ));
 }
 
 #[test]

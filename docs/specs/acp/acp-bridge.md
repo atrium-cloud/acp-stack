@@ -17,7 +17,7 @@ The bridge maps runtime session operations to ACP methods where supported:
 - load
 - resume
 - fork
-- close/delete
+- close
 - prompt
 - cancel
 - set model or mode config options
@@ -34,6 +34,8 @@ Capability flags are read from the ACP `initialize` response — `loadSession` o
 Sessions learned from `session/list` are persisted only when their CWD is an existing directory under `[workspace].root`. Load, resume, and fork recheck the stored CWD before passing it back to the agent. Explicit load/resume CWDs update local session state after the agent accepts the call.
 
 ACP session lifecycle calls pass CWDs as paths because ACP has no directory-handle transport; the runtime revalidates those paths immediately before each call.
+
+`session/close` is surfaced as history-preserving close in `acp-stack`; it does not permanently delete local session history.
 
 ### Session Resume Capability Matrix
 

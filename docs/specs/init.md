@@ -8,6 +8,8 @@
 
 The non-interactive contract: a first run that creates a new config requires `--agent <id>`, the `--custom-agent-*` flag set, or a complete imported config. Provider, MCP, and agent env secret refs must resolve when used. A non-interactive first run with no agent path fails before writing config.
 
+`acps init --handoff-json` is the platform automation handoff mode. It disables prompts, writes only one JSON object to stdout, and keeps the broader `acps init --format json` form rejected. Platform callers must provide the same required inputs as any other non-interactive init.
+
 ## The Resumable Run
 
 Each `acps init` invocation is recorded as an init run. Within a run, every phase is recorded as a step keyed by an ordinal, so a failed or interrupted run can be continued from the first unsettled step. See [runtime.md](runtime.md) for the step machine and `src/runtime/init_runner.rs` for the implementation.
@@ -117,6 +119,32 @@ When no auth verifier rows exist, init generates two API keys and shows their pl
 - Admin key — secrets, config import, agent process control, and other elevated operations.
 
 The handover prints the two values with the reminder that the admin key is never regenerable and that `acps reset --yes` is the only way to rotate it by reinitializing the instance. The values are never stored in plaintext, never returned through the API, and never reprinted on a later run: a re-run or `--resume` over existing verifier rows takes the preserved path and shows nothing. Save them when shown.
+
+## Platform Handoff JSON
+
+`acps init --handoff-json` emits the paths and keys a hosted platform needs after init:
+
+```json
+{
+  "status": "initialized",
+  "config_path": "/home/acps/.config/acp-stack/acps-config.toml",
+  "state_path": "/home/acps/.local/share/acp-stack/state.sqlite",
+  "secret_store_path": "/home/acps/.local/share/acp-stack/secrets.age",
+  "age_key_path": "/home/acps/.config/acp-stack/age.key",
+  "agent": {
+    "id": "opencode",
+    "name": "OpenCode"
+  },
+  "auth": {
+    "generated_keys": ["session", "admin"],
+    "preserved_keys": []
+  },
+  "session_key": "acps_...",
+  "admin_key": "acps_..."
+}
+```
+
+`session_key` and `admin_key` appear only when that invocation freshly generated the keys. A later run preserves the verifier rows and reports `"preserved_keys": ["session", "admin"]` without reprinting either plaintext key. If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"` so automation can capture the one-time keys before retrying.
 
 ## Testflight
 

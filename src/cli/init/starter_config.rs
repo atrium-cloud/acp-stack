@@ -569,7 +569,9 @@ fn prompt_repeated_values(
     values: &mut Vec<String>,
 ) -> Result<()> {
     if !values.is_empty() {
-        println!("{label}: already configured ({})", values.len());
+        if interactive {
+            println!("{label}: already configured ({})", values.len());
+        }
         return Ok(());
     }
     // Free-form entries (URLs, name=command, secret refs) have no fixed option
