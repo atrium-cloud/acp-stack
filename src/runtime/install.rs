@@ -6,6 +6,7 @@ pub mod github_release;
 pub mod npm_registry;
 pub mod skill_installer;
 pub mod skill_registry;
+#[cfg(feature = "stack-self-update")]
 pub mod stack_updater;
 
 use std::path::{Path, PathBuf};

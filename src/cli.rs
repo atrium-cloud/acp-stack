@@ -15,6 +15,7 @@ mod serve;
 mod sessions;
 mod status;
 mod subagent;
+#[cfg(feature = "stack-self-update")]
 mod update;
 mod ws;
 

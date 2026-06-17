@@ -49,6 +49,10 @@ References:
     - After changing user-facing behavior, update the relevant file under docs/specs/.
     - If a task maps to docs/todos/ checkboxes, update them as work is completed.
     - Keep specs in `docs/specs/`.
+- Release workflows
+    - Public release builds keep default Cargo features and are the only workflow that publishes GitHub Releases.
+    - Public releases require a human-authored changelog at `docs/changelogs/v<version>.md`, a human commit containing that changelog and release prep, then a human-created `v<version>` tag pointing at that commit.
+    - Dev-build artifacts must be manual-only Actions artifacts and must build with `scripts/build-release.sh --no-default-features` so the binary omits `acps update`.
 - Before writing code
     - Explore first. Search for existing modules, docs, patterns, and naming.
     - Trace the full code path of the area being modified before changing it.

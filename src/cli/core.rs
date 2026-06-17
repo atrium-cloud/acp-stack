@@ -26,6 +26,7 @@ use super::security::SecurityCommand;
 use super::serve::{ServeArgs, ServeMode};
 use super::sessions::SessionsCommand;
 use super::subagent::SubagentCommand;
+#[cfg(feature = "stack-self-update")]
 use super::update::UpdateCommand;
 use super::ws::WsCommand;
 
@@ -80,6 +81,7 @@ enum Command {
     /// Print daemon health and runtime status.
     Status,
     /// Check, install, or configure acp-stack self-updates.
+    #[cfg(feature = "stack-self-update")]
     #[command(after_help = "Examples:
   acps update check
   acps update install --latest
@@ -239,6 +241,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             }
         }
         Command::Status => super::status::run_status(output.effective()),
+        #[cfg(feature = "stack-self-update")]
         Command::Update { command } => {
             super::update::run_update_command(command, output.effective())
         }
