@@ -264,16 +264,18 @@ pub(super) fn configure_model_and_mode_for_init(
                 ),
             });
         }
-        if binary_missing {
-            println!(
-                "model/mode discovery skipped: agent command `{}` not found on PATH",
-                config.agent.command,
-            );
-        } else {
-            println!(
-                "model/mode discovery skipped: spawn cwd `{}` is not yet provisioned",
-                spawn_cwd.display(),
-            );
+        if !args.handoff_json {
+            if binary_missing {
+                println!(
+                    "model/mode discovery skipped: agent command `{}` not found on PATH",
+                    config.agent.command,
+                );
+            } else {
+                println!(
+                    "model/mode discovery skipped: spawn cwd `{}` is not yet provisioned",
+                    spawn_cwd.display(),
+                );
+            }
         }
         return Ok(ModelModeOutcome::default());
     }
@@ -365,7 +367,11 @@ pub(super) fn configure_model_and_mode_for_init(
 /// binary is not yet on PATH or the spawn cwd is missing — the same
 /// preconditions discovery uses — so a partial or `--skip-workspace-init` run is
 /// not failed here.
-pub(super) fn verify_agent_acp_connection(home: &Path, config: &Config) -> Result<()> {
+pub(super) fn verify_agent_acp_connection(
+    home: &Path,
+    config: &Config,
+    print_progress: bool,
+) -> Result<()> {
     let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
         || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
     let spawn_cwd: PathBuf = config
@@ -376,10 +382,12 @@ pub(super) fn verify_agent_acp_connection(home: &Path, config: &Config) -> Resul
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
     if !fixture_discovery {
         if !spawn_cwd.is_dir() {
-            println!(
-                "acp connection check skipped: spawn cwd `{}` is not yet provisioned",
-                spawn_cwd.display(),
-            );
+            if print_progress {
+                println!(
+                    "acp connection check skipped: spawn cwd `{}` is not yet provisioned",
+                    spawn_cwd.display(),
+                );
+            }
             return Ok(());
         }
         if crate::runtime::agent::acp_bridge::resolve_command_path(
@@ -389,10 +397,12 @@ pub(super) fn verify_agent_acp_connection(home: &Path, config: &Config) -> Resul
         .is_none()
         {
             if crate::dev_gates::fixture_enabled(TEST_SKIP_AGENT_INSTALL_ENV) {
-                println!(
-                    "acp connection check skipped: agent command `{}` not found on PATH",
-                    config.agent.command,
-                );
+                if print_progress {
+                    println!(
+                        "acp connection check skipped: agent command `{}` not found on PATH",
+                        config.agent.command,
+                    );
+                }
                 return Ok(());
             }
             return Err(StackError::AgentInitializeFailed {
@@ -452,11 +462,13 @@ fn configure_model_for_init(
         // do NOT mutate config — provider stays set, model stays at
         // whatever it was (most commonly unset, so the agent picks
         // its own default on session/new).
-        println!("advertised models for {agent_name}:");
-        for value in &values {
-            println!("  {value}");
+        if !args.handoff_json {
+            println!("advertised models for {agent_name}:");
+            for value in &values {
+                println!("  {value}");
+            }
+            println!("rerun with `acps init --model <value>` to write a model into config");
         }
-        println!("rerun with `acps init --model <value>` to write a model into config");
         return Ok(ModelModeAction::PrintedList);
     }
 
@@ -503,11 +515,13 @@ fn configure_mode_for_init(
     }
     let interactive = prompts_enabled(args);
     if !interactive {
-        println!("advertised modes for {agent_name}:");
-        for value in &values {
-            println!("  {value}");
+        if !args.handoff_json {
+            println!("advertised modes for {agent_name}:");
+            for value in &values {
+                println!("  {value}");
+            }
+            println!("rerun with `acps init --mode <value>` to write a mode into config");
         }
-        println!("rerun with `acps init --mode <value>` to write a mode into config");
         return Ok(ModelModeAction::PrintedList);
     }
     let Some(selected) =

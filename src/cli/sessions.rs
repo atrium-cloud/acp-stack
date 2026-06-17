@@ -21,6 +21,10 @@ pub enum SessionsCommand {
     Status(SessionsStatusArgs),
     /// Create a new session through the running daemon.
     New(SessionsNewArgs),
+    /// Load an existing agent session through ACP.
+    Load(SessionsLoadArgs),
+    /// Resume an existing agent session through ACP.
+    Resume(SessionsLoadArgs),
     /// Fork an existing session through ACP.
     Fork(SessionsForkArgs),
     /// Send a prompt to a session. Polls until completion unless `--no-wait`.
@@ -79,6 +83,17 @@ pub struct SessionsForkArgs {
     /// Optional ACP prompt message id to fork from.
     #[arg(long)]
     message_id: Option<String>,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsLoadArgs {
+    session_id: String,
+    /// Optional working directory for the loaded/resumed session.
+    #[arg(long)]
+    cwd: Option<String>,
     /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
     #[arg(long = "session-key")]
     session_key: Option<String>,
@@ -226,6 +241,12 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                     }
                 }
                 Ok(())
+            }
+            SessionsCommand::Load(args) => {
+                run_sessions_load_or_resume(&config, &base_url, args, output, "load").await
+            }
+            SessionsCommand::Resume(args) => {
+                run_sessions_load_or_resume(&config, &base_url, args, output, "resume").await
             }
             SessionsCommand::Fork(args) => {
                 let session_access = resolve_session_access(&config, args.session_key.clone())?;
@@ -405,6 +426,44 @@ fn encode_query_value(input: &str) -> String {
         }
     }
     out
+}
+
+async fn run_sessions_load_or_resume(
+    config: &Config,
+    base_url: &str,
+    args: SessionsLoadArgs,
+    output: OutputFormat,
+    action: &'static str,
+) -> Result<()> {
+    let session_access = resolve_session_access(config, args.session_key.clone())?;
+    let body = serde_json::json!({
+        "cwd": args.cwd,
+    });
+    let encoded = encode_path_segment(&args.session_id);
+    let path = format!("/v1/sessions/{encoded}/{action}");
+    let response = session_daemon_request(
+        config,
+        base_url,
+        &session_access,
+        CliMethod::Post,
+        &path,
+        Some(&body),
+    )
+    .await?;
+    let data = response.get("data").unwrap_or(&response);
+    if output.is_json() {
+        print_json(data)?;
+    } else {
+        let id = data["id"].as_str().unwrap_or(&args.session_id);
+        let status = data["status"].as_str().unwrap_or("active");
+        let cwd = data["cwd"].as_str().unwrap_or("");
+        println!("session {action}: {status}");
+        println!("session: {id}");
+        if !cwd.is_empty() {
+            println!("cwd: {cwd}");
+        }
+    }
+    Ok(())
 }
 
 async fn run_sessions_prompt(

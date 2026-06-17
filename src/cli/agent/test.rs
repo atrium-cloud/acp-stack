@@ -81,20 +81,21 @@ pub(in crate::cli) fn run_init_testflight(
     home: &Path,
     config: &Config,
     registry: &RegistryCatalog,
+    print_summary: bool,
 ) -> Result<()> {
     let args = AgentTestArgs {
         prompt: None,
         timeout: DEFAULT_AGENT_TEST_TIMEOUT.to_owned(),
         progress_timeout: DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT.to_owned(),
     };
-    run_agent_test_with(home, config, registry, args)
+    run_agent_test_with(home, config, registry, args, print_summary)
 }
 
 pub(super) fn run_agent_test(args: AgentTestArgs) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    run_agent_test_with(&home, &config, &registry, args)
+    run_agent_test_with(&home, &config, &registry, args, true)
 }
 
 fn run_agent_test_with(
@@ -102,6 +103,7 @@ fn run_agent_test_with(
     config: &Config,
     registry: &RegistryCatalog,
     args: AgentTestArgs,
+    print_summary: bool,
 ) -> Result<()> {
     let entry = registry.lookup_required(&config.agent.id)?;
     entry.ensure_supported()?;
@@ -152,18 +154,20 @@ fn run_agent_test_with(
         None => None,
     };
 
-    println!("agent test: ok");
-    println!("agent: {}", config.agent.id);
-    println!("prompt: {}", prompt_source.label());
-    println!("session_id: {}", report.session_id);
-    println!("stop_reason: {}", stop_reason_label(report.stop_reason));
-    println!("updates: {}", report.updates);
-    if let Some(outcome) = fs_outcome {
-        println!(
-            "fs_smoke: ok ({} bytes at {})",
-            outcome.bytes,
-            outcome.path.display()
-        );
+    if print_summary {
+        println!("agent test: ok");
+        println!("agent: {}", config.agent.id);
+        println!("prompt: {}", prompt_source.label());
+        println!("session_id: {}", report.session_id);
+        println!("stop_reason: {}", stop_reason_label(report.stop_reason));
+        println!("updates: {}", report.updates);
+        if let Some(outcome) = fs_outcome {
+            println!(
+                "fs_smoke: ok ({} bytes at {})",
+                outcome.bytes,
+                outcome.path.display()
+            );
+        }
     }
     Ok(())
 }

@@ -55,7 +55,9 @@ pub(super) fn resolve_testflight_decision(
         return Ok(Some(TestflightDecision::SkipUnsupported));
     }
     if args.testflight {
-        print_testflight_credit_warning(entry);
+        if !args.handoff_json {
+            print_testflight_credit_warning(entry);
+        }
         return Ok(Some(TestflightDecision::Run));
     }
     if !interactive {

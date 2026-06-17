@@ -87,7 +87,7 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 | `POST /v1/sessions/{id}/fork`               | session | forks a session through ACP                                    |
 | `POST /v1/sessions/{id}/prompt`             | session | enqueues a prompt and returns a prompt id                      |
 | `POST /v1/sessions/{id}/cancel`             | session | cancels an in-flight prompt                                    |
-| `DELETE /v1/sessions/{id}`                  | session | closes or deletes a session when supported                     |
+| `DELETE /v1/sessions/{id}`                  | session | closes the agent-side session and preserves local history      |
 | `GET /v1/sessions/{id}/prompts/{prompt_id}` | session | returns prompt status                                          |
 | `GET /v1/sessions/{id}/events`              | session | returns durable session events                                 |
 | `GET /v1/sessions/{id}/snapshot`            | session | returns session row, in-flight prompts, and recent events      |
@@ -95,6 +95,8 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
 
 Session create, load, resume, and fork accept an optional `cwd`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before reuse. Explicit load/resume CWDs are stored after the agent accepts the call. Closed sessions cannot be loaded, resumed, forked, or prompted.
+
+Session close is history-preserving: the runtime calls ACP `session/close` when supported, marks the local row `closed`, and keeps durable events/query history. Permanent deletion is deferred until product semantics are defined.
 
 `POST /v1/sessions/{id}/fork` also accepts optional `{ "message_id": "<prompt message id>" }`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
 

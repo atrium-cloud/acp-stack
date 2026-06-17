@@ -12,8 +12,8 @@
 //! prompts must expose an explicit Skip item instead of treating cancellation as
 //! a hidden skip.
 //!
-//! Init is text-only by construction: `--format json` is rejected for `init`
-//! before `run_init` runs, so this terminal UI never collides with structured
+//! `--format json` is rejected for `init`, and `--handoff-json` disables prompts
+//! before these helpers run, so terminal UI never collides with structured
 //! output.
 
 use std::io;
