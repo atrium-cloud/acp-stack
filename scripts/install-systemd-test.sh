@@ -153,7 +153,19 @@ docker exec "${CONTAINER_NAME}" \
   >"${stdout_capture}" 2>&1
 cat "${stdout_capture}"
 
-session_key="$(awk '/^session key \([^)]*\): / { print $NF; exit }' "${stdout_capture}")"
+session_key="$(
+  awk '
+    /^session key: / {
+      sub(/^session key: /, "")
+      print
+      exit
+    }
+    /^session key \([^)]*\): / {
+      print $NF
+      exit
+    }
+  ' "${stdout_capture}"
+)"
 if [[ -z "${session_key}" ]]; then
   echo "install-systemd-test: failed to parse session key from installer output." >&2
   exit 1
