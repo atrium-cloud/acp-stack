@@ -7,7 +7,7 @@ set -euo pipefail
 # both cross-compiles to Linux and pins the glibc floor in the target triple
 # so the artifacts run on old and new distros alike.
 #
-# Usage: scripts/build-release.sh [--classification regular|security-critical] [--breaking true|false]
+# Usage: scripts/build-release.sh [--classification regular|security-critical] [--breaking true|false] [--no-default-features]
 #
 # The git tag for a release must be `v<version>` where <version> is the
 # [package] version in Cargo.toml; install.sh derives the artifact filename
@@ -31,6 +31,7 @@ readonly DIST_DIR="${REPO_ROOT}/dist"
 
 classification="${ACP_STACK_RELEASE_CLASSIFICATION:-regular}"
 breaking="${ACP_STACK_RELEASE_BREAKING:-false}"
+no_default_features=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "build-release: --breaking needs true or false" >&2; exit 1; }
       breaking="$2"
       shift 2
+      ;;
+    --no-default-features)
+      no_default_features=true
+      shift
       ;;
     -h|--help)
       sed -n '3,17p' "$0"
@@ -103,7 +108,12 @@ for target in "${TARGETS[@]}"; do
   target_args+=(--target "${target}.${GLIBC}")
 done
 
-cargo zigbuild --release "${target_args[@]}" --bin acps
+cargo_feature_args=()
+if [[ "${no_default_features}" == true ]]; then
+  cargo_feature_args+=(--no-default-features)
+fi
+
+cargo zigbuild --release "${target_args[@]}" "${cargo_feature_args[@]}" --bin acps
 
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"

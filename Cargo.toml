@@ -11,8 +11,9 @@ rust-version = "1.95"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["stack-self-update"]
 dev-tools = []
+stack-self-update = []
 test-fixtures = []
 
 [[bin]]

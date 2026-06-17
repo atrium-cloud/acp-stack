@@ -46,6 +46,75 @@ fn production_build_does_not_expose_placebo_binary() {
 }
 
 #[test]
+fn default_release_build_keeps_stack_self_update_enabled() {
+    let manifest = std::fs::read_to_string("Cargo.toml").expect("read manifest");
+    let value: toml::Value = toml::from_str(&manifest).expect("parse manifest");
+    let features = value
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .expect("features table");
+    let defaults = features
+        .get("default")
+        .and_then(toml::Value::as_array)
+        .expect("default feature array");
+    assert!(
+        features.contains_key("stack-self-update"),
+        "stack-self-update feature must exist so dev builds can omit it explicitly"
+    );
+    assert!(
+        defaults
+            .iter()
+            .any(|feature| feature.as_str() == Some("stack-self-update")),
+        "default release builds must include stack-self-update"
+    );
+
+    let release_workflow =
+        std::fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    assert!(
+        release_workflow.contains("bash scripts/build-release.sh"),
+        "release workflow must use the release packaging script"
+    );
+    assert!(
+        !release_workflow.contains("--no-default-features"),
+        "public release builds must keep default features enabled"
+    );
+}
+
+#[test]
+fn dev_build_workflow_uploads_release_shaped_artifacts_without_self_update() {
+    let workflow = std::fs::read_to_string(".github/workflows/dev-build.yml")
+        .expect("read dev build workflow");
+    assert!(
+        workflow.contains("workflow_dispatch:"),
+        "dev build workflow must be manual-only"
+    );
+    assert!(
+        !workflow.contains("pull_request:") && !workflow.contains("push:"),
+        "dev build workflow must not run on PRs or pushes"
+    );
+    assert!(
+        workflow.contains("permissions:") && workflow.contains("contents: read"),
+        "dev build workflow must request read-only contents permission"
+    );
+    assert!(
+        !workflow.contains("contents: write"),
+        "dev build workflow must not request release publishing permission"
+    );
+    assert!(
+        workflow.contains("bash scripts/build-release.sh --no-default-features"),
+        "dev build workflow must compile without default features"
+    );
+    assert!(
+        workflow.contains("uses: actions/upload-artifact@v4") && workflow.contains("path: dist/"),
+        "dev build workflow must upload the full dist directory"
+    );
+    assert!(
+        !workflow.contains("softprops/action-gh-release"),
+        "dev build workflow must not publish GitHub Releases"
+    );
+}
+
+#[test]
 fn docker_runtime_includes_registry_install_tools() {
     let dockerfile = std::fs::read_to_string("Dockerfile").expect("read Dockerfile");
     let install_line = dockerfile
@@ -142,5 +211,9 @@ fn release_workflow_runs_acceptance_gate() {
             "cargo test --test release_acceptance_tests --features dev-tools,test-fixtures --locked"
         ),
         "release workflow must run release_acceptance_tests with release fixtures"
+    );
+    assert!(
+        workflow.contains("cargo check --no-default-features --bin acps --locked"),
+        "release workflow must compile the dev-build feature set"
     );
 }
