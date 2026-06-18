@@ -278,10 +278,12 @@ fn update_components(entry: &RegistryEntry) -> Result<Vec<UpdateComponent<'_>>> 
             .ok_or_else(|| StackError::RegistryLoad {
                 reason: format!("registry entry `{}` has no adapter block", entry.id),
             })?;
-        return Ok(vec![
-            harness_component(entry, harness, STEP_HARNESS),
-            adapter_component(entry, adapter),
-        ]);
+        let mut components = Vec::new();
+        if !harness.install.is_provided_by_adapter() {
+            components.push(harness_component(entry, harness, STEP_HARNESS));
+        }
+        components.push(adapter_component(entry, adapter));
+        return Ok(components);
     }
     Ok(vec![harness_component(entry, harness, STEP_INSTALL)])
 }
@@ -694,7 +696,7 @@ mod tests {
 
     use super::{
         AgentUpdateOptions, UpdateComponent, UpdatePlanKind, choose_update_plan,
-        help_output_contains_command, update_agent_for_config,
+        help_output_contains_command, update_agent_for_config, update_components,
     };
     use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
     use crate::state::{
@@ -727,6 +729,41 @@ mod tests {
             UpdatePlanKind::Native { command } => assert_eq!(command, "shell-agent"),
             _ => panic!("expected native update plan"),
         }
+    }
+
+    #[test]
+    fn update_components_skip_adapter_provided_harness() {
+        let catalog = RegistryCatalog::from_toml(
+            r#"
+[[agents]]
+id = "sdk-backed"
+name = "SDK Backed"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/sdk-backed.md"
+
+[agents.adapter]
+id = "sdk-backed-acp"
+
+[agents.adapter.install.npm]
+package = "sdk-backed-acp"
+creates = "sdk-backed-acp"
+
+[agents.harness]
+id = "sdk-agent-sdk"
+
+[agents.harness.install]
+provided_by = "adapter"
+"#,
+        )
+        .expect("registry");
+        let entry = catalog.lookup_required("sdk-backed").expect("entry");
+
+        let components = update_components(entry).expect("components");
+
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].step, "adapter");
+        assert_eq!(components[0].command_id, "sdk-backed-acp");
     }
 
     #[test]

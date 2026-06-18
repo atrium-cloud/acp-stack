@@ -18,7 +18,7 @@ Session recovery remains explicit. After an automatic relaunch, clients use `GET
 
 ## Agent Installation
 
-Supported agents are declared in the embedded catalog. Entries may be native ACP agents or adapter-backed agents with separate harness and adapter install steps.
+Supported agents are declared in the embedded catalog. Entries may be native ACP agents or adapter-backed agents; adapter entries either install separate harness and adapter steps or declare that the harness is provided by the adapter package.
 
 Installer behavior:
 

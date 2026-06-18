@@ -829,37 +829,12 @@ impl AcpBridge {
         self.planned_shutdown.store(true, Ordering::SeqCst);
         // Clear the cloneable handle so any in-flight session calls fail
         // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
-        {
-            let mut guard = self.connection.lock().await;
-            *guard = None;
-        }
+        self.clear_connection().await;
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }
-        let task = self.connection_task.lock().await.take();
-        if let Some(mut task) = task {
-            // Wait for the SDK closure to return. If it doesn't within the
-            // grace window, abort the task explicitly so the IO loop does
-            // not continue running detached after shutdown returns.
-            let sleep = tokio::time::sleep(SHUTDOWN_GRACE);
-            tokio::pin!(sleep);
-            tokio::select! {
-                result = &mut task => {
-                    if let Err(err) = result {
-                        tracing::warn!(error = ?err, "acp bridge task panicked on shutdown");
-                    }
-                }
-                _ = &mut sleep => {
-                    task.abort();
-                    let _ = task.await;
-                }
-            }
-        }
-        self.notification_drain.wait_idle().await;
-        // Drain queued `session/update` writes after the connection task has
-        // stopped and every accepted notification append task has finished
-        // enqueueing its row. Only then is it safe to close the sink.
-        self.sink.flush().await;
+        self.wait_connection_task().await;
+        self.flush_notifications().await;
 
         let mut child = match self.child.lock().await.take() {
             Some(child) => child,
@@ -886,6 +861,69 @@ impl AcpBridge {
         };
 
         Ok(status.and_then(|s| s.code()))
+    }
+
+    /// Tear down a provisional probe by killing the process group before the
+    /// client IO loop drops stdout. This keeps one-shot discovery from
+    /// surfacing adapter-side broken-pipe stack traces after values were read.
+    pub async fn terminate_probe(&self) -> Result<Option<i32>> {
+        self.planned_shutdown.store(true, Ordering::SeqCst);
+        self.clear_connection().await;
+
+        let status = match self.child.lock().await.take() {
+            Some(mut child) => {
+                kill_tokio_process_group(&mut child);
+                match timeout(SHUTDOWN_GRACE, child.wait()).await {
+                    Ok(Ok(status)) => Some(status),
+                    Ok(Err(err)) => {
+                        tracing::warn!(error = ?err, "acp bridge: wait failed after probe kill");
+                        None
+                    }
+                    Err(_) => None,
+                }
+            }
+            None => None,
+        };
+
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
+        self.wait_connection_task().await;
+        self.flush_notifications().await;
+
+        Ok(status.and_then(|s| s.code()))
+    }
+
+    async fn clear_connection(&self) {
+        let mut guard = self.connection.lock().await;
+        *guard = None;
+    }
+
+    async fn wait_connection_task(&self) {
+        let task = self.connection_task.lock().await.take();
+        if let Some(mut task) = task {
+            let sleep = tokio::time::sleep(SHUTDOWN_GRACE);
+            tokio::pin!(sleep);
+            tokio::select! {
+                result = &mut task => {
+                    if let Err(err) = result {
+                        tracing::warn!(error = ?err, "acp bridge task panicked on shutdown");
+                    }
+                }
+                _ = &mut sleep => {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
+    }
+
+    async fn flush_notifications(&self) {
+        self.notification_drain.wait_idle().await;
+        // Drain queued `session/update` writes after the connection task has
+        // stopped and every accepted notification append task has finished
+        // enqueueing its row. Only then is it safe to close the sink.
+        self.sink.flush().await;
     }
 }
 

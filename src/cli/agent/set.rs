@@ -1,26 +1,23 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::config::{
     self, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
-use crate::dev_gates::{
-    FIXTURE_CONFIG_OPTIONS_ENV as ACP_CONFIG_OPTIONS_FIXTURE_ENV,
-    FIXTURE_NEW_SESSION_RESPONSE_ENV as ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV, fixture_path,
-};
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
-    session_config_values, session_model_selection_for_value, session_model_values,
+    AgentSessionConfigCategory, session_config_id_for_value, session_config_values,
+    session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent::claude_code_provider_profiles::{
     CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider, profile_for_provider_id,
 };
-use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
+use crate::runtime::agent::model_discovery::{
+    fetch_session_config, resolve_advertised_model_value,
+};
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
     optional_env_refs_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
@@ -29,7 +26,7 @@ use crate::runtime::agent::provider_keys::{
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
 use super::AgentSetArgs;
-use super::install::{operator_registry_override, resolve_agent_env_for_cli};
+use super::install::operator_registry_override;
 
 pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     let home = home_dir()?;
@@ -800,71 +797,5 @@ fn read_agent_new_session_response(
     home: &Path,
     config: &Config,
 ) -> Result<agent_client_protocol::schema::NewSessionResponse> {
-    if let Some(path) = fixture_path(ACP_CONFIG_OPTIONS_FIXTURE_ENV) {
-        let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
-            path: path.clone(),
-            source,
-        })?;
-        let options: Vec<agent_client_protocol::schema::SessionConfigOption> =
-            serde_json::from_str(&body).map_err(|source| StackError::AgentConfigProvision {
-                path,
-                reason: format!("ACP session config options fixture is invalid: {source}"),
-            })?;
-        return Ok(
-            agent_client_protocol::schema::NewSessionResponse::new("fixture")
-                .config_options(options),
-        );
-    }
-
-    if let Some(path) = fixture_path(ACP_NEW_SESSION_RESPONSE_FIXTURE_ENV) {
-        let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
-            path: path.clone(),
-            source,
-        })?;
-        return serde_json::from_str(&body).map_err(|source| StackError::AgentConfigProvision {
-            path,
-            reason: format!("ACP session/new fixture is invalid: {source}"),
-        });
-    }
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|source| StackError::ServeIo { source })?;
-    let env = resolve_agent_env_for_cli(home, config)?;
-    let cwd = config
-        .agent
-        .cwd
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
-
-    runtime.block_on(async move {
-        let bridge = AcpBridge::spawn(
-            &config.agent,
-            env,
-            cwd.clone(),
-            Arc::new(NoopSessionEventSink),
-            None,
-        )
-        .await?;
-        let response = bridge.new_session(cwd, Vec::new()).await;
-        let shutdown = bridge.shutdown().await;
-        let response = response?;
-        shutdown?;
-        Ok(response)
-    })
-}
-
-struct NoopSessionEventSink;
-
-impl SessionEventSink for NoopSessionEventSink {
-    fn append<'a>(
-        &'a self,
-        _session_id: &'a str,
-        _kind: &'a str,
-        _payload_json: &'a str,
-    ) -> futures::future::BoxFuture<'a, ()> {
-        Box::pin(async {})
-    }
+    fetch_session_config(home, config)
 }
