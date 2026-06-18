@@ -18,7 +18,7 @@ use crate::runtime::agent::acp_bridge::{
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider,
+    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider, profile_for_provider_id,
 };
 use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
 use crate::runtime::agent::provider_keys::{
@@ -144,7 +144,13 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
         });
     };
     let model = match args.model {
-        Some(model) => resolve_agent_model_value(&home, &config, Some(agent_provider_id), &model)?,
+        Some(model) => Some(resolve_agent_model_value(
+            &home,
+            &config,
+            Some(agent_provider_id),
+            &model,
+        )?),
+        None if claude_code_provider_has_profile_default_model(&config) => None,
         None => {
             if !entry.set_model {
                 return Err(StackError::AgentConfigProvision {
@@ -163,25 +169,25 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
             else {
                 return Ok(());
             };
-            model
+            Some(model)
         }
     };
-    if let Some(provider) = config.agent.provider.as_mut() {
+    if let Some(model) = model
+        && let Some(provider) = config.agent.provider.as_mut()
+    {
         provider.model = Some(model);
     }
 
     let canonical = config.to_canonical_toml()?;
     let config = config::load_config_from_str(&canonical)?;
-    validate_agent_model_if_required(
-        &home,
-        &config,
-        config
-            .agent
-            .provider
-            .as_ref()
-            .and_then(|provider| provider.model.as_deref())
-            .expect("provider model set"),
-    )?;
+    if let Some(model) = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+    {
+        validate_agent_model_if_required(&home, &config, model)?;
+    }
     let provisioned = provision_agent_headless_config(&config, &home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
@@ -190,15 +196,14 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
         "provider: {}",
         config.agent.provider.as_ref().expect("provider set").id
     );
-    println!(
-        "model: {}",
-        config
-            .agent
-            .provider
-            .as_ref()
-            .and_then(|provider| provider.model.as_deref())
-            .unwrap_or("")
-    );
+    if let Some(model) = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.as_deref())
+    {
+        println!("model: {model}");
+    }
     if let Some(api_key_ref) = api_key_ref.as_deref() {
         println!("api_key_ref: {api_key_ref}");
     }
@@ -695,6 +700,19 @@ pub(in crate::cli) fn claude_code_provider_model_is_explicit(config: &Config) ->
     config.agent.provider.as_ref().is_some_and(|provider| {
         provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
     })
+}
+
+fn claude_code_provider_has_profile_default_model(config: &Config) -> bool {
+    if config.agent.id != CLAUDE_CODE_AGENT_ID {
+        return false;
+    }
+    config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| profile_for_provider_id(&provider.id))
+        .and_then(|profile| profile.default_model.as_deref())
+        .is_some_and(|model| !model.trim().is_empty())
 }
 
 fn select_agent_session_config_value(
