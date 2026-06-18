@@ -224,8 +224,6 @@ fn adapter_kind_entry() -> RegistryEntry {
         harness: Some(HarnessSpec {
             id: HARNESS_BIN.to_owned(),
             install: InstallSet {
-                shell: None,
-                npm: None,
                 github: Some(GithubInstall {
                     asset_pattern: HARNESS_ASSET.to_owned(),
                     archive: ArchiveKind::None,
@@ -237,6 +235,7 @@ fn adapter_kind_entry() -> RegistryEntry {
                         aarch64: Some("aarch64".to_owned()),
                     },
                 }),
+                ..InstallSet::default()
             },
             update: Default::default(),
         }),
@@ -245,8 +244,6 @@ fn adapter_kind_entry() -> RegistryEntry {
             sync_id: None,
             github: Some(format!("https://github.com/{ADAPTER_REPO}")),
             install: InstallSet {
-                shell: None,
-                npm: None,
                 github: Some(GithubInstall {
                     asset_pattern: ADAPTER_ASSET.to_owned(),
                     archive: ArchiveKind::None,
@@ -258,6 +255,7 @@ fn adapter_kind_entry() -> RegistryEntry {
                         aarch64: Some("aarch64".to_owned()),
                     },
                 }),
+                ..InstallSet::default()
             },
             update: Default::default(),
         }),

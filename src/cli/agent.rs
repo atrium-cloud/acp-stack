@@ -375,6 +375,21 @@ mod tests {
     }
 
     #[test]
+    fn build_agent_check_report_skips_adapter_provided_harness() {
+        let entry = embedded_entry("claude-code");
+        let resolver =
+            MockResolver::new().with_npm("@agentclientprotocol/claude-agent-acp", "1.2.3");
+        let rows = vec![installer_row("adapter", Some("1.2.3"))];
+        let report = build_agent_check_report(&entry, &rows, &resolver);
+
+        assert_eq!(report.len(), 1);
+        assert!(matches!(
+            &report[0],
+            (step, AgentCheckStatus::UpToDate { .. }) if step == "adapter"
+        ));
+    }
+
+    #[test]
     fn build_agent_check_report_marks_resolver_errors_as_unknown() {
         let entry = embedded_entry("codex");
         // No mock entries -> resolver errors -> report should mark each step

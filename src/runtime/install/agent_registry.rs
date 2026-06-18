@@ -194,6 +194,14 @@ impl RegistryCatalog {
             }
             let harness = entry.harness.as_ref().expect("validated harness presence");
             harness.validate(&entry.id, entry.github.as_deref())?;
+            if entry.kind == RegistryKind::Native && harness.install.is_provided_by_adapter() {
+                return Err(StackError::RegistryLoad {
+                    reason: format!(
+                        "agent `{}` is kind=\"native\" but declares harness.install.provided_by = \"adapter\"",
+                        entry.id
+                    ),
+                });
+            }
             if entry.kind == RegistryKind::Adapter {
                 let adapter = entry
                     .adapter
@@ -326,6 +334,13 @@ impl HarnessSpec {
     fn validate(&self, agent_id: &str, github: Option<&str>) -> Result<()> {
         validate_nonempty(agent_id, "harness.id", &self.id)?;
         self.install.validate(agent_id, "harness.install", github)?;
+        if self.install.is_provided_by_adapter() && !self.update.is_empty() {
+            return Err(StackError::RegistryLoad {
+                reason: format!(
+                    "agent `{agent_id}` harness.update cannot be set when harness.install is provided by adapter"
+                ),
+            });
+        }
         self.update.validate(agent_id, "harness.update")
     }
 }
@@ -362,11 +377,19 @@ impl AdapterSpec {
 #[serde(deny_unknown_fields)]
 pub struct InstallSet {
     #[serde(default)]
+    pub provided_by: Option<InstallProvidedBy>,
+    #[serde(default)]
     pub shell: Option<ShellInstall>,
     #[serde(default)]
     pub npm: Option<NpmInstall>,
     #[serde(default)]
     pub github: Option<GithubInstall>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallProvidedBy {
+    Adapter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -377,6 +400,10 @@ pub struct UpdateSet {
 }
 
 impl UpdateSet {
+    pub fn is_empty(&self) -> bool {
+        self.apt.is_none()
+    }
+
     fn validate(&self, agent_id: &str, field: &str) -> Result<()> {
         if let Some(apt) = &self.apt {
             apt.validate(agent_id, &format!("{field}.apt"))?;
@@ -399,13 +426,44 @@ impl AptUpdate {
 
 impl InstallSet {
     pub fn is_empty(&self) -> bool {
-        self.shell.is_none() && self.npm.is_none() && self.github.is_none()
+        self.provided_by.is_none() && !self.has_install_paths()
+    }
+
+    pub fn is_provided_by_adapter(&self) -> bool {
+        self.provided_by == Some(InstallProvidedBy::Adapter)
+    }
+
+    fn has_install_paths(&self) -> bool {
+        self.shell.is_some() || self.npm.is_some() || self.github.is_some()
     }
 
     fn validate(&self, agent_id: &str, field: &str, github_url: Option<&str>) -> Result<()> {
-        if self.is_empty() {
+        if let Some(provided_by) = self.provided_by {
+            if self.has_install_paths() {
+                return Err(StackError::RegistryLoad {
+                    reason: format!(
+                        "agent `{agent_id}` {field}.provided_by cannot be combined with shell, npm, or github install paths"
+                    ),
+                });
+            }
+            match provided_by {
+                InstallProvidedBy::Adapter => {
+                    if field != "harness.install" {
+                        return Err(StackError::RegistryLoad {
+                            reason: format!(
+                                "agent `{agent_id}` {field}.provided_by = \"adapter\" is only valid for harness.install"
+                            ),
+                        });
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        if !self.has_install_paths() {
             return Err(StackError::RegistryLoad {
-                reason: format!("agent `{agent_id}` has no [{field}.shell|npm|github] path"),
+                reason: format!(
+                    "agent `{agent_id}` has no [{field}.shell|npm|github] path or {field}.provided_by"
+                ),
             });
         }
         if let Some(shell) = &self.shell {
@@ -658,8 +716,7 @@ fn development_placebo_install(placebo_path: &str) -> InstallSet {
             creates: placebo_path.to_owned(),
             required_tools: Vec::new(),
         }),
-        npm: None,
-        github: None,
+        ..InstallSet::default()
     }
 }
 
@@ -982,21 +1039,10 @@ mod tests {
             .as_ref()
             .expect("Claude Code harness")
             .install;
+        assert!(claude_code_harness_install.is_provided_by_adapter());
+        assert!(claude_code_harness_install.shell.is_none());
         assert!(claude_code_harness_install.npm.is_none());
-        let claude_code_harness_shell = claude_code_harness_install
-            .shell
-            .as_ref()
-            .expect("Claude Code harness shell install");
-        assert!(
-            claude_code_harness_shell
-                .script
-                .contains("https://claude.ai/install.sh")
-        );
-        assert_eq!(claude_code_harness_shell.creates, "claude");
-        assert_eq!(
-            claude_code_harness_shell.required_tools,
-            ["curl".to_owned(), "bash".to_owned()]
-        );
+        assert!(claude_code_harness_install.github.is_none());
         assert_eq!(
             claude_code.support_doc.as_deref(),
             Some("docs/agents/claude-code.md")
@@ -1178,6 +1224,131 @@ creates = "adapter"
         match err {
             StackError::RegistryLoad { reason } => {
                 assert!(reason.contains("[agents.adapter]"), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_adapter_harness_provided_by_adapter() {
+        let body = r#"
+[[agents]]
+id = "sdk-backed"
+name = "SDK Backed"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/sdk-backed.md"
+
+[agents.adapter]
+id = "sdk-backed-acp"
+
+[agents.adapter.install.npm]
+package = "sdk-backed-acp"
+creates = "sdk-backed-acp"
+
+[agents.harness]
+id = "sdk-agent-sdk"
+
+[agents.harness.install]
+provided_by = "adapter"
+"#;
+        let catalog = RegistryCatalog::from_toml(body).expect("registry should parse");
+        let entry = catalog.lookup("sdk-backed").expect("entry exists");
+        assert!(
+            entry
+                .harness
+                .as_ref()
+                .expect("harness")
+                .install
+                .is_provided_by_adapter()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_native_harness_provided_by_adapter() {
+        let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+
+[agents.harness]
+id = "bad-sdk"
+
+[agents.harness.install]
+provided_by = "adapter"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("native entries cannot use adapter-provided harnesses");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("kind=\"native\""), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_provided_by_with_install_paths() {
+        let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "adapter"
+
+[agents.adapter]
+id = "bad-acp"
+
+[agents.adapter.install.npm]
+package = "bad-acp"
+creates = "bad-acp"
+
+[agents.harness]
+id = "bad-sdk"
+
+[agents.harness.install]
+provided_by = "adapter"
+
+[agents.harness.install.npm]
+package = "bad-sdk"
+creates = "bad-sdk"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("provided_by cannot be combined with install paths");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("cannot be combined"), "reason: {reason}");
+            }
+            other => panic!("expected RegistryLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_adapter_install_provided_by_adapter() {
+        let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "adapter"
+
+[agents.adapter]
+id = "bad-acp"
+
+[agents.adapter.install]
+provided_by = "adapter"
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+        let err = RegistryCatalog::from_toml(body)
+            .expect_err("adapter install cannot use provided_by adapter");
+        match err {
+            StackError::RegistryLoad { reason } => {
+                assert!(reason.contains("only valid"), "reason: {reason}");
             }
             other => panic!("expected RegistryLoad, got {other:?}"),
         }

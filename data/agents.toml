@@ -335,16 +335,7 @@ package = "@agentclientprotocol/claude-agent-acp"
 creates = "claude-agent-acp"
 
 [agents.harness]
-id = "claude"
+id = "claude-agent-sdk"
 
-[agents.harness.install.shell]
-script = '''
-set -eu
-managed_bin="${HOME}/.local/bin"
-managed_claude="${managed_bin}/claude"
-mkdir -p "$managed_bin"
-curl -fsSL https://claude.ai/install.sh | bash
-test -x "$managed_claude"
-'''
-creates = "claude"
-required_tools = ["curl", "bash"]
+[agents.harness.install]
+provided_by = "adapter"

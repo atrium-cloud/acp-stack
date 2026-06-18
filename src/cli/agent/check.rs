@@ -202,15 +202,15 @@ pub(super) fn build_agent_check_report(
     let expected_steps = expected_agent_check_steps(entry);
     let mut out = Vec::with_capacity(expected_steps.len());
     for step in expected_steps {
-        let Some(row) = installed_rows.iter().find(|row| row.step == *step) else {
-            out.push(((*step).to_owned(), AgentCheckStatus::NotInstalled));
+        let Some(row) = installed_rows.iter().find(|row| row.step == step) else {
+            out.push((step.to_owned(), AgentCheckStatus::NotInstalled));
             continue;
         };
         let latest = match resolve_upstream_version_for_step(entry, step, resolver) {
             Ok(value) => value,
             Err(err) => {
                 out.push((
-                    (*step).to_owned(),
+                    step.to_owned(),
                     AgentCheckStatus::Unknown {
                         reason: format!("upstream lookup failed: {err}"),
                     },
@@ -230,16 +230,24 @@ pub(super) fn build_agent_check_report(
                 },
             },
         };
-        out.push(((*step).to_owned(), status));
+        out.push((step.to_owned(), status));
     }
     out
 }
 
-fn expected_agent_check_steps(entry: &RegistryEntry) -> &'static [&'static str] {
+fn expected_agent_check_steps(entry: &RegistryEntry) -> Vec<&'static str> {
     if entry.kind == RegistryKind::Adapter {
-        &[STEP_HARNESS, STEP_ADAPTER]
+        let harness_is_provided_by_adapter = entry
+            .harness
+            .as_ref()
+            .is_some_and(|harness| harness.install.is_provided_by_adapter());
+        if harness_is_provided_by_adapter {
+            vec![STEP_ADAPTER]
+        } else {
+            vec![STEP_HARNESS, STEP_ADAPTER]
+        }
     } else {
-        &[STEP_INSTALL]
+        vec![STEP_INSTALL]
     }
 }
 

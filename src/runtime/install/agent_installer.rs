@@ -318,7 +318,7 @@ pub fn install_resolved_capture(
     }
 
     // Step 1: install the upstream agent harness. Native entries speak ACP from
-    // this binary; adapter-backed entries wrap it with an adapter in step 2.
+    // this binary; most adapter-backed entries wrap it with an adapter in step 2.
     let harness = match entry.harness.as_ref() {
         Some(h) => h,
         None => {
@@ -349,6 +349,29 @@ pub fn install_resolved_capture(
                 };
             }
         };
+
+        if harness.install.is_provided_by_adapter() {
+            let adapter_chain = install_one_with_fallback(
+                &entry.id,
+                "adapter.install",
+                STEP_ADAPTER,
+                &adapter.install,
+                adapter.github.as_deref(),
+                None,
+                &installer_env,
+                workspace_root,
+                dest_dir,
+            );
+            rows.extend(adapter_chain.rows);
+            if let Some(err) = adapter_chain.terminal_error {
+                return InstallerSequenceResult {
+                    outcome: Err(err),
+                    rows,
+                };
+            }
+
+            return final_verification(agent, workspace_root, dest_dir, rows);
+        }
 
         // Harness + adapter install in parallel. Each side tries its
         // priority chain (shell → npm → github_release for floating,
@@ -754,7 +777,7 @@ mod tests {
     use super::step_runners::select_install_path;
     use super::*;
     use crate::runtime::install::agent_registry::{
-        AdapterSpec, ArchiveKind, HarnessSpec, ShellInstall,
+        AdapterSpec, ArchiveKind, HarnessSpec, InstallProvidedBy, ShellInstall,
     };
     use crate::state::StateStore;
     use std::os::unix::fs::PermissionsExt;
@@ -835,6 +858,13 @@ mod tests {
                 creates: creates.to_owned(),
                 required_tools: Vec::new(),
             }),
+            ..InstallSet::default()
+        }
+    }
+
+    fn adapter_provided_install_set() -> InstallSet {
+        InstallSet {
+            provided_by: Some(InstallProvidedBy::Adapter),
             ..InstallSet::default()
         }
     }
@@ -1761,6 +1791,39 @@ exit 9
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0].step, "harness");
         assert_eq!(result.rows[1].step, "adapter");
+    }
+
+    #[test]
+    fn adapter_entry_skips_harness_step_when_harness_is_provided_by_adapter() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let dest_dir = tempdir.path().join("bin");
+        std::fs::create_dir(&dest_dir).expect("create bin dir");
+        let adapter_binary = dest_dir.join("adapter-agent");
+        let adapter_script = shell_string_for_write(&adapter_binary, "adapter");
+        let entry = adapter_entry(
+            "adapter-agent",
+            "Adapter Agent",
+            Some("docs/agents/adapter-agent.md"),
+            harness_spec("adapter-agent-sdk", adapter_provided_install_set()),
+            adapter_spec(
+                "adapter-agent",
+                shell_install_set(&adapter_script, "adapter-agent"),
+            ),
+        );
+
+        let result = install_resolved_capture(
+            &agent_config("adapter-agent"),
+            &entry,
+            HashMap::new(),
+            tempdir.path(),
+            &dest_dir,
+        );
+
+        let outcome = result.outcome.expect("adapter should install");
+        assert_eq!(outcome.path(), adapter_binary.as_path());
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].step, "adapter");
+        assert_eq!(result.rows[0].status, "ran");
     }
 
     #[test]

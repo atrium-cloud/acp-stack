@@ -50,7 +50,7 @@ pub fn fetch_session_config(home: &Path, config: &Config) -> Result<NewSessionRe
 
 /// Async variant used by the HTTP API. Unlike the CLI wrapper, this
 /// does not park discovery on a detached blocking thread: timeout,
-/// request errors, and success all flow through `AcpBridge::shutdown`
+/// request errors, and success all flow through `AcpBridge::terminate_probe`
 /// so the provisional child process is reaped before the call returns.
 pub async fn fetch_session_config_with_timeout(
     home: &Path,
@@ -98,14 +98,14 @@ pub async fn fetch_session_config_with_timeout(
                 reason: format!("model discovery exceeded the {timeout_duration:?} timeout"),
             }),
         };
-    let shutdown = bridge.shutdown().await;
+    let shutdown = bridge.terminate_probe().await;
     match (discovery, shutdown) {
         (Ok(response), Ok(_)) => Ok(response),
         (Err(err), Ok(_)) => Err(err),
         (Ok(_), Err(err)) => Err(err),
-        (Err(discovery_err), Err(shutdown_err)) => Err(StackError::AgentInitializeFailed {
+        (Err(discovery_err), Err(teardown_err)) => Err(StackError::AgentInitializeFailed {
             reason: format!(
-                "model discovery failed: {discovery_err}; shutdown also failed: {shutdown_err}"
+                "model discovery failed: {discovery_err}; probe teardown also failed: {teardown_err}"
             ),
         }),
     }

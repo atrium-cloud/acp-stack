@@ -127,6 +127,34 @@ async fn shutdown_terminates_the_child() {
 }
 
 #[tokio::test]
+async fn terminate_probe_terminates_the_child() {
+    let bridge = AcpBridge::spawn(
+        &fake_agent_config(),
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+    )
+    .await
+    .expect("spawn ok");
+    let pid = bridge.pid().expect("pid available");
+    bridge.terminate_probe().await.expect("terminate ok");
+
+    #[cfg(unix)]
+    unsafe {
+        let alive = libc::kill(pid as i32, 0);
+        if alive == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let still_alive = libc::kill(pid as i32, 0);
+            assert_ne!(
+                still_alive, 0,
+                "fake agent pid {pid} appears to still be running after probe terminate"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
     let home = std::env::var("HOME").expect("HOME must be set for bridge runtime context test");
     let mut config = fake_agent_config();

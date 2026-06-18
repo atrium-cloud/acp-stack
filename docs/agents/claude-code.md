@@ -1,6 +1,6 @@
 # Claude Code
 
-Claude Code is adapter-backed. `acp-stack` launches `claude-agent-acp`, which launches the Claude Code CLI.
+Claude Code is adapter-backed. `acp-stack` installs and launches `claude-agent-acp`; the adapter uses the Claude Agent SDK's bundled Claude Code binary.
 
 Install path:
 

@@ -129,7 +129,11 @@ fn print_switch_plan(
         "agent switch plan: {} -> {}",
         plan.old_agent_id, plan.target_agent_id
     );
-    if let Some(harness) = target_entry.harness.as_ref() {
+    if let Some(harness) = target_entry
+        .harness
+        .as_ref()
+        .filter(|harness| !harness.install.is_provided_by_adapter())
+    {
         println!("will install harness: {}", harness.id);
     }
     if let Some(adapter) = target_entry.adapter.as_ref() {
