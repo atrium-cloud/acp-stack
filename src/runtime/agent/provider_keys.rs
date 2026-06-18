@@ -141,6 +141,10 @@ impl ProviderKeyMapping {
         &self.api_keys
     }
 
+    pub fn providers(&self) -> &[ProviderEnvMapping] {
+        &self.providers
+    }
+
     fn mapping_for_env_var(&self, env_var: &str) -> Option<&ApiKeyProviderMapping> {
         self.api_keys
             .iter()
