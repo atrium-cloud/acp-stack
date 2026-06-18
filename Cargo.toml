@@ -25,13 +25,19 @@ name = "placebo-agent"
 path = "src/bin/placebo_agent/main.rs"
 required-features = ["test-fixtures"]
 
-# Dev-only: diffs upstream ACP registry.json against data/registry.toml so the
+# Dev-only: diffs upstream ACP registry.json against data/agents.toml so the
 # maintainer can keep the embedded catalog in sync. Not installed by
 # `cargo install` consumers in the normal sense — invoked via `cargo run --bin
 # sync-registry-check` from the workspace.
 [[bin]]
 name = "sync-registry-check"
 path = "src/bin/sync_registry_check.rs"
+required-features = ["dev-tools"]
+
+# Dev-only: fact-checks shipped data files against external metadata sources.
+[[bin]]
+name = "fact-check-data"
+path = "src/bin/fact_check_data.rs"
 required-features = ["dev-tools"]
 
 [dependencies]

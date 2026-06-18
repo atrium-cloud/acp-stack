@@ -6,7 +6,7 @@
 # [Amp manual](https://ampcode.com/manual)
 # [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-05-22
+# Last updated on 2026-06-18
 
 [[providers]]
 id = ["anthropic"]
@@ -647,7 +647,7 @@ agents = ["opencode"]
 
 [[providers]]
 id = ["stepfun-ai"]
-name = "StepFun"
+name = "StepFun AI"
 agents = ["opencode"]
 
 [[providers]]
