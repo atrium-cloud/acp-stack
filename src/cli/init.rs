@@ -228,7 +228,7 @@ pub struct InitArgs {
     /// Base URL for a custom provider.
     #[arg(long = "base-url", requires = "custom_provider")]
     pub(super) base_url: Option<String>,
-    /// API family for a custom provider: chat-completions or responses.
+    /// API family for a custom provider: chat-completions, responses, or anthropic-messages.
     #[arg(long = "provider-api", requires = "custom_provider")]
     pub(super) provider_api: Option<String>,
     /// Initial model id. With `--custom-provider`, taken verbatim as the

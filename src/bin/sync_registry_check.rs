@@ -9,9 +9,9 @@
 //! ```
 //!
 //! The embedded registry is intentionally a small curated subset. Every
-//! embedded sync id (`adapter.id` for adapter-backed entries, otherwise `id`)
-//! must still exist upstream; upstream entries that are not embedded are reported for
-//! awareness but do not fail the check.
+//! embedded sync id (`adapter.sync_id`, `adapter.id`, or `id`) must still exist
+//! upstream; upstream entries that are not embedded are reported for awareness
+//! but do not fail the check.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
@@ -136,7 +136,7 @@ fn embedded_sync_ids(catalog: &RegistryCatalog) -> Vec<&str> {
             entry
                 .adapter
                 .as_ref()
-                .map(|adapter| adapter.id.as_str())
+                .map(|adapter| adapter.sync_id.as_deref().unwrap_or(adapter.id.as_str()))
                 .unwrap_or(entry.id.as_str())
         })
         .collect()
@@ -198,6 +198,8 @@ mod tests {
     fn embedded_sync_ids_use_upstream_aliases() {
         let catalog = RegistryCatalog::load_embedded().expect("embedded registry");
         assert!(embedded_sync_ids(&catalog).contains(&"amp-acp"));
+        assert!(embedded_sync_ids(&catalog).contains(&"claude-acp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"amp"));
+        assert!(!embedded_sync_ids(&catalog).contains(&"claude-agent-acp"));
     }
 }

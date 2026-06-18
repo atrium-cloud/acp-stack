@@ -17,11 +17,14 @@ use crate::runtime::agent::acp_bridge::{
     session_config_values, session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent::claude_code_provider_profiles::{
+    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider,
+};
 use crate::runtime::agent::model_discovery::resolve_advertised_model_value;
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
-    optional_env_refs_for_provider_id, provider_id_is_known, provider_id_supports_agent,
-    required_env_refs_for_provider_id,
+    optional_env_refs_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
+    provider_uses_agent_native_auth, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
@@ -83,7 +86,8 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
 
     let default_api_key_ref =
         default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id);
-    if default_api_key_ref.is_none() {
+    let native_auth = provider_uses_agent_native_auth(&config.agent.id, &provider_id);
+    if default_api_key_ref.is_none() && !native_auth {
         return Err(StackError::AgentConfigProvision {
             path: config_path,
             reason: format!(
@@ -92,17 +96,31 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
             ),
         });
     }
+    if native_auth && args.api_key_ref.is_some() {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: format!(
+                "{} provider `{provider_id}` uses agent-native auth; do not pass --api-key-ref",
+                entry.name
+            ),
+        });
+    }
 
-    let api_key_ref = args.api_key_ref.or(default_api_key_ref).ok_or_else(|| {
-        StackError::AgentConfigProvision {
+    let api_key_ref = args.api_key_ref.or(default_api_key_ref);
+    if api_key_ref.is_none() && !native_auth {
+        return Err(StackError::AgentConfigProvision {
             path: config_path.clone(),
             reason: format!(
                 "provider `{provider_id}` has no default API-key env var; pass --api-key-ref"
             ),
-        }
-    })?;
+        });
+    }
 
-    let required_env_refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
+    let required_env_refs = required_env_refs_for_agent_provider_id(
+        &config.agent.id,
+        &provider_id,
+        api_key_ref.as_deref(),
+    );
     for env_ref in &required_env_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
@@ -112,7 +130,7 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     config.agent.provider = Some(AgentProviderConfig {
         id: provider_id.clone(),
         model: None,
-        api_key_ref: Some(api_key_ref.clone()),
+        api_key_ref: api_key_ref.clone(),
         custom: None,
     });
     let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, &provider_id)
@@ -154,10 +172,9 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
 
     let canonical = config.to_canonical_toml()?;
     let config = config::load_config_from_str(&canonical)?;
-    validate_agent_session_config_value(
+    validate_agent_model_if_required(
         &home,
         &config,
-        AgentSessionConfigCategory::Model,
         config
             .agent
             .provider
@@ -182,11 +199,14 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
             .and_then(|provider| provider.model.as_deref())
             .unwrap_or("")
     );
-    println!("api_key_ref: {api_key_ref}");
+    if let Some(api_key_ref) = api_key_ref.as_deref() {
+        println!("api_key_ref: {api_key_ref}");
+    }
     if required_env_refs.len() > 1 {
         println!("required_env_refs: {}", required_env_refs.join(", "));
     }
-    let optional = optional_env_refs_for_provider_id(
+    let optional = optional_env_refs_for_agent_provider_id(
+        &config.agent.id,
         &config.agent.provider.as_ref().expect("provider set").id,
     );
     if !optional.is_empty() {
@@ -303,12 +323,7 @@ fn run_agent_custom_provider_set(
         args.provider_api.as_deref(),
         default_custom_provider_api(&config.agent.id),
     )?;
-    if config.agent.id == "codex" && api != CustomProviderApi::Responses {
-        return Err(StackError::InvalidParam {
-            field: "provider-api",
-            reason: "Codex custom providers only support responses".to_owned(),
-        });
-    }
+    validate_custom_provider_api_for_agent(&config.agent.id, api, "provider-api")?;
     let context = parse_custom_token_limit(
         "context",
         args.context.as_deref(),
@@ -380,6 +395,8 @@ pub(in crate::cli) fn required_custom_arg(
 pub(in crate::cli) fn default_custom_provider_api(agent_id: &str) -> CustomProviderApi {
     if agent_id == "codex" {
         CustomProviderApi::Responses
+    } else if agent_id == CLAUDE_CODE_AGENT_ID {
+        CustomProviderApi::AnthropicMessages
     } else {
         CustomProviderApi::ChatCompletions
     }
@@ -393,11 +410,38 @@ pub(in crate::cli) fn parse_custom_provider_api(
         None => Ok(default),
         Some("chat-completions") => Ok(CustomProviderApi::ChatCompletions),
         Some("responses") => Ok(CustomProviderApi::Responses),
+        Some("anthropic-messages") => Ok(CustomProviderApi::AnthropicMessages),
         Some(_) => Err(StackError::InvalidParam {
             field: "provider-api",
-            reason: "must be `chat-completions` or `responses`".to_owned(),
+            reason: "must be `chat-completions`, `responses`, or `anthropic-messages`".to_owned(),
         }),
     }
+}
+
+pub(in crate::cli) fn validate_custom_provider_api_for_agent(
+    agent_id: &str,
+    api: CustomProviderApi,
+    field: &'static str,
+) -> Result<()> {
+    if agent_id == "codex" && api != CustomProviderApi::Responses {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "Codex custom providers only support responses".to_owned(),
+        });
+    }
+    if agent_id == CLAUDE_CODE_AGENT_ID && api != CustomProviderApi::AnthropicMessages {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "Claude Code custom providers only support anthropic-messages".to_owned(),
+        });
+    }
+    if agent_id != CLAUDE_CODE_AGENT_ID && api == CustomProviderApi::AnthropicMessages {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "anthropic-messages custom providers only support Claude Code".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 pub(in crate::cli) fn parse_custom_token_limit(
@@ -485,15 +529,11 @@ fn run_agent_model_set(
     };
 
     let required_env_refs = if let Some(provider) = config.agent.provider.as_ref() {
-        provider
-            .api_key_ref
-            .as_deref()
-            .map(|api_key_ref| {
-                required_env_refs_for_provider_id(&provider.id, api_key_ref)
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        required_env_refs_for_agent_provider_id(
+            &config.agent.id,
+            &provider.id,
+            provider.api_key_ref.as_deref(),
+        )
     } else {
         env_refs_for_agent_id(&config.agent.id)
             .into_iter()
@@ -527,12 +567,7 @@ fn run_agent_model_set(
         .and_then(|provider| provider.model.as_deref())
         .or(config.agent.model.as_deref())
         .expect("agent model set");
-    validate_agent_session_config_value(
-        home,
-        &config,
-        AgentSessionConfigCategory::Model,
-        model_value,
-    )?;
+    validate_agent_model_if_required(home, &config, model_value)?;
     let provisioned = provision_agent_headless_config(&config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
@@ -634,8 +669,32 @@ pub(in crate::cli) fn resolve_agent_model_value(
     provider_id: Option<&str>,
     model_id: &str,
 ) -> Result<String> {
+    if claude_code_provider_model_is_explicit(config) {
+        return Ok(model_id.to_owned());
+    }
     let response = read_agent_new_session_response(home, config)?;
     resolve_advertised_model_value(&response, provider_id, model_id)
+}
+
+fn validate_agent_model_if_required(home: &Path, config: &Config, model_value: &str) -> Result<()> {
+    if claude_code_provider_model_is_explicit(config) {
+        return Ok(());
+    }
+    validate_agent_session_config_value(
+        home,
+        config,
+        AgentSessionConfigCategory::Model,
+        model_value,
+    )
+}
+
+pub(in crate::cli) fn claude_code_provider_model_is_explicit(config: &Config) -> bool {
+    if config.agent.id != CLAUDE_CODE_AGENT_ID {
+        return false;
+    }
+    config.agent.provider.as_ref().is_some_and(|provider| {
+        provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
+    })
 }
 
 fn select_agent_session_config_value(

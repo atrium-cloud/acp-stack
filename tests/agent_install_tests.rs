@@ -242,6 +242,7 @@ fn adapter_kind_entry() -> RegistryEntry {
         }),
         adapter: Some(AdapterSpec {
             id: ADAPTER_BIN.to_owned(),
+            sync_id: None,
             github: Some(format!("https://github.com/{ADAPTER_REPO}")),
             install: InstallSet {
                 shell: None,

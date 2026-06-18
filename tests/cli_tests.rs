@@ -3355,6 +3355,82 @@ fn init_same_provider_without_model_preserves_existing_model() {
 }
 
 #[test]
+fn init_custom_provider_rejects_anthropic_messages_for_non_claude_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/anthropic",
+            "--provider-api",
+            "anthropic-messages",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "anthropic-messages custom providers only support Claude Code",
+        ));
+}
+
+#[test]
+fn init_claude_code_explicit_profile_model_skips_acp_discovery() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("MOONSHOT_API_KEY", "test-moonshot-key")]);
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "claude-code",
+            "--provider",
+            "moonshotai",
+            "--model",
+            "kimi-k2.7-code",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "agent: Claude Code (claude-code)",
+        ));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "claude-code""#));
+    assert!(config.contains(r#"id = "moonshotai""#));
+    assert!(config.contains(r#"model = "kimi-k2.7-code""#));
+
+    let settings = claude_settings(tempdir.path());
+    assert_eq!(
+        settings["env"]["ANTHROPIC_BASE_URL"].as_str(),
+        Some("https://api.moonshot.ai/anthropic")
+    );
+    assert_eq!(
+        settings["apiKeyHelper"].as_str(),
+        Some("printenv MOONSHOT_API_KEY")
+    );
+}
+
+#[test]
 fn init_goose_custom_provider_provision_failure_removes_sidecar() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test")]);
@@ -3816,6 +3892,39 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
         opencode["enabled_providers"],
         json!(["openai", "opencode-go"])
     );
+}
+
+#[test]
+fn subagent_set_rejects_anthropic_messages_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "subagent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/anthropic",
+            "--provider-api",
+            "anthropic-messages",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "anthropic-messages custom providers only support Claude Code",
+        ));
 }
 
 #[test]
@@ -4796,6 +4905,362 @@ fn agent_set_codex_rejects_chat_completions_custom_provider() {
         .failure()
         .stderr(predicates::str::contains(
             "Codex custom providers only support responses",
+        ));
+}
+
+#[test]
+fn agent_set_opencode_rejects_anthropic_messages_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/anthropic",
+            "--provider-api",
+            "anthropic-messages",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "anthropic-messages custom providers only support Claude Code",
+        ));
+}
+
+#[test]
+fn agent_set_claude_code_native_provider_presets_write_headless_config() {
+    struct Case {
+        provider: &'static str,
+        model: &'static str,
+        api_key_ref: Option<&'static str>,
+        env_refs: &'static [&'static str],
+        native_env_key: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            provider: "anthropic",
+            model: "claude-sonnet-4-5",
+            api_key_ref: Some("ANTHROPIC_API_KEY"),
+            env_refs: &["ANTHROPIC_API_KEY"],
+            native_env_key: None,
+        },
+        Case {
+            provider: "amazon-bedrock",
+            model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            api_key_ref: None,
+            env_refs: &[],
+            native_env_key: Some("CLAUDE_CODE_USE_BEDROCK"),
+        },
+        Case {
+            provider: "google-vertex-anthropic",
+            model: "claude-sonnet-4-vertex",
+            api_key_ref: None,
+            env_refs: &["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"],
+            native_env_key: Some("CLAUDE_CODE_USE_VERTEX"),
+        },
+        Case {
+            provider: "microsoft-foundry",
+            model: "claude-sonnet-4-foundry",
+            api_key_ref: Some("ANTHROPIC_FOUNDRY_API_KEY"),
+            env_refs: &["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL"],
+            native_env_key: Some("CLAUDE_CODE_USE_FOUNDRY"),
+        },
+    ];
+
+    for case in cases {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let config_dir = tempdir.path().join(".config/acp-stack");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+            .expect("config should be written");
+
+        let output = acps_command()
+            .env("HOME", tempdir.path())
+            .args([
+                "agent",
+                "set",
+                "--provider",
+                case.provider,
+                "--model",
+                case.model,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).expect("stdout should be utf8");
+        assert!(stdout.contains("agent: claude-code"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("provider: {}", case.provider)),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("model: {}", case.model)),
+            "{stdout}"
+        );
+
+        let config_text = fs::read_to_string(config_dir.join("acps-config.toml"))
+            .expect("config should be readable");
+        let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
+        let provider = &config["agent"]["provider"];
+        assert_eq!(provider["id"].as_str(), Some(case.provider));
+        assert_eq!(provider["model"].as_str(), Some(case.model));
+        let env_refs = config["agent"]["env"]
+            .as_array()
+            .expect("agent env should be an array");
+        for expected in case.env_refs {
+            assert!(
+                env_refs
+                    .iter()
+                    .any(|value| value.as_str() == Some(*expected)),
+                "{case_provider} missing env ref {expected}",
+                case_provider = case.provider,
+            );
+        }
+
+        let settings = claude_settings(tempdir.path());
+        assert_eq!(
+            settings["env"]["ANTHROPIC_MODEL"].as_str(),
+            Some(case.model)
+        );
+        assert!(settings["env"].get("ANTHROPIC_BASE_URL").is_none());
+        if let Some(native_env_key) = case.native_env_key {
+            assert_eq!(settings["env"][native_env_key].as_str(), Some("1"));
+        }
+        if let Some(api_key_ref) = case.api_key_ref {
+            assert_eq!(provider["api_key_ref"].as_str(), Some(api_key_ref));
+            let helper = format!("printenv {api_key_ref}");
+            assert_eq!(settings["apiKeyHelper"].as_str(), Some(helper.as_str()));
+            assert!(
+                stdout.contains(&format!("api_key_ref: {api_key_ref}")),
+                "{stdout}"
+            );
+        } else {
+            assert!(provider.get("api_key_ref").is_none());
+            assert!(settings.get("apiKeyHelper").is_none());
+            assert!(!stdout.contains("api_key_ref:"), "{stdout}");
+        }
+    }
+}
+
+#[test]
+fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
+    struct Case {
+        provider: &'static str,
+        base_url: &'static str,
+        api_key_ref: &'static str,
+    }
+
+    let cases = [
+        Case {
+            provider: "deepseek",
+            base_url: "https://api.deepseek.com/anthropic",
+            api_key_ref: "DEEPSEEK_API_KEY",
+        },
+        Case {
+            provider: "moonshotai",
+            base_url: "https://api.moonshot.ai/anthropic",
+            api_key_ref: "MOONSHOT_API_KEY",
+        },
+        Case {
+            provider: "zai",
+            base_url: "https://api.z.ai/api/anthropic",
+            api_key_ref: "ZAI_API_KEY",
+        },
+        Case {
+            provider: "zhipuai",
+            base_url: "https://api.z.ai/api/anthropic",
+            api_key_ref: "ZAI_API_KEY",
+        },
+        Case {
+            provider: "minimax",
+            base_url: "https://api.minimax.io/anthropic",
+            api_key_ref: "MINIMAX_API_KEY",
+        },
+        Case {
+            provider: "minimax-coding-plan",
+            base_url: "https://api.minimax.io/anthropic",
+            api_key_ref: "MINIMAX_API_KEY",
+        },
+        Case {
+            provider: "minimax-cn",
+            base_url: "https://api.minimaxi.com/anthropic",
+            api_key_ref: "MINIMAX_CN_API_KEY",
+        },
+        Case {
+            provider: "minimax-cn-coding-plan",
+            base_url: "https://api.minimaxi.com/anthropic",
+            api_key_ref: "MINIMAX_CN_API_KEY",
+        },
+        Case {
+            provider: "xiaomi",
+            base_url: "https://api.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_API_KEY",
+        },
+        Case {
+            provider: "xiaomi-token-plan-cn",
+            base_url: "https://token-plan-cn.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+        },
+        Case {
+            provider: "xiaomi-token-plan-ams",
+            base_url: "https://token-plan-ams.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+        },
+        Case {
+            provider: "xiaomi-token-plan-sgp",
+            base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+        },
+    ];
+
+    for case in cases {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let config_dir = tempdir.path().join(".config/acp-stack");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+            .expect("config should be written");
+
+        acps_command()
+            .env("HOME", tempdir.path())
+            .args([
+                "agent",
+                "set",
+                "--provider",
+                case.provider,
+                "--model",
+                "provider-profile-model",
+            ])
+            .assert()
+            .success();
+
+        let config_text = fs::read_to_string(config_dir.join("acps-config.toml"))
+            .expect("config should be readable");
+        let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
+        assert_eq!(
+            config["agent"]["provider"]["api_key_ref"].as_str(),
+            Some(case.api_key_ref)
+        );
+
+        let settings = claude_settings(tempdir.path());
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"].as_str(),
+            Some(case.base_url),
+            "{}",
+            case.provider
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_MODEL"].as_str(),
+            Some("provider-profile-model")
+        );
+        let helper = format!("printenv {}", case.api_key_ref);
+        assert_eq!(settings["apiKeyHelper"].as_str(), Some(helper.as_str()));
+        assert!(!settings.to_string().contains("test-secret"));
+    }
+}
+
+#[test]
+fn agent_set_claude_code_custom_provider_defaults_to_anthropic_messages() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+        .expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myanthropic",
+            "--provider-name",
+            "My Anthropic",
+            "--base-url",
+            "https://api.myanthropic.example/anthropic",
+            "--api-key-ref",
+            "CUSTOM_CLAUDE_API_KEY",
+            "--model",
+            "custom-claude-model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Claude Code config:"));
+
+    let config =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
+    assert!(config.contains(r#"api = "anthropic-messages""#));
+    assert!(config.contains(r#"api_key_ref = "CUSTOM_CLAUDE_API_KEY""#));
+
+    let settings = claude_settings(tempdir.path());
+    assert_eq!(
+        settings["env"]["ANTHROPIC_BASE_URL"].as_str(),
+        Some("https://api.myanthropic.example/anthropic")
+    );
+    assert_eq!(
+        settings["env"]["ANTHROPIC_MODEL"].as_str(),
+        Some("custom-claude-model")
+    );
+    assert_eq!(
+        settings["apiKeyHelper"].as_str(),
+        Some("printenv CUSTOM_CLAUDE_API_KEY")
+    );
+    let onboarding: Value = serde_json::from_str(
+        &fs::read_to_string(tempdir.path().join(".claude.json"))
+            .expect("Claude onboarding config should be readable"),
+    )
+    .expect("Claude onboarding config should parse");
+    assert_eq!(onboarding["hasCompletedOnboarding"], true);
+}
+
+#[test]
+fn agent_set_claude_code_rejects_non_anthropic_messages_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+        .expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myanthropic",
+            "--provider-name",
+            "My Anthropic",
+            "--base-url",
+            "https://api.myanthropic.example/v1",
+            "--provider-api",
+            "chat-completions",
+            "--api-key-ref",
+            "CUSTOM_CLAUDE_API_KEY",
+            "--model",
+            "custom-claude-model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "Claude Code custom providers only support anthropic-messages",
         ));
 }
 
@@ -8630,6 +9095,32 @@ creates = "opencode"
 "#,
             "",
         )
+}
+
+fn claude_code_config() -> String {
+    VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "claude-code""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Claude Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "claude-agent-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        )
+}
+
+fn claude_settings(home: &std::path::Path) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(home.join(".claude").join("settings.json"))
+            .expect("Claude settings should be readable"),
+    )
+    .expect("Claude settings should parse")
 }
 
 fn write_acp_config_options(

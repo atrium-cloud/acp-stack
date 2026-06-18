@@ -124,7 +124,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         validate_agent_install(install)?;
     }
     if let Some(provider) = &config.agent.provider {
-        validate_agent_provider(provider)?;
+        validate_agent_provider(&config.agent.id, provider)?;
     }
     if config.agent.model.is_some()
         && config
@@ -140,7 +140,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         });
     }
     if let Some(subagent) = &config.agent.subagent {
-        validate_agent_subagent(subagent)?;
+        validate_agent_subagent(&config.agent.id, subagent)?;
     }
     if let Some(auto_update) = &config.agent.auto_update {
         validate_agent_auto_update(auto_update)?;

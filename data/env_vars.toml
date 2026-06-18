@@ -88,7 +88,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "ZAI_API_KEY"
-provider_ids = ["zai"]
+provider_ids = ["zai", "zhipuai"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -124,15 +124,27 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "MINIMAX_API_KEY"
-provider_ids = ["minimax"]
+provider_ids = ["minimax", "minimax-coding-plan"]
 companion_env_vars = []
 optional_env_vars = []
 
 [[api_keys]]
 env_var = "MINIMAX_CN_API_KEY"
-provider_ids = ["minimax-cn"]
+provider_ids = ["minimax-cn", "minimax-cn-coding-plan"]
 companion_env_vars = []
 optional_env_vars = []
+
+[[api_keys]]
+env_var = "MOONSHOT_API_KEY"
+provider_ids = ["moonshotai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ANTHROPIC_FOUNDRY_API_KEY"
+provider_ids = ["microsoft-foundry"]
+companion_env_vars = ["ANTHROPIC_FOUNDRY_BASE_URL"]
+optional_env_vars = ["ANTHROPIC_FOUNDRY_RESOURCE"]
 
 [[api_keys]]
 env_var = "XIAOMI_API_KEY"

@@ -304,3 +304,39 @@ binary_name = "codex"
 [agents.harness.install.github.arch]
 x86_64 = "x86_64"
 aarch64 = "aarch64"
+
+# Claude Code
+
+[[agents]]
+id = "claude-code"
+name = "Claude Code"
+kind = "adapter"
+headless_compatible = true
+set_provider = true
+set_model = true
+allow_custom_provider = true
+allow_custom_model = true
+set_mode = true # default, acceptEdits, plan, bypassPermissions
+supports_mcp = true
+supports_agent_skills = false
+stdio_framing = "json-lines"
+website = "https://code.claude.com/docs/"
+support_doc = "docs/agents/claude-code.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
+
+[agents.adapter]
+id = "claude-agent-acp"
+sync_id = "claude-acp"
+github = "agentclientprotocol/claude-agent-acp"
+
+[agents.adapter.install.npm]
+package = "@agentclientprotocol/claude-agent-acp"
+creates = "claude-agent-acp"
+
+[agents.harness]
+id = "claude"
+
+[agents.harness.install.npm]
+package = "@anthropic-ai/claude-code"
+creates = "claude"

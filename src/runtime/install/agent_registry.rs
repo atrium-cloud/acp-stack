@@ -335,6 +335,8 @@ impl HarnessSpec {
 pub struct AdapterSpec {
     pub id: String,
     #[serde(default)]
+    pub sync_id: Option<String>,
+    #[serde(default)]
     pub github: Option<String>,
     pub install: InstallSet,
     #[serde(default)]
@@ -344,6 +346,9 @@ pub struct AdapterSpec {
 impl AdapterSpec {
     fn validate(&self, agent_id: &str) -> Result<()> {
         validate_nonempty(agent_id, "adapter.id", &self.id)?;
+        if let Some(sync_id) = &self.sync_id {
+            validate_nonempty(agent_id, "adapter.sync_id", sync_id)?;
+        }
         if let Some(github) = &self.github {
             github_url_from_value(agent_id, "adapter.github", github)?;
         }
@@ -777,7 +782,15 @@ mod tests {
             .collect();
         assert_eq!(
             supported,
-            ["opencode", "cursor", "amp", "pi", "goose", "codex"]
+            [
+                "opencode",
+                "cursor",
+                "amp",
+                "pi",
+                "goose",
+                "codex",
+                "claude-code"
+            ]
         );
         for entry in catalog
             .entries()
@@ -789,22 +802,27 @@ mod tests {
                 "{} must advertise MCP support",
                 entry.id
             );
-            assert!(
-                entry.supports_agent_skills,
-                "{} must advertise Agent Skills support",
-                entry.id
-            );
-            assert!(
-                entry
-                    .agent_skills_install_dir
-                    .as_deref()
-                    .is_some_and(|path| {
-                        matches!(entry.id.as_str(), "amp" if path == "~/.config/agents/skills")
-                            || (entry.id != "amp" && path == "~/.agents/skills")
-                    }),
-                "{} must declare the documented Agent Skills install directory",
-                entry.id
-            );
+            if entry.id == "claude-code" {
+                assert!(!entry.supports_agent_skills);
+                assert!(entry.agent_skills_install_dir.is_none());
+            } else {
+                assert!(
+                    entry.supports_agent_skills,
+                    "{} must advertise Agent Skills support",
+                    entry.id
+                );
+                assert!(
+                    entry
+                        .agent_skills_install_dir
+                        .as_deref()
+                        .is_some_and(|path| {
+                            matches!(entry.id.as_str(), "amp" if path == "~/.config/agents/skills")
+                                || (entry.id != "amp" && path == "~/.agents/skills")
+                        }),
+                    "{} must declare the documented Agent Skills install directory",
+                    entry.id
+                );
+            }
             assert_eq!(
                 entry.testflight_expect_fs.as_deref(),
                 Some(".acp-stack-testflight.txt"),
@@ -831,7 +849,18 @@ mod tests {
             .iter()
             .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(ids, ["opencode", "cursor", "amp", "pi", "goose", "codex"]);
+        assert_eq!(
+            ids,
+            [
+                "opencode",
+                "cursor",
+                "amp",
+                "pi",
+                "goose",
+                "codex",
+                "claude-code"
+            ]
+        );
         let cursor = catalog.lookup("cursor").expect("cursor entry exists");
         assert_eq!(cursor.kind, RegistryKind::Native);
         assert!(cursor.headless_compatible);
@@ -910,6 +939,56 @@ mod tests {
             Some("codex-{arch}-unknown-linux-musl")
         );
         assert_eq!(codex.support_doc.as_deref(), Some("docs/agents/codex.md"));
+        let claude_code = catalog
+            .lookup("claude-code")
+            .expect("Claude Code entry exists");
+        assert_eq!(claude_code.kind, RegistryKind::Adapter);
+        assert!(claude_code.headless_compatible);
+        assert!(claude_code.set_provider);
+        assert!(claude_code.set_model);
+        assert!(claude_code.allow_custom_provider);
+        assert!(claude_code.allow_custom_model);
+        assert!(claude_code.set_mode);
+        assert!(claude_code.supports_mcp);
+        assert!(!claude_code.supports_agent_skills);
+        assert_eq!(
+            claude_code
+                .adapter
+                .as_ref()
+                .map(|adapter| adapter.id.as_str()),
+            Some("claude-agent-acp")
+        );
+        assert_eq!(
+            claude_code
+                .adapter
+                .as_ref()
+                .and_then(|adapter| adapter.sync_id.as_deref()),
+            Some("claude-acp")
+        );
+        let claude_code_adapter_install = &claude_code
+            .adapter
+            .as_ref()
+            .expect("Claude Code adapter")
+            .install;
+        assert_eq!(
+            claude_code_adapter_install
+                .npm
+                .as_ref()
+                .map(|install| install.package.as_str()),
+            Some("@agentclientprotocol/claude-agent-acp")
+        );
+        assert_eq!(
+            claude_code
+                .harness
+                .as_ref()
+                .and_then(|harness| harness.install.npm.as_ref())
+                .map(|install| install.package.as_str()),
+            Some("@anthropic-ai/claude-code")
+        );
+        assert_eq!(
+            claude_code.support_doc.as_deref(),
+            Some("docs/agents/claude-code.md")
+        );
     }
 
     #[test]

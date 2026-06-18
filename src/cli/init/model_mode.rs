@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::cli::agent::claude_code_provider_model_is_explicit;
 use crate::config::Config;
 use crate::dev_gates::{
     FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, TEST_SKIP_AGENT_INSTALL_ENV,
@@ -155,6 +156,9 @@ pub(super) fn configure_model_and_mode_for_init(
     // for these agents.
     let provider_present =
         provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
+    let claude_code_explicit_model = args.model.is_some()
+        && !args.custom_provider
+        && claude_code_provider_model_is_explicit(config);
     // Discovery runs when the model lane needs the advertised list — either to
     // validate an explicit value (L86), to drive an interactive picker (L84), or
     // to surface the L87 print-and-skip behavior after a provider was just set
@@ -165,6 +169,12 @@ pub(super) fn configure_model_and_mode_for_init(
         && (args.model.is_some() || interactive || provider_set_this_run);
     if !model_lane_active {
         return Ok(ModelModeOutcome::default());
+    }
+    if claude_code_explicit_model && let Some(model) = args.model.as_deref() {
+        write_model_into_config(config, model.to_owned(), entry.set_provider);
+        return Ok(ModelModeOutcome {
+            model_action: ModelModeAction::Set,
+        });
     }
     // `explicit` gates the failure path of the preflight checks below.
     let explicit = args.model.is_some();
@@ -380,6 +390,10 @@ fn configure_model_for_init(
     provider_backed: bool,
 ) -> Result<ModelModeAction> {
     if let Some(explicit) = args.model.as_deref() {
+        if claude_code_provider_model_is_explicit(config) {
+            write_model_into_config(config, explicit.to_owned(), provider_backed);
+            return Ok(ModelModeAction::Set);
+        }
         let agent_provider_id = provider_backed
             .then(|| {
                 config.agent.provider.as_ref().and_then(|provider| {

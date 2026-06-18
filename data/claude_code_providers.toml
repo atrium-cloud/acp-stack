@@ -1,0 +1,103 @@
+# Claude Code provider profiles.
+#
+# These values are Claude Code-specific provider routing and headless setup
+# metadata. Keep endpoint URLs and model defaults here instead of embedding
+# provider literals in Rust provisioners.
+
+[[profiles]]
+provider_ids = ["anthropic"]
+api_key_env_var = "ANTHROPIC_API_KEY"
+
+[[profiles]]
+provider_ids = ["amazon-bedrock"]
+agent_native_auth = true
+env = { CLAUDE_CODE_USE_BEDROCK = "1" }
+optional_env_vars = [
+  "AWS_PROFILE",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_REGION",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+  "AWS_BEDROCK_SKIP_AUTH",
+  "AWS_BEDROCK_FORCE_HTTP1",
+  "AWS_BEDROCK_FORCE_CACHE",
+]
+
+[[profiles]]
+provider_ids = ["google-vertex-anthropic"]
+agent_native_auth = true
+env = { CLAUDE_CODE_USE_VERTEX = "1" }
+companion_env_vars = ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"]
+optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_VERTEX_BASE_URL"]
+
+[[profiles]]
+provider_ids = ["microsoft-foundry"]
+api_key_env_var = "ANTHROPIC_FOUNDRY_API_KEY"
+env = { CLAUDE_CODE_USE_FOUNDRY = "1" }
+companion_env_vars = ["ANTHROPIC_FOUNDRY_BASE_URL"]
+optional_env_vars = ["ANTHROPIC_FOUNDRY_RESOURCE"]
+
+[[profiles]]
+provider_ids = ["deepseek"]
+api_key_env_var = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com/anthropic"
+
+[[profiles]]
+provider_ids = ["moonshotai"]
+api_key_env_var = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.ai/anthropic"
+default_model = "kimi-k2.7-code"
+set_subagent_model = true
+env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144" }
+
+[[profiles]]
+provider_ids = ["zai", "zhipuai"]
+api_key_env_var = "ZAI_API_KEY"
+base_url = "https://api.z.ai/api/anthropic"
+env = { API_TIMEOUT_MS = "3000000" }
+
+[[profiles]]
+provider_ids = ["minimax", "minimax-coding-plan"]
+api_key_env_var = "MINIMAX_API_KEY"
+base_url = "https://api.minimax.io/anthropic"
+default_model = "MiniMax-M3"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+
+[[profiles]]
+provider_ids = ["minimax-cn", "minimax-cn-coding-plan"]
+api_key_env_var = "MINIMAX_CN_API_KEY"
+base_url = "https://api.minimaxi.com/anthropic"
+default_model = "MiniMax-M3"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+
+[[profiles]]
+provider_ids = ["xiaomi"]
+api_key_env_var = "XIAOMI_API_KEY"
+base_url = "https://api.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
+
+[[profiles]]
+provider_ids = ["xiaomi-token-plan-cn"]
+api_key_env_var = "XIAOMI_TOKEN_PLAN_CN_API_KEY"
+base_url = "https://token-plan-cn.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
+
+[[profiles]]
+provider_ids = ["xiaomi-token-plan-ams"]
+api_key_env_var = "XIAOMI_TOKEN_PLAN_AMS_API_KEY"
+base_url = "https://token-plan-ams.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
+
+[[profiles]]
+provider_ids = ["xiaomi-token-plan-sgp"]
+api_key_env_var = "XIAOMI_TOKEN_PLAN_SGP_API_KEY"
+base_url = "https://token-plan-sgp.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"

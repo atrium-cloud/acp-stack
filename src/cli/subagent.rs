@@ -20,7 +20,7 @@ use super::agent::{
     default_api_key_ref_for_agent_provider, default_custom_provider_api,
     operator_registry_override, parse_custom_provider_api, parse_custom_token_limit,
     print_agent_set_effective_notice_for, required_custom_arg, resolve_agent_model_value,
-    validate_agent_session_config_value,
+    validate_agent_session_config_value, validate_custom_provider_api_for_agent,
 };
 
 const SUBAGENT_UNSUPPORTED_MESSAGE: &str = "Current agent does not support subagent configuration.";
@@ -474,6 +474,7 @@ fn configure_custom_subagent(
         args.provider_api.as_deref(),
         default_custom_provider_api(&config.agent.id),
     )?;
+    validate_custom_provider_api_for_agent(&config.agent.id, api, "provider-api")?;
     let context = parse_custom_token_limit(
         "context",
         args.context.as_deref(),

@@ -96,6 +96,68 @@ fn parses_custom_provider_defaults() {
 }
 
 #[test]
+fn parses_custom_provider_anthropic_messages_api() {
+    let claude_code_config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "claude-code""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Claude Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "claude-agent-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["CUSTOM_API_KEY"]"#,
+        );
+    let config_text = format!(
+        "{claude_code_config}\n\
+         [agent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/anthropic\"\n\
+         api = \"anthropic-messages\"\n"
+    );
+
+    let config = load_config_from_str(&config_text)
+        .expect("Anthropic Messages custom provider config should parse");
+    let custom = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.custom.as_ref())
+        .expect("custom provider should load");
+
+    assert_eq!(custom.api, CustomProviderApi::AnthropicMessages);
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    assert!(canonical.contains(r#"api = "anthropic-messages""#));
+}
+
+#[test]
+fn rejects_custom_provider_anthropic_messages_for_non_claude_agent() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/anthropic\"\n\
+         api = \"anthropic-messages\"\n"
+    );
+
+    let error =
+        load_config_from_str(&config_text).expect_err("non-Claude anthropic custom provider fails");
+
+    assert!(
+        error
+            .to_string()
+            .contains("anthropic-messages custom providers only support Claude Code"),
+        "{error}"
+    );
+}
+
+#[test]
 fn parses_subagent_provider_config() {
     let config_text = format!(
         "{VALID_CONFIG}\n\

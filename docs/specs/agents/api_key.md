@@ -6,16 +6,19 @@
 
 How each harness reads provider credentials. `acp-stack` injects the listed env refs; the values are stored in the encrypted secret store.
 
-| Agent      | Auth uptake                                                             |
-| ---------- | ----------------------------------------------------------------------- |
-| OpenCode   | generated provider config referencing env refs                          |
-| Pi Agent   | provider env refs plus Pi model/provider settings                       |
-| Amp Code   | reads `AMP_API_KEY` from the environment                                |
-| Cursor CLI | reads `CURSOR_API_KEY` from the environment                             |
-| Goose      | provider-native env vars plus Goose config                              |
-| Codex      | Codex-native OpenAI auth, or env refs for non-OpenAI mapped providers   |
+| Agent       | Auth uptake                                                                            |
+| ----------- | -------------------------------------------------------------------------------------- |
+| OpenCode    | generated provider config referencing env refs                                         |
+| Pi Agent    | provider env refs plus Pi model/provider settings                                      |
+| Amp Code    | reads `AMP_API_KEY` from the environment                                               |
+| Cursor CLI  | reads `CURSOR_API_KEY` from the environment                                            |
+| Goose       | provider-native env vars plus Goose config                                             |
+| Codex       | Codex-native OpenAI auth, or env refs for non-OpenAI mapped providers                  |
+| Claude Code | provider env refs exposed through Claude settings, or native cloud provider credentials |
 
 Codex requires a Responses-API-compatible upstream for any non-OpenAI provider. OpenRouter's OpenResponses (beta) endpoint is the mapped option `acps` supports today.
+
+Claude Code custom providers require Anthropic Messages-compatible endpoints. Google Vertex and Amazon Bedrock use Claude Code's native cloud-provider auth flow; Microsoft Foundry uses Foundry-specific Claude env refs.
 
 ## Provider Concept
 

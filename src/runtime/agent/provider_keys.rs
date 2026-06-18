@@ -9,6 +9,9 @@ use std::sync::LazyLock;
 use serde::Deserialize;
 
 use crate::error::{Result, StackError};
+use crate::runtime::agent::claude_code_provider_profiles::{
+    CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
+};
 
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
@@ -332,6 +335,12 @@ pub fn env_var_for_provider_id(provider_id: &str) -> Option<&'static str> {
 }
 
 pub fn env_var_for_agent_provider_id(agent_id: &str, provider_id: &str) -> Option<&'static str> {
+    if agent_id == CLAUDE_CODE_AGENT_ID
+        && let Some(profile) = profile_for_provider_id(provider_id)
+        && let Some(env_var) = profile.api_key_env_var.as_deref()
+    {
+        return Some(env_var);
+    }
     let mapping = ProviderKeyMapping::load_embedded();
     mapping.provider_mapping(provider_id).and_then(|provider| {
         if !provider.agents.iter().any(|id| id == agent_id) {
@@ -398,7 +407,10 @@ pub fn agent_provider_id_for_provider_id(
 }
 
 pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
-    agent_id == CODEX_AGENT_ID && provider_id == CODEX_NATIVE_AUTH_PROVIDER_ID
+    (agent_id == CODEX_AGENT_ID && provider_id == CODEX_NATIVE_AUTH_PROVIDER_ID)
+        || (agent_id == CLAUDE_CODE_AGENT_ID
+            && profile_for_provider_id(provider_id)
+                .is_some_and(|profile| profile.agent_native_auth))
 }
 
 pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> {
@@ -476,8 +488,8 @@ pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
                 name: static_str(&provider.name),
                 agent_provider_id,
                 default_api_key_ref: default,
-                companion_env_refs: companion_env_refs_for_provider_id(id_static),
-                optional_env_refs: optional_env_refs_for_provider_id(id_static),
+                companion_env_refs: companion_env_refs_for_agent_provider_id(agent_id, id_static),
+                optional_env_refs: optional_env_refs_for_agent_provider_id(agent_id, id_static),
             });
         }
     }
@@ -507,6 +519,26 @@ pub fn required_env_refs_for_provider_id(provider_id: &str, api_key_ref: &str) -
     refs
 }
 
+pub fn required_env_refs_for_agent_provider_id(
+    agent_id: &str,
+    provider_id: &str,
+    api_key_ref: Option<&str>,
+) -> Vec<String> {
+    if agent_id == CLAUDE_CODE_AGENT_ID
+        && let Some(profile) = profile_for_provider_id(provider_id)
+    {
+        let mut refs = Vec::new();
+        if let Some(api_key_ref) = api_key_ref {
+            refs.push(api_key_ref.to_owned());
+        }
+        refs.extend(profile.companion_env_vars.iter().cloned());
+        return refs;
+    }
+    api_key_ref
+        .map(|api_key_ref| required_env_refs_for_provider_id(provider_id, api_key_ref))
+        .unwrap_or_default()
+}
+
 pub fn companion_env_refs_for_provider_id(provider_id: &str) -> Vec<&'static str> {
     let mapping = ProviderKeyMapping::load_embedded();
     let mut refs: Vec<_> = mapping
@@ -520,6 +552,24 @@ pub fn companion_env_refs_for_provider_id(provider_id: &str) -> Vec<&'static str
     dedupe_refs(refs)
 }
 
+pub fn companion_env_refs_for_agent_provider_id(
+    agent_id: &str,
+    provider_id: &str,
+) -> Vec<&'static str> {
+    if agent_id == CLAUDE_CODE_AGENT_ID
+        && let Some(profile) = profile_for_provider_id(provider_id)
+    {
+        return dedupe_refs(
+            profile
+                .companion_env_vars
+                .iter()
+                .map(|value| static_str(value))
+                .collect(),
+        );
+    }
+    companion_env_refs_for_provider_id(provider_id)
+}
+
 pub fn optional_env_refs_for_provider_id(provider_id: &str) -> Vec<&'static str> {
     let mapping = ProviderKeyMapping::load_embedded();
     let mut refs: Vec<_> = mapping
@@ -531,6 +581,24 @@ pub fn optional_env_refs_for_provider_id(provider_id: &str) -> Vec<&'static str>
         refs.extend(provider.optional_env_vars.iter().map(String::as_str));
     }
     dedupe_refs(refs)
+}
+
+pub fn optional_env_refs_for_agent_provider_id(
+    agent_id: &str,
+    provider_id: &str,
+) -> Vec<&'static str> {
+    if agent_id == CLAUDE_CODE_AGENT_ID
+        && let Some(profile) = profile_for_provider_id(provider_id)
+    {
+        return dedupe_refs(
+            profile
+                .optional_env_vars
+                .iter()
+                .map(|value| static_str(value))
+                .collect(),
+        );
+    }
+    optional_env_refs_for_provider_id(provider_id)
 }
 
 pub fn provider_ids_for_env_refs<'a>(
@@ -617,7 +685,7 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
 fn is_supported_agent_id(agent_id: &str) -> bool {
     matches!(
         agent_id,
-        "amp" | "codex" | "cursor" | "goose" | "opencode" | "pi"
+        "amp" | "claude-code" | "codex" | "cursor" | "goose" | "opencode" | "pi"
     )
 }
 
@@ -722,6 +790,18 @@ mod tests {
         );
         assert_eq!(env_var_for_provider_id("huggingface"), Some("HF_TOKEN"));
         assert_eq!(env_var_for_provider_id("zai"), Some("ZAI_API_KEY"));
+        assert_eq!(
+            env_var_for_provider_id("moonshotai"),
+            Some("MOONSHOT_API_KEY")
+        );
+        assert_eq!(
+            env_var_for_provider_id("minimax-coding-plan"),
+            Some("MINIMAX_API_KEY")
+        );
+        assert_eq!(
+            env_var_for_provider_id("microsoft-foundry"),
+            Some("ANTHROPIC_FOUNDRY_API_KEY")
+        );
     }
 
     #[test]
@@ -827,6 +907,21 @@ mod tests {
         assert!(provider_id_supports_agent("openai", "codex"));
         assert!(provider_id_supports_agent("openrouter", "codex"));
         assert!(!provider_id_supports_agent("anthropic", "codex"));
+        assert!(provider_id_supports_agent("anthropic", "claude-code"));
+        assert!(provider_id_supports_agent("amazon-bedrock", "claude-code"));
+        assert!(provider_id_supports_agent(
+            "google-vertex-anthropic",
+            "claude-code"
+        ));
+        assert!(provider_id_supports_agent(
+            "microsoft-foundry",
+            "claude-code"
+        ));
+        assert!(provider_id_supports_agent("moonshotai", "claude-code"));
+        assert!(provider_id_supports_agent(
+            "xiaomi-token-plan-sgp",
+            "claude-code"
+        ));
         assert!(!provider_id_supports_agent("xai", "codex"));
         assert!(!provider_id_supports_agent("openai", "cursor"));
         assert!(provider_id_supports_agent("anthropic", "goose"));
@@ -845,6 +940,14 @@ mod tests {
         assert_eq!(
             env_var_for_agent_provider_id("codex", "openrouter"),
             Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            env_var_for_agent_provider_id("claude-code", "moonshotai"),
+            Some("MOONSHOT_API_KEY")
+        );
+        assert_eq!(
+            env_var_for_agent_provider_id("claude-code", "amazon-bedrock"),
+            None
         );
     }
 
@@ -907,6 +1010,51 @@ mod tests {
         assert!(bedrock.contains(&"AWS_ACCESS_KEY_ID"));
         assert!(bedrock.contains(&"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"));
         assert!(bedrock.contains(&"AWS_WEB_IDENTITY_TOKEN_FILE"));
+    }
+
+    #[test]
+    fn claude_code_provider_refs_use_agent_specific_profiles() {
+        assert_eq!(
+            required_env_refs_for_agent_provider_id("claude-code", "google-vertex-anthropic", None),
+            ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"]
+        );
+        assert_eq!(
+            required_env_refs_for_agent_provider_id(
+                "claude-code",
+                "microsoft-foundry",
+                Some("ANTHROPIC_FOUNDRY_API_KEY")
+            ),
+            ["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL"]
+        );
+        assert!(provider_uses_agent_native_auth(
+            "claude-code",
+            "amazon-bedrock"
+        ));
+        assert!(provider_uses_agent_native_auth(
+            "claude-code",
+            "google-vertex-anthropic"
+        ));
+        assert!(!provider_uses_agent_native_auth(
+            "claude-code",
+            "microsoft-foundry"
+        ));
+
+        let summaries = providers_for_agent("claude-code");
+        let bedrock = summaries
+            .iter()
+            .find(|summary| summary.id == "amazon-bedrock")
+            .expect("Bedrock should be listed for Claude Code");
+        assert_eq!(bedrock.default_api_key_ref, None);
+        assert!(bedrock.optional_env_refs.contains(&"AWS_PROFILE"));
+        let foundry = summaries
+            .iter()
+            .find(|summary| summary.id == "microsoft-foundry")
+            .expect("Foundry should be listed for Claude Code");
+        assert_eq!(
+            foundry.default_api_key_ref,
+            Some("ANTHROPIC_FOUNDRY_API_KEY")
+        );
+        assert_eq!(foundry.companion_env_refs, ["ANTHROPIC_FOUNDRY_BASE_URL"]);
     }
 
     #[test]
