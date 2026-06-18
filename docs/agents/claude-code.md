@@ -18,13 +18,13 @@ env = ["<provider-api-key-ref>"]
 
 [agent.provider]
 id = "<provider-id>"
-model = "<model-id>"
+model = "<model-id>" # optional for mapped profiles with defaults
 api_key_ref = "<provider-api-key-ref>"
 ```
 
 Native-auth providers such as Amazon Bedrock and Google Vertex AI omit `api_key_ref`; add only the env refs Claude Code needs for that provider.
 
-Claude Code reads managed provider settings from `~/.claude/settings.json` and onboarding state from `~/.claude.json`. `acp-stack` writes Anthropic-compatible endpoint settings and model env vars there, while secrets stay in the encrypted secret store and are exposed through provider-specific env refs.
+Claude Code reads managed provider settings from `~/.claude/settings.json` and onboarding state from `~/.claude.json`. `acp-stack` writes Anthropic-compatible endpoint settings and model env vars there, while secrets stay in the encrypted secret store and are exposed through provider-specific env refs. Mapped third-party profiles can provide default Claude model env vars when no explicit provider model is pinned.
 
 Supported native Claude Code provider paths are Anthropic, Amazon Bedrock, Google Vertex AI for Claude, and Microsoft Foundry. Supported Anthropic-compatible mapped providers include DeepSeek, Moonshot AI/Kimi, Z.AI/Zhipu, MiniMax, and Xiaomi MiMo.
 

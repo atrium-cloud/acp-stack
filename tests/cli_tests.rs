@@ -5239,9 +5239,225 @@ fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
             settings["env"]["ANTHROPIC_MODEL"].as_str(),
             Some("provider-profile-model")
         );
+        for key in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            assert_eq!(
+                settings["env"][key].as_str(),
+                Some("provider-profile-model"),
+                "{provider} {key}",
+                provider = case.provider,
+            );
+        }
         let helper = format!("printenv {}", case.api_key_ref);
         assert_eq!(settings["apiKeyHelper"].as_str(), Some(helper.as_str()));
         assert!(!settings.to_string().contains("test-secret"));
+    }
+}
+
+#[test]
+fn agent_set_claude_code_third_party_provider_without_model_uses_profile_default() {
+    struct Case {
+        provider: &'static str,
+        base_url: &'static str,
+        api_key_ref: &'static str,
+        model: &'static str,
+        opus_model: &'static str,
+        sonnet_model: &'static str,
+        haiku_model: &'static str,
+        subagent_model: Option<&'static str>,
+    }
+
+    let cases = [
+        Case {
+            provider: "deepseek",
+            base_url: "https://api.deepseek.com/anthropic",
+            api_key_ref: "DEEPSEEK_API_KEY",
+            model: "deepseek-v4-flash",
+            opus_model: "deepseek-v4-pro",
+            sonnet_model: "deepseek-v4-flash",
+            haiku_model: "deepseek-v4-flash",
+            subagent_model: None,
+        },
+        Case {
+            provider: "moonshotai",
+            base_url: "https://api.moonshot.ai/anthropic",
+            api_key_ref: "MOONSHOT_API_KEY",
+            model: "kimi-k2.7-code",
+            opus_model: "kimi-k2.7-code",
+            sonnet_model: "kimi-k2.7-code",
+            haiku_model: "kimi-k2.7-code",
+            subagent_model: Some("kimi-k2.7-code"),
+        },
+        Case {
+            provider: "zai",
+            base_url: "https://api.z.ai/api/anthropic",
+            api_key_ref: "ZAI_API_KEY",
+            model: "glm-5.2[1m]",
+            opus_model: "glm-5.2[1m]",
+            sonnet_model: "glm-5.2[1m]",
+            haiku_model: "GLM-4.7",
+            subagent_model: None,
+        },
+        Case {
+            provider: "zhipuai",
+            base_url: "https://api.z.ai/api/anthropic",
+            api_key_ref: "ZAI_API_KEY",
+            model: "glm-5.2[1m]",
+            opus_model: "glm-5.2[1m]",
+            sonnet_model: "glm-5.2[1m]",
+            haiku_model: "GLM-4.7",
+            subagent_model: None,
+        },
+        Case {
+            provider: "minimax",
+            base_url: "https://api.minimax.io/anthropic",
+            api_key_ref: "MINIMAX_API_KEY",
+            model: "MiniMax-M3",
+            opus_model: "MiniMax-M3",
+            sonnet_model: "MiniMax-M3",
+            haiku_model: "MiniMax-M3",
+            subagent_model: None,
+        },
+        Case {
+            provider: "minimax-coding-plan",
+            base_url: "https://api.minimax.io/anthropic",
+            api_key_ref: "MINIMAX_API_KEY",
+            model: "MiniMax-M3",
+            opus_model: "MiniMax-M3",
+            sonnet_model: "MiniMax-M3",
+            haiku_model: "MiniMax-M3",
+            subagent_model: None,
+        },
+        Case {
+            provider: "minimax-cn",
+            base_url: "https://api.minimaxi.com/anthropic",
+            api_key_ref: "MINIMAX_CN_API_KEY",
+            model: "MiniMax-M3",
+            opus_model: "MiniMax-M3",
+            sonnet_model: "MiniMax-M3",
+            haiku_model: "MiniMax-M3",
+            subagent_model: None,
+        },
+        Case {
+            provider: "minimax-cn-coding-plan",
+            base_url: "https://api.minimaxi.com/anthropic",
+            api_key_ref: "MINIMAX_CN_API_KEY",
+            model: "MiniMax-M3",
+            opus_model: "MiniMax-M3",
+            sonnet_model: "MiniMax-M3",
+            haiku_model: "MiniMax-M3",
+            subagent_model: None,
+        },
+        Case {
+            provider: "xiaomi",
+            base_url: "https://api.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_API_KEY",
+            model: "mimo-v2.5-pro",
+            opus_model: "mimo-v2.5-pro",
+            sonnet_model: "mimo-v2.5-pro",
+            haiku_model: "mimo-v2.5-pro",
+            subagent_model: None,
+        },
+        Case {
+            provider: "xiaomi-token-plan-cn",
+            base_url: "https://token-plan-cn.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+            model: "mimo-v2.5-pro",
+            opus_model: "mimo-v2.5-pro",
+            sonnet_model: "mimo-v2.5-pro",
+            haiku_model: "mimo-v2.5-pro",
+            subagent_model: None,
+        },
+        Case {
+            provider: "xiaomi-token-plan-ams",
+            base_url: "https://token-plan-ams.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+            model: "mimo-v2.5-pro",
+            opus_model: "mimo-v2.5-pro",
+            sonnet_model: "mimo-v2.5-pro",
+            haiku_model: "mimo-v2.5-pro",
+            subagent_model: None,
+        },
+        Case {
+            provider: "xiaomi-token-plan-sgp",
+            base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic",
+            api_key_ref: "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+            model: "mimo-v2.5-pro",
+            opus_model: "mimo-v2.5-pro",
+            sonnet_model: "mimo-v2.5-pro",
+            haiku_model: "mimo-v2.5-pro",
+            subagent_model: None,
+        },
+    ];
+
+    for case in cases {
+        let tempdir = tempfile::tempdir().expect("tempdir should be created");
+        let config_dir = tempdir.path().join(".config/acp-stack");
+        fs::create_dir_all(&config_dir).expect("config dir should be created");
+        fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+            .expect("config should be written");
+
+        let output = acps_command()
+            .env("HOME", tempdir.path())
+            .args(["agent", "set", "--provider", case.provider])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).expect("stdout should be utf8");
+        assert!(stdout.contains(&format!("provider: {}", case.provider)));
+        assert!(!stdout.contains("model:"), "{stdout}");
+
+        let config_text = fs::read_to_string(config_dir.join("acps-config.toml"))
+            .expect("config should be readable");
+        let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
+        let provider = &config["agent"]["provider"];
+        assert_eq!(provider["id"].as_str(), Some(case.provider));
+        assert_eq!(provider["api_key_ref"].as_str(), Some(case.api_key_ref));
+        assert!(provider.get("model").is_none());
+
+        let settings = claude_settings(tempdir.path());
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"].as_str(),
+            Some(case.base_url),
+            "{}",
+            case.provider
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_MODEL"].as_str(),
+            Some(case.model)
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"].as_str(),
+            Some(case.opus_model)
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"].as_str(),
+            Some(case.sonnet_model)
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"].as_str(),
+            Some(case.haiku_model)
+        );
+        match case.subagent_model {
+            Some(model) => {
+                assert_eq!(
+                    settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"].as_str(),
+                    Some(model)
+                );
+            }
+            None => {
+                assert!(
+                    settings["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none(),
+                    "{}",
+                    case.provider
+                );
+            }
+        }
     }
 }
 

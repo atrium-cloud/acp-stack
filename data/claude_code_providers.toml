@@ -49,6 +49,10 @@ optional_env_vars = ["ANTHROPIC_FOUNDRY_RESOURCE"]
 provider_ids = ["deepseek"]
 api_key_env_var = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com/anthropic"
+default_model = "deepseek-v4-flash"
+default_opus_model = "deepseek-v4-pro"
+default_sonnet_model = "deepseek-v4-flash"
+default_haiku_model = "deepseek-v4-flash"
 
 [[profiles]]
 provider_ids = ["moonshotai"]
@@ -62,7 +66,11 @@ env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144"
 provider_ids = ["zai", "zhipuai"]
 api_key_env_var = "ZAI_API_KEY"
 base_url = "https://api.z.ai/api/anthropic"
-env = { API_TIMEOUT_MS = "3000000" }
+default_model = "glm-5.2[1m]"
+default_opus_model = "glm-5.2[1m]"
+default_sonnet_model = "glm-5.2[1m]"
+default_haiku_model = "GLM-4.7"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[profiles]]
 provider_ids = ["minimax", "minimax-coding-plan"]

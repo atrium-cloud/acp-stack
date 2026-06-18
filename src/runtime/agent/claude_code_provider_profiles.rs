@@ -32,6 +32,12 @@ pub struct ClaudeCodeProviderProfile {
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
+    pub default_opus_model: Option<String>,
+    #[serde(default)]
+    pub default_sonnet_model: Option<String>,
+    #[serde(default)]
+    pub default_haiku_model: Option<String>,
+    #[serde(default)]
     pub set_subagent_model: bool,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -119,6 +125,33 @@ impl ClaudeCodeProviderProfiles {
             }
             if let Some(default_model) = profile.default_model.as_deref() {
                 validate_nonempty("profiles.default_model", default_model)?;
+            }
+            let role_models = [
+                (
+                    "profiles.default_opus_model",
+                    profile.default_opus_model.as_deref(),
+                ),
+                (
+                    "profiles.default_sonnet_model",
+                    profile.default_sonnet_model.as_deref(),
+                ),
+                (
+                    "profiles.default_haiku_model",
+                    profile.default_haiku_model.as_deref(),
+                ),
+            ];
+            if profile.default_model.is_none()
+                && role_models.iter().any(|(_, model)| model.is_some())
+            {
+                return claude_profile_error(format!(
+                    "Claude Code provider `{}` declares role model defaults without default_model",
+                    profile.primary_provider_id()
+                ));
+            }
+            for (field, model) in role_models {
+                if let Some(model) = model {
+                    validate_nonempty(field, model)?;
+                }
             }
             validate_env_map("profiles.env", &profile.env)?;
             validate_tokens("profiles.companion_env_vars", &profile.companion_env_vars)?;
@@ -219,6 +252,38 @@ mod tests {
                 .unwrap_or_else(|| panic!("{provider_id} profile should exist"));
             assert!(profile.agent_native_auth);
             assert!(profile.api_key_env_var.is_none());
+        }
+    }
+
+    #[test]
+    fn third_party_profiles_declare_role_model_defaults() {
+        let profiles = ClaudeCodeProviderProfiles::load_embedded();
+        let cases = [
+            (
+                "deepseek",
+                "deepseek-v4-flash",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "deepseek-v4-flash",
+            ),
+            (
+                "zai",
+                "glm-5.2[1m]",
+                "glm-5.2[1m]",
+                "glm-5.2[1m]",
+                "GLM-4.7",
+            ),
+        ];
+
+        for (provider_id, default_model, opus_model, sonnet_model, haiku_model) in cases {
+            let profile = profiles
+                .profile_for_provider_id(provider_id)
+                .unwrap_or_else(|| panic!("{provider_id} profile"));
+
+            assert_eq!(profile.default_model.as_deref(), Some(default_model));
+            assert_eq!(profile.default_opus_model.as_deref(), Some(opus_model));
+            assert_eq!(profile.default_sonnet_model.as_deref(), Some(sonnet_model));
+            assert_eq!(profile.default_haiku_model.as_deref(), Some(haiku_model));
         }
     }
 }
