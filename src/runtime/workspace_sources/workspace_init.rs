@@ -173,6 +173,21 @@ fn workspace_base_dirs_exist(workspace: &WorkspaceConfig) -> bool {
     Path::new(&workspace.root).is_dir() && Path::new(&workspace.uploads).is_dir()
 }
 
+pub fn prepare_workspace_base_dirs(workspace: &WorkspaceConfig) -> Result<()> {
+    let root = Path::new(&workspace.root);
+    if !root.is_absolute() {
+        return Err(StackError::WorkspaceMaterializeFailed {
+            reason: format!(
+                "workspace.root `{}` must be absolute for materialization",
+                workspace.root
+            ),
+        });
+    }
+
+    ensure_workspace_base_dir(root, "workspace.root")?;
+    ensure_workspace_base_dir(Path::new(&workspace.uploads), "workspace.uploads")
+}
+
 /// Prepare the workspace root/uploads directories and materialize every
 /// declared code and data source. When `log_paths` is `Some(...)`, every source
 /// operation writes capture pairs under
@@ -187,15 +202,6 @@ pub fn materialize_workspace(
     log_paths: Option<&WorkspaceLogPaths>,
 ) -> Result<MaterializeReport> {
     let root = Path::new(&workspace.root);
-    if !root.is_absolute() {
-        return Err(StackError::WorkspaceMaterializeFailed {
-            reason: format!(
-                "workspace.root `{}` must be absolute for materialization",
-                workspace.root
-            ),
-        });
-    }
-
     let code_root = root.join(CODE_LANE_DIR);
     let data_root = root.join(DATA_LANE_DIR);
     let uploads = Path::new(&workspace.uploads);
@@ -211,8 +217,7 @@ pub fn materialize_workspace(
         ensure_workspace_log_dir(&paths.run_dir)?;
     }
 
-    ensure_workspace_base_dir(root, "workspace.root")?;
-    ensure_workspace_base_dir(uploads, "workspace.uploads")?;
+    prepare_workspace_base_dirs(workspace)?;
 
     for (index, source) in workspace.code_sources.iter().enumerate() {
         ensure_lane_root(&code_root)?;
@@ -369,6 +374,34 @@ mod tests {
         names
             .iter()
             .any(|name| name.starts_with(&format!("{tag}.")) && name.ends_with(extension))
+    }
+
+    #[test]
+    fn prepare_workspace_base_dirs_creates_root_and_uploads_only() {
+        let root_dir = tempdir().expect("root");
+        let root = root_dir.path().join("workspace");
+        let workspace = workspace_with(&root);
+
+        prepare_workspace_base_dirs(&workspace).expect("prepare");
+        prepare_workspace_base_dirs(&workspace).expect("idempotent");
+
+        assert!(root.is_dir());
+        assert!(root.join("uploads").is_dir());
+        assert!(!root.join("usr").exists());
+    }
+
+    #[test]
+    fn prepare_workspace_base_dirs_rejects_relative_root() {
+        let mut workspace = workspace_with(Path::new("relative-workspace"));
+        workspace.uploads = "relative-workspace/uploads".to_owned();
+
+        let err = prepare_workspace_base_dirs(&workspace).expect_err("relative root rejected");
+
+        assert!(matches!(
+            err,
+            StackError::WorkspaceMaterializeFailed { reason }
+                if reason.contains("workspace.root `relative-workspace` must be absolute")
+        ));
     }
 
     #[test]

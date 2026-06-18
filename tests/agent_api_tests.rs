@@ -40,8 +40,13 @@ impl AgentHarness {
         Self::spawn_with_config(test_config()).await
     }
 
-    async fn spawn_with_config(config: Config) -> Self {
+    async fn spawn_with_config(mut config: Config) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
+        if config.workspace.root == "/workspace" {
+            let workspace = tempdir.path().join("workspace");
+            config.workspace.root = workspace.to_string_lossy().into_owned();
+            config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
+        }
         let path = tempdir.path().join("state.sqlite");
         let config_path = tempdir.path().join("acps-config.toml");
         std::fs::write(
@@ -188,6 +193,10 @@ async fn registry_install_does_not_require_runtime_secret_store() {
     let workspace_root = tempdir.path().join("workspace");
     std::fs::create_dir(&workspace_root).expect("workspace dir");
     config.workspace.root = workspace_root.to_string_lossy().into_owned();
+    config.workspace.uploads = workspace_root
+        .join("uploads")
+        .to_string_lossy()
+        .into_owned();
     let binary_path = tempdir
         .path()
         .join(".local")
