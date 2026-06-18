@@ -1496,6 +1496,11 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                 ))
             },
             || {
+                if !args.skip_workspace_init() {
+                    crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs(
+                        &config.workspace,
+                    )?;
+                }
                 // Snapshot the latest installer_runs row ids for this
                 // agent so the install closure can correlate the init
                 // step row to whichever installer attempts the install

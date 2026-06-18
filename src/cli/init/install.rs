@@ -137,6 +137,7 @@ fn install_error_is_retryable(error: &StackError) -> bool {
         StackError::AgentNotConfigured
             | StackError::AgentInstallerCreatesMissing { .. }
             | StackError::AgentInstallerPrerequisitesMissing { .. }
+            | StackError::AgentInstallerWorkingDirectoryMissing { .. }
             | StackError::AgentSha256Mismatch { .. }
             | StackError::RegistryLoad { .. }
     )

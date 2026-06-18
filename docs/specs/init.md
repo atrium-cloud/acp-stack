@@ -77,6 +77,7 @@ The operator-facing sequence, in order:
     - Registry agents install from the embedded catalog.
     - Custom agents install through `[agent.install]`.
     - Adapter-backed agents install both harness and adapter.
+    - Init prepares `workspace.root` and `workspace.uploads` before installer subprocesses run so installers have a valid working directory.
     - Expected-hash checks run when configured.
     - Retry uses bounded exponential backoff, with each attempt recorded in installer history.
 9. Workspace materialization.

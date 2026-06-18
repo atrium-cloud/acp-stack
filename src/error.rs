@@ -404,6 +404,9 @@ pub enum StackError {
     #[error("agent installer hit the 10-minute timeout")]
     AgentInstallerTimeout,
 
+    #[error("agent installer working directory `{path}` does not exist or is not a directory")]
+    AgentInstallerWorkingDirectoryMissing { path: PathBuf },
+
     #[error("failed to persist installer log at {path}: {source}")]
     AgentInstallerLogPersist {
         path: PathBuf,
@@ -794,6 +797,7 @@ impl StackError {
             StackError::AgentInstallerFailed { .. }
             | StackError::AgentInstallerCreatesMissing { .. }
             | StackError::AgentInstallerPrerequisitesMissing { .. }
+            | StackError::AgentInstallerWorkingDirectoryMissing { .. }
             | StackError::AgentInstallerTimeout => {
                 "inspect `acps installer history`, then retry with `acps agent install`"
             }

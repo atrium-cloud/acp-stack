@@ -590,6 +590,12 @@ fn run_program_install(
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
 ) -> Result<CapturedOutput> {
+    if !workspace_root.is_dir() {
+        return Err(StackError::AgentInstallerWorkingDirectoryMissing {
+            path: workspace_root.to_path_buf(),
+        });
+    }
+
     let mut command = Command::new(program);
     command
         .args(args)

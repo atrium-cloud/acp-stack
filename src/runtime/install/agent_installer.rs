@@ -1526,6 +1526,24 @@ exit 9
     }
 
     #[test]
+    fn missing_workspace_root_returns_typed_installer_error() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let missing_workspace = tempdir.path().join("missing-workspace");
+        let install = install_config("true", "definitely-not-a-real-binary-xyz123");
+
+        let result = run_installer_capture(&install, None, HashMap::new(), &missing_workspace);
+        let err = result.outcome.expect_err("missing cwd must fail");
+
+        assert!(matches!(
+            err,
+            StackError::AgentInstallerWorkingDirectoryMissing { path }
+                if path == missing_workspace
+        ));
+        assert_eq!(result.row.status, "error");
+        assert_eq!(result.row.step, "install");
+    }
+
+    #[test]
     fn nonzero_exit_returns_installer_failed() {
         let (_tempdir, store) = open_store();
         let install = install_config("false", "definitely-not-a-real-binary-xyz123");

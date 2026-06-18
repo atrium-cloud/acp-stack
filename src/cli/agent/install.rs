@@ -9,6 +9,7 @@ use crate::fs_util::{
 };
 use crate::runtime::install::agent_installer::{install_resolved, run_installer};
 use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 
@@ -96,6 +97,7 @@ pub(super) fn run_agent_install(args: AgentInstallArgs, output: OutputFormat) ->
     set_owner_only_file(&state_path)?;
 
     let workspace_root = PathBuf::from(config.workspace.root.clone());
+    prepare_workspace_base_dirs(&config.workspace)?;
     let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = config.agent.install.as_ref() {
