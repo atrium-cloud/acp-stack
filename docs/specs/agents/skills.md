@@ -25,3 +25,5 @@ Catalog entries record source identity, documentation sources, trust metadata, b
 | Goose      | `~/.agents/skills`             |
 
 Custom init sources use GitHub owner/org repositories named `skills` on branch `main`.
+
+Claude Code is not a managed Agent Skills install target in this version.

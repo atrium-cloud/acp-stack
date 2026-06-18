@@ -11,7 +11,7 @@
 [[providers]]
 id = ["anthropic"]
 name = "Anthropic"
-agents = ["pi", "opencode", "goose"]
+agents = ["pi", "opencode", "goose", "claude-code"]
 
 [[providers]]
 id = ["azure-openai-responses"]
@@ -26,7 +26,7 @@ agents = ["pi", "opencode", "goose", "codex"]
 [[providers]]
 id = ["deepseek"]
 name = "DeepSeek"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["google"]
@@ -87,7 +87,7 @@ vercel = "opencode"
 id = ["zai"]
 name = "Z.AI"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["opencode"]
@@ -136,36 +136,36 @@ kimi-for-coding = "opencode"
 [[providers]]
 id = ["minimax"]
 name = "MiniMax"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["xiaomi"]
 name = "Xiaomi"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["xiaomi-token-plan-cn"]
 name = "Xiaomi Token Plan (China)"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["xiaomi-token-plan-ams"]
 name = "Xiaomi Token Plan (Europe)"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["xiaomi-token-plan-sgp"]
 name = "Xiaomi Token Plan (Singapore)"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 
 [[providers]]
 id = ["google-vertex"]
@@ -177,14 +177,14 @@ optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
 [[providers]]
 id = ["google-vertex-anthropic"]
 name = "Vertex (Anthropic)"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
 optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
 
 [[providers]]
 id = ["amazon-bedrock"]
 name = "Amazon Bedrock"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
 optional_env_vars = [
   "AWS_PROFILE",
   "AWS_ACCESS_KEY_ID",
@@ -203,6 +203,11 @@ optional_env_vars = [
   "AWS_BEDROCK_FORCE_HTTP1",
   "AWS_BEDROCK_FORCE_CACHE",
 ]
+
+[[providers]]
+id = ["microsoft-foundry"]
+name = "Microsoft Foundry"
+agents = ["claude-code"]
 
 [[providers]]
 id = ["amp-code"]
@@ -478,12 +483,12 @@ agents = ["opencode"]
 [[providers]]
 id = ["minimax-cn-coding-plan"]
 name = "MiniMax Token Plan (minimaxi.com)"
-agents = ["opencode"]
+agents = ["opencode", "claude-code"]
 
 [[providers]]
 id = ["minimax-coding-plan"]
 name = "MiniMax Token Plan (minimax.io)"
-agents = ["opencode"]
+agents = ["opencode", "claude-code"]
 
 [[providers]]
 id = ["mixlayer"]
@@ -503,7 +508,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["moonshotai"]
 name = "Moonshot AI"
-agents = ["opencode"]
+agents = ["opencode", "claude-code"]
 
 [[providers]]
 id = ["moonshotai-cn"]
@@ -728,7 +733,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["zhipuai"]
 name = "Zhipu AI"
-agents = ["opencode"]
+agents = ["opencode", "claude-code"]
 
 [[providers]]
 id = ["zhipuai-coding-plan"]

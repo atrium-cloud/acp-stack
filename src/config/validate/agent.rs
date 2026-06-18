@@ -3,19 +3,26 @@
 
 use crate::config::schema::{
     AgentAutoUpdateConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
-    AgentSubagentConfig,
+    AgentSubagentConfig, CustomProviderApi,
 };
 use crate::config::validate::primitives::{
     require_present, validate_duration_field, validate_non_empty_trimmed, validate_nonempty,
     validate_secret_ref_name_value,
 };
 use crate::error::{Result, StackError};
+use crate::runtime::agent::claude_code_provider_profiles::CLAUDE_CODE_AGENT_ID;
 
-pub(crate) fn validate_agent_provider(provider: &AgentProviderConfig) -> Result<()> {
-    validate_agent_provider_at(provider, AGENT_PROVIDER_FIELDS)
+pub(crate) fn validate_agent_provider(
+    agent_id: &str,
+    provider: &AgentProviderConfig,
+) -> Result<()> {
+    validate_agent_provider_at(agent_id, provider, AGENT_PROVIDER_FIELDS)
 }
 
-pub(crate) fn validate_agent_subagent(subagent: &AgentSubagentConfig) -> Result<()> {
+pub(crate) fn validate_agent_subagent(
+    agent_id: &str,
+    subagent: &AgentSubagentConfig,
+) -> Result<()> {
     if subagent.disabled && subagent.provider.is_some() {
         return Err(StackError::InvalidParam {
             field: "agent.subagent.provider",
@@ -23,7 +30,7 @@ pub(crate) fn validate_agent_subagent(subagent: &AgentSubagentConfig) -> Result<
         });
     }
     if let Some(provider) = subagent.provider.as_ref() {
-        validate_agent_provider_at(provider, AGENT_SUBAGENT_PROVIDER_FIELDS)?;
+        validate_agent_provider_at(agent_id, provider, AGENT_SUBAGENT_PROVIDER_FIELDS)?;
     }
     Ok(())
 }
@@ -46,6 +53,7 @@ struct AgentProviderFieldNames {
     api_key_ref: &'static str,
     custom_name: &'static str,
     custom_base_url: &'static str,
+    custom_api: &'static str,
     custom_model_name: &'static str,
     custom_context: &'static str,
     custom_output_max_tokens: &'static str,
@@ -57,6 +65,7 @@ const AGENT_PROVIDER_FIELDS: AgentProviderFieldNames = AgentProviderFieldNames {
     api_key_ref: "agent.provider.api_key_ref",
     custom_name: "agent.provider.custom.name",
     custom_base_url: "agent.provider.custom.base_url",
+    custom_api: "agent.provider.custom.api",
     custom_model_name: "agent.provider.custom.model_name",
     custom_context: "agent.provider.custom.context",
     custom_output_max_tokens: "agent.provider.custom.output_max_tokens",
@@ -68,12 +77,14 @@ const AGENT_SUBAGENT_PROVIDER_FIELDS: AgentProviderFieldNames = AgentProviderFie
     api_key_ref: "agent.subagent.provider.api_key_ref",
     custom_name: "agent.subagent.provider.custom.name",
     custom_base_url: "agent.subagent.provider.custom.base_url",
+    custom_api: "agent.subagent.provider.custom.api",
     custom_model_name: "agent.subagent.provider.custom.model_name",
     custom_context: "agent.subagent.provider.custom.context",
     custom_output_max_tokens: "agent.subagent.provider.custom.output_max_tokens",
 };
 
 fn validate_agent_provider_at(
+    agent_id: &str,
     provider: &AgentProviderConfig,
     fields: AgentProviderFieldNames,
 ) -> Result<()> {
@@ -101,12 +112,13 @@ fn validate_agent_provider_at(
                 field: fields.api_key_ref,
             });
         }
-        validate_agent_custom_provider(custom, fields)?;
+        validate_agent_custom_provider(agent_id, custom, fields)?;
     }
     Ok(())
 }
 
 fn validate_agent_custom_provider(
+    agent_id: &str,
     custom: &AgentCustomProviderConfig,
     fields: AgentProviderFieldNames,
 ) -> Result<()> {
@@ -118,6 +130,7 @@ fn validate_agent_custom_provider(
             reason: "must start with http:// or https://".to_owned(),
         });
     }
+    validate_agent_custom_provider_api(agent_id, custom.api, fields.custom_api)?;
     if let Some(model_name) = custom.model_name.as_deref() {
         validate_non_empty_trimmed(fields.custom_model_name, model_name)?;
     }
@@ -131,6 +144,32 @@ fn validate_agent_custom_provider(
         return Err(StackError::InvalidParam {
             field: fields.custom_output_max_tokens,
             reason: "must be greater than 0".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_agent_custom_provider_api(
+    agent_id: &str,
+    api: CustomProviderApi,
+    field: &'static str,
+) -> Result<()> {
+    if agent_id == "codex" && api != CustomProviderApi::Responses {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "Codex custom providers only support responses".to_owned(),
+        });
+    }
+    if agent_id == CLAUDE_CODE_AGENT_ID && api != CustomProviderApi::AnthropicMessages {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "Claude Code custom providers only support anthropic-messages".to_owned(),
+        });
+    }
+    if agent_id != CLAUDE_CODE_AGENT_ID && api == CustomProviderApi::AnthropicMessages {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "anthropic-messages custom providers only support Claude Code".to_owned(),
         });
     }
     Ok(())

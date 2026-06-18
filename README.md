@@ -15,14 +15,15 @@
 
 These harnesses are currently supported:
 
-| Agent      | ACP Compat |
-| ---------- | ---------- |
-| OpenCode   | native     |
-| Pi Agent   | adapter    |
-| Amp Code   | adapter    |
-| Cursor CLI | native     |
-| Goose      | native     |
-| Codex CLI  | adapter    |
+| Agent       | ACP Compat |
+| ----------- | ---------- |
+| Claude Code | adapter    |
+| Codex CLI   | adapter    |
+| OpenCode    | native     |
+| Pi Agent    | adapter    |
+| Goose       | native     |
+| Amp Code    | adapter    |
+| Cursor CLI  | native     |
 
 "native" means the agent harness is compatible with ACP natively; "adapter" means an ACP adapter must be installed alongside the harness to enable agent-ACP communication.
 
