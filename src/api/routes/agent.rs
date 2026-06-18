@@ -26,6 +26,7 @@ use crate::runtime::install::agent_installer::{
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{SkillPortReport, port_agent_skills};
+use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 use crate::state::InstallerRunInput;
 
@@ -51,6 +52,7 @@ async fn install_agent_for_config(
     state: &AppState,
     config: &Config,
 ) -> Result<AgentInstallResponse> {
+    prepare_workspace_base_dirs(&config.workspace)?;
     let workspace_root = std::path::PathBuf::from(config.workspace.root.clone());
     let home = home_dir()?;
     let local_bin = home.join(".local").join("bin");

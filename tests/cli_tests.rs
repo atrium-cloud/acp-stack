@@ -1901,6 +1901,76 @@ fn init_creates_workspace_root_and_uploads_without_sources() {
 }
 
 #[test]
+fn init_prepares_workspace_root_before_agent_install() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let workspace_root = tempdir.path().join("workspace");
+    let managed_binary = tempdir.path().join(".local/bin/cwd-agent");
+    let shell = format!(
+        "test \"$(pwd -P)\" = \"$(cd {workspace} && pwd -P)\" && mkdir -p {bin} && printf '#!/bin/sh\\necho cwd-agent\\n' > {binary} && chmod 755 {binary}",
+        workspace = shell_quote_path(&workspace_root),
+        bin = shell_quote_path(managed_binary.parent().expect("binary has parent")),
+        binary = shell_quote_path(&managed_binary),
+    );
+    fs::write(
+        config_dir.join("agents.toml"),
+        format!(
+            r#"
+[[agents]]
+id = "cwd-agent"
+name = "CWD Agent"
+kind = "native"
+headless_compatible = true
+set_provider = false
+set_model = false
+allow_custom_provider = false
+allow_custom_model = false
+set_mode = false
+support_doc = "docs/agents/cwd-agent.md"
+
+[agents.harness]
+id = "cwd-agent"
+
+[agents.harness.install.shell]
+script = {}
+creates = "cwd-agent"
+"#,
+            toml_string(&shell),
+        ),
+    )
+    .expect("agents override should be written");
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--agent",
+            "cwd-agent",
+            "--no-skills",
+            "--skip-testflight",
+            "--workspace-root",
+            workspace_root.to_str().expect("workspace UTF-8"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "progress: materializing workspace sources",
+        ));
+
+    assert!(workspace_root.is_dir());
+    assert!(workspace_root.join("uploads").is_dir());
+    assert!(managed_binary.is_file());
+    let store = StateStore::open(default_state_path(tempdir.path())).expect("state should open");
+    let runs = store
+        .query_installer_runs_filtered(Some("cwd-agent"), 10)
+        .expect("installer history should query");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "ran");
+    assert_eq!(runs[0].step, "install");
+}
+
+#[test]
 fn init_edge_profile_prints_edge_artifact_progress() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 
@@ -5919,19 +5989,19 @@ creates = "opencode"
 }
 
 #[test]
-fn agent_install_registry_path_does_not_require_runtime_secret_store() {
+fn agent_install_registry_path_prepares_workspace_root_without_secret_store() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let workspace_root = tempdir.path().join("workspace");
-    fs::create_dir(&workspace_root).expect("workspace dir should be created");
     let binary_path = tempdir
         .path()
         .join(".local")
         .join("bin")
         .join("cli-registry-agent");
     let script = format!(
-        "mkdir -p {bin} && printf registry > {binary} && chmod 755 {binary}",
+        "test \"$(pwd -P)\" = \"$(cd {workspace} && pwd -P)\" && mkdir -p {bin} && printf registry > {binary} && chmod 755 {binary}",
+        workspace = shell_quote_path(&workspace_root),
         bin = shell_quote_path(binary_path.parent().expect("binary has parent")),
         binary = shell_quote_path(&binary_path),
     );
@@ -6000,6 +6070,9 @@ creates = "cli-registry-agent"
         .stdout(predicates::str::contains(
             binary_path.to_string_lossy().as_ref(),
         ));
+
+    assert!(workspace_root.is_dir());
+    assert!(workspace_root.join("uploads").is_dir());
 }
 
 #[cfg(unix)]
