@@ -2929,10 +2929,10 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
 }
 
 // L84-L87 cover the provisional ACP discovery flow during init: validate
-// explicit `--model`/`--mode` against the harness's advertised values
-// (L86) and surface the list when non-interactive callers omit `--model`
-// (L87). The fixture env var short-circuits the actual spawn so these
-// tests don't depend on a real opencode binary being installed.
+// explicit `--model` against the harness's advertised values (L86) and
+// surface the list when non-interactive callers omit `--model` (L87). The
+// fixture env var short-circuits the actual spawn so these tests don't depend
+// on a real opencode binary being installed.
 fn write_workspace_init_config(home: &std::path::Path) {
     let config_dir = home.join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir");
@@ -3209,98 +3209,49 @@ fn init_noninteractive_missing_model_prints_advertised_values_without_mutating_c
 }
 
 #[test]
-fn init_explicit_mode_validates_against_acp_advertised_values() {
+fn init_rejects_mode_flag_at_cli_boundary() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    write_workspace_init_config(tempdir.path());
-    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
-    let options_path =
-        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
-    acps_with_empty_path(tempdir.path())
+    acps_command()
         .env("HOME", tempdir.path())
-        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args([
-            "init",
-            "--agent",
-            "opencode",
-            "--provider",
-            "openai",
-            "--api-key-ref",
-            "OPENAI_API_KEY",
-            "--model",
-            "openai/gpt-5.5",
-            "--mode",
-            "plan",
-        ])
-        .assert()
-        .success();
-
-    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
-        .expect("config should be readable");
-    assert!(config.contains(r#"mode = "plan""#));
-}
-
-#[test]
-fn init_explicit_mode_rejects_value_not_in_advertised_list() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    write_workspace_init_config(tempdir.path());
-    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
-    let options_path =
-        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
-
-    acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
-        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args([
-            "init",
-            "--agent",
-            "opencode",
-            "--provider",
-            "openai",
-            "--api-key-ref",
-            "OPENAI_API_KEY",
-            "--model",
-            "openai/gpt-5.5",
-            "--mode",
-            "executor",
-        ])
+        .args(["init", "--agent", "opencode", "--mode", "plan"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "agent did not advertise `executor` as an available `mode`",
-        ))
-        .stderr(predicates::str::contains("advertised modes: [build, plan]"));
+            "unexpected argument '--mode' found",
+        ));
 }
 
 #[test]
-fn init_mode_only_does_not_print_model_picker() {
-    // OpenCode advertises both model and mode. Running --mode plan
-    // with an existing provider should only exercise the mode lane; the
-    // model lane stays dormant. Regression for an audit-flagged
-    // bug where `configure_model_for_init` ran whenever set_model was
-    // true, surfacing an unrelated advertised-models block.
+fn init_model_setup_does_not_write_agent_mode() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
-    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test")]);
-    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
-    let mut config = fs::read_to_string(&config_path).expect("config should be readable");
-    config.push_str("\n[agent.provider]\nid = \"openai\"\napi_key_ref = \"OPENAI_API_KEY\"\n");
-    fs::write(&config_path, config).expect("config should be writable");
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
     let options_path =
         write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
 
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["init", "--agent", "opencode", "--mode", "plan"])
+        .args([
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "openai/gpt-5.5",
+        ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("advertised models").not())
         .stdout(predicates::str::contains("advertised modes").not());
 
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
-    assert!(config.contains(r#"mode = "plan""#));
+    assert!(!config.contains(r#"mode = "plan""#));
+    assert!(!config.contains(r#"mode = "build""#));
 }
 
 #[test]
@@ -3401,73 +3352,6 @@ fn init_same_provider_without_model_preserves_existing_model() {
         config.contains(r#"model = "openai/gpt-5.5""#),
         "second init --provider openai (no --model) must preserve the previously pinned model",
     );
-}
-
-#[test]
-fn init_rejects_mode_for_agents_without_set_mode_before_discovery() {
-    // Pi has set_model=true and set_mode=false. The unsupported-mode
-    // rejection must fire as a capability check, BEFORE any binary /
-    // cwd / discovery error can hide the real reason.
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    seed_init_secrets(tempdir.path(), &[("ANTHROPIC_API_KEY", "test")]);
-
-    acps_command()
-        .env("HOME", tempdir.path())
-        .args([
-            "init",
-            "--agent",
-            "pi",
-            "--provider",
-            "anthropic",
-            "--api-key-ref",
-            "ANTHROPIC_API_KEY",
-            "--mode",
-            "plan",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "does not support mode configuration through `acps init`",
-        ));
-}
-
-#[test]
-fn init_custom_provider_still_validates_mode_against_acp_advertised_values() {
-    // Custom-provider skips MODEL validation (the model id is freeform),
-    // but MODE is independent of provider choice and must still be
-    // validated against the agent's ACP advertisement.
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    write_workspace_init_config(tempdir.path());
-    seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test")]);
-    let options_path =
-        write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &["build", "plan"]);
-
-    acps_with_empty_path(tempdir.path())
-        .env("HOME", tempdir.path())
-        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args([
-            "init",
-            "--agent",
-            "opencode",
-            "--provider",
-            "myprovider",
-            "--custom-provider",
-            "--provider-name",
-            "My Provider",
-            "--base-url",
-            "https://api.myprovider.example/v1",
-            "--api-key-ref",
-            "CUSTOM_API_KEY",
-            "--model",
-            "my-freeform-model",
-            "--mode",
-            "executor",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "agent did not advertise `executor` as an available `mode`",
-        ));
 }
 
 #[test]

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 
-use crate::config::{self, AgentSubagentConfig, Config};
+use crate::config::{self, AgentSubagentConfig, Config, DataSourceConfig};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
@@ -80,6 +80,27 @@ use super::logging::{
     disabled_supabase_config, enabled_supabase_config, ensure_supabase_secret,
 };
 
+#[derive(Debug, Clone)]
+pub(super) struct InitMcpStdioServer {
+    pub(super) name: String,
+    pub(super) command: String,
+    pub(super) args: Vec<String>,
+    pub(super) env: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct InitMcpHttpServer {
+    pub(super) name: String,
+    pub(super) url: String,
+    pub(super) headers: Vec<InitMcpHttpHeader>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct InitMcpHttpHeader {
+    pub(super) name: String,
+    pub(super) value_ref: String,
+}
+
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Select the configured agent non-interactively from the registry.
@@ -92,7 +113,7 @@ pub struct InitArgs {
     #[arg(
         long = "custom-agent-id",
         value_name = "ID",
-        conflicts_with_all = ["agent", "provider", "model", "mode", "custom_provider"]
+        conflicts_with_all = ["agent", "provider", "model", "custom_provider"]
     )]
     pub(super) custom_agent_id: Option<String>,
     /// Display name for the custom agent (defaults to the id).
@@ -132,9 +153,9 @@ pub struct InitArgs {
     )]
     pub(super) custom_agent_creates: Option<String>,
     /// Reference an existing secret as an environment variable for the agent
-    /// process. Repeatable. The secret must already be in the store;
-    /// interactive runs also offer an add-loop that collects the value. Applies
-    /// only when creating a new config.
+    /// process. Repeatable. The secret must already be in the store. Interactive
+    /// optional setup can collect masked values. Applies only when creating a
+    /// new config.
     #[arg(long = "agent-env-ref", value_name = "NAME")]
     pub(super) agent_env_ref: Vec<String>,
     /// Declare a user-scope dependency install action as NAME=SHELL. Repeatable.
@@ -216,10 +237,6 @@ pub struct InitArgs {
     /// session.
     #[arg(long)]
     pub(super) model: Option<String>,
-    /// Initial mode value. Validated against the agent's ACP-advertised
-    /// `mode` values discovered via the same provisional session.
-    #[arg(long)]
-    pub(super) mode: Option<String>,
     /// Display name for a custom model.
     #[arg(long = "model-name", requires = "custom_provider")]
     pub(super) model_name: Option<String>,
@@ -245,7 +262,7 @@ pub struct InitArgs {
         conflicts_with = "no_skills"
     )]
     pub(super) skills: Vec<String>,
-    /// Skip the Agent Skills prompt in interactive runs.
+    /// Skip Agent Skills during init.
     #[arg(long, conflicts_with_all = ["skills_source", "skills"])]
     pub(super) no_skills: bool,
     /// Configure a public edge profile during init.
@@ -333,6 +350,16 @@ pub struct InitArgs {
     /// Suppress the end-of-init testflight even in interactive runs.
     #[arg(long)]
     pub(super) skip_testflight: bool,
+    #[arg(skip)]
+    pub(super) prompt_agent_env_refs: bool,
+    #[arg(skip)]
+    pub(super) prompt_skills: bool,
+    #[arg(skip)]
+    pub(super) prompt_data_sources: Vec<DataSourceConfig>,
+    #[arg(skip)]
+    pub(super) prompt_mcp_stdio: Vec<InitMcpStdioServer>,
+    #[arg(skip)]
+    pub(super) prompt_mcp_http: Vec<InitMcpHttpServer>,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
@@ -1026,7 +1053,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         }
     }
     if creating_config && !args.resume {
-        prompt_starter_config_selections_if_needed(&mut args)?;
+        prompt_starter_config_selections_if_needed(&mut args, &registry)?;
     }
     // Operator agent env refs (flags + interactive add-loop). On a fresh run the
     // interactive loop also collects masked values; on resume only the replayed
@@ -1253,9 +1280,6 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         if args.model.is_none() {
             args.model = recorded.model.clone();
         }
-        if args.mode.is_none() {
-            args.mode = recorded.mode.clone();
-        }
         if args.provider.is_none() {
             args.provider = recorded.provider.clone();
         }
@@ -1292,7 +1316,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             .provider
             .as_ref()
             .map(|provider| provider.id.clone());
-        // A failed provider_configure step that owned ONLY model/mode (no
+        // A failed provider_configure step that owned only model (no
         // provider was ever set) can legitimately resume without `--provider`.
         // Only error when we know provider is required AND absent.
         let resume_recorded_provider = recorded_args.as_ref().and_then(|r| r.provider.clone());
@@ -1715,17 +1739,14 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         step_kind::PROVIDER_CONFIGURE,
         || {
             // Provider config is idempotent only when there's no explicit
-            // change requested for any of the three lanes this step
-            // now owns (provider, model, mode). We always re-run on
-            // resume so partial writes (e.g. missing secret refs) get
-            // re-collected, and so a resumed `--model`/`--mode` still
-            // gets validated and persisted rather than silently
-            // skipped because the prior succeeded row passes the
-            // verifier.
+            // change requested for any lane this step owns (provider, model).
+            // We always re-run on resume so partial writes (e.g. missing secret
+            // refs) get re-collected, and so a resumed `--model` still gets
+            // validated and persisted rather than silently skipped because the
+            // prior succeeded row passes the verifier.
             let secret_store = SecretStore::open(&provider_verify_home)?;
             Ok(args.provider.is_none()
                 && args.model.is_none()
-                && args.mode.is_none()
                 && configured_provider_refs_satisfied(
                     &registry,
                     &provider_verify_config,
@@ -1754,8 +1775,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                 verify_agent_acp_connection(&home, &config, output_mode.is_text())?;
             }
             let model_mode_changed =
-                matches!(model_mode_outcome.model_action, ModelModeAction::Set)
-                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
+                matches!(model_mode_outcome.model_action, ModelModeAction::Set);
             let subagent_configured = configure_subagent_inherit_for_init(
                 prompts_enabled(&args),
                 &registry,
@@ -1772,8 +1792,8 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                 atomic_write_owner_only(&config_path, canonical.as_bytes())?;
             }
             Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
-                model_mode_outcome.model_action, model_mode_outcome.mode_action,
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
+                model_mode_outcome.model_action,
             )))
         },
     );
@@ -1781,9 +1801,8 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
         return finalize_with_error(&store, &init_run, error);
     }
 
-    // acp-stack auto-update: configure `[updates.acp_stack]` after mode
-    // selection, before the summary. Flags apply on any run; the interactive
-    // prompt is suppressed on resume.
+    // acp-stack auto-update: configure `[updates.acp_stack]` before the summary.
+    // Flags apply on any run; the interactive prompt is suppressed on resume.
     let stack_update_outcome = (|| -> Result<()> {
         let changed = configure_stack_update_for_init(
             &args,
@@ -2145,5 +2164,80 @@ mod tests {
 
         let handoff = parse_init_args(&["--handoff-json"]);
         assert!(!prompts_enabled_for(&handoff, true));
+    }
+
+    #[test]
+    fn starter_config_writes_interactive_mcp_rows() {
+        let mut args = parse_init_args(&[]);
+        args.prompt_mcp_stdio.push(InitMcpStdioServer {
+            name: "local-tool".to_owned(),
+            command: "local-tool-mcp".to_owned(),
+            args: vec!["serve".to_owned(), "--verbose".to_owned()],
+            env: vec!["LOCAL_TOOL_API_KEY".to_owned()],
+        });
+        args.prompt_mcp_http.push(InitMcpHttpServer {
+            name: "remote".to_owned(),
+            url: "https://mcp.example.com".to_owned(),
+            headers: vec![InitMcpHttpHeader {
+                name: "Authorization".to_owned(),
+                value_ref: "REMOTE_MCP_TOKEN".to_owned(),
+            }],
+        });
+
+        let toml = starter_config::starter_config(&args).expect("starter config");
+        let config = config::load_config_from_str(&toml).expect("config parses");
+        assert_eq!(config.mcp.servers.len(), 2);
+        match &config.mcp.servers[0] {
+            config::McpServerConfig::Stdio(stdio) => {
+                assert_eq!(stdio.name, "local-tool");
+                assert_eq!(stdio.command, "local-tool-mcp");
+                assert_eq!(stdio.args, ["serve", "--verbose"]);
+                assert_eq!(stdio.env, ["LOCAL_TOOL_API_KEY"]);
+            }
+            other => panic!("expected stdio MCP, got {other:?}"),
+        }
+        match &config.mcp.servers[1] {
+            config::McpServerConfig::Http(http) => {
+                assert_eq!(http.name, "remote");
+                assert_eq!(http.url, "https://mcp.example.com");
+                assert_eq!(http.headers.len(), 1);
+                assert_eq!(http.headers[0].name, "Authorization");
+                assert_eq!(http.headers[0].value_ref, "REMOTE_MCP_TOKEN");
+            }
+            other => panic!("expected HTTP MCP, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn starter_config_writes_interactive_s3_data_source() {
+        let mut args = parse_init_args(&[]);
+        args.prompt_data_sources.push(DataSourceConfig {
+            source_type: "s3".to_owned(),
+            name: None,
+            path: None,
+            url: None,
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: Some("acps-fixtures".to_owned()),
+            prefix: Some("datasets".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            access_key_ref: Some("AWS_ACCESS_KEY_ID".to_owned()),
+            secret_key_ref: Some("AWS_SECRET_ACCESS_KEY".to_owned()),
+        });
+
+        let toml = starter_config::starter_config(&args).expect("starter config");
+        let config = config::load_config_from_str(&toml).expect("config parses");
+        assert_eq!(config.workspace.data_sources.len(), 1);
+        let source = &config.workspace.data_sources[0];
+        assert_eq!(source.source_type, "s3");
+        assert_eq!(source.bucket.as_deref(), Some("acps-fixtures"));
+        assert_eq!(source.prefix.as_deref(), Some("datasets"));
+        assert_eq!(source.region.as_deref(), Some("us-east-1"));
+        assert_eq!(source.access_key_ref.as_deref(), Some("AWS_ACCESS_KEY_ID"));
+        assert_eq!(
+            source.secret_key_ref.as_deref(),
+            Some("AWS_SECRET_ACCESS_KEY")
+        );
     }
 }

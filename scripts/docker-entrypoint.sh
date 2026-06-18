@@ -33,9 +33,6 @@ if [ "${ACP_STACK_AUTO_INIT:-0}" = "1" ] && [ ! -f "${config_path}" ]; then
     if [ -n "${ACP_STACK_INIT_MODEL:-}" ]; then
       set -- "$@" --model "${ACP_STACK_INIT_MODEL}"
     fi
-    if [ -n "${ACP_STACK_INIT_MODE:-}" ]; then
-      set -- "$@" --mode "${ACP_STACK_INIT_MODE}"
-    fi
     if [ -n "${ACP_STACK_INIT_WORKSPACE_ROOT:-}" ]; then
       set -- "$@" --workspace-root "${ACP_STACK_INIT_WORKSPACE_ROOT}"
     fi

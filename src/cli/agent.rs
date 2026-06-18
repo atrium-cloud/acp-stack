@@ -470,7 +470,7 @@ mod tests {
             .expect_err("missing file must fail");
         match err {
             StackError::AgentTestFailed { stage, reason } => {
-                assert_eq!(stage, "fs smoke");
+                assert_eq!(stage, "fs_check");
                 assert!(reason.contains("stat failed"), "reason: {reason}");
             }
             other => panic!("expected AgentTestFailed, got {other:?}"),
