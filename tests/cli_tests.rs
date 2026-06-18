@@ -13,7 +13,10 @@ use acp_stack::state::{
     InstallerRunInput, StateStore, default_state_path,
 };
 use assert_cmd::Command;
-use axum::{Json, Router, routing::get};
+use axum::{
+    Json, Router,
+    routing::{get, put},
+};
 use base64::Engine;
 use http::StatusCode;
 use predicates::prelude::PredicateBooleanExt as _;
@@ -3501,6 +3504,45 @@ fn init_claude_code_explicit_profile_model_skips_acp_discovery() {
 }
 
 #[test]
+fn init_claude_code_profile_provider_filters_builtin_model_aliases() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("MOONSHOT_API_KEY", "test-moonshot-key")]);
+    let options_path = write_acp_config_options(
+        tempdir.path(),
+        &["opus", "sonnet", "kimi-k2.7-code", "haiku"],
+        &[],
+    );
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "claude-code",
+            "--provider",
+            "moonshotai",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "advertised models for Claude Code:",
+        ))
+        .stdout(predicates::str::contains("  kimi-k2.7-code"))
+        .stdout(predicates::str::contains("  opus").not())
+        .stdout(predicates::str::contains("  sonnet").not())
+        .stdout(predicates::str::contains("  haiku").not());
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "moonshotai""#));
+    assert!(!config.contains(r#"model = "kimi-k2.7-code""#));
+}
+
+#[test]
 fn init_goose_custom_provider_provision_failure_removes_sidecar() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(tempdir.path(), &[("CUSTOM_API_KEY", "test")]);
@@ -5240,6 +5282,7 @@ fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
             Some("provider-profile-model")
         );
         for key in [
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -5430,6 +5473,10 @@ fn agent_set_claude_code_third_party_provider_without_model_uses_profile_default
         assert_eq!(
             settings["env"]["ANTHROPIC_MODEL"].as_str(),
             Some(case.model)
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"].as_str(),
+            Some(case.opus_model)
         );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"].as_str(),
@@ -10745,6 +10792,63 @@ fn secrets_set_reads_value_from_stdin() {
 }
 
 #[test]
+fn secrets_set_accepts_name_and_value_flags() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (_, admin_key) = run_init_with_home(tempdir.path());
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "secrets",
+            "set",
+            "--name",
+            "MOONSHOT_API_KEY",
+            "--value",
+            "super-secret-value",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("set secret: MOONSHOT_API_KEY"))
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!String::from_utf8_lossy(&output).contains("super-secret-value"));
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["secrets", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MOONSHOT_API_KEY"));
+}
+
+#[test]
+fn secrets_set_rejects_positional_name_with_name_flag() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "secrets",
+            "set",
+            "OPENCODE_API_KEY",
+            "--name",
+            "MOONSHOT_API_KEY",
+            "--value",
+            "super-secret-value",
+            "--admin-key",
+            "unused",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "pass the secret name either positionally or with --name, not both",
+        ));
+}
+
+#[test]
 fn secrets_delete_removes_named_secret() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let (_, admin_key) = run_init_with_home(tempdir.path());
@@ -10989,6 +11093,59 @@ fn config_import_force_replaces_invalid_existing_config() {
 
     let written = fs::read_to_string(config_path).expect("config readable");
     assert!(written.contains("127.0.0.1:7778"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_import_treats_auth_rejection_from_previous_daemon_as_deferred_apply() {
+    for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind rejecting daemon");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let app = Router::new().route(
+            "/v1/auth/local-session-access",
+            put(move || async move {
+                (
+                    status,
+                    Json(json!({
+                        "ok": false,
+                        "error": {
+                            "code": "auth.invalid",
+                            "message": "invalid credential",
+                            "details": {}
+                        }
+                    })),
+                )
+            }),
+        );
+        let join = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        write_cli_home(tempdir.path(), &base_url, ADMIN_KEY);
+        let modified = VALID_PLACEBO_CONFIG
+            .replace(r#"bind = "127.0.0.1:7700""#, r#"bind = "127.0.0.1:7786""#);
+        let import_path = tempdir.path().join("replacement.toml");
+        fs::write(&import_path, &modified).expect("write replacement");
+
+        acps_command()
+            .env("HOME", tempdir.path())
+            .args([
+                "config",
+                "import",
+                import_path.to_str().unwrap(),
+                "--force",
+                "--admin-key",
+                ADMIN_KEY,
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("imported config (replaced)"))
+            .stdout(predicates::str::contains(
+                "local session access will apply on next daemon start",
+            ));
+
+        join.abort();
+    }
 }
 
 #[test]

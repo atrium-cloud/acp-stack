@@ -265,7 +265,9 @@ fn apply_imported_local_session_auth_to_running_daemon(
         Err(StackError::AgentApiRequest { .. }) => Ok(false),
         Err(StackError::AgentApiStatus { status, .. })
             if status == http::StatusCode::NOT_FOUND
-                || status == http::StatusCode::METHOD_NOT_ALLOWED =>
+                || status == http::StatusCode::METHOD_NOT_ALLOWED
+                || status == http::StatusCode::UNAUTHORIZED
+                || status == http::StatusCode::FORBIDDEN =>
         {
             Ok(false)
         }
