@@ -25,6 +25,8 @@ Shell install paths declare `required_tools` for external commands they invoke. 
 
 The installer verifies declared executables after each managed step. Provider secrets are never passed to install steps.
 
+Adapter `sync_id` is a maintainer-only ACP registry comparison alias for adapters whose upstream registry id differs from the local launch command.
+
 ## Operator Override
 
 The embedded registry is the default source. Operators may provide a local override catalog for their instance, but unsupported entries remain outside the project's support guarantee.

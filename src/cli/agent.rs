@@ -13,9 +13,10 @@ use crate::error::Result;
 
 pub(in crate::cli) use self::install::operator_registry_override;
 pub(in crate::cli) use self::set::{
-    default_api_key_ref_for_agent_provider, default_custom_provider_api, parse_custom_provider_api,
-    parse_custom_token_limit, print_agent_set_effective_notice_for, required_custom_arg,
-    resolve_agent_model_value, validate_agent_session_config_value,
+    claude_code_provider_model_is_explicit, default_api_key_ref_for_agent_provider,
+    default_custom_provider_api, parse_custom_provider_api, parse_custom_token_limit,
+    print_agent_set_effective_notice_for, required_custom_arg, resolve_agent_model_value,
+    validate_agent_session_config_value, validate_custom_provider_api_for_agent,
 };
 pub(in crate::cli) use self::test::run_init_testflight;
 
@@ -126,7 +127,7 @@ pub struct AgentSetArgs {
     /// Base URL for a custom provider.
     #[arg(long = "base-url")]
     pub(super) base_url: Option<String>,
-    /// API family for a custom provider: chat-completions or responses.
+    /// API family for a custom provider: chat-completions, responses, or anthropic-messages.
     #[arg(long = "provider-api")]
     pub(super) provider_api: Option<String>,
     /// Provider-qualified model id or model pattern.

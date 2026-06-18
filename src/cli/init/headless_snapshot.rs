@@ -26,6 +26,10 @@ pub(super) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Ve
         "goose" => vec![home.join(".config").join("goose").join("config.yaml")],
         "opencode" => vec![home.join(".config").join("opencode").join("opencode.json")],
         "codex" => vec![home.join(".codex").join("config.toml")],
+        "claude-code" => vec![
+            home.join(".claude").join("settings.json"),
+            home.join(".claude.json"),
+        ],
         "pi" => vec![
             home.join(".pi").join("agent").join("settings.json"),
             home.join(".pi").join("agent").join("models.json"),

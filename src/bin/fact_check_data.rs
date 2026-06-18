@@ -398,7 +398,12 @@ fn embedded_sync_ids(catalog: &RegistryCatalog) -> BTreeSet<String> {
             entry
                 .adapter
                 .as_ref()
-                .map(|adapter| adapter.id.clone())
+                .map(|adapter| {
+                    adapter
+                        .sync_id
+                        .clone()
+                        .unwrap_or_else(|| adapter.id.clone())
+                })
                 .unwrap_or_else(|| entry.id.clone())
         })
         .collect()
@@ -813,7 +818,9 @@ mod tests {
 
         assert!(ids.contains("amp-acp"));
         assert!(ids.contains("codex-acp"));
+        assert!(ids.contains("claude-acp"));
         assert!(!ids.contains("amp"));
+        assert!(!ids.contains("claude-agent-acp"));
     }
 
     #[test]

@@ -58,21 +58,23 @@ api_key_ref = "<provider-api-key-ref>"
 - Model edits require the configured agent to support model selection.
 - Mode edits require the configured agent to advertise mode choices.
 - Root `agent.model` must be omitted when `[agent.provider].model` is set.
-- Mapped model and mode values are validated against ACP-advertised options.
+- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile model ids are accepted as supplied.
 - Custom-provider model ids are accepted as supplied.
+- Custom providers use `chat-completions` by default, `responses` for Codex, and `anthropic-messages` for Claude Code.
 - API-key refs must be valid secret-ref names and are added to `[agent].env`.
 - Switch does not migrate custom providers in place; configure the target provider explicitly.
 - Agent-owned config provisioning must succeed before canonical config is updated.
 
 ## Agent Behavior
 
-| Agent      | Provider/model behavior                                                 |
-| ---------- | ----------------------------------------------------------------------- |
-| OpenCode   | provider and `small_model` config in OpenCode JSON                      |
-| Pi Agent   | provider is part of the model choice; model written to Pi settings      |
-| Amp Code   | mode selection only                                                     |
-| Cursor CLI | model and mode selection only                                           |
-| Goose      | provider-native env vars; model applied through ACP session config      |
-| Codex      | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY` |
+| Agent       | Provider/model behavior                                                                  |
+| ----------- | ---------------------------------------------------------------------------------------- |
+| OpenCode    | provider and `small_model` config in OpenCode JSON                                       |
+| Pi Agent    | provider is part of the model choice; model written to Pi settings                       |
+| Amp Code    | mode selection only                                                                      |
+| Cursor CLI  | model and mode selection only                                                            |
+| Goose       | provider-native env vars; model applied through ACP session config                       |
+| Codex       | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY`                  |
+| Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

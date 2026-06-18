@@ -850,6 +850,7 @@ mod tests {
     fn adapter_spec(id: &str, install: InstallSet) -> AdapterSpec {
         AdapterSpec {
             id: id.to_owned(),
+            sync_id: None,
             github: None,
             install,
             update: Default::default(),

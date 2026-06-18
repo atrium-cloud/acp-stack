@@ -2,7 +2,8 @@ use crate::config::{AgentAdapterConfig, AgentProviderConfig, Config};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
     api_key_ref_can_migrate_for_provider, env_refs_for_agent_id, env_var_for_agent_provider_id,
-    provider_id_is_known, provider_id_supports_agent, required_env_refs_for_provider_id,
+    provider_id_is_known, provider_id_supports_agent, provider_uses_agent_native_auth,
+    required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 
@@ -332,16 +333,36 @@ fn build_provider_for_target(
         ));
     }
 
-    let default_ref =
-        env_var_for_agent_provider_id(target_agent_id, &provider_id).ok_or_else(|| {
-            StackError::AgentConfigProvision {
-                path: std::path::PathBuf::from("provider/env mapping"),
-                reason: format!(
-                    "{} provider `{provider_id}` has no API-key env mapping",
-                    target_agent_name
-                ),
-            }
-        })?;
+    let default_ref = env_var_for_agent_provider_id(target_agent_id, &provider_id);
+    let native_auth = provider_uses_agent_native_auth(target_agent_id, &provider_id);
+    if native_auth && requested_api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "api-key-ref",
+            reason: format!(
+                "{target_agent_name} provider `{provider_id}` uses agent-native auth; do not pass --api-key-ref"
+            ),
+        });
+    }
+    if native_auth {
+        let refs = required_env_refs_for_agent_provider_id(target_agent_id, &provider_id, None);
+        return Ok((
+            AgentProviderConfig {
+                id: provider_id,
+                model: None,
+                api_key_ref: None,
+                custom: None,
+            },
+            refs,
+            Vec::new(),
+        ));
+    }
+    let default_ref = default_ref.ok_or_else(|| StackError::AgentConfigProvision {
+        path: std::path::PathBuf::from("provider/env mapping"),
+        reason: format!(
+            "{} provider `{provider_id}` has no API-key env mapping",
+            target_agent_name
+        ),
+    })?;
     let mut secret_migrations = Vec::new();
     let mut api_key_ref = requested_api_key_ref.unwrap_or_else(|| default_ref.to_owned());
     if matches!(kind, AgentSwitchProviderStatusKind::Reused) && api_key_ref != default_ref {
@@ -363,7 +384,8 @@ fn build_provider_for_target(
             });
         }
     }
-    let refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
+    let refs =
+        required_env_refs_for_agent_provider_id(target_agent_id, &provider_id, Some(&api_key_ref));
     Ok((
         AgentProviderConfig {
             id: provider_id,

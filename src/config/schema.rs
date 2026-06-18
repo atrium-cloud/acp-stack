@@ -358,6 +358,7 @@ pub enum CustomProviderApi {
     #[default]
     ChatCompletions,
     Responses,
+    AnthropicMessages,
 }
 
 impl CustomProviderApi {
@@ -365,6 +366,7 @@ impl CustomProviderApi {
         match self {
             Self::ChatCompletions => "openai-completions",
             Self::Responses => "openai-responses",
+            Self::AnthropicMessages => "anthropic-messages",
         }
     }
 
@@ -372,6 +374,7 @@ impl CustomProviderApi {
         match self {
             Self::Responses => "responses",
             Self::ChatCompletions => "chat",
+            Self::AnthropicMessages => "anthropic",
         }
     }
 }

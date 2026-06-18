@@ -5,14 +5,16 @@ use crate::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
 use crate::error::{Result, StackError};
+use crate::runtime::agent::claude_code_provider_profiles::CLAUDE_CODE_AGENT_ID;
 use crate::runtime::agent::provider_keys::{
     AgentProviderSummary, env_var_for_agent_provider_id, provider_id_is_known,
     provider_id_supports_agent, provider_uses_agent_native_auth, providers_for_agent,
-    required_env_refs_for_provider_id,
+    required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 
+use super::super::agent::validate_custom_provider_api_for_agent;
 use super::{InitArgs, prompt, prompts_enabled};
 
 pub(super) fn preflight_provider_for_init(
@@ -60,12 +62,7 @@ pub(super) fn preflight_provider_for_init(
             args.provider_api.as_deref(),
             default_init_custom_provider_api(&config.agent.id),
         )?;
-        if config.agent.id == "codex" && api != CustomProviderApi::Responses {
-            return Err(StackError::InvalidParam {
-                field: "provider-api",
-                reason: "Codex custom providers only support responses".to_owned(),
-            });
-        }
+        validate_custom_provider_api_for_agent(&config.agent.id, api, "provider-api")?;
         parse_init_custom_token_limit(
             "context",
             args.context.as_deref(),
@@ -153,10 +150,16 @@ pub(super) fn configured_provider_refs_satisfied(
     if !configured_provider_shape_is_supported(&config.agent.id, entry, provider) {
         return false;
     };
-    let Some(api_key_ref) = provider.api_key_ref.as_deref() else {
-        return provider_uses_agent_native_auth(&config.agent.id, &provider.id);
-    };
-    let required_refs = required_env_refs_for_provider_id(&provider.id, api_key_ref);
+    let required_refs = required_env_refs_for_agent_provider_id(
+        &config.agent.id,
+        &provider.id,
+        provider.api_key_ref.as_deref(),
+    );
+    if provider.api_key_ref.is_none()
+        && !provider_uses_agent_native_auth(&config.agent.id, &provider.id)
+    {
+        return false;
+    }
     required_refs.iter().all(|env_ref| {
         config.agent.env.iter().any(|name| name == env_ref) && secret_store.contains(env_ref)
     })
@@ -191,10 +194,11 @@ fn ensure_configured_provider_refs_for_init(
         provider.api_key_ref = Some(default_api_key_ref.to_owned());
         api_key_ref_changed = true;
     }
-    let Some(api_key_ref) = provider.api_key_ref.clone() else {
-        return Ok(false);
-    };
-    let required_refs = required_env_refs_for_provider_id(&provider.id, &api_key_ref);
+    let required_refs = required_env_refs_for_agent_provider_id(
+        &config.agent.id,
+        &provider.id,
+        provider.api_key_ref.as_deref(),
+    );
     let mut env_changed = false;
     for env_ref in &required_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
@@ -231,18 +235,25 @@ fn validate_configured_provider_for_init(
                 reason: format!("{} does not support custom model setup", config.agent.name),
             });
         }
-        if config.agent.id == "codex"
-            && provider
-                .custom
-                .as_ref()
-                .is_some_and(|custom| custom.api != CustomProviderApi::Responses)
-        {
-            return Err(StackError::InvalidParam {
-                field: "agent.provider.custom.api",
-                reason: "Codex custom providers only support responses".to_owned(),
-            });
+        if let Some(custom) = provider.custom.as_ref() {
+            validate_custom_provider_api_for_agent(
+                &config.agent.id,
+                custom.api,
+                "agent.provider.custom.api",
+            )?;
         }
         return Ok(());
+    }
+    if provider_uses_agent_native_auth(&config.agent.id, &provider.id)
+        && provider.api_key_ref.is_some()
+    {
+        return Err(StackError::InvalidParam {
+            field: "agent.provider.api_key_ref",
+            reason: format!(
+                "{} provider `{}` uses agent-native auth",
+                config.agent.name, provider.id
+            ),
+        });
     }
     if !provider_id_is_known(&provider.id) {
         return Err(StackError::InvalidParam {
@@ -277,14 +288,14 @@ fn configured_provider_shape_is_supported(
     entry: &crate::runtime::install::agent_registry::RegistryEntry,
     provider: &AgentProviderConfig,
 ) -> bool {
-    if provider.custom.is_some() {
+    if let Some(custom) = provider.custom.as_ref() {
         return entry.allow_custom_provider
             && entry.allow_custom_model
-            && (agent_id != "codex"
-                || provider
-                    .custom
-                    .as_ref()
-                    .is_some_and(|custom| custom.api == CustomProviderApi::Responses));
+            && (agent_id != "codex" || custom.api == CustomProviderApi::Responses)
+            && (agent_id != CLAUDE_CODE_AGENT_ID
+                || custom.api == CustomProviderApi::AnthropicMessages)
+            && (agent_id == CLAUDE_CODE_AGENT_ID
+                || custom.api != CustomProviderApi::AnthropicMessages);
     }
     provider_id_is_known(&provider.id)
         && provider_id_supports_agent(&provider.id, agent_id)
@@ -379,10 +390,14 @@ fn provider_has_available_secret_refs(
     summary: &AgentProviderSummary,
     secret_store: &SecretStore,
 ) -> bool {
-    let Some(api_key_ref) = summary.default_api_key_ref else {
-        return provider_uses_agent_native_auth(agent_id, summary.id);
-    };
-    required_env_refs_for_provider_id(summary.id, api_key_ref)
+    let required_refs =
+        required_env_refs_for_agent_provider_id(agent_id, summary.id, summary.default_api_key_ref);
+    if summary.default_api_key_ref.is_none()
+        && !provider_uses_agent_native_auth(agent_id, summary.id)
+    {
+        return false;
+    }
+    required_refs
         .iter()
         .all(|env_ref| secret_store.contains(env_ref))
 }
@@ -392,22 +407,23 @@ fn provider_readiness_label(
     summary: &AgentProviderSummary,
     secret_store: &SecretStore,
 ) -> String {
-    let Some(api_key_ref) = summary.default_api_key_ref else {
-        return if provider_uses_agent_native_auth(agent_id, summary.id) {
-            "agent-native auth".to_owned()
-        } else {
-            "custom provider setup required".to_owned()
-        };
-    };
-
-    let required_refs = required_env_refs_for_provider_id(summary.id, api_key_ref);
+    let required_refs =
+        required_env_refs_for_agent_provider_id(agent_id, summary.id, summary.default_api_key_ref);
     let missing_refs: Vec<_> = required_refs
         .iter()
         .filter(|env_ref| !secret_store.contains(env_ref))
         .map(String::as_str)
         .collect();
     if missing_refs.is_empty() {
-        "ready".to_owned()
+        if summary.default_api_key_ref.is_none()
+            && provider_uses_agent_native_auth(agent_id, summary.id)
+        {
+            "agent-native auth".to_owned()
+        } else if summary.default_api_key_ref.is_none() {
+            "custom provider setup required".to_owned()
+        } else {
+            "ready".to_owned()
+        }
     } else {
         format!("missing {}", missing_refs.join(", "))
     }
@@ -496,7 +512,8 @@ fn apply_provider_to_config(
         return Ok(Vec::new());
     }
     let default_api_key_ref = env_var_for_agent_provider_id(&config.agent.id, &provider_id);
-    if default_api_key_ref.is_none() {
+    let native_auth = provider_uses_agent_native_auth(&config.agent.id, &provider_id);
+    if default_api_key_ref.is_none() && !native_auth {
         if !entry.allow_custom_provider {
             return Err(StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
@@ -525,13 +542,25 @@ fn apply_provider_to_config(
         }
         return apply_custom_provider_to_config(args, config, config_path, provider_id);
     }
+    if native_auth && args.api_key_ref.is_some() {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} provider `{provider_id}` uses agent-native auth; do not pass --api-key-ref",
+                config.agent.name
+            ),
+        });
+    }
     let api_key_ref = args
         .api_key_ref
         .clone()
-        .or_else(|| default_api_key_ref.map(str::to_owned))
-        .expect("default API-key ref checked");
+        .or_else(|| default_api_key_ref.map(str::to_owned));
 
-    let required_refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
+    let required_refs = required_env_refs_for_agent_provider_id(
+        &config.agent.id,
+        &provider_id,
+        api_key_ref.as_deref(),
+    );
     for env_ref in &required_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
@@ -551,7 +580,7 @@ fn apply_provider_to_config(
     config.agent.provider = Some(AgentProviderConfig {
         id: provider_id,
         model: preserved_model,
-        api_key_ref: Some(api_key_ref),
+        api_key_ref,
         custom: None,
     });
     Ok(required_refs)
@@ -575,12 +604,7 @@ fn apply_custom_provider_to_config(
         args.provider_api.as_deref(),
         default_init_custom_provider_api(&config.agent.id),
     )?;
-    if config.agent.id == "codex" && api != CustomProviderApi::Responses {
-        return Err(StackError::InvalidParam {
-            field: "provider-api",
-            reason: "Codex custom providers only support responses".to_owned(),
-        });
-    }
+    validate_custom_provider_api_for_agent(&config.agent.id, api, "provider-api")?;
     let context = parse_init_custom_token_limit(
         "context",
         args.context.as_deref(),
@@ -666,6 +690,8 @@ fn required_init_custom_value(
 fn default_init_custom_provider_api(agent_id: &str) -> CustomProviderApi {
     if agent_id == "codex" {
         CustomProviderApi::Responses
+    } else if agent_id == CLAUDE_CODE_AGENT_ID {
+        CustomProviderApi::AnthropicMessages
     } else {
         CustomProviderApi::ChatCompletions
     }
@@ -679,9 +705,10 @@ fn parse_init_custom_provider_api(
         None => Ok(default),
         Some("chat-completions") => Ok(CustomProviderApi::ChatCompletions),
         Some("responses") => Ok(CustomProviderApi::Responses),
+        Some("anthropic-messages") => Ok(CustomProviderApi::AnthropicMessages),
         Some(_) => Err(StackError::InvalidParam {
             field: "provider-api",
-            reason: "must be `chat-completions` or `responses`".to_owned(),
+            reason: "must be `chat-completions`, `responses`, or `anthropic-messages`".to_owned(),
         }),
     }
 }
@@ -835,6 +862,44 @@ mod tests {
         assert_eq!(
             provider_readiness_label("codex", &summary, &secret_store),
             "agent-native auth"
+        );
+    }
+
+    #[test]
+    fn provider_readiness_reports_claude_code_vertex_companion_refs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        let summary = summary_for("claude-code", "google-vertex-anthropic");
+
+        assert_eq!(
+            provider_readiness_label("claude-code", &summary, &secret_store),
+            "missing ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION"
+        );
+        assert!(!provider_has_available_secret_refs(
+            "claude-code",
+            &summary,
+            &secret_store
+        ));
+    }
+
+    #[test]
+    fn claude_code_custom_provider_defaults_to_anthropic_messages() {
+        assert_eq!(
+            default_init_custom_provider_api("claude-code"),
+            CustomProviderApi::AnthropicMessages
+        );
+        assert_eq!(
+            parse_init_custom_provider_api(None, default_init_custom_provider_api("claude-code"))
+                .expect("default parses"),
+            CustomProviderApi::AnthropicMessages
+        );
+        assert_eq!(
+            parse_init_custom_provider_api(
+                Some("anthropic-messages"),
+                default_init_custom_provider_api("opencode"),
+            )
+            .expect("explicit Anthropic Messages API parses"),
+            CustomProviderApi::AnthropicMessages
         );
     }
 
