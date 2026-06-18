@@ -57,7 +57,7 @@ Interactive init may prompt for a config source, then for missing choices. Optio
 
 `--handoff-json` is the platform automation output mode for init. It disables prompts and emits only the handoff JSON object described in [init.md](init.md#platform-handoff-json). `acps init --format json` remains rejected; scripts should use `--handoff-json` for this narrower contract.
 
-`acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Interactive init can also collect S3 data sources. Plain HTTP URLs are rejected.
+`acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter unless the catalog marks the harness as adapter-provided. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Interactive init can also collect S3 data sources. Plain HTTP URLs are rejected.
 
 On new starter configs, `--mcp-preset linear` adds the Linear hosted MCP declaration using `LINEAR_API_KEY`. `--mcp-stdio name=command` and `--mcp-http name=https://...` add custom runtime-wide MCP declarations. `--mcp-stdio-env server=SECRET_REF` and `--mcp-http-header server=Header:SECRET_REF` attach required secret refs to those declarations.
 

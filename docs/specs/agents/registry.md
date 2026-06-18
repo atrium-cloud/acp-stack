@@ -19,7 +19,7 @@ Only entries marked headless-compatible are offered as supported runtime targets
 
 ## Install Paths
 
-Install metadata may describe shell, npm, or GitHub Release sources. Native agents have one install step. Adapter-backed agents have a harness step and an adapter step.
+Install metadata may describe shell, npm, or GitHub Release sources. Native agents have one install step. Adapter-backed agents have a harness step and an adapter step unless `[agents.harness.install] provided_by = "adapter"` declares that the adapter package supplies the harness.
 
 Shell install paths declare `required_tools` for external commands they invoke. Npm install paths require `npm`. GitHub Release install paths use the runtime downloader and do not require host fetch tools. The installer preflights declared paths and uses a fallback path when one is available.
 
