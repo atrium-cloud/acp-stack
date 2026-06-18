@@ -467,8 +467,9 @@ pub(super) fn configure_stack_update_for_init(
     Ok(changed)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OptionalSetupSection {
+    Skip,
     CodeSource,
     DataSource,
     McpStdioServer,
@@ -476,6 +477,13 @@ enum OptionalSetupSection {
     Dependency,
     AgentEnvironment,
     AgentSkills,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OptionalSetupSelection {
+    Skip,
+    Apply,
+    MixedSkip,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -554,8 +562,28 @@ pub(super) fn prompt_starter_config_selections_if_needed(
             "Install selected skills".to_owned(),
         ));
     }
+    if sections.is_empty() {
+        return Ok(());
+    }
+    sections.insert(
+        0,
+        (
+            OptionalSetupSection::Skip,
+            "Skip".to_owned(),
+            "Continue without optional setup".to_owned(),
+        ),
+    );
 
-    let selections = prompt::multiselect(interactive, "Optional setup", &sections)?;
+    let selections = loop {
+        let selections = prompt::multiselect(interactive, "Optional setup", &sections)?;
+        match classify_optional_setup_selection(&selections) {
+            OptionalSetupSelection::Skip => return Ok(()),
+            OptionalSetupSelection::Apply => break selections,
+            OptionalSetupSelection::MixedSkip => {
+                println!("Select Skip by itself, or choose setup items.");
+            }
+        }
+    };
     if selections.contains(&OptionalSetupSection::CodeSource) {
         prompt_repeated_values(
             interactive,
@@ -579,6 +607,18 @@ pub(super) fn prompt_starter_config_selections_if_needed(
     args.prompt_agent_env_refs = selections.contains(&OptionalSetupSection::AgentEnvironment);
     args.prompt_skills = selections.contains(&OptionalSetupSection::AgentSkills);
     Ok(())
+}
+
+fn classify_optional_setup_selection(
+    selections: &[OptionalSetupSection],
+) -> OptionalSetupSelection {
+    let has_skip = selections.contains(&OptionalSetupSection::Skip);
+    match (selections.is_empty(), has_skip, selections.len()) {
+        (true, _, _) => OptionalSetupSelection::Skip,
+        (false, true, 1) => OptionalSetupSelection::Skip,
+        (false, true, _) => OptionalSetupSelection::MixedSkip,
+        (false, false, _) => OptionalSetupSelection::Apply,
+    }
 }
 
 fn agent_supports_skills(args: &InitArgs, registry: &RegistryCatalog) -> bool {
@@ -1440,5 +1480,43 @@ mod tests {
         apply_agent_env_collection(&mut store, &collection(&[("GITHUB_TOKEN", "ghp_value")]))
             .expect("a new, valid ref should be stored");
         assert_eq!(store.get("GITHUB_TOKEN").expect("stored"), "ghp_value");
+    }
+
+    #[test]
+    fn optional_setup_empty_selection_skips() {
+        assert_eq!(
+            classify_optional_setup_selection(&[]),
+            OptionalSetupSelection::Skip
+        );
+    }
+
+    #[test]
+    fn optional_setup_skip_alone_skips() {
+        assert_eq!(
+            classify_optional_setup_selection(&[OptionalSetupSection::Skip]),
+            OptionalSetupSelection::Skip
+        );
+    }
+
+    #[test]
+    fn optional_setup_real_selection_applies() {
+        assert_eq!(
+            classify_optional_setup_selection(&[
+                OptionalSetupSection::CodeSource,
+                OptionalSetupSection::DataSource,
+            ]),
+            OptionalSetupSelection::Apply
+        );
+    }
+
+    #[test]
+    fn optional_setup_rejects_mixed_skip_selection() {
+        assert_eq!(
+            classify_optional_setup_selection(&[
+                OptionalSetupSection::Skip,
+                OptionalSetupSection::McpHttpServer,
+            ]),
+            OptionalSetupSelection::MixedSkip
+        );
     }
 }
