@@ -28,7 +28,7 @@ pub(super) fn prompt_init_skills_if_needed(
         return Ok(());
     }
     let interactive = prompts_enabled(args);
-    if !interactive || agent_install_dir(config, registry).is_none() {
+    if !interactive || !args.prompt_skills || agent_install_dir(config, registry).is_none() {
         return Ok(());
     }
 

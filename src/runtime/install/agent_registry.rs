@@ -261,7 +261,7 @@ pub struct RegistryEntry {
     pub github: Option<String>,
     #[serde(default)]
     pub support_doc: Option<String>,
-    /// Real-prompt smoke text sent during `acps agent test` / init testflight
+    /// Real-prompt text sent during `acps agent test` / init testflight
     /// when the operator did not pass `--prompt`. Should be deterministic and
     /// cheap; for filesystem-tool-capable agents it should ask the agent to
     /// create the `testflight_expect_fs` path so the runtime can verify the
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_registry_advertises_smoked_headless_support() {
+    fn embedded_registry_advertises_tested_headless_support() {
         let catalog = RegistryCatalog::load_embedded().expect("registry");
         let supported: Vec<_> = catalog
             .entries()
@@ -808,7 +808,7 @@ mod tests {
             assert_eq!(
                 entry.testflight_expect_fs.as_deref(),
                 Some(".acp-stack-testflight.txt"),
-                "{} must declare filesystem smoke output",
+                "{} must declare filesystem test output",
                 entry.id
             );
             let prompt = entry
@@ -817,7 +817,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} must declare a testflight prompt", entry.id));
             assert!(
                 prompt.contains(".acp-stack-testflight.txt"),
-                "{} prompt must mention smoke output path",
+                "{} prompt must mention test output path",
                 entry.id
             );
         }
@@ -1093,26 +1093,26 @@ creates = "adapter"
     }
 
     #[test]
-    fn parses_optional_testflight_smoke_fields() {
+    fn parses_optional_testflight_fields() {
         let body = r#"
 [[agents]]
-id = "smoke-agent"
-name = "Smoke Agent"
+id = "test-agent"
+name = "Test Agent"
 kind = "native"
 headless_compatible = true
-support_doc = "docs/agents/smoke-agent.md"
+support_doc = "docs/agents/test-agent.md"
 testflight_prompt = "Create /workspace/.acp-stack-testflight.txt with text 'ok'"
 testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.harness]
-id = "smoke-agent"
+id = "test-agent"
 
 [agents.harness.install.npm]
-package = "smoke-agent"
-creates = "smoke-agent"
+package = "test-agent"
+creates = "test-agent"
 "#;
         let catalog = RegistryCatalog::from_toml(body).expect("registry should parse");
-        let entry = catalog.lookup("smoke-agent").expect("entry exists");
+        let entry = catalog.lookup("test-agent").expect("entry exists");
         assert_eq!(
             entry.testflight_prompt.as_deref(),
             Some("Create /workspace/.acp-stack-testflight.txt with text 'ok'")

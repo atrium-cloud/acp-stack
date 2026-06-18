@@ -14,6 +14,7 @@ use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps_apply::{
     DepApplyCandidate, candidate_summary_line, summarize_candidates,
 };
+use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 
 use super::super::logging::{
@@ -21,12 +22,13 @@ use super::super::logging::{
     enabled_supabase_config,
 };
 use super::{
-    InitArgs, STARTER_AGENT_COMMAND, STARTER_AGENT_ID, STARTER_AGENT_INSTALL_COMMAND,
-    STARTER_AGENT_INSTALL_CREATES, STARTER_AGENT_INSTALL_TYPE, STARTER_AGENT_NAME,
-    STARTER_AGENT_RESTART, STARTER_AUTH_BLOCK_DURATION, STARTER_AUTH_FAILURES_PER_MINUTE,
-    STARTER_DEFAULT_SHELL, STARTER_LOCAL_RETENTION_DAYS, STARTER_LOG_LEVEL,
-    STARTER_MAX_REQUEST_BYTES, STARTER_RATE_LIMIT_BURST, STARTER_RATE_LIMIT_PER_MINUTE,
-    STARTER_WORKSPACE_MAX_FILE_BYTES, prompt, prompts_enabled,
+    InitArgs, InitMcpHttpHeader, InitMcpHttpServer, InitMcpStdioServer, STARTER_AGENT_COMMAND,
+    STARTER_AGENT_ID, STARTER_AGENT_INSTALL_COMMAND, STARTER_AGENT_INSTALL_CREATES,
+    STARTER_AGENT_INSTALL_TYPE, STARTER_AGENT_NAME, STARTER_AGENT_RESTART,
+    STARTER_AUTH_BLOCK_DURATION, STARTER_AUTH_FAILURES_PER_MINUTE, STARTER_DEFAULT_SHELL,
+    STARTER_LOCAL_RETENTION_DAYS, STARTER_LOG_LEVEL, STARTER_MAX_REQUEST_BYTES,
+    STARTER_RATE_LIMIT_BURST, STARTER_RATE_LIMIT_PER_MINUTE, STARTER_WORKSPACE_MAX_FILE_BYTES,
+    prompt, prompts_enabled,
 };
 
 pub(super) fn validate_deployment_overrides_match_existing(
@@ -92,9 +94,9 @@ pub(super) fn reject_agent_env_refs_for_existing_config(args: &InitArgs) -> Resu
 }
 
 /// Collect operator agent environment variable refs from `--agent-env-ref` and,
-/// in interactive runs, an add-loop that prompts for each name and a masked
-/// value. Flag refs reference secrets that must already exist; interactive
-/// entries carry their value for the store write after the secret store opens.
+/// in interactive runs, name/value entries. Flag refs reference secrets that
+/// must already exist; interactive entries carry their value for the store write
+/// after the secret store opens.
 pub(super) fn collect_agent_env_refs_for_init(
     args: &InitArgs,
     interactive: bool,
@@ -121,16 +123,15 @@ pub(super) fn collect_agent_env_refs_for_init(
         }
     }
     let mut fresh: Vec<(String, zeroize::Zeroizing<String>)> = Vec::new();
-    if interactive {
-        while prompt::confirm(interactive, "Add an agent environment variable?", false)? {
-            let Some(name) =
-                prompt::text(interactive, "secret ref name (e.g. GITHUB_TOKEN)", true)?
+    if interactive && args.prompt_agent_env_refs {
+        loop {
+            let Some(name) = prompt::text(interactive, "secret ref name (blank to finish)", false)?
             else {
                 break;
             };
             let name = name.trim().to_owned();
             if name.is_empty() {
-                continue;
+                break;
             }
             if !is_valid_secret_ref_name(&name) {
                 println!(
@@ -425,7 +426,7 @@ fn prompt_stack_update_frequency() -> Result<String> {
 }
 
 /// Configure `[updates.acp_stack]` from `--stack-update`/`--stack-update-frequency`
-/// or, interactively, a policy + frequency prompt placed after mode selection.
+/// or, interactively, a policy + frequency prompt placed after model selection.
 /// `on` → Compatible, `security` → SecurityCritical, `off` → Manual. A frequency
 /// is only collected for non-Manual policies. Returns whether config changed; a
 /// non-interactive run with no flags leaves the schema defaults intact.
@@ -466,69 +467,399 @@ pub(super) fn configure_stack_update_for_init(
     Ok(changed)
 }
 
-pub(super) fn prompt_starter_config_selections_if_needed(args: &mut InitArgs) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptionalSetupSection {
+    CodeSource,
+    DataSource,
+    McpStdioServer,
+    McpHttpServer,
+    Dependency,
+    AgentEnvironment,
+    AgentSkills,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupRowAction {
+    AddAnother,
+    Discard,
+    Done,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataSourceKind {
+    Local,
+    Https,
+    S3,
+}
+
+pub(super) fn prompt_starter_config_selections_if_needed(
+    args: &mut InitArgs,
+    registry: &RegistryCatalog,
+) -> Result<()> {
     let interactive = prompts_enabled(args);
     if !interactive {
         return Ok(());
     }
-    prompt_repeated_values(
-        interactive,
-        "code source git URL",
-        "add a code source?",
-        "code source git URL",
-        &mut args.code_from,
-    )?;
-    prompt_repeated_values(
-        interactive,
-        "data source path or HTTPS archive URL",
-        "add a data source?",
-        "data source path or HTTPS archive URL",
-        &mut args.data_from,
-    )?;
-    prompt_mcp_preset(interactive, args)?;
-    prompt_repeated_values(
-        interactive,
-        "custom stdio MCP server",
-        "add a custom stdio MCP server?",
-        "stdio MCP server (name=command)",
-        &mut args.mcp_stdio,
-    )?;
-    prompt_repeated_values(
-        interactive,
-        "custom HTTP MCP server",
-        "add a custom HTTP MCP server?",
-        "HTTP MCP server (name=https://...)",
-        &mut args.mcp_http,
-    )?;
-    prompt_repeated_values(
-        interactive,
-        "stdio MCP secret ref",
-        "add a stdio MCP secret ref?",
-        "stdio MCP secret ref (server=SECRET_REF)",
-        &mut args.mcp_stdio_env,
-    )?;
-    prompt_repeated_values(
-        interactive,
-        "HTTP MCP header secret ref",
-        "add an HTTP MCP header secret ref?",
-        "HTTP MCP header secret ref (server=Header:SECRET_REF)",
-        &mut args.mcp_http_header,
-    )?;
-    prompt_deps(interactive, args)?;
+    let mut sections = Vec::new();
+    if args.code_from.is_empty() {
+        sections.push((
+            OptionalSetupSection::CodeSource,
+            "Code source (e.g., GitHub)".to_owned(),
+            "Git repository".to_owned(),
+        ));
+    }
+    if args.data_from.is_empty() && args.prompt_data_sources.is_empty() {
+        sections.push((
+            OptionalSetupSection::DataSource,
+            "Data source (e.g., S3 bucket)".to_owned(),
+            "Local, HTTPS, or S3".to_owned(),
+        ));
+    }
+    if args.mcp_stdio.is_empty() && args.prompt_mcp_stdio.is_empty() {
+        sections.push((
+            OptionalSetupSection::McpStdioServer,
+            "MCP stdio server (e.g., local tool)".to_owned(),
+            "Command, args, env refs".to_owned(),
+        ));
+    }
+    if args.mcp_http.is_empty() && args.prompt_mcp_http.is_empty() {
+        sections.push((
+            OptionalSetupSection::McpHttpServer,
+            "MCP HTTP server (e.g., remote MCP)".to_owned(),
+            "URL and header refs".to_owned(),
+        ));
+    }
+    if args.dep.is_empty() && args.dep_system.is_empty() {
+        sections.push((
+            OptionalSetupSection::Dependency,
+            "Dependency install (e.g., ripgrep)".to_owned(),
+            "Install commands for this runtime".to_owned(),
+        ));
+    }
+    if args.agent_env_ref.is_empty() {
+        sections.push((
+            OptionalSetupSection::AgentEnvironment,
+            "Agent environment (e.g., GITHUB_TOKEN)".to_owned(),
+            "Secret-backed variables".to_owned(),
+        ));
+    }
+    if agent_supports_skills(args, registry)
+        && !args.no_skills
+        && args.skills_source.is_none()
+        && args.skills.is_empty()
+    {
+        sections.push((
+            OptionalSetupSection::AgentSkills,
+            "Agent Skills (e.g., OpenAI)".to_owned(),
+            "Install selected skills".to_owned(),
+        ));
+    }
+
+    let selections = prompt::multiselect(interactive, "Optional setup", &sections)?;
+    if selections.contains(&OptionalSetupSection::CodeSource) {
+        prompt_repeated_values(
+            interactive,
+            "code source git URL",
+            "code source git URL (blank to finish)",
+            &mut args.code_from,
+        )?;
+    }
+    if selections.contains(&OptionalSetupSection::DataSource) {
+        prompt_data_sources(interactive, args)?;
+    }
+    if selections.contains(&OptionalSetupSection::McpStdioServer) {
+        prompt_mcp_stdio_servers(interactive, args)?;
+    }
+    if selections.contains(&OptionalSetupSection::McpHttpServer) {
+        prompt_mcp_http_servers(interactive, args)?;
+    }
+    if selections.contains(&OptionalSetupSection::Dependency) {
+        prompt_deps(interactive, args)?;
+    }
+    args.prompt_agent_env_refs = selections.contains(&OptionalSetupSection::AgentEnvironment);
+    args.prompt_skills = selections.contains(&OptionalSetupSection::AgentSkills);
     Ok(())
+}
+
+fn agent_supports_skills(args: &InitArgs, registry: &RegistryCatalog) -> bool {
+    let Some(agent_id) = args.agent.as_deref() else {
+        return false;
+    };
+    registry.lookup(agent_id).is_some_and(|entry| {
+        entry.supports_agent_skills && entry.agent_skills_install_dir.is_some()
+    })
+}
+
+fn prompt_data_sources(interactive: bool, args: &mut InitArgs) -> Result<()> {
+    loop {
+        let Some(kind) = prompt::select(
+            interactive,
+            "data source type",
+            &[
+                (
+                    DataSourceKind::S3,
+                    "S3 bucket".to_owned(),
+                    "Bucket, region, credential refs".to_owned(),
+                ),
+                (
+                    DataSourceKind::Https,
+                    "HTTPS archive".to_owned(),
+                    "Download URL".to_owned(),
+                ),
+                (
+                    DataSourceKind::Local,
+                    "Local path".to_owned(),
+                    "Absolute path".to_owned(),
+                ),
+            ],
+        )?
+        else {
+            break;
+        };
+        let Some(source) = prompt_data_source_row(interactive, kind)? else {
+            break;
+        };
+        match prompt_setup_row_action(interactive, "Data source row")? {
+            SetupRowAction::AddAnother => args.prompt_data_sources.push(source),
+            SetupRowAction::Discard => continue,
+            SetupRowAction::Done => {
+                args.prompt_data_sources.push(source);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prompt_data_source_row(
+    interactive: bool,
+    kind: DataSourceKind,
+) -> Result<Option<DataSourceConfig>> {
+    match kind {
+        DataSourceKind::Local => {
+            let Some(path) = prompt::text(interactive, "local path (blank to finish)", false)?
+            else {
+                return Ok(None);
+            };
+            let path = path.trim();
+            if path.is_empty() {
+                return Ok(None);
+            }
+            classify_data_from(path).map(Some)
+        }
+        DataSourceKind::Https => {
+            let Some(url) =
+                prompt::text(interactive, "HTTPS archive URL (blank to finish)", false)?
+            else {
+                return Ok(None);
+            };
+            let url = url.trim();
+            if url.is_empty() {
+                return Ok(None);
+            }
+            classify_data_from(url).map(Some)
+        }
+        DataSourceKind::S3 => {
+            let Some(bucket) = prompt::text(interactive, "S3 bucket (blank to finish)", false)?
+            else {
+                return Ok(None);
+            };
+            let bucket = bucket.trim().to_owned();
+            if bucket.is_empty() {
+                return Ok(None);
+            }
+            let Some(region) = prompt::text(interactive, "S3 region", true)? else {
+                return Ok(None);
+            };
+            let region = region.trim().to_owned();
+            let Some(access_key_ref) = prompt::text(
+                interactive,
+                "access key ref (e.g., AWS_ACCESS_KEY_ID)",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let access_key_ref = access_key_ref.trim().to_owned();
+            let Some(secret_key_ref) = prompt::text(
+                interactive,
+                "secret key ref (e.g., AWS_SECRET_ACCESS_KEY)",
+                true,
+            )?
+            else {
+                return Ok(None);
+            };
+            let secret_key_ref = secret_key_ref.trim().to_owned();
+            let prefix = prompt::text(interactive, "S3 prefix (blank for bucket root)", false)?
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+            Ok(Some(DataSourceConfig {
+                source_type: "s3".to_owned(),
+                name: None,
+                path: None,
+                url: None,
+                expected_sha256: None,
+                max_download_bytes: None,
+                max_extracted_bytes: None,
+                bucket: Some(bucket),
+                prefix,
+                region: Some(region),
+                access_key_ref: Some(access_key_ref),
+                secret_key_ref: Some(secret_key_ref),
+            }))
+        }
+    }
+}
+
+fn prompt_mcp_stdio_servers(interactive: bool, args: &mut InitArgs) -> Result<()> {
+    loop {
+        let Some(name) = prompt::text(interactive, "MCP name (blank to finish)", false)? else {
+            break;
+        };
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            break;
+        }
+        let Some(command) = prompt::text(interactive, "command", true)? else {
+            break;
+        };
+        let command = command.trim().to_owned();
+        if command.is_empty() {
+            continue;
+        }
+        let cli_args =
+            match prompt::text(interactive, "args (comma-separated, blank for none)", false)? {
+                Some(raw) => parse_comma_separated_prompt_values(&raw),
+                None => Vec::new(),
+            };
+        let env = match prompt::text(
+            interactive,
+            "env refs (comma-separated, blank for none)",
+            false,
+        )? {
+            Some(raw) => parse_secret_ref_prompt_values("mcp-stdio-env", &raw)?,
+            None => Vec::new(),
+        };
+        let row = InitMcpStdioServer {
+            name,
+            command,
+            args: cli_args,
+            env,
+        };
+        match prompt_setup_row_action(interactive, "MCP row")? {
+            SetupRowAction::AddAnother => args.prompt_mcp_stdio.push(row),
+            SetupRowAction::Discard => continue,
+            SetupRowAction::Done => {
+                args.prompt_mcp_stdio.push(row);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prompt_mcp_http_servers(interactive: bool, args: &mut InitArgs) -> Result<()> {
+    loop {
+        let Some(name) = prompt::text(interactive, "MCP name (blank to finish)", false)? else {
+            break;
+        };
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            break;
+        }
+        let Some(url) = prompt::text(interactive, "URL", true)? else {
+            break;
+        };
+        let url = url.trim().to_owned();
+        if url.is_empty() {
+            continue;
+        }
+        let headers = match prompt::text(
+            interactive,
+            "headers (comma-separated Header:SECRET_REF, blank for none)",
+            false,
+        )? {
+            Some(raw) => parse_http_header_prompt_values(&raw)?,
+            None => Vec::new(),
+        };
+        let row = InitMcpHttpServer { name, url, headers };
+        match prompt_setup_row_action(interactive, "MCP row")? {
+            SetupRowAction::AddAnother => args.prompt_mcp_http.push(row),
+            SetupRowAction::Discard => continue,
+            SetupRowAction::Done => {
+                args.prompt_mcp_http.push(row);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prompt_setup_row_action(interactive: bool, prompt_label: &str) -> Result<SetupRowAction> {
+    let items = [
+        (
+            SetupRowAction::AddAnother,
+            "Add another".to_owned(),
+            "Save this row and continue".to_owned(),
+        ),
+        (
+            SetupRowAction::Discard,
+            "Discard".to_owned(),
+            "Drop this row and continue".to_owned(),
+        ),
+        (
+            SetupRowAction::Done,
+            "Done".to_owned(),
+            "Save this row and finish".to_owned(),
+        ),
+    ];
+    Ok(prompt::select(interactive, prompt_label, &items)?.unwrap_or(SetupRowAction::Done))
+}
+
+fn parse_secret_ref_prompt_values(field: &'static str, raw: &str) -> Result<Vec<String>> {
+    let values = parse_comma_separated_prompt_values(raw);
+    for value in &values {
+        if !is_valid_secret_ref_name(value) {
+            return Err(StackError::InvalidParam {
+                field,
+                reason: format!(
+                    "`{value}` is not a valid secret ref name (letters, digits, and underscore; must not start with a digit)"
+                ),
+            });
+        }
+    }
+    Ok(values)
+}
+
+fn parse_http_header_prompt_values(raw: &str) -> Result<Vec<InitMcpHttpHeader>> {
+    let mut out = Vec::new();
+    for value in parse_comma_separated_prompt_values(raw) {
+        let (name, value_ref) = split_mcp_header_ref(&value)?;
+        out.push(InitMcpHttpHeader { name, value_ref });
+    }
+    Ok(out)
+}
+
+fn parse_comma_separated_prompt_values(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Interactive add-loop for dependency install actions. Each entry collects a
 /// name, an install shell command, and whether it needs system privilege, then
 /// stacks onto `--dep`/`--dep-system` so `deps_from_args` consumes it uniformly.
 fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
-    while prompt::confirm(interactive, "add a dependency to install?", false)? {
-        let Some(name) = prompt::text(interactive, "dependency name (e.g. ripgrep)", true)? else {
+    loop {
+        let Some(name) = prompt::text(interactive, "dependency name (blank to finish)", false)?
+        else {
             break;
         };
         let name = name.trim().to_owned();
         if name.is_empty() {
-            continue;
+            break;
         }
         let Some(shell) = prompt::text(interactive, "install shell command", true)? else {
             break;
@@ -538,33 +869,34 @@ fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
             continue;
         }
         let entry = format!("{name}={shell}");
-        if prompt::confirm(
+        let scope = prompt::select(
             interactive,
-            "does this need system privilege (sudo)?",
-            false,
-        )? {
-            args.dep_system.push(entry);
-        } else {
-            args.dep.push(entry);
+            "dependency scope",
+            &[
+                (
+                    DependencyInstallScope::User,
+                    "User".to_owned(),
+                    "Runtime user install".to_owned(),
+                ),
+                (
+                    DependencyInstallScope::System,
+                    "System".to_owned(),
+                    "Requires OS privilege".to_owned(),
+                ),
+            ],
+        )?
+        .unwrap_or_default();
+        match scope {
+            DependencyInstallScope::User => args.dep.push(entry),
+            DependencyInstallScope::System => args.dep_system.push(entry),
         }
     }
-    Ok(())
-}
-
-fn prompt_mcp_preset(interactive: bool, args: &mut InitArgs) -> Result<()> {
-    if !args.mcp_preset.is_empty()
-        || !prompt::confirm(interactive, "add the Linear MCP preset?", false)?
-    {
-        return Ok(());
-    }
-    args.mcp_preset.push("linear".to_owned());
     Ok(())
 }
 
 fn prompt_repeated_values(
     interactive: bool,
     label: &str,
-    add_prompt: &str,
     value_prompt: &str,
     values: &mut Vec<String>,
 ) -> Result<()> {
@@ -575,16 +907,13 @@ fn prompt_repeated_values(
         return Ok(());
     }
     // Free-form entries (URLs, name=command, secret refs) have no fixed option
-    // set, so this stays an add-loop: confirm to add, then a required text line.
-    while prompt::confirm(interactive, add_prompt, false)? {
-        match prompt::text(interactive, value_prompt, true)? {
-            Some(value) => {
-                let value = value.trim().to_owned();
-                if !value.is_empty() {
-                    values.push(value);
-                }
-            }
-            None => break,
+    // set; blank input finishes the selected item without extra confirmations.
+    while let Some(value) = prompt::text(interactive, value_prompt, false)? {
+        let value = value.trim().to_owned();
+        if !value.is_empty() {
+            values.push(value);
+        } else {
+            break;
         }
     }
     Ok(())
@@ -759,10 +1088,13 @@ fn code_sources_from_args(args: &InitArgs) -> Vec<CodeSourceConfig> {
 }
 
 fn data_sources_from_args(args: &InitArgs) -> Result<Vec<DataSourceConfig>> {
-    args.data_from
+    let mut sources: Vec<DataSourceConfig> = args
+        .data_from
         .iter()
         .map(|value| classify_data_from(value))
-        .collect()
+        .collect::<Result<_>>()?;
+    sources.extend(args.prompt_data_sources.iter().cloned());
+    Ok(sources)
 }
 
 fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
@@ -794,6 +1126,14 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
             env: Vec::new(),
         }));
     }
+    for value in &args.prompt_mcp_stdio {
+        servers.push(McpServerConfig::Stdio(McpStdioServer {
+            name: value.name.clone(),
+            command: value.command.clone(),
+            args: value.args.clone(),
+            env: value.env.clone(),
+        }));
+    }
     for value in &args.mcp_http {
         let (name, url) = split_mcp_pair("mcp-http", value)?;
         validate_mcp_https_url(&name, &url)?;
@@ -801,6 +1141,21 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
             name,
             url,
             headers: Vec::new(),
+        }));
+    }
+    for value in &args.prompt_mcp_http {
+        validate_mcp_https_url(&value.name, &value.url)?;
+        servers.push(McpServerConfig::Http(McpHttpServer {
+            name: value.name.clone(),
+            url: value.url.clone(),
+            headers: value
+                .headers
+                .iter()
+                .map(|header| HttpHeaderRef {
+                    name: header.name.clone(),
+                    value_ref: header.value_ref.clone(),
+                })
+                .collect(),
         }));
     }
     apply_mcp_stdio_env_refs(&mut servers, &args.mcp_stdio_env)?;

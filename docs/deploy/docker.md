@@ -63,7 +63,7 @@ docker run -d \
   acp-stack:local
 ```
 
-Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. Provider-backed agents can also set `ACP_STACK_INIT_PROVIDER`, `ACP_STACK_INIT_API_KEY_REF`, `ACP_STACK_INIT_MODEL`, and `ACP_STACK_INIT_MODE`; these map to the matching `acps init` flags. `ACP_STACK_INIT_WORKSPACE_ROOT` and `ACP_STACK_INIT_WORKSPACE_UPLOADS` override the workspace paths used at init. First-run API keys are printed to container logs in auto-init mode.
+Set `ACP_STACK_AUTO_INIT=1` and `ACP_STACK_INIT_AGENT=<agent-id>` only when you want the entrypoint to initialize a missing config automatically. Provider-backed agents can also set `ACP_STACK_INIT_PROVIDER`, `ACP_STACK_INIT_API_KEY_REF`, and `ACP_STACK_INIT_MODEL`; these map to the matching `acps init` flags. `ACP_STACK_INIT_WORKSPACE_ROOT` and `ACP_STACK_INIT_WORKSPACE_UPLOADS` override the workspace paths used at init. First-run API keys are printed to container logs in auto-init mode.
 
 For Supabase logging, run setup after init on a host/container where the Supabase CLI is authenticated:
 

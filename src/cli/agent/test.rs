@@ -74,7 +74,7 @@ struct AgentTestReport {
 /// Run a real-prompt testflight at the tail of `acps init`. Uses the registry
 /// entry's `testflight_prompt` if present (else the default) and verifies the
 /// declared `testflight_expect_fs` artifact post-prompt. Surfaces the same
-/// "ok / session_id / stop_reason / updates / fs_smoke" lines as
+/// "ok / session_id / stop_reason / updates / fs_check" lines as
 /// `acps agent test` so the operator sees consistent output regardless of
 /// which entry point they used.
 pub(in crate::cli) fn run_init_testflight(
@@ -163,7 +163,7 @@ fn run_agent_test_with(
         println!("updates: {}", report.updates);
         if let Some(outcome) = fs_outcome {
             println!(
-                "fs_smoke: ok ({} bytes at {})",
+                "fs_check: ok ({} bytes at {})",
                 outcome.bytes,
                 outcome.path.display()
             );
@@ -206,7 +206,7 @@ pub(super) fn prepare_testflight_expect_fs(workspace_root: &Path, relative: &str
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => {
             std::fs::remove_file(&path).map_err(|source| StackError::AgentTestFailed {
-                stage: "fs smoke".to_owned(),
+                stage: "fs_check".to_owned(),
                 reason: format!(
                     "remove stale testflight artifact `{}` failed: {source}",
                     path.display()
@@ -215,7 +215,7 @@ pub(super) fn prepare_testflight_expect_fs(workspace_root: &Path, relative: &str
             Ok(())
         }
         Ok(metadata) => Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "pre-existing testflight artifact `{}` is {}; remove it before running testflight",
                 path.display(),
@@ -228,7 +228,7 @@ pub(super) fn prepare_testflight_expect_fs(workspace_root: &Path, relative: &str
         }),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "stat pre-existing testflight artifact `{}` failed: {source}",
                 path.display()
@@ -246,7 +246,7 @@ pub(super) fn verify_testflight_expect_fs(
         workspace_root
             .canonicalize()
             .map_err(|source| StackError::AgentTestFailed {
-                stage: "fs smoke".to_owned(),
+                stage: "fs_check".to_owned(),
                 reason: format!(
                     "canonicalize workspace root `{}` failed: {source}",
                     workspace_root.display()
@@ -254,7 +254,7 @@ pub(super) fn verify_testflight_expect_fs(
             })?;
     let metadata =
         std::fs::symlink_metadata(&path).map_err(|source| StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "expected agent to create `{}` (workspace-relative `{}`) but stat failed: {source}",
                 path.display(),
@@ -263,7 +263,7 @@ pub(super) fn verify_testflight_expect_fs(
         })?;
     if metadata.file_type().is_symlink() {
         return Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "expected agent to create regular file `{}`, but it is a symlink",
                 path.display()
@@ -272,7 +272,7 @@ pub(super) fn verify_testflight_expect_fs(
     }
     if !metadata.is_file() {
         return Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "expected agent to create regular file `{}`, but it is not a regular file",
                 path.display()
@@ -282,7 +282,7 @@ pub(super) fn verify_testflight_expect_fs(
     let canonical_path = path
         .canonicalize()
         .map_err(|source| StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "canonicalize testflight artifact `{}` failed: {source}",
                 path.display()
@@ -290,7 +290,7 @@ pub(super) fn verify_testflight_expect_fs(
         })?;
     if !canonical_path.starts_with(&workspace) {
         return Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "testflight artifact `{}` resolved outside workspace `{}`",
                 canonical_path.display(),
@@ -300,7 +300,7 @@ pub(super) fn verify_testflight_expect_fs(
     }
     if metadata.len() == 0 {
         return Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "agent created `{}` but the file is empty; treating as no tool action",
                 path.display()
@@ -316,7 +316,7 @@ pub(super) fn verify_testflight_expect_fs(
 fn testflight_expect_fs_path(workspace_root: &Path, relative: &str) -> Result<PathBuf> {
     if Path::new(relative).is_absolute() || relative.split('/').any(|seg| seg == "..") {
         return Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "testflight_expect_fs `{relative}` must be a workspace-relative path with no `..` segments"
             ),
@@ -333,7 +333,7 @@ fn ensure_testflight_parent_within_workspace(workspace_root: &Path, path: &Path)
         workspace_root
             .canonicalize()
             .map_err(|source| StackError::AgentTestFailed {
-                stage: "fs smoke".to_owned(),
+                stage: "fs_check".to_owned(),
                 reason: format!(
                     "canonicalize workspace root `{}` failed: {source}",
                     workspace_root.display()
@@ -344,7 +344,7 @@ fn ensure_testflight_parent_within_workspace(workspace_root: &Path, path: &Path)
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
             return Err(StackError::AgentTestFailed {
-                stage: "fs smoke".to_owned(),
+                stage: "fs_check".to_owned(),
                 reason: format!("canonicalize `{}` failed: {source}", parent.display()),
             });
         }
@@ -353,7 +353,7 @@ fn ensure_testflight_parent_within_workspace(workspace_root: &Path, path: &Path)
         Ok(())
     } else {
         Err(StackError::AgentTestFailed {
-            stage: "fs smoke".to_owned(),
+            stage: "fs_check".to_owned(),
             reason: format!(
                 "testflight artifact parent `{}` resolved outside workspace `{}`",
                 parent.display(),

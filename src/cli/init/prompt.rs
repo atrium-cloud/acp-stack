@@ -49,6 +49,27 @@ pub(super) fn searchable_select<T: Clone + Eq>(
     select_inner(interactive, prompt, items, true)
 }
 
+pub(super) fn multiselect<T: Clone + Eq>(
+    interactive: bool,
+    prompt: &str,
+    items: &[(T, String, String)],
+) -> Result<Vec<T>> {
+    if !interactive || items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = cliclack::multiselect::<T>(prompt)
+        .required(false)
+        .max_rows(12);
+    for (value, label, hint) in items {
+        builder = builder.item(value.clone(), label, hint);
+    }
+    match builder.interact() {
+        Ok(values) => Ok(values),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(cancelled()),
+        Err(error) => Err(map_interact_error(error)),
+    }
+}
+
 fn select_inner<T: Clone + Eq>(
     interactive: bool,
     prompt: &str,
@@ -141,6 +162,15 @@ mod tests {
     fn select_returns_none_when_not_interactive() {
         let items = [(1u8, "one".to_owned(), String::new())];
         assert_eq!(select(false, "pick", &items).expect("select"), None);
+    }
+
+    #[test]
+    fn multiselect_returns_empty_when_not_interactive() {
+        let items = [(1u8, "one".to_owned(), String::new())];
+        assert_eq!(
+            multiselect(false, "pick", &items).expect("multiselect"),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]
