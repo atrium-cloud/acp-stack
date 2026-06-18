@@ -14,9 +14,10 @@ use crate::error::Result;
 pub(in crate::cli) use self::install::operator_registry_override;
 pub(in crate::cli) use self::set::{
     claude_code_provider_model_is_explicit, default_api_key_ref_for_agent_provider,
-    default_custom_provider_api, parse_custom_provider_api, parse_custom_token_limit,
-    print_agent_set_effective_notice_for, required_custom_arg, resolve_agent_model_value,
-    validate_agent_session_config_value, validate_custom_provider_api_for_agent,
+    default_custom_provider_api, model_values_for_cli_display, parse_custom_provider_api,
+    parse_custom_token_limit, print_agent_set_effective_notice_for, required_custom_arg,
+    resolve_agent_model_value, validate_agent_session_config_value,
+    validate_custom_provider_api_for_agent,
 };
 pub(in crate::cli) use self::test::run_init_testflight;
 
