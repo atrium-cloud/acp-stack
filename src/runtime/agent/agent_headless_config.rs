@@ -16,7 +16,7 @@ use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, Config, Cust
 use crate::error::{Result, StackError};
 use crate::fs_util::parent_dir;
 use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
+    CLAUDE_CODE_AGENT_ID, ClaudeCodeProviderProfile, profile_for_provider_id,
 };
 use crate::runtime::agent::config_io::{
     ensure_object_field, ensure_toml_table_field, insert_if_missing, read_json_object,
@@ -685,11 +685,11 @@ fn write_claude_provider_env(
     if let Some(base_url) = profile.base_url.as_deref() {
         env.insert("ANTHROPIC_BASE_URL".to_owned(), json!(base_url));
     }
-    if let Some(model) = configured_provider_model(config)
-        .or(profile.default_model.as_deref())
-        .filter(|model| !model.trim().is_empty())
+    if let Some(model) = configured_provider_model(config).filter(|model| !model.trim().is_empty())
     {
         insert_claude_model_env(env, model, profile.set_subagent_model);
+    } else {
+        insert_claude_profile_default_model_env(env, profile);
     }
     Ok(())
 }
@@ -760,6 +760,35 @@ fn insert_claude_model_env(
         env.insert(key.to_owned(), json!(model));
     }
     if set_subagent_model {
+        env.insert("CLAUDE_CODE_SUBAGENT_MODEL".to_owned(), json!(model));
+    }
+}
+
+fn insert_claude_profile_default_model_env(
+    env: &mut Map<String, serde_json::Value>,
+    profile: &ClaudeCodeProviderProfile,
+) {
+    let Some(model) = profile
+        .default_model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    else {
+        return;
+    };
+    env.insert("ANTHROPIC_MODEL".to_owned(), json!(model));
+    env.insert(
+        "ANTHROPIC_DEFAULT_OPUS_MODEL".to_owned(),
+        json!(profile.default_opus_model.as_deref().unwrap_or(model)),
+    );
+    env.insert(
+        "ANTHROPIC_DEFAULT_SONNET_MODEL".to_owned(),
+        json!(profile.default_sonnet_model.as_deref().unwrap_or(model)),
+    );
+    env.insert(
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_owned(),
+        json!(profile.default_haiku_model.as_deref().unwrap_or(model)),
+    );
+    if profile.set_subagent_model {
         env.insert("CLAUDE_CODE_SUBAGENT_MODEL".to_owned(), json!(model));
     }
 }
@@ -1321,6 +1350,18 @@ restart = "on-crash"
         );
         assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "kimi-k2.7-code");
         assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+            "kimi-k2.7-code"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "kimi-k2.7-code"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            "kimi-k2.7-code"
+        );
+        assert_eq!(
             settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
             "kimi-k2.7-code"
         );
@@ -1334,6 +1375,46 @@ restart = "on-crash"
         )
         .expect("onboarding json parses");
         assert_eq!(onboarding["hasCompletedOnboarding"], true);
+    }
+
+    #[test]
+    fn claude_code_zai_writes_profile_role_model_defaults() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["ZAI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "zai".to_owned(),
+            model: None,
+            api_key_ref: Some("ZAI_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let settings_path = tempdir.path().join(".claude").join("settings.json");
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings_path).expect("settings should be readable"),
+        )
+        .expect("settings json parses");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.z.ai/api/anthropic"
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "glm-5.2[1m]");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+            "glm-5.2[1m]"
+        );
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "glm-5.2[1m]"
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "GLM-4.7");
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+            "1000000"
+        );
+        assert_eq!(settings["env"]["API_TIMEOUT_MS"], "3000000");
+        assert_eq!(settings["apiKeyHelper"], "printenv ZAI_API_KEY");
     }
 
     #[test]
@@ -1378,7 +1459,7 @@ restart = "on-crash"
             .expect("create settings dir");
         std::fs::write(
             &settings_path,
-            r#"{"apiKeyHelper":"printenv MOONSHOT_API_KEY","env":{"ANTHROPIC_BASE_URL":"https://api.moonshot.ai/anthropic","ANTHROPIC_AUTH_TOKEN":"old","ANTHROPIC_API_KEY":"old","ANTHROPIC_MODEL":"kimi-k2.7-code","KEEP_ME":"yes"},"theme":"keep"}"#,
+            r#"{"apiKeyHelper":"printenv MOONSHOT_API_KEY","env":{"ANTHROPIC_BASE_URL":"https://api.moonshot.ai/anthropic","ANTHROPIC_AUTH_TOKEN":"old","ANTHROPIC_API_KEY":"old","ANTHROPIC_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_OPUS_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_SONNET_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_HAIKU_MODEL":"kimi-k2.7-code","CLAUDE_CODE_SUBAGENT_MODEL":"kimi-k2.7-code","KEEP_ME":"yes"},"theme":"keep"}"#,
         )
         .expect("write settings");
         let onboarding_path = tempdir.path().join(".claude.json");
@@ -1407,6 +1488,22 @@ restart = "on-crash"
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "old");
         assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "old");
         assert!(settings["env"].get("ANTHROPIC_MODEL").is_none());
+        assert!(
+            settings["env"]
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .is_none()
+        );
+        assert!(
+            settings["env"]
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .is_none()
+        );
+        assert!(
+            settings["env"]
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .is_none()
+        );
+        assert!(settings["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
         assert_eq!(settings["env"]["KEEP_ME"], "yes");
         assert_eq!(settings["theme"], "keep");
         let onboarding: Value = serde_json::from_str(

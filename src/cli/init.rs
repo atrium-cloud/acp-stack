@@ -986,6 +986,14 @@ fn import_config_for_init(
     Ok(true)
 }
 
+fn agent_install_progress_message(attempt: u32) -> String {
+    if attempt == 1 {
+        "installing agent".to_owned()
+    } else {
+        format!("installing agent (attempt {attempt}/{MAX_INSTALL_ATTEMPTS})")
+    }
+}
+
 pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
     let output_mode = if args.handoff_json {
         InitOutputMode::HandoffJson
@@ -1513,8 +1521,7 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
                     .unwrap_or_default();
                 let outcome = run_install_with_retry(
                     |attempt| {
-                        let message =
-                            format!("installing agent (attempt {attempt}/{MAX_INSTALL_ATTEMPTS})");
+                        let message = agent_install_progress_message(attempt);
                         if install_interactive {
                             prompt::with_spinner(&message, || {
                                 install_configured_agent(&home, &config, &registry, &store)
@@ -2169,6 +2176,15 @@ mod tests {
 
         let handoff = parse_init_args(&["--handoff-json"]);
         assert!(!prompts_enabled_for(&handoff, true));
+    }
+
+    #[test]
+    fn agent_install_progress_message_hides_attempt_on_first_try() {
+        assert_eq!(agent_install_progress_message(1), "installing agent");
+        assert_eq!(
+            agent_install_progress_message(2),
+            format!("installing agent (attempt 2/{MAX_INSTALL_ATTEMPTS})")
+        );
     }
 
     #[test]
