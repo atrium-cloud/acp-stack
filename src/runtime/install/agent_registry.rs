@@ -977,13 +977,25 @@ mod tests {
                 .map(|install| install.package.as_str()),
             Some("@agentclientprotocol/claude-agent-acp")
         );
+        let claude_code_harness_install = &claude_code
+            .harness
+            .as_ref()
+            .expect("Claude Code harness")
+            .install;
+        assert!(claude_code_harness_install.npm.is_none());
+        let claude_code_harness_shell = claude_code_harness_install
+            .shell
+            .as_ref()
+            .expect("Claude Code harness shell install");
+        assert!(
+            claude_code_harness_shell
+                .script
+                .contains("https://claude.ai/install.sh")
+        );
+        assert_eq!(claude_code_harness_shell.creates, "claude");
         assert_eq!(
-            claude_code
-                .harness
-                .as_ref()
-                .and_then(|harness| harness.install.npm.as_ref())
-                .map(|install| install.package.as_str()),
-            Some("@anthropic-ai/claude-code")
+            claude_code_harness_shell.required_tools,
+            ["curl".to_owned(), "bash".to_owned()]
         );
         assert_eq!(
             claude_code.support_doc.as_deref(),
