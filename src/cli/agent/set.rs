@@ -699,9 +699,31 @@ pub(in crate::cli) fn claude_code_provider_model_is_explicit(config: &Config) ->
     })
 }
 
-fn claude_code_provider_has_profile_default_model(config: &Config) -> bool {
+pub(in crate::cli) fn model_values_for_cli_display(
+    config: &Config,
+    values: Vec<String>,
+) -> Vec<String> {
+    let Some(default_model) = claude_code_profile_default_model(config) else {
+        return values;
+    };
+    let mut filtered = Vec::new();
+    for value in values {
+        if is_claude_code_builtin_model_alias(&value) {
+            continue;
+        }
+        if !filtered.iter().any(|existing| existing == &value) {
+            filtered.push(value);
+        }
+    }
+    if !filtered.iter().any(|value| value == default_model) {
+        filtered.insert(0, default_model.to_owned());
+    }
+    filtered
+}
+
+fn claude_code_profile_default_model(config: &Config) -> Option<&'static str> {
     if config.agent.id != CLAUDE_CODE_AGENT_ID {
-        return false;
+        return None;
     }
     config
         .agent
@@ -709,7 +731,18 @@ fn claude_code_provider_has_profile_default_model(config: &Config) -> bool {
         .as_ref()
         .and_then(|provider| profile_for_provider_id(&provider.id))
         .and_then(|profile| profile.default_model.as_deref())
-        .is_some_and(|model| !model.trim().is_empty())
+        .filter(|model| !model.trim().is_empty())
+}
+
+fn is_claude_code_builtin_model_alias(value: &str) -> bool {
+    matches!(
+        value.trim(),
+        "best" | "default" | "fable" | "opus" | "sonnet" | "haiku"
+    )
+}
+
+fn claude_code_provider_has_profile_default_model(config: &Config) -> bool {
+    claude_code_profile_default_model(config).is_some()
 }
 
 fn select_agent_session_config_value(
@@ -786,7 +819,8 @@ fn agent_session_config_values(
 ) -> Result<Vec<String>> {
     let response = read_agent_new_session_response(home, config)?;
     match category {
-        AgentSessionConfigCategory::Model => session_model_values(&response),
+        AgentSessionConfigCategory::Model => session_model_values(&response)
+            .map(|values| model_values_for_cli_display(config, values)),
         AgentSessionConfigCategory::Mode => {
             session_config_values(response.config_options.as_deref(), category)
         }

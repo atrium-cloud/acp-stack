@@ -40,6 +40,7 @@ const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -753,6 +754,7 @@ fn insert_claude_model_env(
 ) {
     for key in [
         "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -775,11 +777,13 @@ fn insert_claude_profile_default_model_env(
     else {
         return;
     };
+    let opus_model = profile.default_opus_model.as_deref().unwrap_or(model);
     env.insert("ANTHROPIC_MODEL".to_owned(), json!(model));
     env.insert(
-        "ANTHROPIC_DEFAULT_OPUS_MODEL".to_owned(),
-        json!(profile.default_opus_model.as_deref().unwrap_or(model)),
+        "ANTHROPIC_DEFAULT_FABLE_MODEL".to_owned(),
+        json!(opus_model),
     );
+    env.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_owned(), json!(opus_model));
     env.insert(
         "ANTHROPIC_DEFAULT_SONNET_MODEL".to_owned(),
         json!(profile.default_sonnet_model.as_deref().unwrap_or(model)),
@@ -1350,6 +1354,10 @@ restart = "on-crash"
         );
         assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "kimi-k2.7-code");
         assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "kimi-k2.7-code"
+        );
+        assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
             "kimi-k2.7-code"
         );
@@ -1400,6 +1408,10 @@ restart = "on-crash"
             "https://api.z.ai/api/anthropic"
         );
         assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "glm-5.2[1m]");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "glm-5.2[1m]"
+        );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
             "glm-5.2[1m]"
@@ -1459,7 +1471,7 @@ restart = "on-crash"
             .expect("create settings dir");
         std::fs::write(
             &settings_path,
-            r#"{"apiKeyHelper":"printenv MOONSHOT_API_KEY","env":{"ANTHROPIC_BASE_URL":"https://api.moonshot.ai/anthropic","ANTHROPIC_AUTH_TOKEN":"old","ANTHROPIC_API_KEY":"old","ANTHROPIC_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_OPUS_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_SONNET_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_HAIKU_MODEL":"kimi-k2.7-code","CLAUDE_CODE_SUBAGENT_MODEL":"kimi-k2.7-code","KEEP_ME":"yes"},"theme":"keep"}"#,
+            r#"{"apiKeyHelper":"printenv MOONSHOT_API_KEY","env":{"ANTHROPIC_BASE_URL":"https://api.moonshot.ai/anthropic","ANTHROPIC_AUTH_TOKEN":"old","ANTHROPIC_API_KEY":"old","ANTHROPIC_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_FABLE_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_OPUS_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_SONNET_MODEL":"kimi-k2.7-code","ANTHROPIC_DEFAULT_HAIKU_MODEL":"kimi-k2.7-code","CLAUDE_CODE_SUBAGENT_MODEL":"kimi-k2.7-code","KEEP_ME":"yes"},"theme":"keep"}"#,
         )
         .expect("write settings");
         let onboarding_path = tempdir.path().join(".claude.json");
@@ -1488,6 +1500,11 @@ restart = "on-crash"
         assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "old");
         assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "old");
         assert!(settings["env"].get("ANTHROPIC_MODEL").is_none());
+        assert!(
+            settings["env"]
+                .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+                .is_none()
+        );
         assert!(
             settings["env"]
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")

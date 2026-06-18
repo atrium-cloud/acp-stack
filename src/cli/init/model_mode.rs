@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::cli::agent::claude_code_provider_model_is_explicit;
+use crate::cli::agent::{claude_code_provider_model_is_explicit, model_values_for_cli_display};
 use crate::config::Config;
 use crate::dev_gates::{
     FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, TEST_SKIP_AGENT_INSTALL_ENV,
@@ -416,7 +416,10 @@ fn configure_model_for_init(
         return Ok(ModelModeAction::Set);
     }
 
-    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Model)?;
+    let values = model_values_for_cli_display(
+        config,
+        advertised_values_for_category(response, AgentSessionConfigCategory::Model)?,
+    );
     let interactive = prompts_enabled(args);
     if !interactive {
         // L87: non-interactive run, no explicit choice. Print the
@@ -439,7 +442,9 @@ fn configure_model_for_init(
     else {
         return Ok(ModelModeAction::Skipped);
     };
-    validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
+    if !claude_code_provider_model_is_explicit(config) {
+        validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
+    }
     write_model_into_config(config, selected, provider_backed);
     Ok(ModelModeAction::Set)
 }

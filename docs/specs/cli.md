@@ -93,17 +93,17 @@ acps config import <path> [--force] [--dry-run] [--admin-key <key>]
 acps config import --base64 <code> [--force] [--dry-run] [--admin-key <key>]
 ```
 
-Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it and requires the admin key. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing. After a successful replace, import asks the currently configured daemon to apply `[local].session_auth`; if the daemon is unreachable, the value applies on next daemon start.
+Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it and requires the admin key. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing. After a successful replace, import asks the currently configured daemon to apply `[local].session_auth`; if the daemon is unreachable or rejects the local admin key, the value applies on next daemon start.
 
 ## Secret Commands
 
 ```sh
 acps secrets list
-acps secrets set <name> [--admin-key <key>]
+acps secrets set [<name>] [--name <name>] [--value <value>] [--admin-key <key>]
 acps secrets delete <name> [--admin-key <key>]
 ```
 
-`secrets list` prints secret names only and does not require an auth key. `secrets set` and `secrets delete` mutate the encrypted secret store and require the admin key.
+`secrets list` prints secret names only and does not require an auth key. `secrets set` and `secrets delete` mutate the encrypted secret store and require the admin key. Interactive `secrets set` prompts for the secret value without echo when `--value` is omitted; non-interactive runs read one line from stdin. Use the prompt or stdin form when avoiding shell history and process-argument exposure matters.
 
 ## Update Commands
 
