@@ -4,7 +4,7 @@
 
 ## Interactive And Non-Interactive
 
-`acps init` runs interactively when stdin is a TTY and `--non-interactive` is not set. In that mode it prompts for missing choices. Agent, provider, and advertised model selectors are searchable. Optional prompts expose an explicit Skip choice; Esc and Ctrl-C abort init. When stdin is not a TTY, or `--non-interactive` is passed, every prompt is skipped and the corresponding value must be supplied by flag.
+`acps init` runs interactively when stdin is a TTY and `--non-interactive` is not set. In that mode it prompts for missing choices. Agent, provider, and advertised model selectors are searchable. Optional setup is selected from one grouped prompt before any selected item asks for details. Esc and Ctrl-C abort init. When stdin is not a TTY, or `--non-interactive` is passed, every prompt is skipped and the corresponding value must be supplied by flag.
 
 The non-interactive contract: a first run that creates a new config requires `--agent <id>`, the `--custom-agent-*` flag set, or a complete imported config. Provider, MCP, and agent env secret refs must resolve when used. A non-interactive first run with no agent path fails before writing config.
 
@@ -41,20 +41,22 @@ The operator-facing sequence, in order:
         - Interactive runs offer "Custom agent...".
         - Non-interactive runs use `--custom-agent-*`.
         - The id must not be a registry agent id.
-        - Provider/model/mode setup is handled by the agent environment, not init flags.
+        - Provider/model setup is handled by the agent environment, not init flags.
 4. Starter-config selections (new config only).
     - Sources:
         - Code sources are Git repos.
-        - Data sources are local paths or HTTPS archives.
+        - Data sources are local paths, HTTPS archives, or S3 buckets.
     - MCP:
-        - Add the Linear preset, custom stdio servers, or custom HTTP servers.
-        - Add required MCP secret refs.
+        - Add custom stdio servers with command, args, and env refs.
+        - Add custom HTTP servers with URL and header refs.
     - Agent env:
         - Add secret ref names to `[agent].env`.
         - Interactive runs can collect masked values.
     - Dependencies:
         - Add `[dependencies.commands]` install actions with user or system scope.
         - Flags pre-populate the matching sections and skip those prompts.
+    - Agent Skills:
+        - Choose whether to install Agent Skills before testflight.
 5. Config and state.
     - Write a starter config or validate the existing/imported config.
     - Open SQLite state and run migrations.
@@ -62,7 +64,7 @@ The operator-facing sequence, in order:
         - New selections get `[agent.auto_update] enabled = true`, `frequency = "1d"`.
         - Re-confirming the same agent preserves policy.
         - Switching agents resets to the supported-agent default.
-6. Agent Skills selection (interactive).
+6. Agent Skills selection (interactive, when selected).
     - Choose OpenAI, Anthropic, or `github:<owner>`.
     - Choose skills to install before testflight.
     - `--skills-source`, `--skills`, and `--no-skills` drive this without prompts.
@@ -86,15 +88,15 @@ The operator-facing sequence, in order:
     - Interactive runs ask for confirmation and show system-scope notes.
     - Non-interactive runs require `--deps-apply --deps-apply-yes`.
     - Failures and unmet system privilege fail init and are recorded under `deps_apply`.
-11. Provider, model, and mode.
+11. Provider and model.
     - Supported registry agents:
         - Select or validate provider and required secret refs.
-        - Discover ACP-advertised model and mode options with one provisional session.
-        - Apply `--provider`, `--api-key-ref`, `--model`, `--mode`, and custom-provider flags.
+        - Discover ACP-advertised model options with one provisional session.
+        - Apply `--provider`, `--api-key-ref`, `--model`, and custom-provider flags.
     - Custom agents:
         - Skip provider/model discovery.
         - Run one ACP connection gate when the launch command and cwd are present.
-        - Explicit `--model` and `--mode` are rejected.
+        - Explicit `--model` is rejected.
 12. `acp-stack` auto-update.
     - Configure `[updates.acp_stack]` as on, security-only, or off.
     - Frequencies use day/week units, minimum `1d`.

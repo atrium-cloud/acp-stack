@@ -1,6 +1,6 @@
 //! Snapshot/restore primitives for the per-agent headless config files written
 //! by `agent_headless_config::provision_agent_headless_config`. Used by the
-//! model/mode discovery flow so a failed validation can roll back to the
+//! model discovery flow so a failed validation can roll back to the
 //! state on disk before provisioning ran.
 //!
 //! Per-agent list of headless-config files that `provision_agent_headless_config`
@@ -13,9 +13,9 @@
 //! Custom-provider variants additionally write a side file —
 //! `~/.config/goose/custom_providers/<id>.json` for Goose,
 //! `~/.pi/agent/models.json` for Pi — so the candidate list covers those
-//! too when a custom provider is configured. Without this, a failed
-//! `--mode` validation on a custom-provider init could leave the side file
-//! behind even though `acps-config.toml` was never written.
+//! too when a custom provider is configured. Without this, a failed validation
+//! on a custom-provider init could leave the side file behind even though
+//! `acps-config.toml` was never written.
 
 use std::path::{Path, PathBuf};
 

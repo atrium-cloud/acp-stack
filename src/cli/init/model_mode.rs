@@ -20,7 +20,7 @@ use super::headless_snapshot::{
 use super::registry_apply::is_custom_agent;
 use super::{InitArgs, prompt, prompts_enabled};
 
-/// Outcome of a single category (model or mode) selection step.
+/// Outcome of the init model selection step.
 /// `Skipped` covers both "agent doesn't support this category" and
 /// "no flag, no resume, no interactive prompt"; `PrintedList` is the
 /// L87 path where non-interactive init prints advertised values but
@@ -36,7 +36,6 @@ pub(super) enum ModelModeAction {
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct ModelModeOutcome {
     pub(super) model_action: ModelModeAction,
-    pub(super) mode_action: ModelModeAction,
 }
 
 pub(super) fn preflight_model_and_mode_for_init(
@@ -45,19 +44,11 @@ pub(super) fn preflight_model_and_mode_for_init(
     config: &Config,
     config_path: &Path,
 ) -> Result<()> {
-    if is_custom_agent(config, registry) {
-        if args.model.is_some() {
-            return Err(StackError::InvalidParam {
-                field: "--model",
-                reason: "custom agents configure models through their own environment; `--model` applies only to supported registry agents".to_owned(),
-            });
-        }
-        if args.mode.is_some() {
-            return Err(StackError::InvalidParam {
-                field: "--mode",
-                reason: "custom agents configure modes through their own environment; `--mode` applies only to supported registry agents".to_owned(),
-            });
-        }
+    if is_custom_agent(config, registry) && args.model.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "--model",
+            reason: "custom agents configure models through their own environment; `--model` applies only to supported registry agents".to_owned(),
+        });
     }
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(());
@@ -84,29 +75,20 @@ pub(super) fn preflight_model_and_mode_for_init(
             ),
         });
     }
-    if args.mode.is_some() && !entry.set_mode {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: format!(
-                "{} does not support mode configuration through `acps init`",
-                entry.name,
-            ),
-        });
-    }
     Ok(())
 }
 
-/// Drives the L84-L87 ACP-discovery flow during `acps init`.
+/// Drives the model ACP-discovery flow during `acps init`.
 ///
 /// - L84: spawns one provisional ACP session via `fetch_session_config`
-///   when the configured agent supports model or mode setup, so the
-///   advertised lists come straight from the installed harness instead
+///   when the configured agent supports model setup, so the advertised list
+///   comes straight from the installed harness instead
 ///   of a stale registry snapshot.
-/// - L85: reads `model` and `mode` `session/new` config_options before
-///   accepting or printing any choice.
-/// - L86: explicit `--model`/`--mode` values are validated against the
-///   advertised list before being written to canonical config.
-/// - L87: non-interactive runs without `--model`/`--mode` print the
+/// - L85: reads `model` `session/new` config_options before accepting or
+///   printing any choice.
+/// - L86: explicit `--model` values are validated against the advertised list
+///   before being written to canonical config.
+/// - L87: non-interactive runs without `--model` print the
 ///   advertised values and return `PrintedList` so the caller does NOT
 ///   mutate that field; init continues with the existing config so
 ///   downstream steps stay usable.
@@ -121,12 +103,10 @@ pub(super) fn configure_model_and_mode_for_init(
         return Ok(ModelModeOutcome::default());
     };
 
-    // Capability gate, evaluated before any side effects. Reject
-    // explicit --model/--mode for agents whose registry entry says the
-    // category is not supported — surfacing this here means the operator
-    // gets a precise capability error instead of a downstream "binary
-    // not on PATH" / "no advertised values" / silent no-op (audit P1
-    // for --model, P2 for --mode).
+    // Capability gate, evaluated before any side effects. Reject explicit
+    // --model for agents whose registry entry says model selection is not
+    // supported, so the operator gets a precise capability error instead of a
+    // downstream "binary not on PATH" / "no advertised values" / silent no-op.
     if args.model.is_some() && !entry.set_model {
         return Err(StackError::AgentConfigProvision {
             path: config_path.to_path_buf(),
@@ -156,24 +136,12 @@ pub(super) fn configure_model_and_mode_for_init(
             ),
         });
     }
-    if args.mode.is_some() && !entry.set_mode {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: format!(
-                "{} does not support mode configuration through `acps init`",
-                entry.name,
-            ),
-        });
-    }
-    if !entry.set_model && !entry.set_mode {
+    if !entry.set_model {
         return Ok(ModelModeOutcome::default());
     }
     // Custom-provider flow already wrote a literal model id into the
     // provider config and that id is not an ACP-advertised value, so
-    // the MODEL lane is skipped for custom-provider runs. The MODE
-    // lane is independent of provider choice (the agent advertises the
-    // same set of modes regardless), so mode discovery still runs to
-    // honor an explicit `--mode` or interactive picker.
+    // the model lane is skipped for custom-provider runs.
     let skip_model_lane = args.custom_provider;
 
     let interactive = prompts_enabled(args);
@@ -187,25 +155,19 @@ pub(super) fn configure_model_and_mode_for_init(
     // for these agents.
     let provider_present =
         provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
-    // Each lane is active independently. Discovery runs when at least
-    // one lane needs the advertised list — either to validate an
-    // explicit value (L86), to drive an interactive picker (L84), or
-    // to surface the L87 print-and-skip behavior after a provider was
-    // just set non-interactively.
+    // Discovery runs when the model lane needs the advertised list — either to
+    // validate an explicit value (L86), to drive an interactive picker (L84), or
+    // to surface the L87 print-and-skip behavior after a provider was just set
+    // non-interactively.
     let model_lane_active = entry.set_model
         && !skip_model_lane
         && provider_present
         && (args.model.is_some() || interactive || provider_set_this_run);
-    let mode_lane_active =
-        entry.set_mode && (args.mode.is_some() || interactive || provider_set_this_run);
-    if !model_lane_active && !mode_lane_active {
+    if !model_lane_active {
         return Ok(ModelModeOutcome::default());
     }
-    // `explicit` gates the failure path of the preflight checks below:
-    // an explicit `--model` (when the model lane is active, i.e. not
-    // custom-provider) or `--mode` must error out rather than silently
-    // skip if the binary or cwd is missing.
-    let explicit = (args.model.is_some() && model_lane_active) || args.mode.is_some();
+    // `explicit` gates the failure path of the preflight checks below.
+    let explicit = args.model.is_some();
 
     // Two preconditions must hold before we spawn the agent for
     // session/new:
@@ -220,10 +182,10 @@ pub(super) fn configure_model_and_mode_for_init(
     //      preflight can pass on a directory the spawn never visits
     //      (audit P2).
     // When either is missing on a non-explicit call we skip the L84-L87
-    // dance with a printed note — the operator gets a working partial
-    // config they can finish off with a follow-up `acps init --model`.
-    // For explicit `--model`/`--mode` we fail loudly so they're never
-    // silently accepted without validation.
+    // dance with a printed note — the operator gets a working partial config
+    // they can finish off with a follow-up `acps init --model`. For explicit
+    // `--model` we fail loudly so it is never silently accepted without
+    // validation.
     let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
         || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
     let spawn_cwd: PathBuf = config
@@ -258,21 +220,18 @@ pub(super) fn configure_model_and_mode_for_init(
             };
             return Err(StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
-                reason: format!(
-                    "cannot validate --model/--mode for {}: {reason}",
-                    entry.name
-                ),
+                reason: format!("cannot validate --model for {}: {reason}", entry.name),
             });
         }
         if !args.handoff_json {
             if binary_missing {
                 println!(
-                    "model/mode discovery skipped: agent command `{}` not found on PATH",
+                    "model discovery skipped: agent command `{}` not found on PATH",
                     config.agent.command,
                 );
             } else {
                 println!(
-                    "model/mode discovery skipped: spawn cwd `{}` is not yet provisioned",
+                    "model discovery skipped: spawn cwd `{}` is not yet provisioned",
                     spawn_cwd.display(),
                 );
             }
@@ -293,7 +252,7 @@ pub(super) fn configure_model_and_mode_for_init(
     // post-provision restore can roll back to true prior state on
     // discovery/validation failure. On success the provision stays;
     // step 5 (agent_headless_config) will re-provision with the final
-    // post-discovery model/mode shape.
+    // post-discovery model shape.
     //
     // Known narrow caveat: Codex provisioners (`provision_codex_openai_config`
     // and the OpenRouter branch) short-circuit with `Ok(None)` when no
@@ -325,27 +284,16 @@ pub(super) fn configure_model_and_mode_for_init(
             config, home,
         )?;
         let response = fetch_session_config(home, config)?;
-        let mut outcome = ModelModeOutcome::default();
-        // Honor the per-lane gates rather than `entry.set_*` alone:
-        // when only one lane is active (e.g. `--mode plan` for an
-        // agent that advertises both model and mode), running the
-        // other lane would print an advertised list the operator
-        // never asked for or error out on a category they explicitly
-        // omitted.
-        if model_lane_active {
-            outcome.model_action = configure_model_for_init(
+        let outcome = ModelModeOutcome {
+            model_action: configure_model_for_init(
                 args,
                 config,
                 config_path,
                 &response,
                 &entry.name,
                 entry.set_provider,
-            )?;
-        }
-        if mode_lane_active {
-            outcome.mode_action =
-                configure_mode_for_init(args, config, config_path, &response, &entry.name)?;
-        }
+            )?,
+        };
         Ok::<ModelModeOutcome, StackError>(outcome)
     })();
 
@@ -360,7 +308,7 @@ pub(super) fn configure_model_and_mode_for_init(
 }
 
 /// Connection gate: confirm the configured agent launches and completes an ACP
-/// session. Registry agents are verified implicitly by model/mode discovery,
+/// session. Registry agents are verified implicitly by model discovery,
 /// which spawns the same provisional session; this gate exists for agents that
 /// do not run discovery (custom agents), so a non-ACP or broken binary is
 /// caught during init rather than at first session. Skips quietly when the
@@ -479,58 +427,6 @@ fn configure_model_for_init(
     };
     validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
     write_model_into_config(config, selected, provider_backed);
-    Ok(ModelModeAction::Set)
-}
-
-fn configure_mode_for_init(
-    args: &InitArgs,
-    config: &mut Config,
-    config_path: &Path,
-    response: &agent_client_protocol::schema::NewSessionResponse,
-    agent_name: &str,
-) -> Result<ModelModeAction> {
-    if let Some(explicit) = args.mode.as_deref() {
-        validate_advertised_value(response, AgentSessionConfigCategory::Mode, explicit).map_err(
-            |err| {
-                let advertised =
-                    advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
-                        .unwrap_or_default();
-                StackError::AgentConfigProvision {
-                    path: config_path.to_path_buf(),
-                    reason: format!("{err}; advertised modes: [{}]", advertised.join(", "),),
-                }
-            },
-        )?;
-        config.agent.mode = Some(explicit.to_owned());
-        return Ok(ModelModeAction::Set);
-    }
-
-    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
-        .unwrap_or_default();
-    if values.is_empty() {
-        // Agent supports `set_mode` per registry but did not surface
-        // a `mode` config option this session. Treat as skipped rather
-        // than erroring so init still completes.
-        return Ok(ModelModeAction::Skipped);
-    }
-    let interactive = prompts_enabled(args);
-    if !interactive {
-        if !args.handoff_json {
-            println!("advertised modes for {agent_name}:");
-            for value in &values {
-                println!("  {value}");
-            }
-            println!("rerun with `acps init --mode <value>` to write a mode into config");
-        }
-        return Ok(ModelModeAction::PrintedList);
-    }
-    let Some(selected) =
-        prompt_session_config_selection(interactive, &values, AgentSessionConfigCategory::Mode)?
-    else {
-        return Ok(ModelModeAction::Skipped);
-    };
-    validate_advertised_value(response, AgentSessionConfigCategory::Mode, &selected)?;
-    config.agent.mode = Some(selected);
     Ok(ModelModeAction::Set)
 }
 

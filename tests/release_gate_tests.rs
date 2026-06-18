@@ -156,7 +156,6 @@ fn docker_entrypoint_maps_provider_init_env_vars() {
         ("ACP_STACK_INIT_PROVIDER", "--provider"),
         ("ACP_STACK_INIT_API_KEY_REF", "--api-key-ref"),
         ("ACP_STACK_INIT_MODEL", "--model"),
-        ("ACP_STACK_INIT_MODE", "--mode"),
         ("ACP_STACK_INIT_WORKSPACE_ROOT", "--workspace-root"),
         ("ACP_STACK_INIT_WORKSPACE_UPLOADS", "--workspace-uploads"),
     ] {
