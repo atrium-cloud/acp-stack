@@ -15,6 +15,8 @@ The session key can be regenerated. The admin key is generated once and is repla
 
 Plaintext auth keys are printed only at init or session-key regeneration time. Local state stores non-recoverable verifier rows for the session and admin keys; config and `secrets.age` do not store auth keys.
 
+`acps init serve` uses a separate bootstrap bearer token supplied by environment variable or file. That token is never persisted and is valid only for the bootstrap init routes. Hosted init status and event replay omit plaintext auth keys; keys appear only in the explicit WebSocket result handoff and are cleared from memory after `ack_result`.
+
 ## Key Tiering
 
 Tiering is strict and non-superset: the admin key is rejected on session-tier routes with `401 auth.wrong_kind`, and the session key is rejected on admin-tier routes with the same code. The admin key is not a superset of the session key.
