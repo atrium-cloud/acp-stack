@@ -149,6 +149,14 @@ The handover prints the two values with the reminder that the admin key is never
 
 `session_key` and `admin_key` appear only when that invocation freshly generated the keys. A later run preserves the verifier rows and reports `"preserved_keys": ["session", "admin"]` without reprinting either plaintext key. If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"` so automation can capture the one-time keys before retrying.
 
+## Hosted Streaming Init
+
+`acps init serve` runs a bootstrap-only HTTP/WebSocket server for hosted init. The hosted backend connects to the instance; the web UI does not connect to the instance directly. Bootstrap auth uses a bearer token from `ACP_STACK_INIT_TOKEN`, `--token-env`, or `--token-file`.
+
+The hosted flow follows the same init steps as interactive `acps init`, but v1 only streams the bootstrap prompts needed for agent selection, provider selection, required secret collection, custom-provider fields, model selection, and the simple confirmations on that path. Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the v1 scope use the same skip/default behavior as non-interactive init unless supplied through initial args.
+
+Final result delivery uses the same handoff payload shape as `--handoff-json`. Status and event replay report only non-secret state; plaintext session/admin keys are sent only in the WebSocket `result` frame. The backend must send `ack_result` after storing or forwarding the keys. After acknowledgement, the in-memory result is cleared, the session closes, and the bootstrap server exits successfully.
+
 ## Testflight
 
 After config and secrets are present, init can run a testflight that starts the configured agent and sends a minimal real prompt to verify the connection end to end — session creation, prompt completion, streamed updates, and a terminal prompt state, plus at least one filesystem-visible tool action when the agent supports tools. Testflight is opt-in because it may consume provider credits:

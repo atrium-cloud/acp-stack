@@ -41,6 +41,25 @@ JSON errors:
 
 Binary downloads and WebSocket frames are not wrapped in this envelope.
 
+## Bootstrap Init API
+
+`acps init serve` exposes only the bootstrap init routes below. Normal session/admin `/v1` routes are not mounted in this mode. Calls use exactly one `Authorization: Bearer <bootstrap-token>` header; the token comes from process input, not config or state.
+
+| Route                                      | Contract |
+| ------------------------------------------ | -------- |
+| `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args |
+| `GET /v1/init/sessions/{id}`              | returns non-secret status, pending input, recent progress, and `completed_awaiting_ack` when a result exists |
+| `GET /v1/init/sessions/{id}/events?after_seq=N` | replays non-secret progress and input lifecycle events |
+| `GET /v1/init/sessions/{id}/ws`           | upgrades to the hosted init WebSocket |
+
+`POST /v1/init/sessions` returns `{ "session_id": "...", "status": "running" }` in the standard success envelope. It returns `409 init.session_active` while another session is running or awaiting result acknowledgement.
+
+Status and event replay never include plaintext session/admin keys or secret input values. Pending input includes `request_id`, `style`, `prompt`, `required`, optional `default`, and visible option labels/hints. Client `input` frames must include the active `request_id`; stale input is rejected.
+
+WebSocket server frames are `hello`, `progress`, `input_required`, `input_accepted`, `result`, and `error`. Client frames are `input`, `cancel`, `replay_result`, and `ack_result`. The final `result` frame carries the platform handoff payload, including freshly generated keys when present.
+
+After `result`, the session remains `completed_awaiting_ack`. If the WebSocket drops before acknowledgement, the backend reconnects and sends `replay_result`; the server does not replay keys through status or generic events. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
+
 ## Config And Secrets
 
 | Route                                | Tier    | Contract                                                     |

@@ -5,6 +5,7 @@ mod prompt;
 mod provider;
 mod registry_apply;
 mod resume;
+mod serve;
 mod skills;
 mod starter_config;
 mod testflight;
@@ -12,7 +13,7 @@ mod testflight;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::config::{self, AgentSubagentConfig, Config, DataSourceConfig};
 use crate::error::{Result, StackError};
@@ -79,6 +80,20 @@ use super::logging::{
     SUPABASE_ENABLED_ENV, SUPABASE_SCHEMA_ENV, SUPABASE_URL_ENV, apply_supabase_config,
     disabled_supabase_config, enabled_supabase_config, ensure_supabase_secret,
 };
+
+#[derive(Debug, Args)]
+pub struct InitCommand {
+    #[command(subcommand)]
+    command: Option<InitSubcommand>,
+    #[command(flatten)]
+    args: InitArgs,
+}
+
+#[derive(Debug, Subcommand)]
+enum InitSubcommand {
+    /// Run the hosted bootstrap init HTTP/WebSocket server.
+    Serve(serve::InitServeArgs),
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct InitMcpStdioServer {
@@ -669,6 +684,7 @@ const KEY_HANDOVER_PRINTED_EVENT: &str = "auth.keys_handover_printed";
 enum InitOutputMode {
     Text,
     HandoffJson,
+    Hosted,
 }
 
 impl InitOutputMode {
@@ -679,12 +695,22 @@ impl InitOutputMode {
     fn is_handoff_json(self) -> bool {
         matches!(self, Self::HandoffJson)
     }
+
+    fn is_hosted(self) -> bool {
+        matches!(self, Self::Hosted)
+    }
+
+    fn is_machine_handoff(self) -> bool {
+        matches!(self, Self::HandoffJson | Self::Hosted)
+    }
 }
 
 macro_rules! init_println {
     ($output:expr, $($arg:tt)*) => {
         if $output.is_text() {
             println!($($arg)*);
+        } else if $output.is_hosted() {
+            prompt::emit_progress(format!($($arg)*));
         }
     };
 }
@@ -725,6 +751,9 @@ impl Drop for KeyHandover {
             }
             InitOutputMode::HandoffJson => {
                 self.print_failed_json();
+            }
+            InitOutputMode::Hosted => {
+                self.emit_failed_hosted_json();
             }
         }
     }
@@ -785,6 +814,13 @@ impl KeyHandover {
         Ok(())
     }
 
+    fn emit_handoff_payload(&mut self, status: &'static str, context: &InitHandoffContext) {
+        let payload = init_handoff_payload(status, context, self.keys.as_ref());
+        prompt::emit_result(payload);
+        self.keys.take();
+        self.emitted = true;
+    }
+
     fn print_failed_json(&mut self) {
         let Some(context) = self.failure_context.as_ref() else {
             return;
@@ -797,6 +833,19 @@ impl KeyHandover {
             Ok(rendered) => println!("{rendered}"),
             Err(error) => eprintln!("failed to serialize init handoff JSON: {error}"),
         }
+        self.keys.take();
+        self.emitted = true;
+    }
+
+    fn emit_failed_hosted_json(&mut self) {
+        let Some(context) = self.failure_context.as_ref() else {
+            return;
+        };
+        if !self.auth_ready {
+            return;
+        }
+        let payload = init_handoff_payload("failed", context, self.keys.as_ref());
+        prompt::emit_result(payload);
         self.keys.take();
         self.emitted = true;
     }
@@ -852,7 +901,9 @@ fn init_handoff_payload(
 /// prompt-suppressing automation flags. The single source of truth for the
 /// gate, so every prompt site honors the same contract.
 fn prompts_enabled_for(args: &InitArgs, stdin_is_terminal: bool) -> bool {
-    stdin_is_terminal && !args.non_interactive && !args.handoff_json
+    (stdin_is_terminal || prompt::hosted_driver_active())
+        && !args.non_interactive
+        && !args.handoff_json
 }
 
 pub(super) fn prompts_enabled(args: &InitArgs) -> bool {
@@ -994,12 +1045,31 @@ fn agent_install_progress_message(attempt: u32) -> String {
     }
 }
 
-pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
+pub(super) fn run_init(args: InitArgs, mode: InitMode) -> Result<()> {
     let output_mode = if args.handoff_json {
         InitOutputMode::HandoffJson
     } else {
         InitOutputMode::Text
     };
+    run_init_with_output(args, mode, output_mode)
+}
+
+pub(super) fn run_hosted_init(args: InitArgs, mode: InitMode) -> Result<()> {
+    run_init_with_output(args, mode, InitOutputMode::Hosted)
+}
+
+pub(super) fn run_init_command(command: InitCommand, mode: InitMode) -> Result<()> {
+    match command.command {
+        Some(InitSubcommand::Serve(args)) => serve::run_init_serve(args),
+        None => run_init(command.args, mode),
+    }
+}
+
+fn run_init_with_output(
+    mut args: InitArgs,
+    mode: InitMode,
+    output_mode: InitOutputMode,
+) -> Result<()> {
     if args.skip_workspace_init() && mode != InitMode::Dev {
         return Err(StackError::InvalidParam {
             field: "--skip-workspace-init",
@@ -2141,10 +2211,14 @@ pub(super) fn run_init(mut args: InitArgs, mode: InitMode) -> Result<()> {
             ),
         });
     }
-    if output_mode.is_handoff_json() {
+    if output_mode.is_machine_handoff() {
         key_handover.record(&store, &init_run.id)?;
         crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
-        key_handover.print_handoff_json("initialized", &handoff_context)?;
+        if output_mode.is_handoff_json() {
+            key_handover.print_handoff_json("initialized", &handoff_context)?;
+        } else {
+            key_handover.emit_handoff_payload("initialized", &handoff_context);
+        }
     } else {
         key_handover.print_and_record(&store, &init_run.id)?;
         crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
