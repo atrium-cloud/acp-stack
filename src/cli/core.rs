@@ -15,7 +15,9 @@ use super::agent::AgentCommand;
 use super::auth::AuthCommand;
 use super::config::ConfigCommand;
 use super::deps::DepsCommand;
-use super::init::{InitArgs, InitMode};
+#[cfg(feature = "dev-tools")]
+use super::init::InitArgs;
+use super::init::{InitCommand, InitMode};
 use super::installer::InstallerCommand;
 use super::logging::LoggingCommand;
 use super::logs::LogsCommand;
@@ -69,7 +71,7 @@ enum Command {
         shell: Shell,
     },
     /// Initialize local config, secrets, workspace, and agent files.
-    Init(Box<InitArgs>),
+    Init(Box<InitCommand>),
     /// Run development-only workflows.
     #[cfg(feature = "dev-tools")]
     #[command(after_help = "Examples:
@@ -230,7 +232,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Command::Init(args) => {
             output.reject_json("init")?;
-            super::init::run_init(*args, InitMode::Operator)
+            super::init::run_init_command(*args, InitMode::Operator)
         }
         #[cfg(feature = "dev-tools")]
         Command::Dev { command } => {

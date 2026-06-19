@@ -6,7 +6,7 @@
 
 | Area           | Commands                                                                    |
 | -------------- | --------------------------------------------------------------------------- |
-| Instance       | `acps init`, `acps serve`, `acps status`, `acps update`, `acps reset --yes` |
+| Instance       | `acps init`, `acps init serve`, `acps serve`, `acps status`, `acps update`, `acps reset --yes` |
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
@@ -56,6 +56,8 @@ Interactive init may prompt for a config source, then for missing choices. Optio
 `--workspace-root`, `--workspace-uploads`, and `--runtime-user` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
 
 `--handoff-json` is the platform automation output mode for init. It disables prompts and emits only the handoff JSON object described in [init.md](init.md#platform-handoff-json). `acps init --format json` remains rejected; scripts should use `--handoff-json` for this narrower contract.
+
+`acps init serve` starts the hosted bootstrap HTTP/WebSocket API documented in [api.md](api/api.md#bootstrap-init-api). It is authenticated with a bootstrap token from `ACP_STACK_INIT_TOKEN`, `--token-env`, or `--token-file`; the token is process-local and is not written to config or state.
 
 `acps init` creates or validates the workspace root and uploads directory, then installs the configured real agent. Adapter-backed agents install both the harness and adapter unless the catalog marks the harness as adapter-provided. `--code-from` appends Git code sources to a new starter config. `--data-from` appends local or HTTPS data sources. Interactive init can also collect S3 data sources. Plain HTTP URLs are rejected.
 
