@@ -47,6 +47,10 @@ fn acps_command_without_placebo() -> Command {
     Command::cargo_bin("acps").expect("binary should build")
 }
 
+fn primary_array_agent_value(config: &toml::Value) -> &toml::Value {
+    &config["array"]["targets"][0]["agent"]
+}
+
 struct AgentCliHarness {
     base_url: String,
     socket_path: std::path::PathBuf,
@@ -470,7 +474,7 @@ fn exports_default_home_config_to_stdout() {
         .assert()
         .success()
         .stdout(predicates::str::contains("[api]"))
-        .stdout(predicates::str::contains("[agent.install]"))
+        .stdout(predicates::str::contains("[array.targets.agent.install]"))
         .stdout(predicates::str::contains(SESSION_KEY).not())
         .stdout(predicates::str::contains(ADMIN_KEY).not())
         .stdout(predicates::str::contains("sk-proj-exampleinlinevalue").not());
@@ -500,7 +504,7 @@ fn exports_base64_default_home_config() {
     let toml = String::from_utf8(decoded).expect("decoded TOML should be UTF-8");
 
     assert!(toml.contains("[api]"));
-    assert!(toml.contains("[agent.install]"));
+    assert!(toml.contains("[array.targets.agent.install]"));
 }
 
 #[test]
@@ -531,7 +535,190 @@ fn exports_default_home_config_to_output_path() {
 
     let exported = fs::read_to_string(output_path).expect("export should be readable");
     assert!(exported.contains("[api]"));
-    assert!(exported.contains("[agent.install]"));
+    assert!(exported.contains("[array.targets.agent.install]"));
+}
+
+#[test]
+fn array_add_uses_canonical_agent_id_as_target() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("acps-config.toml");
+    fs::write(&config_path, VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "add", "codex"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("array target added: codex"));
+
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(config_path).expect("updated config should be readable"),
+    )
+    .expect("config should parse");
+    assert_eq!(config["array"]["primary_target"].as_str(), Some("opencode"));
+    assert_eq!(config["array"]["targets"][1]["id"].as_str(), Some("codex"));
+    assert_eq!(
+        config["array"]["targets"][1]["agent"]["id"].as_str(),
+        Some("codex")
+    );
+}
+
+#[test]
+fn array_add_rejects_noncanonical_agent_alias() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "add", "claude"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("claude"));
+}
+
+#[test]
+fn array_set_supports_target_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("acps-config.toml");
+    fs::write(&config_path, VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "array",
+            "set",
+            "--target",
+            "opencode",
+            "--custom-provider",
+            "--provider",
+            "custom-openai",
+            "--provider-name",
+            "Custom OpenAI",
+            "--base-url",
+            "https://llm.example.test/v1",
+            "--model",
+            "custom/model",
+            "--model-name",
+            "Custom Model",
+            "--context",
+            "1234",
+            "--output-max-tokens",
+            "567",
+            "--api-key-ref",
+            "CUSTOM_OPENAI_KEY",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("array target set: opencode"))
+        .stdout(predicates::str::contains("provider: custom-openai"));
+
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(config_path).expect("updated config should be readable"),
+    )
+    .expect("config should parse");
+    let provider = &primary_array_agent_value(&config)["provider"];
+    assert_eq!(provider["id"].as_str(), Some("custom-openai"));
+    assert_eq!(provider["model"].as_str(), Some("custom/model"));
+    assert_eq!(provider["api_key_ref"].as_str(), Some("CUSTOM_OPENAI_KEY"));
+    assert_eq!(
+        provider["custom"]["base_url"].as_str(),
+        Some("https://llm.example.test/v1")
+    );
+    assert_eq!(provider["custom"]["context"].as_integer(), Some(1234));
+    assert_eq!(
+        provider["custom"]["output_max_tokens"].as_integer(),
+        Some(567)
+    );
+}
+
+#[test]
+fn agent_default_set_updates_primary_target_only() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("acps-config.toml");
+    fs::write(&config_path, VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "add", "codex"])
+        .assert()
+        .success();
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "default", "set", "codex"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent default: codex"));
+
+    let config: toml::Value = toml::from_str(
+        &fs::read_to_string(config_path).expect("updated config should be readable"),
+    )
+    .expect("config should parse");
+    assert_eq!(config["array"]["primary_target"].as_str(), Some("codex"));
+    assert_eq!(
+        config["array"]["targets"][0]["id"].as_str(),
+        Some("opencode")
+    );
+    assert_eq!(config["array"]["targets"][1]["id"].as_str(), Some("codex"));
+}
+
+#[test]
+fn array_on_and_off_toggle_enabled_flag() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("acps-config.toml");
+    fs::write(&config_path, VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "on"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("array: on"));
+    let after_on: toml::Value =
+        toml::from_str(&fs::read_to_string(&config_path).expect("config should be readable"))
+            .expect("config should parse");
+    assert_eq!(after_on["array"]["enabled"].as_bool(), Some(true));
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "off"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("array: off"));
+    let after_off: toml::Value =
+        toml::from_str(&fs::read_to_string(&config_path).expect("config should be readable"))
+            .expect("config should parse");
+    assert_eq!(after_off["array"]["enabled"].as_bool(), Some(false));
+}
+
+#[test]
+fn array_start_rejects_non_default_target_when_array_is_off() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_path = config_dir.join("acps-config.toml");
+    fs::write(&config_path, VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "add", "codex"])
+        .assert()
+        .success();
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["array", "start", "--target", "codex"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Array mode is off"));
 }
 
 #[test]
@@ -708,7 +895,7 @@ fn init_custom_agent_writes_install_config() {
     let canonical = config
         .to_canonical_toml()
         .expect("custom agent config should round-trip canonical TOML");
-    assert!(canonical.contains("[agent.install]"));
+    assert!(canonical.contains("[array.targets.agent.install]"));
 }
 
 #[test]
@@ -2346,7 +2533,7 @@ fn init_provider_sets_opencode_auth_config_without_model() {
 
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
-    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
     assert!(!config.contains(r#"model ="#));
@@ -2725,7 +2912,7 @@ creates = {}
         .expect("stderr should include failed init run id");
     let config_before =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config_before.contains("[agent.provider]"));
+    assert!(!config_before.contains("[array.targets.agent.provider]"));
 
     fs::write(
         config_dir.join("agents.toml"),
@@ -2770,9 +2957,9 @@ creates = "opencode"
 
     let config_after =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(config_after.contains("[agent.provider]"));
+    assert!(config_after.contains("[array.targets.agent.provider]"));
     assert!(config_after.contains(r#"id = "myprovider""#));
-    assert!(config_after.contains("[agent.provider.custom]"));
+    assert!(config_after.contains("[array.targets.agent.provider.custom]"));
     assert!(config_after.contains(r#"name = "My Provider""#));
     assert!(config_after.contains(r#"api_key_ref = "MY_PROVIDER_API_KEY""#));
     assert!(config_after.contains(r#"base_url = "https://api.myprovider.example/v1""#));
@@ -2932,7 +3119,7 @@ fn init_custom_opencode_provider_writes_generated_config() {
         .expect("config should be readable");
     assert!(config.contains(r#"id = "myprovider""#));
     assert!(config.contains(r#"api_key_ref = "CUSTOM_API_KEY""#));
-    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains("[array.targets.agent.provider.custom]"));
     assert!(config.contains(r#"api = "chat-completions""#));
     assert!(config.contains(r#"env = ["CUSTOM_API_KEY"]"#));
 
@@ -2987,7 +3174,7 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     assert!(config.contains(r#"id = "anthropic""#));
-    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains("[array.targets.agent.provider.custom]"));
     assert!(config.contains(r#"api = "responses""#));
 
     let codex_path = tempdir.path().join(".codex").join("config.toml");
@@ -3063,7 +3250,7 @@ fn init_explicit_model_validates_against_acp_advertised_values() {
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     assert!(config.contains(r#"model = "openai/gpt-5.5""#));
-    assert!(!config.contains("[agent.subagent"));
+    assert!(!config.contains("[array.targets.agent.subagent"));
 
     let opencode_path = tempdir
         .path()
@@ -3690,7 +3877,7 @@ fn init_custom_codex_provider_allows_openai_provider_id() {
     let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     assert!(config.contains(r#"api_key_ref = "CUSTOM_OPENAI_API_KEY""#));
-    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains("[array.targets.agent.provider.custom]"));
 }
 
 #[test]
@@ -3756,7 +3943,7 @@ fn init_provider_failure_persists_selected_agent_for_resume() {
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(config.contains(r#"id = "amp""#));
     assert!(!config.contains(r#"id = "opencode""#));
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -3822,7 +4009,7 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"model = "openai/gpt-5.5""#));
     assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
@@ -3924,7 +4111,7 @@ fn agent_set_custom_opencode_provider_writes_generated_config() {
         .expect("updated config should be readable");
     assert!(config.contains(r#"id = "myprovider""#));
     assert!(config.contains(r#"api_key_ref = "CUSTOM_API_KEY""#));
-    assert!(config.contains("[agent.provider.custom]"));
+    assert!(config.contains("[array.targets.agent.provider.custom]"));
     assert!(config.contains(r#"context = 200000"#));
     assert!(config.contains(r#"output_max_tokens = 65536"#));
 
@@ -3986,7 +4173,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.subagent.provider]"));
+    assert!(config.contains("[array.targets.agent.subagent.provider]"));
     assert!(config.contains(r#"model = "opencode-go/deepseek-v4-flash""#));
 
     let opencode_path = tempdir
@@ -4112,7 +4299,7 @@ fn subagent_match_clears_explicit_provider_and_uses_main_model() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(!config.contains("[agent.subagent"));
+    assert!(!config.contains("[array.targets.agent.subagent"));
 
     let opencode_path = tempdir
         .path()
@@ -4152,7 +4339,7 @@ fn subagent_match_reenables_inherit_after_disable() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(!config.contains("[agent.subagent"));
+    assert!(!config.contains("[array.targets.agent.subagent"));
 
     let opencode_path = tempdir
         .path()
@@ -4231,9 +4418,9 @@ fn subagent_disable_writes_invalid_opencode_small_model() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.subagent]"));
+    assert!(config.contains("[array.targets.agent.subagent]"));
     assert!(config.contains("disabled = true"));
-    assert!(!config.contains("[agent.subagent.provider]"));
+    assert!(!config.contains("[array.targets.agent.subagent.provider]"));
 
     let opencode_path = tempdir
         .path()
@@ -4273,7 +4460,7 @@ fn subagent_free_infers_openrouter_from_main_provider() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.subagent.provider]"));
+    assert!(config.contains("[array.targets.agent.subagent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
     assert!(config.contains(r#"model = "openrouter/free""#));
     assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
@@ -4477,7 +4664,7 @@ fn subagent_set_inherits_provider_and_api_key_ref_from_main_when_omitted() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.subagent.provider]"));
+    assert!(config.contains("[array.targets.agent.subagent.provider]"));
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"model = "openai/gpt-5.5-mini""#));
     assert!(config.contains(r#"api_key_ref = "OPENAI_CUSTOM_KEY""#));
@@ -4715,7 +4902,7 @@ creates = "opencode"
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
     assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
     assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
@@ -4765,7 +4952,7 @@ fn agent_set_codex_openrouter_writes_responses_provider_config() {
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
     assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
     assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
@@ -4838,13 +5025,13 @@ wire_api = "responses"
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"model = "gpt-5.5""#));
     assert!(config.contains("env = []"));
     let parsed_config: toml::Value = toml::from_str(&config).expect("config should parse");
     assert!(
-        parsed_config["agent"]["provider"]
+        primary_array_agent_value(&parsed_config)["provider"]
             .get("api_key_ref")
             .is_none()
     );
@@ -4892,7 +5079,7 @@ fn agent_set_codex_openai_rejects_api_key_ref() {
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -4914,7 +5101,7 @@ fn agent_set_codex_openai_requires_model() {
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -5130,10 +5317,11 @@ fn agent_set_claude_code_native_provider_presets_write_headless_config() {
         let config_text = fs::read_to_string(config_dir.join("acps-config.toml"))
             .expect("config should be readable");
         let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
-        let provider = &config["agent"]["provider"];
+        let agent = primary_array_agent_value(&config);
+        let provider = &agent["provider"];
         assert_eq!(provider["id"].as_str(), Some(case.provider));
         assert_eq!(provider["model"].as_str(), Some(case.model));
-        let env_refs = config["agent"]["env"]
+        let env_refs = agent["env"]
             .as_array()
             .expect("agent env should be an array");
         for expected in case.env_refs {
@@ -5266,7 +5454,7 @@ fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
             .expect("config should be readable");
         let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
         assert_eq!(
-            config["agent"]["provider"]["api_key_ref"].as_str(),
+            primary_array_agent_value(&config)["provider"]["api_key_ref"].as_str(),
             Some(case.api_key_ref)
         );
 
@@ -5458,7 +5646,7 @@ fn agent_set_claude_code_third_party_provider_without_model_uses_profile_default
         let config_text = fs::read_to_string(config_dir.join("acps-config.toml"))
             .expect("config should be readable");
         let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
-        let provider = &config["agent"]["provider"];
+        let provider = &primary_array_agent_value(&config)["provider"];
         assert_eq!(provider["id"].as_str(), Some(case.provider));
         assert_eq!(provider["api_key_ref"].as_str(), Some(case.api_key_ref));
         assert!(provider.get("model").is_none());
@@ -5639,7 +5827,7 @@ creates = "opencode"
     let after =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(after.contains(r#"env = ["CURSOR_API_KEY"]"#));
-    assert!(!after.contains("[agent.provider]"));
+    assert!(!after.contains("[array.targets.agent.provider]"));
     assert!(after.contains(r#"model = "gpt-5.5[context=272k,reasoning=medium,fast=false]""#));
     assert!(!after.contains(r#"api_key_ref = "CURSOR_API_KEY""#));
 }
@@ -5679,7 +5867,7 @@ creates = "opencode"
 
     let after =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!after.contains("[agent.provider]"));
+    assert!(!after.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -5777,7 +5965,7 @@ api_key_ref = "OPENAI_API_KEY""#,
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(config.contains("[agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"model = "openai/gpt-5.5""#));
 }
 
@@ -5806,7 +5994,7 @@ fn agent_set_rejects_provider_not_supported_by_agent() {
 
     let after =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!after.contains("[agent.provider]"));
+    assert!(!after.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -5836,7 +6024,7 @@ fn agent_set_rejects_providers_without_api_key_mapping() {
 
     let after =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!after.contains("[agent.provider]"));
+    assert!(!after.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -5975,7 +6163,7 @@ fn agent_set_without_model_lists_choices_without_mutating_config() {
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -6009,7 +6197,7 @@ fn agent_set_does_not_partially_write_main_config_when_provisioning_fails() {
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
     assert!(!config.contains(r#""OPENAI_API_KEY""#));
 }
 
@@ -6040,7 +6228,7 @@ fn agent_set_validates_model_against_acp_config_options() {
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -6081,7 +6269,7 @@ creates = "opencode"
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(config.contains(r#"mode = "smart""#));
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -6107,7 +6295,7 @@ fn agent_set_opencode_accepts_mode_only() {
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(config.contains(r#"mode = "plan""#));
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -6150,7 +6338,7 @@ creates = "opencode"
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(config.contains(r#"mode = "plan""#));
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -6178,7 +6366,7 @@ fn agent_set_codex_accepts_mode_only() {
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(config.contains(r#"mode = "full-access""#));
-    assert!(!config.contains("[agent.provider]"));
+    assert!(!config.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -6437,7 +6625,7 @@ fn status_reports_config_state_workspace_agent_sink_and_deps() {
         .success()
         .stdout(predicates::str::contains("config:    ok ("))
         .stdout(predicates::str::contains("state:     ok ("))
-        .stdout(predicates::str::contains("schema=21"))
+        .stdout(predicates::str::contains("schema=22"))
         .stdout(predicates::str::contains("latest_event="))
         .stdout(predicates::str::contains(format!(
             "workspace: ok ({workspace_str})"
@@ -7677,6 +7865,28 @@ fn agent_switch_accepts_drop_flag() {
         .failure()
         .stderr(predicates::str::contains("--admin-key"))
         .stderr(predicates::str::contains("unexpected argument").not());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn array_status_overlays_daemon_state_when_session_access_is_available() {
+    let harness = AgentCliHarness::spawn().await;
+    let home = tempfile::tempdir().expect("tempdir should be created");
+    write_cli_home_with_socket(
+        home.path(),
+        &harness.base_url,
+        ADMIN_KEY,
+        Some(&harness.socket_path),
+    );
+
+    acps_command()
+        .env("HOME", home.path())
+        .env("ACP_STACK_SESSION_KEY", SESSION_KEY)
+        .args(["array", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("daemon: ready"))
+        .stdout(predicates::str::contains("target: opencode"))
+        .stdout(predicates::str::contains("state=stopped"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9569,10 +9779,10 @@ fn init_agent_flag_updates_config_non_interactively() {
     assert!(written.contains(r#""--model-config-option""#));
     assert!(written.contains(r#""placebo-model""#));
     assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
-    assert!(written.contains("[agent.auto_update]"));
+    assert!(written.contains("[array.targets.agent.auto_update]"));
     assert!(written.contains("enabled = true"));
     assert!(written.contains(r#"frequency = "1d""#));
-    assert!(!written.contains("[agent.install]"));
+    assert!(!written.contains("[array.targets.agent.install]"));
 }
 
 #[test]
@@ -11850,7 +12060,7 @@ fn init_resume_restores_recorded_custom_provider_args_after_secret_failure() {
         fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
             .expect("config should be readable");
     assert!(config_after.contains(r#"id = "myprovider""#));
-    assert!(config_after.contains("[agent.provider.custom]"));
+    assert!(config_after.contains("[array.targets.agent.provider.custom]"));
     assert!(config_after.contains(r#"name = "My Provider""#));
     assert!(config_after.contains(r#"api_key_ref = "MY_PROVIDER_API_KEY""#));
     assert!(config_after.contains(r#"base_url = "https://api.myprovider.example/v1""#));

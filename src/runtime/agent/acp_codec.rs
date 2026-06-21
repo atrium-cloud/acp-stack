@@ -180,6 +180,7 @@ fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {
 /// failure so the agent's prompt turn always settles deterministically.
 pub(crate) async fn resolve_acp_permission(
     service: &PermissionService,
+    sink: &Arc<dyn SessionEventSink>,
     request: RequestPermissionRequest,
 ) -> RequestPermissionOutcome {
     // Serialize the full request for the durable detail record. The schema
@@ -192,7 +193,10 @@ pub(crate) async fn resolve_acp_permission(
             return RequestPermissionOutcome::Cancelled;
         }
     };
-    let session_id = request.session_id.0.to_string();
+    let agent_session_id = request.session_id.0.to_string();
+    let Some(session_id) = sink.local_session_id(&agent_session_id).await else {
+        return RequestPermissionOutcome::Cancelled;
+    };
     let first_option_id = request
         .options
         .first()
@@ -323,8 +327,11 @@ mod tests {
         let (_dir, service) = fresh_service().await;
         let request = fake_request("sess_test");
         let service_for_task = service.clone();
+        let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
         let outcome_task =
-            tokio::spawn(async move { resolve_acp_permission(&service_for_task, request).await });
+            tokio::spawn(
+                async move { resolve_acp_permission(&service_for_task, &sink, request).await },
+            );
 
         // Drain the new permission row + approve it.
         let mut id = None;
@@ -356,8 +363,11 @@ mod tests {
         let (_dir, service) = fresh_service().await;
         let request = fake_request("sess_test");
         let service_for_task = service.clone();
+        let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
         let outcome_task =
-            tokio::spawn(async move { resolve_acp_permission(&service_for_task, request).await });
+            tokio::spawn(
+                async move { resolve_acp_permission(&service_for_task, &sink, request).await },
+            );
 
         let mut id = None;
         for _ in 0..50 {

@@ -7,7 +7,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
 
-use crate::api::routes::agent::agent_capabilities_handler;
+use crate::api::routes::agent::{
+    agent_capabilities_handler, array_agent_capabilities_handler, array_status_handler,
+};
 use crate::api::routes::commands::{
     commands_cancel_handler, commands_get_handler, commands_list_handler, commands_output_handler,
     commands_submit_handler,
@@ -61,6 +63,11 @@ pub fn build_local_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route("/v1/array/status", get(array_status_handler))
+        .route(
+            "/v1/array/targets/{target_id}/capabilities",
+            get(array_agent_capabilities_handler),
+        )
         .route("/v1/security/check", get(security_check_handler))
         .route("/v1/logs/events", get(logs_events_handler))
         .route("/v1/logs/commands", get(logs_commands_handler))

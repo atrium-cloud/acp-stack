@@ -17,18 +17,18 @@ use std::path::{Path, PathBuf};
 
 pub use self::schema::{
     AgentAdapterConfig, AgentAutoUpdateConfig, AgentConfig, AgentCustomProviderConfig,
-    AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig, ApiConfig, CloudflareEdgeConfig,
-    CodeSourceConfig, CommandsConfig, CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY,
-    DEFAULT_COMMAND_PROGRESS_INTERVAL, DEFAULT_CUSTOM_MODEL_CONTEXT,
-    DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
-    DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
-    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY,
-    DataSourceConfig, DependenciesConfig, DependencyEntry, DependencyInstallAction,
-    DependencyInstallScope, EdgeConfig, HttpHeaderRef, LocalConfig, LocalSessionAuth,
-    LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
-    PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SecurityConfig, SecurityHttpConfig,
-    StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig,
-    UpdatesConfig, WorkspaceConfig,
+    AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig, ApiConfig, ArrayConfig,
+    ArrayTargetConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig, CustomProviderApi,
+    DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+    DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
+    DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL,
+    DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig,
+    DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
+    EdgeConfig, HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig,
+    McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
+    PromptsConfig, SecurityConfig, SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy,
+    SupabaseLoggingBackend, SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
 };
 pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
@@ -48,7 +48,9 @@ pub struct Config {
     pub updates: UpdatesConfig,
     pub workspace: WorkspaceConfig,
     pub logging: LoggingConfig,
+    #[serde(skip_serializing)]
     pub agent: AgentConfig,
+    pub array: ArrayConfig,
     #[serde(default)]
     pub permissions: PermissionsConfig,
     #[serde(default)]
@@ -111,6 +113,8 @@ struct RawConfig {
     logging: Option<LoggingConfig>,
     agent: Option<AgentConfig>,
     #[serde(default)]
+    array: Option<ArrayConfig>,
+    #[serde(default)]
     permissions: Option<PermissionsConfig>,
     #[serde(default)]
     commands: Option<CommandsConfig>,
@@ -156,7 +160,19 @@ impl Config {
     }
 
     pub fn to_canonical_toml(&self) -> Result<String> {
-        Ok(toml::to_string_pretty(self)?)
+        let mut canonical = self.clone();
+        if let Some(primary_index) = canonical
+            .array
+            .targets
+            .iter()
+            .position(|target| target.id == canonical.array.primary_target)
+        {
+            canonical.array.primary_target = canonical.agent.id.clone();
+            canonical.array.targets[primary_index].id = canonical.agent.id.clone();
+            let primary = &mut canonical.array.targets[primary_index];
+            primary.agent = canonical.agent.clone();
+        }
+        Ok(toml::to_string_pretty(&canonical)?)
     }
 
     fn validate(&self) -> Result<()> {
@@ -228,6 +244,36 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
         section: "security",
     })?;
 
+    let array = match (raw.array, raw.agent) {
+        (Some(array), Some(agent)) => {
+            let mut array = array;
+            if let Some(primary) = array.primary_target_mut() {
+                let primary_target = agent.id.clone();
+                primary.id = primary_target.clone();
+                primary.agent = agent;
+                array.primary_target = primary_target;
+            } else {
+                return Err(StackError::InvalidParam {
+                    field: "array.primary_target",
+                    reason: "must reference an entry in array.targets".to_owned(),
+                });
+            }
+            array
+        }
+        (Some(array), None) => array,
+        (None, Some(agent)) => ArrayConfig::from_agent(agent),
+        (None, None) => {
+            return Err(StackError::MissingSection { section: "agent" });
+        }
+    };
+    let agent = array
+        .primary_target()
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "array.primary_target",
+            reason: "must reference an entry in array.targets".to_owned(),
+        })?
+        .agent
+        .clone();
     let config = Config {
         config_version: raw.config_version.unwrap_or(SUPPORTED_CONFIG_VERSION),
         api: raw
@@ -246,9 +292,8 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
         logging: raw
             .logging
             .ok_or(StackError::MissingSection { section: "logging" })?,
-        agent: raw
-            .agent
-            .ok_or(StackError::MissingSection { section: "agent" })?,
+        agent,
+        array,
         permissions: raw.permissions.unwrap_or_default(),
         commands: raw.commands.unwrap_or_default(),
         prompts: raw.prompts.unwrap_or_default(),

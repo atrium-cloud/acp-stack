@@ -1,4 +1,5 @@
 mod check;
+mod default;
 mod install;
 mod set;
 mod status;
@@ -48,6 +49,26 @@ pub enum AgentCommand {
     Set(AgentSetArgs),
     /// Switch to another supported agent harness.
     Switch(AgentSwitchArgs),
+    /// Select the default Array target for unqualified agent and session commands.
+    Default(AgentDefaultArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentDefaultArgs {
+    #[command(subcommand)]
+    pub(super) command: AgentDefaultCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentDefaultCommand {
+    /// Set the default target by canonical agent id.
+    Set(AgentDefaultSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentDefaultSetArgs {
+    /// Configured Array target id, which is the canonical agent id.
+    pub(super) agent: String,
 }
 
 #[derive(Debug, Args)]
@@ -202,6 +223,7 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
             output.reject_json("agent switch")?;
             self::switch::run_agent_switch(args)
         }
+        AgentCommand::Default(args) => self::default::run_agent_default(args, output.effective()),
     }
 }
 

@@ -125,4 +125,30 @@ impl StateStore {
         tx.commit()?;
         Ok(value)
     }
+
+    /// Like `persist_with_outbox`, but for an operation that writes several
+    /// rows that must commit together. `inner` performs the write(s) and
+    /// returns the source ids it changed; one outbox row is enqueued per id
+    /// before commit so external logging stays consistent with the local
+    /// write. The whole batch is atomic — a failure rolls back every row.
+    pub(super) fn persist_many_with_outbox<F>(
+        &self,
+        source_table: &str,
+        created_at: &str,
+        inner: F,
+    ) -> Result<Vec<String>>
+    where
+        F: FnOnce(&Connection) -> Result<Vec<String>>,
+    {
+        if !self.external_logging_enabled {
+            return inner(&self.connection);
+        }
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let ids = inner(&tx)?;
+        for id in &ids {
+            sink_outbox::enqueue(&tx, source_table, id, created_at)?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
 }

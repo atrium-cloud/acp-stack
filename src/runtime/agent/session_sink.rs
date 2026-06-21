@@ -23,6 +23,13 @@ use crate::state::{PromptStatus, StateStore};
 /// would drop in-flight writes. `flush` waits for any background writer task
 /// owned by the sink to drain; the bridge calls it during graceful shutdown.
 pub trait SessionEventSink: Send + Sync + 'static {
+    fn local_session_id<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        Box::pin(async move { Some(agent_session_id.to_owned()) })
+    }
+
     fn append<'a>(
         &'a self,
         session_id: &'a str,
@@ -48,6 +55,8 @@ pub trait SessionEventSink: Send + Sync + 'static {
 /// `flush()` drops the sender, the writer task drains the remaining queue,
 /// and we await it during graceful shutdown so no notification rows are lost.
 pub struct StateStoreSessionSink {
+    target_id: String,
+    state: Arc<TokioMutex<StateStore>>,
     tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionEventRow>>>,
     writer: TokioMutex<Option<JoinHandle<()>>>,
 }
@@ -165,14 +174,15 @@ fn read_token_field(usage: &serde_json::Value, key: &str) -> Option<i64> {
 pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
 
 impl StateStoreSessionSink {
-    pub fn new(state: Arc<TokioMutex<StateStore>>) -> Self {
+    pub fn new(target_id: String, state: Arc<TokioMutex<StateStore>>) -> Self {
         // Session-update fanout now happens inside
         // `append_session_event_with_source` itself because `StateStore` owns
         // the live `EventHub`; the sink no longer needs its own handle.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SessionEventRow>(SESSION_EVENT_BUFFER);
+        let writer_state = state.clone();
         let writer = tokio::spawn(async move {
             while let Some(row) = rx.recv().await {
-                let guard = state.lock().await;
+                let guard = writer_state.lock().await;
                 match guard.append_session_event_with_source(
                     &row.session_id,
                     "info",
@@ -235,6 +245,8 @@ impl StateStoreSessionSink {
             }
         });
         Self {
+            target_id,
+            state,
             tx: TokioMutex::new(Some(tx)),
             writer: TokioMutex::new(Some(writer)),
         }
@@ -242,20 +254,52 @@ impl StateStoreSessionSink {
 }
 
 impl SessionEventSink for StateStoreSessionSink {
+    fn local_session_id<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let guard = self.state.lock().await;
+            match guard.get_session_by_target_agent_session_id(&self.target_id, agent_session_id) {
+                Ok(Some(record)) => Some(record.id),
+                Ok(None) => {
+                    tracing::warn!(
+                        target_id = %self.target_id,
+                        agent_session_id,
+                        "dropping ACP session update for unknown Array target session"
+                    );
+                    None
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        target_id = %self.target_id,
+                        agent_session_id,
+                        "failed to resolve ACP session id to local session id"
+                    );
+                    None
+                }
+            }
+        })
+    }
+
     fn append<'a>(
         &'a self,
-        session_id: &'a str,
+        agent_session_id: &'a str,
         kind: &'a str,
         payload_json: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
+            let Some(session_id) = self.local_session_id(agent_session_id).await else {
+                return;
+            };
             let sender = {
                 let guard = self.tx.lock().await;
                 match guard.as_ref() {
                     Some(tx) => tx.clone(),
                     None => {
                         tracing::warn!(
-                            session_id = %session_id,
+                            agent_session_id,
                             "session event sink is closed; dropping update"
                         );
                         return;
@@ -264,7 +308,7 @@ impl SessionEventSink for StateStoreSessionSink {
             };
             if let Err(err) = sender
                 .send(SessionEventRow {
-                    session_id: session_id.to_owned(),
+                    session_id,
                     kind: kind.to_owned(),
                     payload_json: payload_json.to_owned(),
                 })
@@ -272,7 +316,7 @@ impl SessionEventSink for StateStoreSessionSink {
             {
                 tracing::warn!(
                     error = %err,
-                    session_id = %session_id,
+                    agent_session_id,
                     "session event writer task ended; dropping update"
                 );
             }

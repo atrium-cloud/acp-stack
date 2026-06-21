@@ -41,6 +41,8 @@ pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub id: String,
+    pub target_id: String,
+    pub agent_session_id: String,
     pub created_at: String,
     pub updated_at: String,
     pub status: String,
@@ -53,6 +55,8 @@ pub struct SessionRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionActivityRecord {
     pub id: String,
+    pub target_id: String,
+    pub agent_session_id: String,
     pub created_at: String,
     pub updated_at: String,
     pub status: String,
@@ -66,6 +70,8 @@ pub struct SessionActivityRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionStatusRecord {
     pub id: String,
+    pub target_id: String,
+    pub agent_session_id: String,
     pub created_at: String,
     pub updated_at: String,
     pub status: String,
@@ -118,6 +124,7 @@ pub struct NewSessionRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedSessionRecord {
     pub id: String,
+    pub agent_session_id: String,
     pub agent_id: String,
     pub cwd: String,
     pub title: Option<String>,
@@ -281,13 +288,15 @@ impl std::str::FromStr for FailureClass {
 pub(super) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     Ok(SessionRecord {
         id: row.get(0)?,
-        created_at: row.get(1)?,
-        updated_at: row.get(2)?,
-        status: row.get(3)?,
-        agent_id: row.get(4)?,
-        cwd: row.get(5)?,
-        title: row.get(6)?,
-        metadata_json: row.get(7)?,
+        target_id: row.get(1)?,
+        agent_session_id: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        status: row.get(5)?,
+        agent_id: row.get(6)?,
+        cwd: row.get(7)?,
+        title: row.get(8)?,
+        metadata_json: row.get(9)?,
     })
 }
 
@@ -312,7 +321,7 @@ pub(super) fn row_to_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptR
 impl StateStore {
     pub fn query_sessions(&self, filter: SessionFilter<'_>) -> Result<Vec<SessionRecord>> {
         let mut sql = String::from(
-            "SELECT id, created_at, updated_at, status, agent_id, cwd, title, metadata_json \
+            "SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json \
              FROM sessions WHERE 1=1",
         );
         let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
@@ -327,6 +336,10 @@ impl StateStore {
         if let Some(status) = filter.status {
             sql.push_str(" AND status = ?");
             bindings.push(rusqlite::types::Value::Text(status.to_owned()));
+        }
+        if let Some(target_id) = filter.target_id {
+            sql.push_str(" AND target_id = ?");
+            bindings.push(rusqlite::types::Value::Text(target_id.to_owned()));
         }
         if let Some(after) = filter.after_id {
             match filter.order {
@@ -355,11 +368,30 @@ impl StateStore {
             .connection()
             .query_row(
                 r#"
-                SELECT id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
+                SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
                 FROM sessions
                 WHERE id = ?1
                 "#,
                 params![id],
+                row_to_session,
+            )
+            .optional()?)
+    }
+
+    pub fn get_session_by_target_agent_session_id(
+        &self,
+        target_id: &str,
+        agent_session_id: &str,
+    ) -> Result<Option<SessionRecord>> {
+        Ok(self
+            .connection()
+            .query_row(
+                r#"
+                SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
+                FROM sessions
+                WHERE target_id = ?1 AND agent_session_id = ?2
+                "#,
+                params![target_id, agent_session_id],
                 row_to_session,
             )
             .optional()?)
@@ -403,7 +435,7 @@ impl StateStore {
         let mut statement = self.connection().prepare(
             r#"
             WITH active_sessions AS (
-                SELECT id, created_at, updated_at, status, agent_id, cwd, title
+                SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title
                 FROM sessions
                 WHERE status = ?1
             ),
@@ -447,6 +479,8 @@ impl StateStore {
                 FROM activity
             )
             SELECT s.id,
+                   s.target_id,
+                   s.agent_session_id,
                    s.created_at,
                    s.updated_at,
                    s.status,
@@ -472,14 +506,16 @@ impl StateStore {
             |row| {
                 Ok(SessionActivityRecord {
                     id: row.get(0)?,
-                    created_at: row.get(1)?,
-                    updated_at: row.get(2)?,
-                    status: row.get(3)?,
-                    agent_id: row.get(4)?,
-                    cwd: row.get(5)?,
-                    title: row.get(6)?,
-                    last_activity_at: row.get(7)?,
-                    last_activity_from: row.get(8)?,
+                    target_id: row.get(1)?,
+                    agent_session_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    status: row.get(5)?,
+                    agent_id: row.get(6)?,
+                    cwd: row.get(7)?,
+                    title: row.get(8)?,
+                    last_activity_at: row.get(9)?,
+                    last_activity_from: row.get(10)?,
                 })
             },
         )?;
@@ -489,16 +525,23 @@ impl StateStore {
     pub fn query_session_status_window(
         &self,
         since: &str,
+        target_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<SessionStatusRecord>> {
         let mut statement = self.connection().prepare(
             r#"
-            WITH activity AS (
+            WITH scoped_sessions AS (
+                SELECT id
+                FROM sessions
+                WHERE (?5 IS NULL OR target_id = ?5)
+            ),
+            activity AS (
                 SELECT s.id AS session_id,
                        s.updated_at AS activity_at,
                        ?2 AS actor,
                        0 AS priority
                 FROM sessions s
+                JOIN scoped_sessions ss ON ss.id = s.id
                 WHERE s.updated_at >= ?1
                 UNION ALL
                 SELECT p.session_id,
@@ -506,6 +549,7 @@ impl StateStore {
                        ?2 AS actor,
                        1 AS priority
                 FROM prompts p
+                JOIN scoped_sessions ss ON ss.id = p.session_id
                 WHERE p.created_at >= ?1
                 UNION ALL
                 SELECT p.session_id,
@@ -513,6 +557,7 @@ impl StateStore {
                        ?3 AS actor,
                        2 AS priority
                 FROM prompts p
+                JOIN scoped_sessions ss ON ss.id = p.session_id
                 WHERE p.status <> 'pending'
                   AND p.updated_at >= ?1
                 UNION ALL
@@ -521,6 +566,7 @@ impl StateStore {
                        CASE WHEN e.source = ?4 THEN ?3 ELSE ?2 END AS actor,
                        3 AS priority
                 FROM events e
+                JOIN scoped_sessions ss ON ss.id = e.session_id
                 WHERE e.session_id IS NOT NULL
                   AND e.created_at >= ?1
                 UNION ALL
@@ -529,6 +575,7 @@ impl StateStore {
                        ?3 AS actor,
                        4 AS priority
                 FROM permission_requests pr
+                JOIN scoped_sessions ss ON ss.id = pr.subject_id
                 WHERE pr.status = 'pending'
                   AND pr.source = 'acp'
                   AND pr.subject_id IS NOT NULL
@@ -590,6 +637,8 @@ impl StateStore {
                 WHERE row_number = 1
             )
             SELECT s.id,
+                   s.target_id,
+                   s.agent_session_id,
                    s.created_at,
                    s.updated_at,
                    s.status,
@@ -624,7 +673,7 @@ impl StateStore {
             LEFT JOIN latest_prompts lp ON lp.session_id = s.id
             LEFT JOIN pending_acp_permissions pp ON pp.session_id = s.id
             ORDER BY r.activity_at DESC, s.id DESC
-            LIMIT ?5
+            LIMIT ?6
             "#,
         )?;
         let rows = statement.query_map(
@@ -633,46 +682,49 @@ impl StateStore {
                 SESSION_ACTIVITY_ACTOR_USER,
                 SESSION_ACTIVITY_ACTOR_AGENT,
                 EVENT_SOURCE_ACP,
+                target_id,
                 i64::from(limit),
             ],
             |row| {
-                let prompt_id: Option<String> = row.get(9)?;
+                let prompt_id: Option<String> = row.get(11)?;
                 let latest_prompt = match prompt_id {
                     Some(id) => Some(SessionStatusPromptRecord {
                         id,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
-                        status: row.get(12)?,
-                        stop_reason: row.get(13)?,
-                        error_code: row.get(14)?,
-                        error_message: row.get(15)?,
-                        message_id: row.get(16)?,
-                        message_id_acknowledged: row.get::<_, Option<i64>>(17)?.unwrap_or(0) != 0,
+                        created_at: row.get(12)?,
+                        updated_at: row.get(13)?,
+                        status: row.get(14)?,
+                        stop_reason: row.get(15)?,
+                        error_code: row.get(16)?,
+                        error_message: row.get(17)?,
+                        message_id: row.get(18)?,
+                        message_id_acknowledged: row.get::<_, Option<i64>>(19)?.unwrap_or(0) != 0,
                     }),
                     None => None,
                 };
-                let permission_id: Option<String> = row.get(18)?;
+                let permission_id: Option<String> = row.get(20)?;
                 let pending_permission = match permission_id {
                     Some(id) => Some(SessionStatusPermissionRecord {
                         id,
-                        created_at: row.get(19)?,
-                        updated_at: row.get(20)?,
+                        created_at: row.get(21)?,
+                        updated_at: row.get(22)?,
                     }),
                     None => None,
                 };
                 Ok(SessionStatusRecord {
                     id: row.get(0)?,
-                    created_at: row.get(1)?,
-                    updated_at: row.get(2)?,
-                    status: row.get(3)?,
-                    agent_id: row.get(4)?,
-                    cwd: row.get(5)?,
-                    title: row.get(6)?,
-                    last_activity_at: row.get(7)?,
-                    last_activity_from: row.get(8)?,
+                    target_id: row.get(1)?,
+                    agent_session_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    status: row.get(5)?,
+                    agent_id: row.get(6)?,
+                    cwd: row.get(7)?,
+                    title: row.get(8)?,
+                    last_activity_at: row.get(9)?,
+                    last_activity_from: row.get(10)?,
                     latest_prompt,
                     pending_permission,
-                    prompt_stream_started_at: row.get(21)?,
+                    prompt_stream_started_at: row.get(23)?,
                 })
             },
         )?;
@@ -680,10 +732,22 @@ impl StateStore {
     }
 
     pub fn insert_session(&self, record: NewSessionRecord) -> Result<SessionRecord> {
+        let target_id = record.agent_id.clone();
+        self.insert_session_for_target(&target_id, record.id.clone(), record)
+    }
+
+    pub fn insert_session_for_target(
+        &self,
+        target_id: &str,
+        agent_session_id: String,
+        record: NewSessionRecord,
+    ) -> Result<SessionRecord> {
         validate_json_payload(self.connection(), &record.metadata_json)?;
         let now = current_timestamp();
         let row = SessionRecord {
             id: record.id,
+            target_id: target_id.to_owned(),
+            agent_session_id,
             created_at: now.clone(),
             updated_at: now,
             status: SESSION_STATUS_ACTIVE.to_owned(),
@@ -696,11 +760,13 @@ impl StateStore {
             conn.execute(
                 r#"
                 INSERT INTO sessions
-                    (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     row.id,
+                    row.target_id,
+                    row.agent_session_id,
                     row.created_at,
                     row.updated_at,
                     row.status,
@@ -715,13 +781,35 @@ impl StateStore {
         Ok(row)
     }
 
+    /// Convenience wrapper that derives each record's target from its
+    /// `agent_id` and upserts one record at a time. Unlike a primary-key upsert
+    /// this dedups on `(target_id, agent_session_id)` — the agent's session id
+    /// is the stable external identity, not the internal row `id`. Used by
+    /// tests and any caller that has no explicit per-target grouping; the
+    /// daemon sync path calls `upsert_listed_sessions_for_target` directly.
     pub fn upsert_listed_sessions(
         &self,
         records: Vec<ListedSessionRecord>,
     ) -> Result<ListedSessionUpsertCounts> {
         let mut counts = ListedSessionUpsertCounts::default();
         for record in records {
-            let existing = self.get_session(&record.id)?;
+            let target_id = record.agent_id.clone();
+            let record_counts = self.upsert_listed_sessions_for_target(&target_id, vec![record])?;
+            counts.upserted += record_counts.upserted;
+            counts.updated += record_counts.updated;
+        }
+        Ok(counts)
+    }
+
+    pub fn upsert_listed_sessions_for_target(
+        &self,
+        target_id: &str,
+        records: Vec<ListedSessionRecord>,
+    ) -> Result<ListedSessionUpsertCounts> {
+        let mut counts = ListedSessionUpsertCounts::default();
+        for record in records {
+            let existing =
+                self.get_session_by_target_agent_session_id(target_id, &record.agent_session_id)?;
             validate_json_payload(self.connection(), &record.metadata_json)?;
             let updated_at = record
                 .updated_at
@@ -730,8 +818,8 @@ impl StateStore {
                 .transpose()?
                 .unwrap_or_else(current_timestamp);
             match existing {
-                Some(_) => {
-                    self.persist_with_outbox("sessions", &record.id, &updated_at, |conn| {
+                Some(existing) => {
+                    self.persist_with_outbox("sessions", &existing.id, &updated_at, |conn| {
                         conn.execute(
                             r#"
                             UPDATE sessions
@@ -743,8 +831,10 @@ impl StateStore {
                                 agent_id = ?5,
                                 cwd = ?6,
                                 title = ?7,
-                                metadata_json = ?8
-                            WHERE id = ?9
+                                metadata_json = ?8,
+                                target_id = ?9,
+                                agent_session_id = ?10
+                            WHERE id = ?11
                             "#,
                             params![
                                 updated_at,
@@ -755,7 +845,9 @@ impl StateStore {
                                 record.cwd,
                                 record.title,
                                 record.metadata_json,
-                                record.id,
+                                target_id,
+                                record.agent_session_id,
+                                existing.id,
                             ],
                         )?;
                         Ok(())
@@ -764,15 +856,18 @@ impl StateStore {
                 }
                 None => {
                     let created_at = current_timestamp();
-                    self.persist_with_outbox("sessions", &record.id, &updated_at, |conn| {
+                    let id = record.id;
+                    self.persist_with_outbox("sessions", &id, &updated_at, |conn| {
                         conn.execute(
                             r#"
                             INSERT INTO sessions
-                                (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
-                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                (id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                             "#,
                             params![
-                                record.id,
+                                id,
+                                target_id,
+                                record.agent_session_id,
                                 created_at,
                                 updated_at,
                                 SESSION_STATUS_AVAILABLE,
@@ -789,6 +884,63 @@ impl StateStore {
             }
         }
         Ok(counts)
+    }
+
+    pub fn rename_session_target_id(
+        &self,
+        old_target_id: &str,
+        new_target_id: &str,
+    ) -> Result<usize> {
+        if old_target_id == new_target_id {
+            return Ok(0);
+        }
+        // The UNIQUE(target_id, agent_session_id) index would reject moving a
+        // row whose agent_session_id already exists under new_target_id. Detect
+        // it up front and fail with a subsystem-identifying error instead of
+        // surfacing a raw SQLite UNIQUE violation partway through the move.
+        let collisions = self.connection().query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM sessions AS moving
+            WHERE moving.target_id = ?1
+              AND EXISTS (
+                  SELECT 1 FROM sessions AS existing
+                  WHERE existing.target_id = ?2
+                    AND existing.agent_session_id = moving.agent_session_id
+              )
+            "#,
+            params![old_target_id, new_target_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if collisions > 0 {
+            return Err(StackError::SessionTargetRenameConflict {
+                old_target_id: old_target_id.to_owned(),
+                new_target_id: new_target_id.to_owned(),
+                count: usize::try_from(collisions).unwrap_or(usize::MAX),
+            });
+        }
+        let updated_at = current_timestamp();
+        // Move every row in one transaction so a failure can never leave the
+        // sessions table split across the old and new target ids.
+        let ids = self.persist_many_with_outbox("sessions", &updated_at, |conn| {
+            let ids = {
+                let mut statement =
+                    conn.prepare("SELECT id FROM sessions WHERE target_id = ?1 ORDER BY id")?;
+                let rows =
+                    statement.query_map(params![old_target_id], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            conn.execute(
+                r#"
+                UPDATE sessions
+                SET target_id = ?1, updated_at = ?2
+                WHERE target_id = ?3
+                "#,
+                params![new_target_id, updated_at, old_target_id],
+            )?;
+            Ok(ids)
+        })?;
+        Ok(ids.len())
     }
 
     pub fn update_session_status(&self, id: &str, status: &str) -> Result<()> {

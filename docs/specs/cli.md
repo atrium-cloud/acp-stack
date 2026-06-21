@@ -10,8 +10,9 @@
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
-| Agents         | `acps agent install`, `update`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test` |
+| Agents         | `acps agent install`, `update`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test`, `default set` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
+| Array          | `acps array status/on/off/add/set/install/start/stop/restart`               |
 | Sessions       | `acps sessions list/status/new/load/resume/fork/prompt/cancel/close`        |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
@@ -175,6 +176,12 @@ acps agent update set --frequency 3d
 `acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information through the local read-only route. `acps agent check` reports whether managed install steps are present and current.
 
 `acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional.
+
+`acps agent default set <target>` repoints the Array primary target at an existing target without touching the others, so the default `acps agent *` surfaces follow it.
+
+## Array
+
+`acps array *` manages multi-target Array mode. `acps array status` prints the Array config and, when the daemon is reachable, per-target process state and pid through the local read-only route. `acps array on` and `off` toggle Array mode without deleting configured targets. `acps array add <agent>` adds a registry agent as a new target and rejects an already-configured harness. `acps array set --target <id> ...` configures provider, model, mode, or a custom provider for one target with the same flags as `acps agent set`. `acps array install|start|stop|restart [--target <id>] [--admin-key <key>]` drives one target, or every configured target when `--target` is omitted — it attempts each target, prints a per-target result line, and exits non-zero if any failed. With Array off, `start` and `restart` are limited to the primary target; `install` and `stop` are unrestricted. See [array.md](array.md) for the full model, validation, and API.
 
 ## Sessions
 

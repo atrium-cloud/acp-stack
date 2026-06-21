@@ -222,6 +222,7 @@ pub(crate) async fn logs_sessions_handler(
         until: params.until.as_deref(),
         status: params.status.as_deref(),
         after_id: params.after.as_deref(),
+        target_id: None,
         order,
     })?;
     drop(store);
