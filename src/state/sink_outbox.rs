@@ -304,26 +304,31 @@ fn hydrate_sessions(conn: &Connection, id: &str) -> Result<Option<Map<String, Va
     Ok(conn
         .query_row(
             r#"
-            SELECT id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
+            SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json
             FROM sessions WHERE id = ?1
             "#,
             params![id],
             |row| {
                 let mut obj = Map::new();
                 obj.insert("id".into(), Value::String(row.get::<_, String>(0)?));
-                obj.insert("created_at".into(), Value::String(row.get::<_, String>(1)?));
-                obj.insert("updated_at".into(), Value::String(row.get::<_, String>(2)?));
-                obj.insert("status".into(), Value::String(row.get::<_, String>(3)?));
-                obj.insert("agent_id".into(), Value::String(row.get::<_, String>(4)?));
-                obj.insert("cwd".into(), Value::String(row.get::<_, String>(5)?));
-                let title: Option<String> = row.get(6)?;
+                obj.insert("target_id".into(), Value::String(row.get::<_, String>(1)?));
+                obj.insert(
+                    "agent_session_id".into(),
+                    Value::String(row.get::<_, String>(2)?),
+                );
+                obj.insert("created_at".into(), Value::String(row.get::<_, String>(3)?));
+                obj.insert("updated_at".into(), Value::String(row.get::<_, String>(4)?));
+                obj.insert("status".into(), Value::String(row.get::<_, String>(5)?));
+                obj.insert("agent_id".into(), Value::String(row.get::<_, String>(6)?));
+                obj.insert("cwd".into(), Value::String(row.get::<_, String>(7)?));
+                let title: Option<String> = row.get(8)?;
                 obj.insert(
                     "title".into(),
                     title.map(Value::String).unwrap_or(Value::Null),
                 );
                 obj.insert(
                     "metadata_json".into(),
-                    json_object_or_empty(Some(row.get::<_, String>(7)?)),
+                    json_object_or_empty(Some(row.get::<_, String>(9)?)),
                 );
                 Ok(obj)
             },

@@ -20,7 +20,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::Config;
-use crate::config::schema::{McpServerConfig, SupabaseLoggingBackend, SupabaseLoggingConfig};
+use crate::config::schema::{
+    AgentConfig, McpServerConfig, SupabaseLoggingBackend, SupabaseLoggingConfig,
+};
 use crate::error::{Result, StackError};
 
 use self::agent::{
@@ -113,52 +115,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     }
     validate_code_sources(&config.workspace.code_sources)?;
     validate_data_sources(&config.workspace.data_sources)?;
-    if let Some(cwd) = &config.agent.cwd {
-        validate_absolute_path("agent.cwd", cwd)?;
-    }
-    validate_agent_restart(&config.agent.restart)?;
-    if let Some(expected_sha256) = &config.agent.expected_sha256 {
-        validate_expected_sha256(expected_sha256)?;
-    }
-    if let Some(install) = &config.agent.install {
-        validate_agent_install(install)?;
-    }
-    if let Some(provider) = &config.agent.provider {
-        validate_agent_provider(&config.agent.id, provider)?;
-    }
-    if config.agent.model.is_some()
-        && config
-            .agent
-            .provider
-            .as_ref()
-            .and_then(|provider| provider.model.as_ref())
-            .is_some()
-    {
-        return Err(StackError::InvalidParam {
-            field: "agent.model",
-            reason: "must be omitted when agent.provider.model is set".to_owned(),
-        });
-    }
-    if let Some(subagent) = &config.agent.subagent {
-        validate_agent_subagent(&config.agent.id, subagent)?;
-    }
-    if let Some(auto_update) = &config.agent.auto_update {
-        validate_agent_auto_update(auto_update)?;
-    }
-    if let Some(mode) = config.agent.mode.as_deref()
-        && (mode.trim().is_empty() || mode.len() != mode.trim().len())
-    {
-        return Err(StackError::MissingField {
-            field: "agent.mode",
-        });
-    }
-    if let Some(model) = config.agent.model.as_deref()
-        && (model.trim().is_empty() || model.len() != model.trim().len())
-    {
-        return Err(StackError::MissingField {
-            field: "agent.model",
-        });
-    }
+    validate_array(config)?;
     validate_permissions(&config.permissions)?;
     validate_commands(&config.commands)?;
     validate_prompts(&config.prompts)?;
@@ -170,6 +127,136 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_secret_refs(config)?;
     validate_supabase_logging(config.logging.supabase.as_ref())?;
 
+    Ok(())
+}
+
+fn validate_array(config: &Config) -> Result<()> {
+    if config.array.targets.is_empty() {
+        return Err(StackError::MissingField {
+            field: "array.targets",
+        });
+    }
+    let mut target_ids = HashSet::new();
+    let mut agent_ids = HashSet::new();
+    let mut primary_seen = false;
+    for target in &config.array.targets {
+        validate_array_target_id(&target.id)?;
+        if target.id != target.agent.id {
+            return Err(StackError::InvalidParam {
+                field: "array.targets.id",
+                reason: format!(
+                    "target id `{}` must match agent id `{}`",
+                    target.id, target.agent.id
+                ),
+            });
+        }
+        if target.id == config.array.primary_target {
+            primary_seen = true;
+        }
+        if !agent_ids.insert(target.agent.id.clone()) {
+            return Err(StackError::InvalidParam {
+                field: "array.targets.agent.id",
+                reason: format!(
+                    "duplicate harness `{}`; Array v1 requires different harnesses per target",
+                    target.agent.id
+                ),
+            });
+        }
+        if !target_ids.insert(target.id.clone()) {
+            return Err(StackError::InvalidParam {
+                field: "array.targets.id",
+                reason: format!("duplicate target id `{}`", target.id),
+            });
+        }
+        // Per-target agent validation reuses the static `agent.*` field names.
+        // Wrap any failure with the target id so a multi-target config still
+        // identifies which target's agent block is invalid.
+        validate_agent_config(&target.agent).map_err(|err| StackError::InvalidParam {
+            field: "array.targets.agent",
+            reason: format!("target `{}`: {err}", target.id),
+        })?;
+    }
+    validate_array_target_id(&config.array.primary_target)?;
+    if !primary_seen {
+        return Err(StackError::InvalidParam {
+            field: "array.primary_target",
+            reason: "must reference an entry in array.targets".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_array_target_id(value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.len() != value.trim().len() {
+        return Err(StackError::MissingField {
+            field: "array.targets.id",
+        });
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(StackError::MissingField {
+            field: "array.targets.id",
+        });
+    };
+    let valid = first.is_ascii_alphanumeric()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid {
+        return Err(StackError::InvalidParam {
+            field: "array.targets.id",
+            reason: format!(
+                "`{value}` must start with an ASCII letter or digit and contain only ASCII letters, digits, '-', '_', or '.'"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
+    if let Some(cwd) = &agent.cwd {
+        validate_absolute_path("agent.cwd", cwd)?;
+    }
+    validate_agent_restart(&agent.restart)?;
+    if let Some(expected_sha256) = &agent.expected_sha256 {
+        validate_expected_sha256(expected_sha256)?;
+    }
+    if let Some(install) = &agent.install {
+        validate_agent_install(install)?;
+    }
+    if let Some(provider) = &agent.provider {
+        validate_agent_provider(&agent.id, provider)?;
+    }
+    if agent.model.is_some()
+        && agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_ref())
+            .is_some()
+    {
+        return Err(StackError::InvalidParam {
+            field: "agent.model",
+            reason: "must be omitted when agent.provider.model is set".to_owned(),
+        });
+    }
+    if let Some(subagent) = &agent.subagent {
+        validate_agent_subagent(&agent.id, subagent)?;
+    }
+    if let Some(auto_update) = &agent.auto_update {
+        validate_agent_auto_update(auto_update)?;
+    }
+    if let Some(mode) = agent.mode.as_deref()
+        && (mode.trim().is_empty() || mode.len() != mode.trim().len())
+    {
+        return Err(StackError::MissingField {
+            field: "agent.mode",
+        });
+    }
+    if let Some(model) = agent.model.as_deref()
+        && (model.trim().is_empty() || model.len() != model.trim().len())
+    {
+        return Err(StackError::MissingField {
+            field: "agent.model",
+        });
+    }
     Ok(())
 }
 
@@ -186,9 +273,8 @@ fn validate_stack_updates(config: &Config) -> Result<()> {
 fn validate_secret_refs(config: &Config) -> Result<()> {
     let mut seen: HashSet<String> = HashSet::new();
 
-    let mut record = |name: &str, kind: &'static str| -> Result<()> {
+    let mut record = |name: &str, _kind: &'static str| -> Result<()> {
         validate_secret_ref_name_value(name)?;
-        let _ = kind;
         if !seen.insert(name.to_owned()) {
             return Err(StackError::DuplicateSecretRef {
                 name: name.to_owned(),
@@ -197,8 +283,29 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
         Ok(())
     };
 
-    for env_ref in &config.agent.env {
-        record(env_ref, "agent.env")?;
+    // Each Array target is a separate process with its own env namespace, so
+    // sharing a secret ref ACROSS targets (e.g. two harnesses both referencing
+    // ANTHROPIC_API_KEY) is intentionally allowed. The primary target's env
+    // refs still feed the global `seen` set so they are deduped against the
+    // other config sources (supabase, mcp, ...). Every other target is deduped
+    // only WITHIN itself, so an intra-target duplicate is still caught for each
+    // one instead of being silently skipped.
+    for target in &config.array.targets {
+        if target.id == config.array.primary_target {
+            for env_ref in &target.agent.env {
+                record(env_ref, "agent.env")?;
+            }
+        } else {
+            let mut target_seen: HashSet<String> = HashSet::new();
+            for env_ref in &target.agent.env {
+                validate_secret_ref_name_value(env_ref)?;
+                if !target_seen.insert(env_ref.clone()) {
+                    return Err(StackError::DuplicateSecretRef {
+                        name: env_ref.clone(),
+                    });
+                }
+            }
+        }
     }
     if let Some(supabase) = &config.logging.supabase {
         record(&supabase.api_key_ref, "logging.supabase")?;
@@ -244,8 +351,21 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
         Ok(())
     };
 
-    for env_ref in &config.agent.env {
-        check(env_ref, "agent.env")?;
+    for target in &config.array.targets {
+        for env_ref in &target.agent.env {
+            check(env_ref, "agent.env")?;
+        }
+        if let Some(provider) = &target.agent.provider
+            && let Some(api_key_ref) = provider.api_key_ref.as_deref()
+        {
+            check(api_key_ref, "agent.provider.api_key_ref")?;
+        }
+        if let Some(subagent) = &target.agent.subagent
+            && let Some(provider) = &subagent.provider
+            && let Some(api_key_ref) = provider.api_key_ref.as_deref()
+        {
+            check(api_key_ref, "agent.subagent.provider.api_key_ref")?;
+        }
     }
     if let Some(supabase) = &config.logging.supabase {
         check(&supabase.api_key_ref, "logging.supabase.api_key_ref")?;
@@ -279,11 +399,6 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
                 }
             }
         }
-    }
-    if let Some(provider) = &config.agent.provider
-        && let Some(api_key_ref) = provider.api_key_ref.as_deref()
-    {
-        check(api_key_ref, "agent.provider.api_key_ref")?;
     }
     Ok(())
 }

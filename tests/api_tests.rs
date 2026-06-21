@@ -199,8 +199,8 @@ fn seed_session(path: &Path, id: &str, status: &str, created_at: &str, updated_a
     connection
         .execute(
             r#"
-            INSERT INTO sessions (id, created_at, updated_at, status)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO sessions (id, target_id, agent_session_id, created_at, updated_at, status)
+            VALUES (?1, 'opencode', ?1, ?2, ?3, ?4)
             "#,
             (id, created_at, updated_at, status),
         )

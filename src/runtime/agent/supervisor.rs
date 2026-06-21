@@ -75,7 +75,7 @@ use crate::state::{
     EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_SYSTEM,
     FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
     PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
-    next_prompt_id, next_prompt_message_id,
+    next_prompt_id, next_prompt_message_id, next_session_id,
 };
 
 pub struct ServerLifecycle {
@@ -253,12 +253,23 @@ struct SupervisorShared {
 
 #[derive(Clone)]
 struct RestartContext {
+    target_id: String,
     agent: AgentConfig,
     workspace_root: String,
     env: HashMap<String, String>,
     state_store: Arc<TokioMutex<StateStore>>,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
+}
+
+pub struct AgentStartRequest<'a> {
+    pub target_id: &'a str,
+    pub agent: &'a AgentConfig,
+    pub workspace_root: &'a str,
+    pub env: HashMap<String, String>,
+    pub state: &'a Arc<TokioMutex<StateStore>>,
+    pub event_hub: EventHub,
+    pub permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
 }
 
 impl Default for AgentSupervisor {
@@ -307,15 +318,7 @@ impl AgentSupervisor {
     /// On success, records `agent.started` and an UPSERT into
     /// `agent_capabilities`. On failure, transitions back to `Stopped` so a
     /// retry can succeed without an intervening `stop`.
-    pub async fn start(
-        &self,
-        agent: &AgentConfig,
-        workspace_root: &str,
-        env: HashMap<String, String>,
-        state: &Arc<TokioMutex<StateStore>>,
-        event_hub: EventHub,
-        permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
-    ) -> Result<AgentCapabilitiesDto> {
+    pub async fn start(&self, request: AgentStartRequest<'_>) -> Result<AgentCapabilitiesDto> {
         // First lock: atomically transition Stopped -> Starting. Refusing
         // any other start under the same lock prevents concurrent spawns.
         {
@@ -332,17 +335,15 @@ impl AgentSupervisor {
         }
 
         let restart_context = RestartContext {
-            agent: agent.clone(),
-            workspace_root: workspace_root.to_owned(),
-            env: env.clone(),
-            state_store: state.clone(),
-            event_hub: event_hub.clone(),
-            permissions: permissions.clone(),
+            target_id: request.target_id.to_owned(),
+            agent: request.agent.clone(),
+            workspace_root: request.workspace_root.to_owned(),
+            env: request.env.clone(),
+            state_store: request.state.clone(),
+            event_hub: request.event_hub.clone(),
+            permissions: request.permissions.clone(),
         };
-        match self
-            .do_start(agent, workspace_root, env, state, event_hub, permissions)
-            .await
-        {
+        match self.do_start(request).await {
             Ok((capabilities, bridge)) => {
                 let pid = bridge.pid();
                 let bridge = Arc::new(bridge);
@@ -374,20 +375,25 @@ impl AgentSupervisor {
     /// the caller's rollback only needs to flip state.
     async fn do_start(
         &self,
-        agent: &AgentConfig,
-        workspace_root: &str,
-        env: HashMap<String, String>,
-        state: &Arc<TokioMutex<StateStore>>,
-        event_hub: EventHub,
-        permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
+        request: AgentStartRequest<'_>,
     ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
-        spawn_agent_bridge(agent, workspace_root, env, state, event_hub, permissions).await
+        spawn_agent_bridge(
+            request.target_id,
+            request.agent,
+            request.workspace_root,
+            request.env,
+            request.state,
+            request.event_hub,
+            request.permissions,
+        )
+        .await
     }
 
     /// Tear down the running agent. Returns the agent's exit status if
     /// available. Records `agent.stopped` regardless of clean exit.
     pub async fn stop(
         &self,
+        target_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: &EventHub,
     ) -> Result<Option<i32>> {
@@ -429,6 +435,7 @@ impl AgentSupervisor {
         // already in a coherent state thanks to the transition above.
         let exit = shutdown_result?;
         let data = json!({
+            "target_id": target_id,
             "exit_status": exit,
             "elapsed_ms": elapsed_ms,
         });
@@ -456,6 +463,7 @@ impl AgentSupervisor {
     /// agent teardown was messy.
     pub async fn shutdown_on_serve_exit(
         &self,
+        target_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
         event_hub: &EventHub,
     ) {
@@ -465,7 +473,7 @@ impl AgentSupervisor {
         if !needs_stop {
             return;
         }
-        if let Err(err) = self.stop(state, event_hub).await {
+        if let Err(err) = self.stop(target_id, state, event_hub).await {
             tracing::warn!(error = %err, "agent supervisor: shutdown on serve exit failed");
         }
     }
@@ -511,6 +519,7 @@ impl AgentSupervisor {
     /// `available` until a caller explicitly loads or resumes them.
     pub async fn sync_listed_sessions(
         &self,
+        target_id: &str,
         agent: &AgentConfig,
         workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
@@ -558,16 +567,18 @@ impl AgentSupervisor {
                     continue;
                 }
             };
-            let session_id = session.session_id.0.to_string();
+            let agent_session_id = session.session_id.0.to_string();
             let updated_at = session.updated_at.clone();
             let metadata_json = serde_json::json!({
                 "source": "agent_list",
-                "agent_updated_at": updated_at,
+                "agent_session_id": &agent_session_id,
+                "agent_updated_at": &updated_at,
                 "agent_meta": session.meta,
             })
             .to_string();
             records.push(ListedSessionRecord {
-                id: session_id,
+                id: next_session_id(),
+                agent_session_id,
                 agent_id: agent.id.clone(),
                 cwd,
                 title: session.title,
@@ -576,8 +587,9 @@ impl AgentSupervisor {
             });
         }
         let guard = state.lock().await;
-        let counts = guard.upsert_listed_sessions(records)?;
+        let counts = guard.upsert_listed_sessions_for_target(target_id, records)?;
         let payload = serde_json::json!({
+            "target_id": target_id,
             "agent_id": agent.id,
             "upserted": counts.upserted,
             "updated": counts.updated,
@@ -603,6 +615,7 @@ impl AgentSupervisor {
     /// when the client omits it.
     pub async fn create_session(
         &self,
+        target_id: &str,
         agent: &AgentConfig,
         workspace_root: &str,
         cwd: Option<String>,
@@ -613,7 +626,7 @@ impl AgentSupervisor {
         let resolved_cwd = resolve_session_cwd(cwd, workspace_root)?;
         let cwd_path = PathBuf::from(&resolved_cwd);
         let response = bridge.new_session(cwd_path, mcp_servers).await?;
-        let session_id = response.session_id.0.to_string();
+        let agent_session_id = response.session_id.0.to_string();
         if let Some(mode) = agent.mode.as_deref() {
             let config_id = session_config_id_for_value(
                 response.config_options.as_deref(),
@@ -648,20 +661,27 @@ impl AgentSupervisor {
         // agent rejected, we'd leave a phantom row. The agent's `session_id`
         // is authoritative; we mirror it into our `sessions` table.
         let record = NewSessionRecord {
-            id: session_id.clone(),
+            id: next_session_id(),
             agent_id: agent.id.clone(),
             cwd: resolved_cwd,
             title: None,
             metadata_json: "{}".to_owned(),
         };
         let guard = state.lock().await;
-        let inserted = guard.insert_session(record)?;
+        let inserted =
+            guard.insert_session_for_target(target_id, agent_session_id.clone(), record)?;
         guard.append_session_event(
-            &session_id,
+            &inserted.id,
             "info",
             "session.created",
             "session created",
-            &json!({ "agent_id": agent.id, "cwd": inserted.cwd }).to_string(),
+            &json!({
+                "target_id": target_id,
+                "agent_id": agent.id,
+                "agent_session_id": &agent_session_id,
+                "cwd": &inserted.cwd,
+            })
+            .to_string(),
         )?;
         Ok(inserted)
     }
@@ -691,7 +711,7 @@ impl AgentSupervisor {
         let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         bridge
             .load_session(
-                AcpSessionId::new(session_id.to_owned()),
+                AcpSessionId::new(record.agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
                 mcp_servers,
             )
@@ -711,7 +731,8 @@ impl AgentSupervisor {
             "info",
             "session.loaded",
             "session loaded",
-            &json!({ "cwd": resolved_cwd }).to_string(),
+            &json!({ "agent_session_id": record.agent_session_id, "cwd": resolved_cwd })
+                .to_string(),
         )?;
         guard
             .get_session(session_id)?
@@ -747,7 +768,7 @@ impl AgentSupervisor {
         let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         bridge
             .resume_session(
-                AcpSessionId::new(session_id.to_owned()),
+                AcpSessionId::new(record.agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
                 mcp_servers,
             )
@@ -767,7 +788,8 @@ impl AgentSupervisor {
             "info",
             "session.resumed",
             "session resumed",
-            &json!({ "cwd": resolved_cwd }).to_string(),
+            &json!({ "agent_session_id": record.agent_session_id, "cwd": resolved_cwd })
+                .to_string(),
         )?;
         guard
             .get_session(session_id)?
@@ -820,20 +842,24 @@ impl AgentSupervisor {
             workspace_root,
         )?;
         let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
+        let parent_agent_session_id = parent.agent_session_id.clone();
         let response = bridge
             .fork_session(
-                AcpSessionId::new(parent_session_id.to_owned()),
+                AcpSessionId::new(parent_agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
                 mcp_servers,
                 breakpoint_message_id.clone(),
             )
             .await?;
-        let child_session_id = response.session_id.0.to_string();
+        let child_agent_session_id = response.session_id.0.to_string();
+        let child_session_id = next_session_id();
         let metadata_json = json!({
             "fork": {
                 "parent_session_id": parent_session_id,
+                "parent_agent_session_id": &parent_agent_session_id,
+                "agent_session_id": &child_agent_session_id,
                 "strategy": "acp_native",
-                "message_id": breakpoint_message_id,
+                "message_id": &breakpoint_message_id,
             }
         })
         .to_string();
@@ -845,13 +871,20 @@ impl AgentSupervisor {
             metadata_json,
         };
         let guard = state.lock().await;
-        let inserted = guard.insert_session(record)?;
+        let inserted = guard.insert_session_for_target(
+            &parent.target_id,
+            child_agent_session_id.clone(),
+            record,
+        )?;
         let payload = json!({
+            "target_id": &parent.target_id,
             "parent_session_id": parent_session_id,
-            "child_session_id": child_session_id,
+            "parent_agent_session_id": &parent_agent_session_id,
+            "child_session_id": &child_session_id,
+            "child_agent_session_id": &child_agent_session_id,
             "strategy": "acp_native",
-            "message_id": breakpoint_message_id,
-            "cwd": inserted.cwd,
+            "message_id": &breakpoint_message_id,
+            "cwd": &inserted.cwd,
         })
         .to_string();
         guard.append_session_event(
@@ -884,22 +917,30 @@ impl AgentSupervisor {
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<SessionRecord> {
         let bridge = self.bridge().await?;
-        {
+        let agent_session_id = {
             let guard = state.lock().await;
-            if guard.get_session(session_id)?.is_none() {
-                return Err(StackError::SessionNotFound {
-                    id: session_id.to_owned(),
-                });
-            }
-        }
+            let record =
+                guard
+                    .get_session(session_id)?
+                    .ok_or_else(|| StackError::SessionNotFound {
+                        id: session_id.to_owned(),
+                    })?;
+            record.agent_session_id
+        };
         bridge
-            .close_session(AcpSessionId::new(session_id.to_owned()))
+            .close_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
         // Bridge confirmed the close — now it's safe to settle local state.
         self.cancel_prompts_for_session(session_id).await;
         let guard = state.lock().await;
         guard.update_session_status(session_id, SESSION_STATUS_CLOSED)?;
-        guard.append_session_event(session_id, "info", "session.closed", "session closed", "{}")?;
+        guard.append_session_event(
+            session_id,
+            "info",
+            "session.closed",
+            "session closed",
+            &json!({ "agent_session_id": agent_session_id }).to_string(),
+        )?;
         guard
             .get_session(session_id)?
             .ok_or_else(|| StackError::SessionNotFound {
@@ -920,7 +961,7 @@ impl AgentSupervisor {
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<PromptRecord> {
         let bridge = self.bridge().await?;
-        {
+        let agent_session_id = {
             let guard = state.lock().await;
             let session =
                 guard
@@ -939,7 +980,8 @@ impl AgentSupervisor {
                     status: session.status,
                 });
             }
-        }
+            session.agent_session_id
+        };
         let prompt_id = next_prompt_id();
         let message_id = next_prompt_message_id();
         let record = {
@@ -960,9 +1002,8 @@ impl AgentSupervisor {
         let session_id_owned = session_id.to_owned();
         let prompt_id_owned = prompt_id.clone();
         let message_id_owned = message_id.clone();
-        let acp_request =
-            PromptRequest::new(AcpSessionId::new(session_id_owned.clone()), prompt_blocks)
-                .message_id(message_id);
+        let acp_request = PromptRequest::new(AcpSessionId::new(agent_session_id), prompt_blocks)
+            .message_id(message_id);
 
         let join = tokio::spawn(async move {
             // Flip `pending -> running` so clients polling immediately after
@@ -1086,16 +1127,18 @@ impl AgentSupervisor {
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<()> {
         let bridge = self.bridge().await?;
-        {
+        let agent_session_id = {
             let guard = state.lock().await;
-            if guard.get_session(session_id)?.is_none() {
-                return Err(StackError::SessionNotFound {
-                    id: session_id.to_owned(),
-                });
-            }
-        }
+            let record =
+                guard
+                    .get_session(session_id)?
+                    .ok_or_else(|| StackError::SessionNotFound {
+                        id: session_id.to_owned(),
+                    })?;
+            record.agent_session_id
+        };
         bridge
-            .cancel_session(AcpSessionId::new(session_id.to_owned()))
+            .cancel_session(AcpSessionId::new(agent_session_id.clone()))
             .await?;
         // Bridge confirmed the cancel notification went out; settle local
         // state. The agent will return `cancelled` on the in-flight prompt
@@ -1108,7 +1151,7 @@ impl AgentSupervisor {
             "info",
             "session.cancel_requested",
             "cancel requested",
-            "{}",
+            &json!({ "agent_session_id": agent_session_id }).to_string(),
         )?;
         Ok(())
     }
@@ -1165,6 +1208,7 @@ impl AgentSupervisor {
 }
 
 async fn spawn_agent_bridge(
+    target_id: &str,
     agent: &AgentConfig,
     workspace_root: &str,
     env: HashMap<String, String>,
@@ -1188,6 +1232,7 @@ async fn spawn_agent_bridge(
         "agent.starting",
         "starting acp agent",
         json!({
+            "target_id": target_id,
             "agent_id": agent.id,
             "command": agent.command,
             "adapter": agent.adapter,
@@ -1195,11 +1240,15 @@ async fn spawn_agent_bridge(
     )
     .await?;
 
-    let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(state.clone()));
+    let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(
+        target_id.to_owned(),
+        state.clone(),
+    ));
     let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions).await {
         Ok(bridge) => bridge,
         Err(err) => {
             let data = json!({
+                "target_id": target_id,
                 "agent_id": agent.id,
                 "reason": err.to_string(),
             });
@@ -1223,6 +1272,7 @@ async fn spawn_agent_bridge(
     let caps_json = capabilities.to_json()?;
 
     let started_data = json!({
+        "target_id": target_id,
         "agent_id": agent.id,
         "pid": pid,
         "adapter": agent.adapter,
@@ -1309,6 +1359,7 @@ async fn monitor_bridge_exit(
         "agent.exited",
         "agent exited unexpectedly",
         bridge_exit_payload(
+            &restart_context.target_id,
             &restart_context.agent.id,
             restart_policy,
             &exit,
@@ -1324,6 +1375,7 @@ async fn monitor_bridge_exit(
             "agent.restart_skipped",
             "agent restart skipped",
             json!({
+                "target_id": restart_context.target_id,
                 "agent_id": restart_context.agent.id,
                 "restart": restart_policy,
                 "reason": "restart policy is not on-crash",
@@ -1340,6 +1392,7 @@ async fn monitor_bridge_exit(
         "agent.restart_scheduled",
         "agent restart scheduled",
         json!({
+            "target_id": restart_context.target_id,
             "agent_id": restart_context.agent.id,
             "restart": restart_policy,
             "backoff_ms": backoff_ms,
@@ -1368,6 +1421,7 @@ async fn monitor_bridge_exit(
     }
 
     match spawn_agent_bridge(
+        &restart_context.target_id,
         &restart_context.agent,
         &restart_context.workspace_root,
         restart_context.env.clone(),
@@ -1400,6 +1454,7 @@ async fn monitor_bridge_exit(
                 "agent.restart_failed",
                 "agent restart failed",
                 json!({
+                    "target_id": restart_context.target_id,
                     "agent_id": restart_context.agent.id,
                     "reason": err.to_string(),
                 }),
@@ -1437,12 +1492,14 @@ async fn wait_for_bridge_exit(bridge: &AcpBridge) -> Option<AcpBridgeExit> {
 }
 
 fn bridge_exit_payload(
+    target_id: &str,
     agent_id: &str,
     restart_policy: &str,
     exit: &AcpBridgeExit,
     exit_status: Option<i32>,
 ) -> Value {
     json!({
+        "target_id": target_id,
         "agent_id": agent_id,
         "pid": exit.pid,
         "planned": exit.planned,

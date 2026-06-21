@@ -28,7 +28,8 @@ flowchart LR
 | Local listener   | owner-only Unix-socket surface for keyless local `acps` routes    |
 | State            | SQLite migrations and repositories for durable runtime records    |
 | Secrets          | age-compatible key management and encrypted values                |
-| Agent supervisor | process lifecycle for the configured ACP agent                    |
+| Agent supervisor | process lifecycle for each configured ACP agent target            |
+| Array            | multi-target fleet: per-target supervision with one primary target as the default and coordination point |
 | ACP bridge       | ACP initialization, sessions, prompts, updates, and permissions   |
 | Agent switch     | harness migration planning and provider/API-key compatibility     |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |
@@ -41,7 +42,7 @@ flowchart LR
 
 ## Boundaries
 
-- `acp-stack` supervises one configured ACP agent per runtime.
+- `acp-stack` supervises one or more agent targets per runtime; Array mode adds targets beyond the single default, with one `primary_target` as the coordination point (see [../specs/array.md](../specs/array.md)).
 - Config is portable and contains references, not secret values.
 - SQLite is the local source of truth for runtime history.
 - The secret store is the only source for secret values.

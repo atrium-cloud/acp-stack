@@ -40,7 +40,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        21
+        22
     );
 }
 
@@ -262,6 +262,7 @@ fn upsert_listed_sessions_inserts_available_and_preserves_active() {
         .upsert_listed_sessions(vec![
             ListedSessionRecord {
                 id: "sess_active".to_owned(),
+                agent_session_id: "sess_active".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp/active-listed".to_owned(),
                 title: Some("active listed".to_owned()),
@@ -270,6 +271,7 @@ fn upsert_listed_sessions_inserts_available_and_preserves_active() {
             },
             ListedSessionRecord {
                 id: "sess_closed".to_owned(),
+                agent_session_id: "sess_closed".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp/closed-listed".to_owned(),
                 title: Some("closed listed".to_owned()),
@@ -278,6 +280,7 @@ fn upsert_listed_sessions_inserts_available_and_preserves_active() {
             },
             ListedSessionRecord {
                 id: "sess_available".to_owned(),
+                agent_session_id: "sess_available".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp/available".to_owned(),
                 title: Some("available listed".to_owned()),
@@ -321,6 +324,7 @@ fn upsert_listed_sessions_normalizes_updated_at_for_range_ordering() {
         .upsert_listed_sessions(vec![
             ListedSessionRecord {
                 id: "sess_offset".to_owned(),
+                agent_session_id: "sess_offset".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp/offset".to_owned(),
                 title: None,
@@ -329,6 +333,7 @@ fn upsert_listed_sessions_normalizes_updated_at_for_range_ordering() {
             },
             ListedSessionRecord {
                 id: "sess_fraction".to_owned(),
+                agent_session_id: "sess_fraction".to_owned(),
                 agent_id: "fake".to_owned(),
                 cwd: "/tmp/fraction".to_owned(),
                 title: None,
@@ -355,6 +360,283 @@ fn upsert_listed_sessions_normalizes_updated_at_for_range_ordering() {
         .expect("offset lookup")
         .expect("offset exists");
     assert_eq!(offset.updated_at, "2026-02-01T00:00:00.000000000Z");
+}
+
+#[test]
+fn sessions_store_target_id_and_agent_session_id() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let primary = store
+        .insert_session(NewSessionRecord {
+            id: "sess_primary".to_owned(),
+            agent_id: "opencode".to_owned(),
+            cwd: "/tmp/primary".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("primary session inserted");
+    assert_eq!(primary.target_id, "opencode");
+    assert_eq!(primary.agent_session_id, "sess_primary");
+
+    let secondary = store
+        .insert_session_for_target(
+            "codex",
+            "acp_secondary".to_owned(),
+            NewSessionRecord {
+                id: "sess_secondary".to_owned(),
+                agent_id: "codex".to_owned(),
+                cwd: "/tmp/secondary".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("secondary session inserted");
+    assert_eq!(secondary.target_id, "codex");
+    assert_eq!(secondary.agent_session_id, "acp_secondary");
+
+    let rows = store
+        .query_sessions(acp_stack::state::SessionFilter {
+            limit: 10,
+            target_id: Some("codex"),
+            ..Default::default()
+        })
+        .expect("target-scoped query");
+    let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, vec!["sess_secondary"]);
+
+    let status_rows = store
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", Some("codex"), 10)
+        .expect("target-scoped status query");
+    let status_ids: Vec<&str> = status_rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(status_ids, vec!["sess_secondary"]);
+
+    store
+        .upsert_listed_sessions_for_target(
+            "codex",
+            vec![ListedSessionRecord {
+                id: "local_agent_1".to_owned(),
+                agent_session_id: "shared_acp_session".to_owned(),
+                agent_id: "codex".to_owned(),
+                cwd: "/tmp/shared-one".to_owned(),
+                title: Some("one".to_owned()),
+                updated_at: Some("2026-04-01T00:00:00Z".to_owned()),
+                metadata_json: "{}".to_owned(),
+            }],
+        )
+        .expect("codex listed session upsert");
+    store
+        .upsert_listed_sessions_for_target(
+            "opencode",
+            vec![ListedSessionRecord {
+                id: "local_agent_2".to_owned(),
+                agent_session_id: "shared_acp_session".to_owned(),
+                agent_id: "opencode".to_owned(),
+                cwd: "/tmp/shared-two".to_owned(),
+                title: Some("two".to_owned()),
+                updated_at: Some("2026-04-01T00:00:01Z".to_owned()),
+                metadata_json: "{}".to_owned(),
+            }],
+        )
+        .expect("opencode listed session upsert");
+    store
+        .upsert_listed_sessions_for_target(
+            "codex",
+            vec![ListedSessionRecord {
+                id: "should_not_replace_local_id".to_owned(),
+                agent_session_id: "shared_acp_session".to_owned(),
+                agent_id: "codex".to_owned(),
+                cwd: "/tmp/shared-one-updated".to_owned(),
+                title: Some("one updated".to_owned()),
+                updated_at: Some("2026-04-01T00:00:02Z".to_owned()),
+                metadata_json: "{}".to_owned(),
+            }],
+        )
+        .expect("codex listed session update");
+    let agent_one = store
+        .get_session_by_target_agent_session_id("codex", "shared_acp_session")
+        .expect("codex lookup")
+        .expect("codex row");
+    let agent_two = store
+        .get_session_by_target_agent_session_id("opencode", "shared_acp_session")
+        .expect("opencode lookup")
+        .expect("opencode row");
+    assert_eq!(agent_one.id, "local_agent_1");
+    assert_eq!(agent_one.title.as_deref(), Some("one updated"));
+    assert_eq!(agent_two.id, "local_agent_2");
+    assert_eq!(agent_two.title.as_deref(), Some("two"));
+}
+
+#[test]
+fn renames_session_target_id_for_legacy_agent_switch() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_primary".to_owned(),
+            agent_id: "opencode".to_owned(),
+            cwd: "/tmp/primary".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("primary session inserted");
+    store
+        .insert_session_for_target(
+            "codex",
+            "acp_secondary".to_owned(),
+            NewSessionRecord {
+                id: "sess_secondary".to_owned(),
+                agent_id: "codex".to_owned(),
+                cwd: "/tmp/secondary".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("secondary session inserted");
+
+    let renamed = store
+        .rename_session_target_id("opencode", "claude-code")
+        .expect("target ids should be renamed");
+    assert_eq!(renamed, 1);
+
+    let primary_rows = store
+        .query_sessions(acp_stack::state::SessionFilter {
+            limit: 10,
+            target_id: Some("claude-code"),
+            ..Default::default()
+        })
+        .expect("renamed target query");
+    let primary_ids: Vec<&str> = primary_rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(primary_ids, vec!["sess_primary"]);
+
+    let secondary_rows = store
+        .query_sessions(acp_stack::state::SessionFilter {
+            limit: 10,
+            target_id: Some("codex"),
+            ..Default::default()
+        })
+        .expect("unchanged target query");
+    let secondary_ids: Vec<&str> = secondary_rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(secondary_ids, vec!["sess_secondary"]);
+}
+
+#[test]
+fn insert_session_for_target_rejects_duplicate_agent_session_id() {
+    // The UNIQUE(target_id, agent_session_id) index is the sole guard against a
+    // duplicate session under one target (insert_session_for_target has no ON
+    // CONFLICT). A second insert of the same pair must error.
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session_for_target(
+            "codex",
+            "acp_dup".to_owned(),
+            NewSessionRecord {
+                id: "sess_one".to_owned(),
+                agent_id: "codex".to_owned(),
+                cwd: "/tmp/one".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("first insert");
+
+    let duplicate = store.insert_session_for_target(
+        "codex",
+        "acp_dup".to_owned(),
+        NewSessionRecord {
+            id: "sess_two".to_owned(),
+            agent_id: "codex".to_owned(),
+            cwd: "/tmp/two".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        },
+    );
+    assert!(
+        duplicate.is_err(),
+        "duplicate (target_id, agent_session_id) must violate the UNIQUE index",
+    );
+
+    // The same agent_session_id under a DIFFERENT target is still allowed.
+    store
+        .insert_session_for_target(
+            "opencode",
+            "acp_dup".to_owned(),
+            NewSessionRecord {
+                id: "sess_three".to_owned(),
+                agent_id: "opencode".to_owned(),
+                cwd: "/tmp/three".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("cross-target reuse allowed");
+}
+
+#[test]
+fn rename_session_target_id_rejects_agent_session_id_collision() {
+    // When the destination target already owns a session whose agent_session_id
+    // matches one being moved in, the rename must fail fast (before any row
+    // moves) rather than surface a raw UNIQUE violation mid-move.
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session_for_target(
+            "opencode",
+            "shared_acp".to_owned(),
+            NewSessionRecord {
+                id: "sess_old".to_owned(),
+                agent_id: "opencode".to_owned(),
+                cwd: "/tmp/old".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("old target session inserted");
+    store
+        .insert_session_for_target(
+            "claude-code",
+            "shared_acp".to_owned(),
+            NewSessionRecord {
+                id: "sess_new".to_owned(),
+                agent_id: "claude-code".to_owned(),
+                cwd: "/tmp/new".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("new target session inserted");
+
+    let result = store.rename_session_target_id("opencode", "claude-code");
+    assert!(
+        matches!(
+            result,
+            Err(acp_stack::error::StackError::SessionTargetRenameConflict { count: 1, .. })
+        ),
+        "rename into a colliding target must fail fast; got {result:?}",
+    );
+
+    // No partial rename: the source row stays under its original target.
+    let old_rows = store
+        .query_sessions(acp_stack::state::SessionFilter {
+            limit: 10,
+            target_id: Some("opencode"),
+            ..Default::default()
+        })
+        .expect("old target query");
+    let old_ids: Vec<&str> = old_rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(old_ids, vec!["sess_old"]);
 }
 
 #[test]
@@ -857,7 +1139,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 21")
+            .contains("state schema version 99 is newer than supported version 22")
     );
 }
 
@@ -971,6 +1253,90 @@ fn migration_002_preserves_legacy_auth_failure_rows() {
         serde_json::from_str(&rows[0].payload_json).expect("payload should parse");
     assert_eq!(payload["legacy_client_label"], "127.0.0.1");
     assert_eq!(payload["reason"], "invalid");
+}
+
+#[test]
+fn migration_022_backfills_array_session_columns() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let connection = Connection::open(&path).expect("sqlite should open");
+    let migrations = [
+        include_str!("../migrations/001_init.sqlite.sql"),
+        include_str!("../migrations/002_auth_failures_schema.sqlite.sql"),
+        include_str!("../migrations/003_agent_capabilities.sqlite.sql"),
+        include_str!("../migrations/004_sessions.sqlite.sql"),
+        include_str!("../migrations/005_commands_schema.sqlite.sql"),
+        include_str!("../migrations/006_permissions.sqlite.sql"),
+        include_str!("../migrations/007_events_source.sqlite.sql"),
+        include_str!("../migrations/008_sink_outbox.sqlite.sql"),
+        include_str!("../migrations/009_installer_runs_step.sqlite.sql"),
+        include_str!("../migrations/010_installer_runs_version.sqlite.sql"),
+        include_str!("../migrations/011_installer_runs_log_dir.sqlite.sql"),
+        include_str!("../migrations/012_init_runs.sqlite.sql"),
+        include_str!("../migrations/013_installer_runs_apply_run_id.sqlite.sql"),
+        include_str!("../migrations/014_security_runs.sqlite.sql"),
+        include_str!("../migrations/015_prompts_lifecycle_extension.sqlite.sql"),
+        include_str!("../migrations/016_command_output_reconnect.sqlite.sql"),
+        include_str!("../migrations/017_prompt_message_ids.sqlite.sql"),
+        include_str!("../migrations/018_installer_runs_operation_method.sqlite.sql"),
+        include_str!("../migrations/019_stack_update_runs.sqlite.sql"),
+        include_str!("../migrations/020_prompt_status_indexes.sqlite.sql"),
+        include_str!("../migrations/021_auth_keys.sqlite.sql"),
+    ];
+    for migration in migrations {
+        connection
+            .execute_batch(migration)
+            .expect("legacy migration should apply");
+    }
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations (version, name, applied_at)
+            VALUES
+                (1, 'm1', '2026-05-13T00:00:00Z'),
+                (2, 'm2', '2026-05-13T00:00:00Z'),
+                (3, 'm3', '2026-05-13T00:00:00Z'),
+                (4, 'm4', '2026-05-13T00:00:00Z'),
+                (5, 'm5', '2026-05-13T00:00:00Z'),
+                (6, 'm6', '2026-05-13T00:00:00Z'),
+                (7, 'm7', '2026-05-13T00:00:00Z'),
+                (8, 'm8', '2026-05-13T00:00:00Z'),
+                (9, 'm9', '2026-05-13T00:00:00Z'),
+                (10, 'm10', '2026-05-13T00:00:00Z'),
+                (11, 'm11', '2026-05-13T00:00:00Z'),
+                (12, 'm12', '2026-05-13T00:00:00Z'),
+                (13, 'm13', '2026-05-13T00:00:00Z'),
+                (14, 'm14', '2026-05-13T00:00:00Z'),
+                (15, 'm15', '2026-05-13T00:00:00Z'),
+                (16, 'm16', '2026-05-13T00:00:00Z'),
+                (17, 'm17', '2026-05-13T00:00:00Z'),
+                (18, 'm18', '2026-05-13T00:00:00Z'),
+                (19, 'm19', '2026-05-13T00:00:00Z'),
+                (20, 'm20', '2026-05-13T00:00:00Z'),
+                (21, 'm21', '2026-05-13T00:00:00Z');
+            INSERT INTO sessions
+                (id, created_at, updated_at, status, agent_id, cwd, title, metadata_json)
+            VALUES
+                ('local_session', '2026-05-13T00:00:00Z', '2026-05-13T00:00:00Z', 'active', 'opencode', '/workspace', NULL, '{}');
+            "#,
+        )
+        .expect("legacy state should be seeded");
+    drop(connection);
+
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    let session = store
+        .get_session("local_session")
+        .expect("session should query")
+        .expect("session should exist");
+
+    assert_eq!(session.target_id, "opencode");
+    assert_eq!(session.agent_session_id, "local_session");
 }
 
 #[test]
@@ -1181,7 +1547,7 @@ fn session_status_window_reports_latest_prompt_and_stream_start() {
         .expect("prompt running");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
         .expect("status rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, "sess_status");
@@ -1207,7 +1573,7 @@ fn session_status_window_reports_latest_prompt_and_stream_start() {
         .expect("session update");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
         .expect("status rows");
     assert_eq!(
         rows[0].prompt_stream_started_at.as_deref(),
@@ -1246,7 +1612,7 @@ fn session_status_window_ignores_non_acp_session_update_for_stream_start() {
         .expect("system session update");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
         .expect("status rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -1304,7 +1670,7 @@ fn session_status_window_uses_oldest_in_flight_prompt_for_streaming() {
         .expect("session update");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
         .expect("status rows");
     assert_eq!(
         rows[0]
@@ -1342,7 +1708,7 @@ fn session_status_window_includes_pending_acp_permission() {
         .expect("permission inserted");
 
     let rows = store
-        .query_session_status_window("1970-01-01T00:00:00.000000000Z", 10)
+        .query_session_status_window("1970-01-01T00:00:00.000000000Z", None, 10)
         .expect("status rows");
     assert_eq!(
         rows[0]
@@ -2591,7 +2957,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        21
+        22
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

@@ -1,10 +1,10 @@
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::super::core::{AppState, load_active_registry, populate_agent_adapter_from_registry};
-use crate::config::{AgentAdapterConfig, Config};
+use super::super::core::{AgentTargetRuntime, AppState};
+use crate::config::{AgentAdapterConfig, Config, LocalSessionAuth};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
@@ -16,7 +16,7 @@ use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
     fetch_session_config_with_timeout,
 };
-use crate::runtime::agent::supervisor::AgentSnapshot;
+use crate::runtime::agent::supervisor::{AgentSnapshot, AgentStartRequest};
 use crate::runtime::agent::switch::{
     AgentSwitchRequest as PlannedAgentSwitchRequest, AgentSwitchSecretMigration,
     adapter_from_registry_entry, plan_agent_switch,
@@ -40,10 +40,76 @@ pub(crate) struct AgentInstallResponse {
 pub(crate) async fn agent_install_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
-    let agent = state.live_agent_config.lock().await.clone();
-    let mut config = (*state.config).clone();
-    config.agent = agent;
-    install_agent_for_config(&state, &config)
+    let target_id = state.default_target_id().await?;
+    install_agent_target(&state, &target_id).await
+}
+
+#[derive(Serialize)]
+pub(crate) struct ArrayStatusResponse {
+    enabled: bool,
+    primary_target: String,
+    delegation: ArrayDelegationStatusResponse,
+    targets: Vec<ArrayTargetStatusResponse>,
+}
+
+#[derive(Serialize)]
+struct ArrayDelegationStatusResponse {
+    ready: bool,
+    local_session_auth: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArrayTargetStatusResponse {
+    id: String,
+    agent_id: String,
+    name: String,
+    primary: bool,
+    process_state: String,
+    pid: Option<u32>,
+}
+
+pub(crate) async fn array_status_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<ArrayStatusResponse>, StackError> {
+    let config = state.refresh_array_runtime_from_disk().await?;
+    let local_session_auth = state.local_session_auth().await;
+    let mut targets = Vec::with_capacity(config.array.targets.len());
+    for target_config in &config.array.targets {
+        let target = state.agent_target(&target_config.id)?;
+        let snapshot = target.supervisor.snapshot().await;
+        targets.push(ArrayTargetStatusResponse {
+            id: target_config.id.clone(),
+            agent_id: target_config.agent.id.clone(),
+            name: target_config.agent.name.clone(),
+            primary: target_config.id == config.array.primary_target,
+            process_state: snapshot.state.as_wire_str().to_owned(),
+            pid: snapshot.pid,
+        });
+    }
+    Ok(ApiSuccess::new(ArrayStatusResponse {
+        enabled: config.array.enabled,
+        primary_target: config.array.primary_target,
+        delegation: ArrayDelegationStatusResponse {
+            ready: local_session_auth == LocalSessionAuth::Keyless,
+            local_session_auth: local_session_auth.as_str(),
+        },
+        targets,
+    }))
+}
+
+pub(crate) async fn array_agent_install_handler(
+    State(state): State<AppState>,
+    Path(target_id): Path<String>,
+) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
+    install_agent_target(&state, &target_id).await
+}
+
+async fn install_agent_target(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentInstallResponse>, StackError> {
+    let (config, _) = load_fresh_config_for_target(state, target_id).await?;
+    install_agent_for_config(state, &config)
         .await
         .map(ApiSuccess::new)
 }
@@ -166,18 +232,24 @@ pub(super) fn open_agent_env(config: &Config) -> Result<std::collections::HashMa
     Ok(env)
 }
 
-async fn load_fresh_config_with_runtime_agent_metadata(state: &AppState) -> Result<Config> {
-    let mut config = Config::load_from_path(&state.runtime_paths.config_path)?;
-    let live_agent = state.live_agent_config.lock().await.clone();
-    if config.agent.id == live_agent.id && config.agent.adapter.is_none() {
-        config.agent.adapter = live_agent.adapter;
+async fn load_fresh_config_for_target(
+    state: &AppState,
+    target_id: &str,
+) -> Result<(Config, AgentTargetRuntime)> {
+    let mut config = state.refresh_array_runtime_from_disk().await?;
+    let target = state.agent_target(target_id)?;
+    let live_agent = target.live_agent_config.lock().await.clone();
+    let Some(target_config) = config.array.target_mut(target_id) else {
+        return Err(StackError::InvalidParam {
+            field: "target",
+            reason: format!("unknown Array target `{target_id}`"),
+        });
+    };
+    if target_config.agent.id == live_agent.id && target_config.agent.adapter.is_none() {
+        target_config.agent.adapter = live_agent.adapter;
     }
-    if config.agent.adapter.is_none()
-        && let Ok(registry) = load_active_registry()
-    {
-        populate_agent_adapter_from_registry(&mut config, &registry);
-    }
-    Ok(config)
+    config.agent = target_config.agent.clone();
+    Ok((config, target))
 }
 
 /// Resolve every configured `[mcp.servers]` entry into the SDK `McpServer`
@@ -204,29 +276,46 @@ pub(crate) struct AgentStartResponse {
 pub(crate) async fn agent_start_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
+    let target_id = state.default_target_id().await?;
+    start_agent_target(&state, &target_id).await
+}
+
+pub(crate) async fn array_agent_start_handler(
+    State(state): State<AppState>,
+    Path(target_id): Path<String>,
+) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
+    start_agent_target(&state, &target_id).await
+}
+
+async fn start_agent_target(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
     // Re-read disk config and resolve env BEFORE invoking the supervisor so
     // `acps agent set` changes made while the daemon is running are honored
     // by the next start. open_agent_env enforces the same allowlist semantics
     // (security.md:91) regardless of caller.
-    let config = load_fresh_config_with_runtime_agent_metadata(&state).await?;
+    let (config, target) = load_fresh_config_for_target(state, target_id).await?;
+    ensure_array_process_start_allowed(&config, target_id)?;
     let env = open_agent_env(&config)?;
-    let capabilities = state
-        .agent_supervisor
-        .start(
-            &config.agent,
-            &config.workspace.root,
+    let capabilities = target
+        .supervisor
+        .start(AgentStartRequest {
+            target_id: &target.target_id,
+            agent: &config.agent,
+            workspace_root: &config.workspace.root,
             env,
-            &state.state,
-            state.event_hub.clone(),
-            Some(state.permissions.clone()),
-        )
+            state: &state.state,
+            event_hub: state.event_hub.clone(),
+            permissions: Some(state.permissions.clone()),
+        })
         .await?;
     {
-        let mut live = state.live_agent_config.lock().await;
+        let mut live = target.live_agent_config.lock().await;
         *live = config.agent.clone();
     }
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let pid = state.agent_supervisor.snapshot().await.pid;
+    let pid = target.supervisor.snapshot().await.pid;
     Ok(ApiSuccess::new(AgentStartResponse {
         started_at,
         capabilities,
@@ -243,9 +332,26 @@ pub(crate) struct AgentStopResponse {
 pub(crate) async fn agent_stop_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
-    let exit_status = state
-        .agent_supervisor
-        .stop(&state.state, &state.event_hub)
+    let target_id = state.default_target_id().await?;
+    stop_agent_target(&state, &target_id).await
+}
+
+pub(crate) async fn array_agent_stop_handler(
+    State(state): State<AppState>,
+    Path(target_id): Path<String>,
+) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
+    stop_agent_target(&state, &target_id).await
+}
+
+async fn stop_agent_target(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
+    state.refresh_array_runtime_from_disk().await?;
+    let target = state.agent_target(target_id)?;
+    let exit_status = target
+        .supervisor
+        .stop(&target.target_id, &state.state, &state.event_hub)
         .await?;
     let stopped_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
     Ok(ApiSuccess::new(AgentStopResponse {
@@ -280,12 +386,28 @@ pub(crate) struct AgentRestartResponse {
 pub(crate) async fn agent_restart_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
+    let target_id = state.default_target_id().await?;
+    restart_agent_target(&state, &target_id).await
+}
+
+pub(crate) async fn array_agent_restart_handler(
+    State(state): State<AppState>,
+    Path(target_id): Path<String>,
+) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
+    restart_agent_target(&state, &target_id).await
+}
+
+async fn restart_agent_target(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
     // Load + validate the fresh on-disk config AND resolve env BEFORE
     // stopping the currently running agent. A malformed config or a
     // missing required secret should fail this call cleanly and leave
     // the running agent alone, rather than taking it down and
     // returning an error with no agent running at all.
-    let fresh_config = load_fresh_config_with_runtime_agent_metadata(&state).await?;
+    let (fresh_config, target) = load_fresh_config_for_target(state, target_id).await?;
+    ensure_array_process_start_allowed(&fresh_config, target_id)?;
     let env = open_agent_env(&fresh_config)?;
 
     // Now safe to stop the prior process. `stop` returns
@@ -293,9 +415,9 @@ pub(crate) async fn agent_restart_handler(
     // there was nothing to stop (acceptable — a "restart" against a
     // stopped agent degenerates into a plain start); inner
     // `Option<i32>` is the optional exit status of the prior process.
-    let prior_exit_status = match state
-        .agent_supervisor
-        .stop(&state.state, &state.event_hub)
+    let prior_exit_status = match target
+        .supervisor
+        .stop(&target.target_id, &state.state, &state.event_hub)
         .await
     {
         Ok(code) => code,
@@ -312,22 +434,23 @@ pub(crate) async fn agent_restart_handler(
     // the stale model — silently giving operators the wrong agent
     // behavior after a `acps agent set`.
     {
-        let mut live = state.live_agent_config.lock().await;
+        let mut live = target.live_agent_config.lock().await;
         *live = fresh_config.agent.clone();
     }
-    let capabilities = state
-        .agent_supervisor
-        .start(
-            &fresh_config.agent,
-            &fresh_config.workspace.root,
+    let capabilities = target
+        .supervisor
+        .start(AgentStartRequest {
+            target_id: &target.target_id,
+            agent: &fresh_config.agent,
+            workspace_root: &fresh_config.workspace.root,
             env,
-            &state.state,
-            state.event_hub.clone(),
-            Some(state.permissions.clone()),
-        )
+            state: &state.state,
+            event_hub: state.event_hub.clone(),
+            permissions: Some(state.permissions.clone()),
+        })
         .await?;
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let pid = state.agent_supervisor.snapshot().await.pid;
+    let pid = target.supervisor.snapshot().await.pid;
 
     Ok(ApiSuccess::new(AgentRestartResponse {
         stopped_at,
@@ -424,18 +547,26 @@ pub(crate) async fn agent_switch_handler(
     let registry = RegistryCatalog::load_with_override(
         &home.join(".config").join("acp-stack").join("agents.toml"),
     )?;
+    if fresh_config.array.target(&body.agent).is_some() {
+        return switch_to_existing_array_target(&state, &home, &registry, fresh_config, body).await;
+    }
     let plan = plan_agent_switch(
         &fresh_config,
         &registry,
         PlannedAgentSwitchRequest {
-            target_agent: body.agent,
-            provider_id: body.provider,
-            api_key_ref: body.api_key_ref,
+            target_agent: body.agent.clone(),
+            provider_id: body.provider.clone(),
+            api_key_ref: body.api_key_ref.clone(),
         },
     )?;
     let target_entry = registry.lookup_required(&plan.target_agent_id)?;
     let mut candidate_config = plan.config.clone();
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    rename_default_target_config(
+        &mut candidate_config,
+        &plan.target_agent_id,
+        plan.config.agent.clone(),
+    )?;
 
     let canonical = candidate_config.to_canonical_toml()?;
     let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
@@ -471,20 +602,30 @@ pub(crate) async fn agent_switch_handler(
         &candidate_config.agent.id,
     )?;
 
-    let was_running = state.agent_supervisor.snapshot().await.state.as_wire_str() == "running";
+    let old_target_id = fresh_config.array.primary_target.clone();
+    let old_target = state.agent_target(&old_target_id)?;
+    let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
+    // Rename sessions to the new primary target BEFORE writing the new config.
+    // The rename can fail (e.g. a UNIQUE(target_id, agent_session_id) collision
+    // is detected up front), and if it does the on-disk config must stay
+    // untouched so config and DB never diverge.
+    {
+        let store = state.state.lock().await;
+        store.rename_session_target_id(&old_target_id, &candidate_config.array.primary_target)?;
+    }
     crate::fs_util::atomic_write_owner_only(
         &state.runtime_paths.config_path,
         canonical.as_bytes(),
     )?;
-    {
-        let mut live = state.live_agent_config.lock().await;
-        *live = candidate_config.agent.clone();
-    }
-    let mut restart_started = false;
-    if was_running {
-        restart_agent_with_config(&state, &candidate_config).await?;
-        restart_started = true;
-    }
+    state.refresh_array_runtime_from_disk().await?;
+    let restart_started = apply_switch_runtime(
+        &state,
+        &old_target_id,
+        &candidate_config.array.primary_target,
+        &candidate_config,
+        was_running,
+    )
+    .await?;
     let (cleaned_configs, cleanup_errors) = if body.drop_configs {
         match cleanup_agent_headless_config(&fresh_config, &home) {
             Ok(cleaned) => (
@@ -527,6 +668,185 @@ pub(crate) async fn agent_switch_handler(
     Ok(ApiSuccess::new(response))
 }
 
+async fn switch_to_existing_array_target(
+    state: &AppState,
+    home: &std::path::Path,
+    registry: &RegistryCatalog,
+    fresh_config: Config,
+    body: AgentSwitchRequest,
+) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
+    if body.provider.is_some() || body.api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: "provider flags are ignored when switching to an existing Array target; use `acps array set --target ...` first".to_owned(),
+        });
+    }
+    if body.drop_configs {
+        return Err(StackError::InvalidParam {
+            field: "drop",
+            reason: "--drop is not supported when selecting an existing Array target".to_owned(),
+        });
+    }
+    if fresh_config.array.primary_target == body.agent {
+        return Err(StackError::InvalidParam {
+            field: "agent",
+            reason: format!("agent `{}` is already the default target", body.agent),
+        });
+    }
+    let target_agent = fresh_config
+        .array
+        .target(&body.agent)
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "agent",
+            reason: format!("unknown Array target `{}`", body.agent),
+        })?
+        .agent
+        .clone();
+    let target_entry = registry.lookup_required(&target_agent.id)?;
+    let mut candidate_config = fresh_config.clone();
+    candidate_config.array.primary_target = body.agent.clone();
+    candidate_config.agent = target_agent;
+    let canonical = candidate_config.to_canonical_toml()?;
+    let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
+    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    let _env = open_agent_env(&candidate_config)?;
+
+    let install = install_agent_for_config(state, &candidate_config).await?;
+    let provisioned =
+        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
+            &candidate_config,
+            home,
+        )?
+        .into_iter()
+        .map(ProvisionedAgentConfigJson::from)
+        .collect::<Vec<_>>();
+    let skills_port = port_agent_skills(
+        home,
+        registry,
+        &fresh_config.agent.id,
+        &candidate_config.agent.id,
+    )?;
+
+    let old_target_id = fresh_config.array.primary_target.clone();
+    let old_target = state.agent_target(&old_target_id)?;
+    let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
+    crate::fs_util::atomic_write_owner_only(
+        &state.runtime_paths.config_path,
+        canonical.as_bytes(),
+    )?;
+    state.refresh_array_runtime_from_disk().await?;
+    let restart_started = apply_switch_runtime(
+        state,
+        &old_target_id,
+        &candidate_config.array.primary_target,
+        &candidate_config,
+        was_running,
+    )
+    .await?;
+
+    Ok(ApiSuccess::new(AgentSwitchResponse {
+        old_agent_id: fresh_config.agent.id,
+        agent_id: candidate_config.agent.id,
+        provider_status: "selected",
+        provider: candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.clone()),
+        api_key_ref: candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.api_key_ref.clone()),
+        required_env_refs: Vec::new(),
+        secret_migrations: Vec::new(),
+        install,
+        restarted: was_running,
+        restart_started,
+        set_model: false,
+        models: Vec::new(),
+        follow_up: None,
+        provisioned,
+        skills_port,
+        cleaned_configs: Vec::new(),
+        cleanup_errors: Vec::new(),
+    }))
+}
+
+fn rename_default_target_config(
+    config: &mut Config,
+    target_id: &str,
+    agent: crate::config::AgentConfig,
+) -> Result<()> {
+    let old_primary = config.array.primary_target.clone();
+    let target = config
+        .array
+        .target_mut(&old_primary)
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "array.primary_target",
+            reason: "must reference an entry in array.targets".to_owned(),
+        })?;
+    target.id = target_id.to_owned();
+    target.agent = agent.clone();
+    config.array.primary_target = target_id.to_owned();
+    config.agent = agent;
+    Ok(())
+}
+
+async fn apply_switch_runtime(
+    state: &AppState,
+    old_target_id: &str,
+    new_target_id: &str,
+    config: &Config,
+    was_running: bool,
+) -> Result<bool> {
+    let target = state.agent_target(new_target_id)?;
+    {
+        let mut live = target.live_agent_config.lock().await;
+        *live = config.agent.clone();
+    }
+    if !was_running {
+        return Ok(false);
+    }
+    if let Ok(old_target) = state.agent_target(old_target_id) {
+        match old_target
+            .supervisor
+            .stop(&old_target.target_id, &state.state, &state.event_hub)
+            .await
+        {
+            Ok(_) | Err(StackError::AgentNotRunning) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    let target_state = target.supervisor.snapshot().await.state;
+    if target_state.as_wire_str() != "stopped" {
+        return Ok(false);
+    }
+    start_agent_with_config(state, &target, config).await?;
+    Ok(true)
+}
+
+async fn start_agent_with_config(
+    state: &AppState,
+    target: &AgentTargetRuntime,
+    config: &Config,
+) -> Result<()> {
+    let env = open_agent_env(config)?;
+    target
+        .supervisor
+        .start(AgentStartRequest {
+            target_id: &target.target_id,
+            agent: &config.agent,
+            workspace_root: &config.workspace.root,
+            env,
+            state: &state.state,
+            event_hub: state.event_hub.clone(),
+            permissions: Some(state.permissions.clone()),
+        })
+        .await?;
+    Ok(())
+}
+
 fn apply_switch_secret_migrations(
     home: &std::path::Path,
     migrations: &[AgentSwitchSecretMigration],
@@ -549,28 +869,17 @@ fn apply_switch_secret_migrations(
     Ok(applied)
 }
 
-async fn restart_agent_with_config(state: &AppState, config: &Config) -> Result<()> {
-    let env = open_agent_env(config)?;
-    match state
-        .agent_supervisor
-        .stop(&state.state, &state.event_hub)
-        .await
-    {
-        Ok(_) | Err(StackError::AgentNotRunning) => {}
-        Err(err) => return Err(err),
+fn ensure_array_process_start_allowed(config: &Config, target_id: &str) -> Result<()> {
+    if config.array.enabled || target_id == config.array.primary_target {
+        return Ok(());
     }
-    state
-        .agent_supervisor
-        .start(
-            &config.agent,
-            &config.workspace.root,
-            env,
-            &state.state,
-            state.event_hub.clone(),
-            Some(state.permissions.clone()),
-        )
-        .await?;
-    Ok(())
+    Err(StackError::InvalidParam {
+        field: "target",
+        reason: format!(
+            "Array mode is off; only default target `{}` can be started",
+            config.array.primary_target
+        ),
+    })
 }
 
 #[derive(Serialize)]
@@ -585,9 +894,26 @@ pub(crate) struct AgentCapabilitiesResponseBody {
 pub(crate) async fn agent_capabilities_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<AgentCapabilitiesResponseBody>, StackError> {
-    let agent = state.live_agent_config.lock().await.clone();
+    let target_id = state.default_target_id().await?;
+    capabilities_agent_target(&state, &target_id).await
+}
+
+pub(crate) async fn array_agent_capabilities_handler(
+    State(state): State<AppState>,
+    Path(target_id): Path<String>,
+) -> std::result::Result<ApiSuccess<AgentCapabilitiesResponseBody>, StackError> {
+    capabilities_agent_target(&state, &target_id).await
+}
+
+async fn capabilities_agent_target(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentCapabilitiesResponseBody>, StackError> {
+    state.refresh_array_runtime_from_disk().await?;
+    let target = state.agent_target(target_id)?;
+    let agent = target.live_agent_config.lock().await.clone();
     let agent_id = agent.id.clone();
-    let snapshot: AgentSnapshot = state.agent_supervisor.snapshot().await;
+    let snapshot: AgentSnapshot = target.supervisor.snapshot().await;
     let store = state.state.lock().await;
     let record = store.latest_agent_capabilities(&agent_id)?;
     drop(store);

@@ -538,6 +538,14 @@ pub enum StackError {
         body: String,
     },
 
+    #[error("array {action} failed for {failed} of {total} target(s): {summary}")]
+    ArrayTargetsFailed {
+        action: &'static str,
+        failed: usize,
+        total: usize,
+        summary: String,
+    },
+
     #[error("agent request to {method} failed: {message}")]
     AgentRequestFailed {
         method: &'static str,
@@ -560,6 +568,15 @@ pub enum StackError {
     // === session / prompt ===
     #[error("session `{id}` was not found")]
     SessionNotFound { id: String },
+
+    #[error(
+        "cannot rename {count} session(s) from target `{old_target_id}` to `{new_target_id}`: the new target already has session(s) with the same agent session id"
+    )]
+    SessionTargetRenameConflict {
+        old_target_id: String,
+        new_target_id: String,
+        count: usize,
+    },
 
     #[error("session `{id}` is closed")]
     SessionClosed { id: String },

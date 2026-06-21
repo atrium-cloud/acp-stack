@@ -73,9 +73,11 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[api]`            | HTTP bind address, public URL, and request size cap                  |
 | `[security.http]`  | origin checks, rate limits, proxy trust, and auth-failure blocking   |
 | `[workspace]`      | workspace root, uploads path, shell, runtime user, and file limits   |
-| `[agent]`          | configured ACP agent process and injected secret refs                |
+| `[agent]`          | configured ACP agent process and injected secret refs (legacy input; canonical config writes `[array]`) |
 | `[agent.auto_update]` | periodic managed agent update policy                             |
 | `[agent.provider]` | selected provider/model metadata for provider-backed agents          |
+| `[array]`          | Array mode flag, primary target, and configured agent targets        |
+| `[[array.targets]]` | one ACP agent target; canonical home of each agent block under `[array.targets.agent]` |
 | `[updates.acp_stack]` | acp-stack self-update policy                                     |
 | `[permissions]`    | command and ACP permission policy                                    |
 | `[commands]`       | mediated shell command limits and env allowlist                      |
@@ -147,6 +149,10 @@ Provider and model fields are documented in [agents/config.md](agents/config.md)
 `[agent.auto_update]` controls daemon-side managed agent updates. `frequency` uses duration suffixes such as `12h`, `1d`, `3d`, or `4w`. Existing configs without this block do not auto-update until the block is added or init writes it for a supported agent. The daemon auto-updater only runs when the agent is stopped and never interrupts a running agent, so a continuously running agent is skipped each cycle; apply updates to a live agent with `acps agent update --restart`.
 
 `[updates.acp_stack]` controls updates of `acp-stack` itself from GitHub Releases. `policy = "security-critical"` is the default and auto-installs only same-major, non-breaking releases marked security-critical. `compatible` also permits same-major, non-breaking regular releases. `manual` disables auto-install. `frequency` uses day/week granularity (minimum a day). `acps init` writes this block — `--stack-update <on|security|off>` and `--stack-update-frequency <freq>`, or the interactive auto-update prompt. Docker and Railway deployments are check-only and should be updated by redeploying the image.
+
+## Array
+
+`[array]` runs more than one agent target under one runtime, with `primary_target` backing the default `[agent]` and `/v1/agent/*` surfaces. In canonical config each agent block lives under `[array.targets.agent]`; a top-level `[agent]` block is accepted as legacy input and migrated into a single Array target with `enabled = false`. Array is disabled by default, so a single-agent config behaves exactly as before. See [array.md](array.md) for the full model, validation rules, CLI, and API.
 
 ## Permissions And Commands
 

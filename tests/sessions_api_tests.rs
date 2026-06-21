@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::{AgentProviderConfig, Config, load_config_from_str};
+use acp_stack::config::{AgentProviderConfig, ArrayTargetConfig, Config, load_config_from_str};
 use acp_stack::state::{
     NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptStatus, StateStore,
 };
@@ -29,6 +29,7 @@ const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddddddd
 
 struct Harness {
     base_url: String,
+    config_path: std::path::PathBuf,
     workspace_root: std::path::PathBuf,
     _tempdir: TempDir,
     state: Arc<TokioMutex<StateStore>>,
@@ -65,7 +66,7 @@ impl Harness {
         )
         .expect("test config write");
         let effective_bind = config.api.bind.clone();
-        let runtime_paths = RuntimePaths::new(config_path, path);
+        let runtime_paths = RuntimePaths::new(config_path.clone(), path);
         let app_state = AppState::with_effective_bind_and_runtime_paths(
             config,
             store,
@@ -80,6 +81,7 @@ impl Harness {
         let join = tokio::spawn(async move { api::serve(app_state, listener).await });
         let harness = Self {
             base_url,
+            config_path,
             workspace_root,
             _tempdir: tempdir,
             state,
@@ -582,6 +584,70 @@ async fn load_and_resume_reject_closed_sessions() {
 }
 
 #[tokio::test]
+async fn close_session_on_secondary_target_survives_array_off() {
+    // Regression: a session opened against a non-primary target while Array was
+    // ON must stay closable after `acps array off`. Terminal wind-down ops
+    // (close/cancel) bypass the Array-enabled gate so toggling Array off never
+    // strands a session with a live agent and no way to wind it down.
+    let harness = Harness::spawn_with(|config| {
+        config.array.enabled = true;
+        let mut secondary = config.agent.clone();
+        secondary.id = "codex".to_owned();
+        secondary.name = "Codex".to_owned();
+        config.array.targets.push(ArrayTargetConfig {
+            id: "codex".to_owned(),
+            agent: secondary,
+        });
+    })
+    .await;
+    let client = http();
+
+    // Start the secondary target and open a session against it while Array is on.
+    let start = client
+        .post(format!("{}/v1/array/targets/codex/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("start codex");
+    assert_eq!(start.status(), StatusCode::OK);
+
+    let create = client
+        .post(format!("{}/v1/sessions?target=codex", harness.base_url))
+        .header("Authorization", session_bearer())
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("create session");
+    assert_eq!(create.status(), StatusCode::OK);
+    let session_id = create.json::<Value>().await.expect("create json")["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    // Toggle Array off by rewriting the on-disk config; handlers re-read it.
+    let mut disabled = Config::load_from_path(&harness.config_path).expect("load config");
+    disabled.array.enabled = false;
+    std::fs::write(
+        &harness.config_path,
+        disabled.to_canonical_toml().expect("canonical config"),
+    )
+    .expect("rewrite config");
+
+    // Close must still succeed even though `codex` is no longer the active
+    // default target; cancel shares the same wind-down resolver.
+    let close = client
+        .delete(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("close session");
+    assert_eq!(close.status(), StatusCode::OK);
+    let close_body: Value = close.json().await.expect("close json");
+    assert_eq!(close_body["data"]["status"], "closed");
+}
+
+#[tokio::test]
 async fn stored_session_cwd_must_remain_under_workspace_for_reuse() {
     let harness = Harness::spawn().await;
     let outside = tempfile::tempdir().expect("outside");
@@ -762,8 +828,9 @@ async fn sessions_list_syncs_agent_discovered_sessions() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|session| session["id"] == "sess_listed_0")
+        .find(|session| session["agent_session_id"] == "sess_listed_0")
         .expect("listed session present");
+    assert!(listed["id"].as_str().is_some_and(|id| !id.is_empty()));
     assert_eq!(listed["status"], "available");
     assert_eq!(listed["title"], "listed session");
     let metadata: Value =
@@ -862,7 +929,8 @@ async fn sessions_list_filters_by_since_and_until() {
             .upsert_listed_sessions(vec![
                 acp_stack::state::ListedSessionRecord {
                     id: "sess_old".to_owned(),
-                    agent_id: "fake".to_owned(),
+                    agent_session_id: "sess_old".to_owned(),
+                    agent_id: "placebo".to_owned(),
                     cwd: "/tmp/old".to_owned(),
                     title: None,
                     updated_at: Some("2026-01-01T00:00:00Z".to_owned()),
@@ -870,7 +938,8 @@ async fn sessions_list_filters_by_since_and_until() {
                 },
                 acp_stack::state::ListedSessionRecord {
                     id: "sess_mid".to_owned(),
-                    agent_id: "fake".to_owned(),
+                    agent_session_id: "sess_mid".to_owned(),
+                    agent_id: "placebo".to_owned(),
                     cwd: "/tmp/mid".to_owned(),
                     title: None,
                     updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
@@ -878,7 +947,8 @@ async fn sessions_list_filters_by_since_and_until() {
                 },
                 acp_stack::state::ListedSessionRecord {
                     id: "sess_new".to_owned(),
-                    agent_id: "fake".to_owned(),
+                    agent_session_id: "sess_new".to_owned(),
+                    agent_id: "placebo".to_owned(),
                     cwd: "/tmp/new".to_owned(),
                     title: None,
                     updated_at: Some("2026-03-01T00:00:00Z".to_owned()),
@@ -961,7 +1031,8 @@ async fn sessions_list_resolves_missing_explicit_bound_to_session_span() {
             .upsert_listed_sessions(vec![
                 acp_stack::state::ListedSessionRecord {
                     id: "sess_first".to_owned(),
-                    agent_id: "fake".to_owned(),
+                    agent_session_id: "sess_first".to_owned(),
+                    agent_id: "placebo".to_owned(),
                     cwd: "/tmp/first".to_owned(),
                     title: None,
                     updated_at: Some("2026-02-01T00:00:00Z".to_owned()),
@@ -969,7 +1040,8 @@ async fn sessions_list_resolves_missing_explicit_bound_to_session_span() {
                 },
                 acp_stack::state::ListedSessionRecord {
                     id: "sess_latest".to_owned(),
-                    agent_id: "fake".to_owned(),
+                    agent_session_id: "sess_latest".to_owned(),
+                    agent_id: "placebo".to_owned(),
                     cwd: "/tmp/latest".to_owned(),
                     title: None,
                     updated_at: Some("2026-02-02T00:00:00Z".to_owned()),
@@ -1031,7 +1103,7 @@ async fn sessions_list_range_counts_from_request_time() {
         store
             .insert_session(NewSessionRecord {
                 id: "sess_active".to_owned(),
-                agent_id: "fake".to_owned(),
+                agent_id: "placebo".to_owned(),
                 cwd: "/tmp/active".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
@@ -1069,7 +1141,7 @@ async fn sessions_status_returns_compact_active_summary() {
         store
             .insert_session(NewSessionRecord {
                 id: "sess_active".to_owned(),
-                agent_id: "fake".to_owned(),
+                agent_id: "placebo".to_owned(),
                 cwd: "/tmp/active".to_owned(),
                 title: Some("active title".to_owned()),
                 metadata_json: r#"{"secretish":"not returned"}"#.to_owned(),
@@ -1111,6 +1183,94 @@ async fn sessions_status_returns_compact_active_summary() {
 }
 
 #[tokio::test]
+async fn sessions_status_defaults_to_primary_target() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_primary".to_owned(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/primary".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("primary session inserted");
+        store
+            .insert_session_for_target(
+                "placebo-secondary",
+                "acp_secondary".to_owned(),
+                NewSessionRecord {
+                    id: "sess_secondary".to_owned(),
+                    agent_id: "placebo-secondary".to_owned(),
+                    cwd: "/tmp/secondary".to_owned(),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                },
+            )
+            .expect("secondary session inserted");
+    }
+
+    let body: Value = http()
+        .get(format!("{}/v1/sessions/-/status", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("status")
+        .json()
+        .await
+        .expect("status json");
+
+    let ids: Vec<&str> = body["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["sess_primary"]);
+}
+
+#[tokio::test]
+async fn sessions_target_obeys_array_off_written_after_daemon_start() {
+    let harness = Harness::spawn_with(|config| {
+        config.array.enabled = true;
+        let mut secondary = config.agent.clone();
+        secondary.id = "placebo-secondary".to_owned();
+        secondary.name = "Placebo Secondary".to_owned();
+        config.array.targets.push(ArrayTargetConfig {
+            id: "placebo-secondary".to_owned(),
+            agent: secondary,
+        });
+    })
+    .await;
+    let mut updated =
+        Config::load_from_path(&harness.config_path).expect("config should load from disk");
+    updated.array.enabled = false;
+    std::fs::write(
+        &harness.config_path,
+        updated.to_canonical_toml().expect("canonical config"),
+    )
+    .expect("config should be rewritten");
+
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions?target=placebo-secondary",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("list");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
 async fn sessions_status_marks_old_activity_idle() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.push("--no-cap-list-session".into());
@@ -1121,7 +1281,7 @@ async fn sessions_status_marks_old_activity_idle() {
         store
             .insert_session(NewSessionRecord {
                 id: "sess_active".to_owned(),
-                agent_id: "fake".to_owned(),
+                agent_id: "placebo".to_owned(),
                 cwd: "/tmp/active".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),
@@ -1199,7 +1359,7 @@ async fn sessions_status_reports_turn_states() {
             store
                 .insert_session(NewSessionRecord {
                     id: session_id.to_owned(),
-                    agent_id: "fake".to_owned(),
+                    agent_id: "placebo".to_owned(),
                     cwd: format!("/tmp/{session_id}"),
                     title: None,
                     metadata_json: "{}".to_owned(),
@@ -1309,7 +1469,7 @@ async fn sessions_status_reports_turn_states() {
 async fn available_session_must_be_loaded_before_prompting() {
     let harness = Harness::spawn().await;
     let client = http();
-    let _: Value = client
+    let list: Value = client
         .get(format!("{}/v1/sessions", harness.base_url))
         .header("Authorization", session_bearer())
         .send()
@@ -1318,11 +1478,18 @@ async fn available_session_must_be_loaded_before_prompting() {
         .json()
         .await
         .expect("list json");
+    let session_id = list["data"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["agent_session_id"] == "sess_listed_0")
+        .and_then(|session| session["id"].as_str())
+        .expect("listed session local id");
 
     let response = client
         .post(format!(
             "{}/v1/sessions/{}/prompt",
-            harness.base_url, "sess_listed_0"
+            harness.base_url, session_id
         ))
         .header("Authorization", session_bearer())
         .json(&json!({ "prompt": "hello agent" }))
@@ -1547,7 +1714,7 @@ async fn sessions_snapshot_returns_session_in_flight_prompts_and_recent_events()
         store
             .insert_session(NewSessionRecord {
                 id: session_id.clone(),
-                agent_id: "fake".to_owned(),
+                agent_id: "placebo".to_owned(),
                 cwd: "/tmp/snap".to_owned(),
                 title: Some("snap".to_owned()),
                 metadata_json: "{}".to_owned(),
@@ -1641,7 +1808,7 @@ async fn sessions_snapshot_caps_recent_events_at_50() {
         store
             .insert_session(NewSessionRecord {
                 id: session_id.clone(),
-                agent_id: "fake".to_owned(),
+                agent_id: "placebo".to_owned(),
                 cwd: "/tmp/cap".to_owned(),
                 title: None,
                 metadata_json: "{}".to_owned(),

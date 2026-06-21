@@ -93,6 +93,19 @@ Agent start/restart uses the current `[agent]` config and injected secret refs. 
 
 `POST /v1/agent/switch` accepts `{ "agent": "<id>", "provider": "<optional-provider-id>", "api_key_ref": "<optional-ref>", "drop": false }`. The route validates provider compatibility, copies compatible provider secret refs when the target expects a different default ref, installs the target harness, provisions agent-owned config without a model, discovers ACP-advertised model values when the target supports model selection, writes canonical config, restarts the supervised agent only if it was already running, and optionally removes source agent-owned config. Source cleanup failures are reported as `cleanup_errors` without rolling back a successful switch. `drop` does not delete secrets, installed harnesses/adapters, or sessions.
 
+## Array
+
+| Route                                            | Tier    | Contract                                                            |
+| ------------------------------------------------ | ------- | ------------------------------------------------------------------- |
+| `GET /v1/array/status`                           | session | enabled flag, primary target, local-delegation readiness, per-target id/agent/name/state/pid |
+| `GET /v1/array/targets/{target_id}/capabilities` | session | latest ACP capability snapshot for one target                       |
+| `POST /v1/array/targets/{target_id}/install`     | admin   | installs one target's harness                                       |
+| `POST /v1/array/targets/{target_id}/start`       | admin   | starts one target's process                                         |
+| `POST /v1/array/targets/{target_id}/stop`        | admin   | stops one target's process                                          |
+| `POST /v1/array/targets/{target_id}/restart`     | admin   | restarts one target's process                                       |
+
+The `/v1/agent/*` routes operate on the Array `primary_target`. Session routes accept `?target=<id>` (alias `target`) to address a specific target; an unknown `target_id` returns `400 request.invalid_param`. With Array off, only the primary target is addressable for driving session ops and start/restart of a non-primary target is rejected with `400`, but terminal ops (`close`, `cancel`) can still wind down a session on any stored target. See [../array.md](../array.md) for the full Array model.
+
 ## Sessions
 
 | Route                                       | Tier    | Contract                                                       |

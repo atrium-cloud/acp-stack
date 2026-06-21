@@ -1,4 +1,5 @@
 mod agent;
+mod array;
 mod auth;
 mod config;
 mod core;

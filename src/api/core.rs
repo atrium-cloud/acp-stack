@@ -23,12 +23,13 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use axum::routing::{get, post, put};
+use dashmap::DashMap;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -40,7 +41,9 @@ use super::auth::{
 };
 use super::routes::agent::{
     agent_capabilities_handler, agent_install_handler, agent_restart_handler, agent_start_handler,
-    agent_stop_handler, agent_switch_handler,
+    agent_stop_handler, agent_switch_handler, array_agent_capabilities_handler,
+    array_agent_install_handler, array_agent_restart_handler, array_agent_start_handler,
+    array_agent_stop_handler, array_status_handler,
 };
 use super::routes::auth::{auth_local_session_access_handler, auth_regenerate_session_key_handler};
 use super::routes::commands::{
@@ -85,7 +88,7 @@ use super::routes::ws::{
 };
 use super::ws::ws_handler;
 use crate::auth::{AuthVerifierSet, KeyKind};
-use crate::config::{Config, LocalSessionAuth};
+use crate::config::{AgentConfig, Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::supervisor::AgentSupervisor;
@@ -109,15 +112,102 @@ pub struct AppState {
     pub state: Arc<TokioMutex<StateStore>>,
     pub auth_verifiers: Arc<TokioRwLock<AuthVerifierSet>>,
     pub local_session_auth: Arc<TokioRwLock<LocalSessionAuth>>,
+    pub(crate) array_enabled: Arc<AtomicBool>,
     pub max_request_bytes: usize,
     pub active_requests: Arc<AtomicU64>,
     pub agent_supervisor: Arc<AgentSupervisor>,
+    pub(crate) agent_targets: Arc<AgentTargetRegistry>,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
     pub permissions: PermissionService,
     pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
     pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
     pub ws_registry: Arc<super::ws_registry::WsRegistry>,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentTargetRuntime {
+    pub(crate) target_id: String,
+    pub(crate) live_agent_config: Arc<TokioMutex<AgentConfig>>,
+    pub(crate) supervisor: Arc<AgentSupervisor>,
+}
+
+pub(crate) struct AgentTargetRegistry {
+    primary: AgentTargetRuntime,
+    targets: DashMap<String, AgentTargetRuntime>,
+}
+
+impl AgentTargetRegistry {
+    fn from_config(config: &Config) -> Self {
+        let targets = DashMap::with_capacity(config.array.targets.len());
+        for target in &config.array.targets {
+            targets.insert(
+                target.id.clone(),
+                AgentTargetRuntime {
+                    target_id: target.id.clone(),
+                    live_agent_config: Arc::new(TokioMutex::new(target.agent.clone())),
+                    supervisor: Arc::new(AgentSupervisor::new()),
+                },
+            );
+        }
+        let primary = match targets
+            .get(&config.array.primary_target)
+            .map(|target| target.value().clone())
+        {
+            Some(primary) => primary,
+            None => {
+                tracing::error!(
+                    target_id = %config.array.primary_target,
+                    "validated config lost its primary Array target before AppState construction"
+                );
+                let runtime = AgentTargetRuntime {
+                    target_id: config.array.primary_target.clone(),
+                    live_agent_config: Arc::new(TokioMutex::new(config.agent.clone())),
+                    supervisor: Arc::new(AgentSupervisor::new()),
+                };
+                targets.insert(config.array.primary_target.clone(), runtime.clone());
+                runtime
+            }
+        };
+        Self { primary, targets }
+    }
+
+    pub(crate) fn primary(&self) -> AgentTargetRuntime {
+        self.primary.clone()
+    }
+
+    pub(crate) fn target(&self, target_id: &str) -> Result<AgentTargetRuntime> {
+        self.targets
+            .get(target_id)
+            .map(|target| target.value().clone())
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "target",
+                reason: format!("unknown Array target `{target_id}`"),
+            })
+    }
+
+    pub(crate) fn targets(&self) -> Vec<AgentTargetRuntime> {
+        self.targets
+            .iter()
+            .map(|target| target.value().clone())
+            .collect()
+    }
+
+    pub(crate) fn sync_targets_from_config(&self, config: &Config) {
+        for target in &config.array.targets {
+            if self.targets.contains_key(&target.id) {
+                continue;
+            }
+            self.targets.insert(
+                target.id.clone(),
+                AgentTargetRuntime {
+                    target_id: target.id.clone(),
+                    live_agent_config: Arc::new(TokioMutex::new(target.agent.clone())),
+                    supervisor: Arc::new(AgentSupervisor::new()),
+                },
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -159,6 +249,66 @@ impl AppState {
 
     pub async fn set_local_session_auth(&self, value: LocalSessionAuth) {
         *self.local_session_auth.write().await = value;
+    }
+
+    pub(crate) async fn refresh_array_runtime_from_disk(&self) -> Result<Config> {
+        let mut config = Config::load_from_path(&self.runtime_paths.config_path)?;
+        if let Ok(registry) = load_active_registry() {
+            populate_agent_adapter_from_registry(&mut config, &registry);
+        }
+        self.agent_targets.sync_targets_from_config(&config);
+        self.array_enabled
+            .store(config.array.enabled, Ordering::Relaxed);
+        Ok(config)
+    }
+
+    pub(crate) async fn default_target_id(&self) -> Result<String> {
+        let config = self.refresh_array_runtime_from_disk().await?;
+        Ok(config.array.primary_target)
+    }
+
+    pub(crate) async fn default_agent_target(&self) -> Result<(Config, AgentTargetRuntime)> {
+        let config = self.refresh_array_runtime_from_disk().await?;
+        let target = self.agent_target(&config.array.primary_target)?;
+        Ok((config, target))
+    }
+
+    pub(crate) fn agent_target(&self, target_id: &str) -> Result<AgentTargetRuntime> {
+        self.agent_targets.target(target_id)
+    }
+
+    pub(crate) async fn session_agent_target(
+        &self,
+        target_id: Option<&str>,
+    ) -> Result<AgentTargetRuntime> {
+        let config = self.refresh_array_runtime_from_disk().await?;
+        let resolved = target_id.unwrap_or(config.array.primary_target.as_str());
+        if !config.array.enabled && resolved != config.array.primary_target {
+            return Err(StackError::InvalidParam {
+                field: "target",
+                reason: format!(
+                    "Array mode is off; only default target `{}` is active",
+                    config.array.primary_target
+                ),
+            });
+        }
+        self.agent_target(resolved)
+    }
+
+    /// Resolve a session's stored target for a terminal wind-down op
+    /// (cancel/close) regardless of whether Array mode is currently enabled.
+    /// Toggling Array off must never strand an existing session: an operator
+    /// has to be able to close or cancel a session that was opened against a
+    /// non-primary target before `acps array off`. Unlike
+    /// `session_agent_target`, this skips the Array-enabled gate; the driving
+    /// ops (prompt/load/resume/fork) keep using the gated path so a disabled
+    /// fleet stays read/terminal-only for its secondary targets.
+    pub(crate) async fn existing_session_target(
+        &self,
+        target_id: &str,
+    ) -> Result<AgentTargetRuntime> {
+        self.refresh_array_runtime_from_disk().await?;
+        self.agent_target(target_id)
     }
 }
 
@@ -217,15 +367,16 @@ impl AppState {
         effective_bind: String,
         runtime_paths: RuntimePaths,
     ) -> Self {
+        if let Some(primary) = config.array.primary_target_mut() {
+            primary.agent = config.agent.clone();
+        }
         // Adapter metadata is runtime-populated from the active registry.
         // We resolve once at AppState construction so every handler that
         // reads `config.agent.adapter` (status, capabilities, etc.) sees
         // the same value. Failures here are non-fatal: an agent whose id is
         // unknown to the registry simply has no adapter metadata, which is
         // the correct outcome for native agents and operator escape hatches.
-        if config.agent.adapter.is_none()
-            && let Ok(registry) = load_active_registry()
-        {
+        if let Ok(registry) = load_active_registry() {
             populate_agent_adapter_from_registry(&mut config, &registry);
         }
         let api_cap = config.api.max_request_bytes;
@@ -260,8 +411,11 @@ impl AppState {
             &config_arc.security.http,
         ));
         let ws_registry = Arc::new(super::ws_registry::WsRegistry::default());
-        let live_agent_config = Arc::new(TokioMutex::new(config_arc.agent.clone()));
+        let agent_targets = Arc::new(AgentTargetRegistry::from_config(&config_arc));
+        let primary_agent_target = agent_targets.primary();
+        let live_agent_config = primary_agent_target.live_agent_config.clone();
         let local_session_auth = Arc::new(TokioRwLock::new(config_arc.local.session_auth));
+        let array_enabled = Arc::new(AtomicBool::new(config_arc.array.enabled));
         Self {
             config: config_arc,
             live_agent_config,
@@ -270,9 +424,11 @@ impl AppState {
             state: state_arc,
             auth_verifiers: Arc::new(TokioRwLock::new(auth_verifiers)),
             local_session_auth,
+            array_enabled,
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
-            agent_supervisor: Arc::new(AgentSupervisor::new()),
+            agent_supervisor: primary_agent_target.supervisor.clone(),
+            agent_targets,
             event_hub,
             commands,
             permissions,
@@ -304,14 +460,23 @@ pub(crate) fn populate_agent_adapter_from_registry(
     config: &mut Config,
     registry: &RegistryCatalog,
 ) {
-    if let Some(entry) = registry.lookup(&config.agent.id)
+    for target in &mut config.array.targets {
+        populate_agent_adapter(&mut target.agent, registry);
+    }
+    if let Some(primary) = config.array.primary_target() {
+        config.agent = primary.agent.clone();
+    }
+}
+
+fn populate_agent_adapter(agent: &mut AgentConfig, registry: &RegistryCatalog) {
+    if let Some(entry) = registry.lookup(&agent.id)
         && matches!(
             entry.kind,
             crate::runtime::install::agent_registry::RegistryKind::Adapter
         )
         && let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter)
     {
-        config.agent.adapter = Some(crate::config::AgentAdapterConfig {
+        agent.adapter = Some(crate::config::AgentAdapterConfig {
             id: adapter.id.clone(),
             name: entry.name.clone(),
             upstream_agent: harness.id.clone(),
@@ -355,6 +520,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route("/v1/array/status", get(array_status_handler))
+        .route(
+            "/v1/array/targets/{target_id}/capabilities",
+            get(array_agent_capabilities_handler),
+        )
         .route("/v1/logs/events", get(logs_events_handler))
         .route("/v1/logs/commands", get(logs_commands_handler))
         .route("/v1/logs/permissions", get(logs_permissions_handler))
@@ -446,6 +616,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/agent/stop", post(agent_stop_handler))
         .route("/v1/agent/restart", post(agent_restart_handler))
         .route("/v1/agent/switch", post(agent_switch_handler))
+        .route(
+            "/v1/array/targets/{target_id}/install",
+            post(array_agent_install_handler),
+        )
+        .route(
+            "/v1/array/targets/{target_id}/start",
+            post(array_agent_start_handler),
+        )
+        .route(
+            "/v1/array/targets/{target_id}/stop",
+            post(array_agent_stop_handler),
+        )
+        .route(
+            "/v1/array/targets/{target_id}/restart",
+            post(array_agent_restart_handler),
+        )
         .route("/v1/deps/apply", post(deps_apply_handler))
         .route(
             "/v1/auth/session-key/regenerate",

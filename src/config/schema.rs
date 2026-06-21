@@ -270,6 +270,59 @@ fn default_supabase_db_url_ref() -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArrayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub primary_target: String,
+    #[serde(default)]
+    pub targets: Vec<ArrayTargetConfig>,
+}
+
+impl ArrayConfig {
+    pub fn from_agent(agent: AgentConfig) -> Self {
+        let target_id = agent.id.clone();
+        Self {
+            enabled: false,
+            primary_target: target_id.clone(),
+            targets: vec![ArrayTargetConfig {
+                id: target_id,
+                agent,
+            }],
+        }
+    }
+
+    pub fn primary_target(&self) -> Option<&ArrayTargetConfig> {
+        self.targets
+            .iter()
+            .find(|target| target.id == self.primary_target)
+    }
+
+    pub fn primary_target_mut(&mut self) -> Option<&mut ArrayTargetConfig> {
+        self.targets
+            .iter_mut()
+            .find(|target| target.id == self.primary_target)
+    }
+
+    pub fn target(&self, target_id: &str) -> Option<&ArrayTargetConfig> {
+        self.targets.iter().find(|target| target.id == target_id)
+    }
+
+    pub fn target_mut(&mut self, target_id: &str) -> Option<&mut ArrayTargetConfig> {
+        self.targets
+            .iter_mut()
+            .find(|target| target.id == target_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArrayTargetConfig {
+    pub id: String,
+    pub agent: AgentConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub id: String,
     pub name: String,
@@ -662,6 +715,13 @@ pub enum LocalSessionAuth {
 impl LocalSessionAuth {
     pub fn is_default(value: &Self) -> bool {
         *value == Self::default()
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionKey => "session-key",
+            Self::Keyless => "keyless",
+        }
     }
 }
 

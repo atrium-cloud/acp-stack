@@ -21,22 +21,26 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    let plan = plan_agent_switch(
-        &config,
-        &registry,
-        PlannedAgentSwitchRequest {
-            target_agent: args.agent.clone(),
-            provider_id: args.provider.clone(),
-            api_key_ref: args.api_key_ref.clone(),
-        },
-    )?;
-    let target_entry = registry.lookup_required(&plan.target_agent_id)?;
-    print_switch_plan(
-        &plan.provider_status,
-        target_entry,
-        &plan,
-        args.drop_configs,
-    );
+    if config.array.target(&args.agent).is_some() {
+        print_existing_target_switch_plan(&config, &args.agent)?;
+    } else {
+        let plan = plan_agent_switch(
+            &config,
+            &registry,
+            PlannedAgentSwitchRequest {
+                target_agent: args.agent.clone(),
+                provider_id: args.provider.clone(),
+                api_key_ref: args.api_key_ref.clone(),
+            },
+        )?;
+        let target_entry = registry.lookup_required(&plan.target_agent_id)?;
+        print_switch_plan(
+            &plan.provider_status,
+            target_entry,
+            &plan,
+            args.drop_configs,
+        );
+    }
 
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let request = serde_json::json!({
@@ -115,6 +119,23 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     } else if set_model {
         print_model_follow_up(&models);
     }
+    Ok(())
+}
+
+fn print_existing_target_switch_plan(config: &Config, agent: &str) -> Result<()> {
+    if config.array.primary_target == agent {
+        return Err(StackError::InvalidParam {
+            field: "agent",
+            reason: format!("agent `{agent}` is already the default target"),
+        });
+    }
+    println!(
+        "agent switch plan: {} -> {agent}",
+        config.array.primary_target
+    );
+    println!("will select existing Array target config");
+    println!("migrated as-is: workspace, MCP, permissions, auth, and secrets config");
+    println!("requires input: none");
     Ok(())
 }
 

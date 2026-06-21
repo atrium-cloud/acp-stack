@@ -1,5 +1,5 @@
 use acp_stack::config::{
-    AgentAdapterConfig, Config, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    AgentAdapterConfig, ArrayTargetConfig, CustomProviderApi, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS, LocalSessionAuth,
     default_config_path, load_config_from_str, parse_duration_string,
 };
@@ -24,14 +24,141 @@ fn parses_valid_config_and_exports_canonical_toml() {
     let canonical = config
         .to_canonical_toml()
         .expect("canonical TOML should serialize");
-    let round_tripped: Config =
-        toml::from_str(&canonical).expect("canonical TOML should parse as config");
+    let round_tripped =
+        load_config_from_str(&canonical).expect("canonical TOML should parse as config");
 
     assert_eq!(round_tripped.agent.id, "opencode");
     assert!(round_tripped.agent.adapter.is_none());
     assert!(canonical.contains("[security.http]"));
     assert!(!canonical.contains("[agent.adapter]"));
-    assert!(canonical.contains("[agent.install]"));
+    assert!(canonical.contains("[array]"));
+    assert!(canonical.contains("[array.targets.agent.install]"));
+}
+
+#[test]
+fn legacy_agent_section_loads_as_primary_array_target() {
+    let config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+
+    assert!(!config.array.enabled);
+    assert_eq!(config.array.primary_target, "opencode");
+    assert_eq!(config.array.targets.len(), 1);
+    assert_eq!(config.array.targets[0].id, "opencode");
+    assert_eq!(config.array.targets[0].agent.id, config.agent.id);
+}
+
+#[test]
+fn canonical_export_writes_array_shape_without_legacy_agent_section() {
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    let mut second_agent = config.agent.clone();
+    second_agent.id = "codex".to_owned();
+    second_agent.name = "Codex".to_owned();
+    second_agent.command = "codex".to_owned();
+    config.array.enabled = true;
+    config.array.targets.push(ArrayTargetConfig {
+        id: "codex".to_owned(),
+        agent: second_agent,
+    });
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical array config parses");
+
+    assert!(canonical.contains("[array]"));
+    assert!(!canonical.contains("\n[agent]\n"));
+    assert_eq!(reparsed.array.targets.len(), 2);
+    assert_eq!(reparsed.array.targets[1].id, "codex");
+    assert_eq!(reparsed.array.targets[1].agent.id, "codex");
+}
+
+#[test]
+fn canonical_export_renames_primary_target_from_agent_mirror() {
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    config.agent.id = "placebo".to_owned();
+    config.agent.name = "Placebo".to_owned();
+    config.agent.command = "placebo-agent".to_owned();
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical array config parses");
+
+    assert_eq!(reparsed.array.primary_target, "placebo");
+    assert_eq!(reparsed.array.targets.len(), 1);
+    assert_eq!(reparsed.array.targets[0].id, "placebo");
+    assert_eq!(reparsed.array.targets[0].agent.id, "placebo");
+}
+
+#[test]
+fn rejects_array_target_id_agent_id_mismatch() {
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    let mut second_agent = config.agent.clone();
+    second_agent.id = "codex".to_owned();
+    second_agent.name = "Codex".to_owned();
+    second_agent.command = "codex".to_owned();
+    config.array.targets.push(ArrayTargetConfig {
+        id: "agent-0".to_owned(),
+        agent: second_agent,
+    });
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let error = load_config_from_str(&canonical).expect_err("mismatched target rejected");
+
+    assert!(error.to_string().contains("must match agent id"), "{error}");
+}
+
+#[test]
+fn rejects_duplicate_array_harnesses() {
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    config.array.targets.push(ArrayTargetConfig {
+        id: "opencode".to_owned(),
+        agent: config.agent.clone(),
+    });
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let error = load_config_from_str(&canonical).expect_err("duplicate harnesses rejected");
+
+    assert!(
+        error.to_string().contains("requires different harnesses"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_dangling_primary_target() {
+    // The coordination invariant: primary_target must name a real target, or
+    // the Array has no distinguished coordinator.
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    config.array.primary_target = "does-not-exist".to_owned();
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let error = load_config_from_str(&canonical).expect_err("dangling primary rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must reference an entry in array.targets"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_invalid_array_target_id() {
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    let mut second = config.agent.clone();
+    second.id = "bad id".to_owned();
+    second.name = "Bad".to_owned();
+    second.command = "bad".to_owned();
+    config.array.targets.push(ArrayTargetConfig {
+        id: "bad id".to_owned(),
+        agent: second,
+    });
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let error = load_config_from_str(&canonical).expect_err("invalid target id rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must start with an ASCII letter or digit"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -456,8 +583,8 @@ fn canonical_export_omits_runtime_adapter_metadata() {
         .to_canonical_toml()
         .expect("canonical TOML should serialize");
     assert!(!canonical.contains("[agent.adapter]"));
-    let round_tripped: Config =
-        toml::from_str(&canonical).expect("canonical TOML should parse as config");
+    let round_tripped =
+        load_config_from_str(&canonical).expect("canonical TOML should parse as config");
     assert!(round_tripped.agent.adapter.is_none());
 }
 

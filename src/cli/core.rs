@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use super::agent::AgentCommand;
+use super::array::ArrayCommand;
 use super::auth::AuthCommand;
 use super::config::ConfigCommand;
 use super::deps::DepsCommand;
@@ -42,6 +43,7 @@ after_help = "Examples:
   acps init --agent opencode --provider openrouter --api-key-ref OPENROUTER_API_KEY
   acps init --from-base64 <base64-acps-config-toml>
   acps status --format json
+  acps array status
   acps sessions list --range week --format json
   acps logging supabase status --format json
   acps logs query --since 1h --kind prompt. --format json
@@ -146,6 +148,16 @@ enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    /// Manage multi-agent Array targets.
+    #[command(after_help = "Examples:
+  acps array status
+  acps array on
+  acps array add codex
+  acps array start --target codex")]
+    Array {
+        #[command(subcommand)]
+        command: ArrayCommand,
     },
     /// Configure OpenCode small-model behavior.
     Subagent {
@@ -270,6 +282,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Command::Logs { command } => super::logs::run_logs_command(command, output),
         Command::Agent { command } => super::agent::run_agent_command(command, output),
+        Command::Array { command } => super::array::run_array_command(command, output.effective()),
         Command::Subagent { command } => {
             output.reject_json("subagent")?;
             super::subagent::run_subagent_command(command)
@@ -497,6 +510,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/config/validate"
     } else if bare == "/v1/agent/capabilities" {
         "/v1/agent/capabilities"
+    } else if bare == "/v1/array/status" {
+        "/v1/array/status"
     } else if bare == "/v1/agent/install" {
         "/v1/agent/install"
     } else if bare == "/v1/agent/start" {
@@ -507,6 +522,16 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/agent/restart"
     } else if bare == "/v1/agent/switch" {
         "/v1/agent/switch"
+    } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/capabilities") {
+        "/v1/array/targets/{target_id}/capabilities"
+    } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/install") {
+        "/v1/array/targets/{target_id}/install"
+    } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/start") {
+        "/v1/array/targets/{target_id}/start"
+    } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/stop") {
+        "/v1/array/targets/{target_id}/stop"
+    } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/restart") {
+        "/v1/array/targets/{target_id}/restart"
     } else if bare == "/v1/logs/events" {
         "/v1/logs/events"
     } else if bare == "/v1/logs/commands" {

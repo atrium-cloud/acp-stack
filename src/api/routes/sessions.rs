@@ -3,6 +3,7 @@ use axum::extract::{Path, Query, State};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::super::core::AgentTargetRuntime;
 use super::super::core::AppState;
 use super::agent::open_mcp_servers;
 use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
@@ -20,6 +21,8 @@ use crate::state::{
 #[derive(Serialize)]
 pub(crate) struct SessionResponse {
     id: String,
+    target_id: String,
+    agent_session_id: String,
     created_at: String,
     updated_at: String,
     status: String,
@@ -33,6 +36,8 @@ impl From<SessionRecord> for SessionResponse {
     fn from(record: SessionRecord) -> Self {
         Self {
             id: record.id,
+            target_id: record.target_id,
+            agent_session_id: record.agent_session_id,
             created_at: record.created_at,
             updated_at: record.updated_at,
             status: record.status,
@@ -78,6 +83,8 @@ pub(crate) struct SessionsListParams {
     range: Option<String>,
     #[serde(default)]
     resolve_bounds: bool,
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
 }
 
 pub(crate) async fn sessions_list_handler(
@@ -86,10 +93,14 @@ pub(crate) async fn sessions_list_handler(
 ) -> std::result::Result<ApiSuccess<SessionsListResponse>, StackError> {
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let now = Utc::now();
-    let agent_for_session = state.live_agent_config.lock().await.clone();
-    let agent_sync = state
-        .agent_supervisor
+    let target = state
+        .session_agent_target(params.target_id.as_deref())
+        .await?;
+    let agent_for_session = target.live_agent_config.lock().await.clone();
+    let agent_sync = target
+        .supervisor
         .sync_listed_sessions(
+            &target.target_id,
             &agent_for_session,
             &state.config.workspace.root,
             &state.state,
@@ -102,6 +113,7 @@ pub(crate) async fn sessions_list_handler(
         limit,
         since: since.as_deref(),
         until: until.as_deref(),
+        target_id: Some(&target.target_id),
         ..Default::default()
     })?;
     drop(store);
@@ -197,6 +209,8 @@ pub(crate) struct SessionsStatusParams {
     window: String,
     #[serde(default = "default_session_status_limit")]
     limit: u32,
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
 }
 
 fn default_session_status_threshold() -> String {
@@ -364,8 +378,15 @@ pub(crate) async fn sessions_status_handler(
     let window_start_text = window_start.to_rfc3339_opts(SecondsFormat::Nanos, true);
     let limit = params.limit.min(MAX_LOGS_LIMIT);
     let query_limit = limit.saturating_add(1);
+    let target = state
+        .session_agent_target(params.target_id.as_deref())
+        .await?;
     let store = state.state.lock().await;
-    let mut rows = store.query_session_status_window(&window_start_text, query_limit)?;
+    let mut rows = store.query_session_status_window(
+        &window_start_text,
+        Some(&target.target_id),
+        query_limit,
+    )?;
     drop(store);
     let truncated = rows.len() > limit as usize;
     if truncated {
@@ -442,6 +463,8 @@ fn resolve_time_bound(
 pub(crate) struct SessionsCreateBody {
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
     // `mcp_servers` is intentionally omitted from the public surface in this
     // batch. The spec (`docs/specs/acp/acp-bridge.md`) declares MCP servers
     // through admin-controlled config, not the session API. Accepting an
@@ -457,16 +480,20 @@ pub(crate) async fn sessions_create_handler(
     let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
     let mcp_servers = open_mcp_servers(&state.config)?;
     let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
+    let target = state
+        .session_agent_target(payload.target_id.as_deref())
+        .await?;
     // Read the agent block from the live cache instead of the cached
     // `state.config.agent`. After `POST /v1/agent/restart` updates
     // the cache, this is how subsequent session creates see the new
     // `agent.model` / `agent.mode` / `agent.provider`. Without this,
     // a post-restart session would still receive the stale config
     // and silently downgrade to the prior model.
-    let agent_for_session = state.live_agent_config.lock().await.clone();
-    let record = state
-        .agent_supervisor
+    let agent_for_session = target.live_agent_config.lock().await.clone();
+    let record = target
+        .supervisor
         .create_session(
+            &target.target_id,
             &agent_for_session,
             &state.config.workspace.root,
             Some(cwd),
@@ -478,14 +505,87 @@ pub(crate) async fn sessions_create_handler(
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct SessionsTargetParams {
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
+}
+
+/// Look up a session's stored `target_id`, rejecting a mismatched
+/// caller-asserted target. Shared by both the gated (driving) and wind-down
+/// (terminal) resolvers below.
+async fn resolved_stored_target_id(
+    state: &AppState,
+    session_id: &str,
+    asserted_target_id: Option<&str>,
+) -> Result<String> {
+    let stored_target_id = {
+        let store = state.state.lock().await;
+        let record = store
+            .get_session(session_id)?
+            .ok_or_else(|| StackError::SessionNotFound {
+                id: session_id.to_owned(),
+            })?;
+        record.target_id
+    };
+    if let Some(asserted) = asserted_target_id
+        && asserted != stored_target_id
+    {
+        return Err(StackError::InvalidParam {
+            field: "target",
+            reason: format!(
+                "session `{session_id}` belongs to target `{stored_target_id}`, not `{asserted}`"
+            ),
+        });
+    }
+    Ok(stored_target_id)
+}
+
+/// Resolve the supervisor for a driving op (prompt/load/resume/fork) against
+/// an existing session. Honors Array-mode gating: a non-primary target is only
+/// reachable while Array mode is enabled.
+async fn target_for_existing_session(
+    state: &AppState,
+    session_id: &str,
+    asserted_target_id: Option<&str>,
+) -> Result<AgentTargetRuntime> {
+    let stored_target_id = resolved_stored_target_id(state, session_id, asserted_target_id).await?;
+    state.session_agent_target(Some(&stored_target_id)).await
+}
+
+/// Resolve the supervisor for a terminal wind-down op (cancel/close) against an
+/// existing session. Reaches the stored target even when Array mode is off, so
+/// an operator can always close or cancel a session that was opened against a
+/// non-primary target before `acps array off`.
+async fn target_for_session_wind_down(
+    state: &AppState,
+    session_id: &str,
+    asserted_target_id: Option<&str>,
+) -> Result<AgentTargetRuntime> {
+    let stored_target_id = resolved_stored_target_id(state, session_id, asserted_target_id).await?;
+    state.existing_session_target(&stored_target_id).await
+}
+
 pub(crate) async fn sessions_get_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let store = state.state.lock().await;
     let record = store.get_session(&id)?;
     drop(store);
     let record = record.ok_or(StackError::SessionNotFound { id })?;
+    if let Some(asserted) = params.target_id.as_deref()
+        && asserted != record.target_id
+    {
+        return Err(StackError::InvalidParam {
+            field: "target",
+            reason: format!(
+                "session `{}` belongs to target `{}`, not `{asserted}`",
+                record.id, record.target_id
+            ),
+        });
+    }
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
@@ -493,6 +593,8 @@ pub(crate) async fn sessions_get_handler(
 pub(crate) struct SessionsLoadBody {
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
     // See `SessionsCreateBody`: MCP servers come from admin config, not
     // session-tier request bodies, until a proper policy surface lands.
 }
@@ -503,14 +605,15 @@ pub(crate) async fn sessions_load_handler(
     body: Option<Json<SessionsLoadBody>>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
+    let target = target_for_existing_session(&state, &id, payload.target_id.as_deref()).await?;
     let cwd = payload
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
     let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
-    let record = state
-        .agent_supervisor
+    let record = target
+        .supervisor
         .load_session(
             &id,
             cwd,
@@ -529,14 +632,15 @@ pub(crate) async fn sessions_resume_handler(
     body: Option<Json<SessionsLoadBody>>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
+    let target = target_for_existing_session(&state, &id, payload.target_id.as_deref()).await?;
     let cwd = payload
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
     let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
-    let record = state
-        .agent_supervisor
+    let record = target
+        .supervisor
         .resume_session(
             &id,
             cwd,
@@ -555,6 +659,8 @@ pub(crate) struct SessionsForkBody {
     cwd: Option<String>,
     #[serde(default)]
     message_id: Option<String>,
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
 }
 
 pub(crate) async fn sessions_fork_handler(
@@ -563,14 +669,15 @@ pub(crate) async fn sessions_fork_handler(
     body: Option<Json<SessionsForkBody>>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
+    let target = target_for_existing_session(&state, &id, payload.target_id.as_deref()).await?;
     let cwd = payload
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
     let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
-    let record = state
-        .agent_supervisor
+    let record = target
+        .supervisor
         .fork_session(
             &id,
             cwd,
@@ -623,6 +730,7 @@ pub(crate) struct PromptSubmitResponse {
 pub(crate) async fn sessions_prompt_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
     Json(payload): Json<SessionsPromptBody>,
 ) -> std::result::Result<ApiSuccess<PromptSubmitResponse>, StackError> {
     let blocks = parse_prompt_blocks(&payload.prompt)?;
@@ -635,8 +743,9 @@ pub(crate) async fn sessions_prompt_handler(
     let prompt_json = serde_json::to_string(&blocks).map_err(|err| {
         StackError::PromptBodyInvalid(format!("failed to canonicalize prompt: {err}"))
     })?;
-    let record = state
-        .agent_supervisor
+    let target = target_for_existing_session(&state, &id, params.target_id.as_deref()).await?;
+    let record = target
+        .supervisor
         .submit_prompt(&id, blocks, prompt_json, &state.state)
         .await?;
     Ok(ApiSuccess::new(PromptSubmitResponse {
@@ -682,7 +791,10 @@ impl From<PromptRecord> for PromptStatusResponse {
 pub(crate) async fn sessions_prompt_status_handler(
     State(state): State<AppState>,
     Path((session_id, prompt_id)): Path<(String, String)>,
+    Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<PromptStatusResponse>, StackError> {
+    let _target =
+        target_for_existing_session(&state, &session_id, params.target_id.as_deref()).await?;
     let store = state.state.lock().await;
     let record = store.get_prompt(&prompt_id)?;
     drop(store);
@@ -704,6 +816,8 @@ pub(crate) struct SessionsEventsParams {
     limit: u32,
     #[serde(default)]
     after: Option<String>,
+    #[serde(default, alias = "target")]
+    target_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -721,6 +835,20 @@ pub(crate) async fn sessions_events_handler(
     let exists = store.get_session(&id)?.is_some();
     if !exists {
         return Err(StackError::SessionNotFound { id });
+    }
+    if let Some(asserted) = params.target_id.as_deref() {
+        let record = store
+            .get_session(&id)?
+            .ok_or_else(|| StackError::SessionNotFound { id: id.clone() })?;
+        if asserted != record.target_id {
+            return Err(StackError::InvalidParam {
+                field: "target",
+                reason: format!(
+                    "session `{}` belongs to target `{}`, not `{asserted}`",
+                    record.id, record.target_id
+                ),
+            });
+        }
     }
     let events = store.query_session_events(&id, params.after.as_deref(), limit)?;
     drop(store);
@@ -752,11 +880,23 @@ pub(crate) struct SessionSnapshotResponse {
 pub(crate) async fn sessions_snapshot_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionSnapshotResponse>, StackError> {
     let store = state.state.lock().await;
     let session = store
         .get_session(&id)?
         .ok_or_else(|| StackError::SessionNotFound { id: id.clone() })?;
+    if let Some(asserted) = params.target_id.as_deref()
+        && asserted != session.target_id
+    {
+        return Err(StackError::InvalidParam {
+            field: "target",
+            reason: format!(
+                "session `{}` belongs to target `{}`, not `{asserted}`",
+                session.id, session.target_id
+            ),
+        });
+    }
     let in_flight = store.in_flight_prompts_for_session(&id)?;
     let recent = store.latest_session_events(&id, SNAPSHOT_RECENT_EVENTS_LIMIT)?;
     drop(store);
@@ -785,11 +925,10 @@ pub(crate) struct SessionsCancelResponse {
 pub(crate) async fn sessions_cancel_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionsCancelResponse>, StackError> {
-    state
-        .agent_supervisor
-        .cancel_session(&id, &state.state)
-        .await?;
+    let target = target_for_session_wind_down(&state, &id, params.target_id.as_deref()).await?;
+    target.supervisor.cancel_session(&id, &state.state).await?;
     cancel_pending_acp_permissions_for_session(&state, &id, "session-canceled").await;
     Ok(ApiSuccess::new(SessionsCancelResponse { session_id: id }))
 }
@@ -797,11 +936,10 @@ pub(crate) async fn sessions_cancel_handler(
 pub(crate) async fn sessions_close_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
-    let record = state
-        .agent_supervisor
-        .close_session(&id, &state.state)
-        .await?;
+    let target = target_for_session_wind_down(&state, &id, params.target_id.as_deref()).await?;
+    let record = target.supervisor.close_session(&id, &state.state).await?;
     cancel_pending_acp_permissions_for_session(&state, &id, "session-closed").await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }

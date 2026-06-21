@@ -123,3 +123,9 @@ id = 21
 name = "auth_keys"
 sqlite_file = "021_auth_keys.sqlite.sql"
 postgres_file = "021_auth_keys.postgres.sql"
+
+[[migration]]
+id = 22
+name = "array_sessions"
+sqlite_file = "022_array_sessions.sqlite.sql"
+postgres_file = "022_array_sessions.postgres.sql"

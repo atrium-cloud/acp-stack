@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS {events} (
 
 CREATE TABLE IF NOT EXISTS {sessions} (
     id text PRIMARY KEY,
+    target_id text NOT NULL DEFAULT '',
+    agent_session_id text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
     status text NOT NULL,
@@ -414,6 +416,8 @@ fn columns_for(source_table: &str) -> Result<&'static [&'static str]> {
         ]),
         "sessions" => Ok(&[
             "id",
+            "target_id",
+            "agent_session_id",
             "created_at",
             "updated_at",
             "status",

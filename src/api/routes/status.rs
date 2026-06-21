@@ -83,8 +83,9 @@ struct AgentFailureJson {
 pub(crate) async fn status_agent_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<StatusAgentResponse>, StackError> {
-    let snapshot = state.agent_supervisor.snapshot().await;
-    let agent = state.live_agent_config.lock().await.clone();
+    let (_, target) = state.default_agent_target().await?;
+    let snapshot = target.supervisor.snapshot().await;
+    let agent = target.live_agent_config.lock().await.clone();
     let store = state.state.lock().await;
     let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
     let latest_failure = store.latest_agent_failure(&agent.id)?;

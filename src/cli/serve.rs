@@ -261,6 +261,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         eprintln!("acps serve: listening on {local}");
         eprintln!("acps serve: local socket at {}", socket_path.display());
         let agent_supervisor = app_state.agent_supervisor.clone();
+        let agent_targets = app_state.agent_targets.clone();
 
         // Spawn the Supabase sink once the runtime + shared state are ready.
         // Failures to build the HTTP client are fatal at boot — there is no
@@ -323,9 +324,12 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         // rows (`agent.stopped`, `server.stopped`) that must reach the
         // external mirror. The sink's own shutdown does one final drain
         // pass before exiting so those rows are uploaded.
-        agent_supervisor
-            .shutdown_on_serve_exit(&state_handle, &event_hub)
-            .await;
+        for target in agent_targets.targets() {
+            target
+                .supervisor
+                .shutdown_on_serve_exit(&target.target_id, &state_handle, &event_hub)
+                .await;
+        }
         // Stop the stale-prompt sweeper before recording `server.stopped`.
         // Otherwise a sweep racing with shutdown could append a
         // `prompt.stalled` event after the lifecycle row, muddling the

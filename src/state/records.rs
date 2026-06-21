@@ -190,6 +190,7 @@ pub struct SessionFilter<'a> {
     pub since: Option<&'a str>,
     pub until: Option<&'a str>,
     pub status: Option<&'a str>,
+    pub target_id: Option<&'a str>,
     pub order: LogOrder,
 }
 
