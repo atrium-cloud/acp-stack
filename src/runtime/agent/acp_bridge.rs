@@ -403,6 +403,7 @@ impl AcpBridge {
         let notification_sink = sink.clone();
         let notification_drain_for_task = Arc::clone(&notification_drain);
         let bridge_sink = sink.clone();
+        let permission_sink = sink.clone();
 
         // The SDK's Client.builder().connect_with(...) future drives the IO
         // loop until the closure returns. We spawn it as a tokio task so the
@@ -416,7 +417,9 @@ impl AcpBridge {
                 .on_receive_request(
                     async move |request: RequestPermissionRequest, responder, _cx| {
                         let outcome = match permissions_for_task.as_ref() {
-                            Some(service) => resolve_acp_permission(service, request).await,
+                            Some(service) => {
+                                resolve_acp_permission(service, &permission_sink, request).await
+                            }
                             None => {
                                 // No permission service attached — tests that
                                 // never decide must not block the agent.

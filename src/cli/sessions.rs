@@ -49,6 +49,9 @@ pub struct SessionsListArgs {
     /// Explicit upper bound. Accepts RFC3339 or duration suffixes like 30d.
     #[arg(long)]
     range_end: Option<String>,
+    /// Array target id to list.
+    #[arg(long)]
+    target: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -61,6 +64,9 @@ pub struct SessionsStatusArgs {
     threshold: Option<String>,
     #[arg(long, default_value_t = DEFAULT_SESSION_STATUS_LIMIT)]
     limit: u32,
+    /// Array target id to inspect.
+    #[arg(long)]
+    target: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -69,6 +75,9 @@ pub struct SessionsNewArgs {
     /// `workspace.root` configured for the runtime.
     #[arg(long)]
     cwd: Option<String>,
+    /// Array target id to create the session on.
+    #[arg(long)]
+    target: Option<String>,
     /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
     #[arg(long = "session-key")]
     session_key: Option<String>,
@@ -83,6 +92,9 @@ pub struct SessionsForkArgs {
     /// Optional ACP prompt message id to fork from.
     #[arg(long)]
     message_id: Option<String>,
+    /// Assert that the parent session belongs to this Array target.
+    #[arg(long)]
+    target: Option<String>,
     /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
     #[arg(long = "session-key")]
     session_key: Option<String>,
@@ -94,6 +106,9 @@ pub struct SessionsLoadArgs {
     /// Optional working directory for the loaded/resumed session.
     #[arg(long)]
     cwd: Option<String>,
+    /// Assert that the session belongs to this Array target.
+    #[arg(long)]
+    target: Option<String>,
     /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
     #[arg(long = "session-key")]
     session_key: Option<String>,
@@ -111,6 +126,9 @@ pub struct SessionsPromptArgs {
     /// `--no-wait` is set). The daemon keeps the task running regardless.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
+    /// Assert that the session belongs to this Array target.
+    #[arg(long)]
+    target: Option<String>,
     /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
     #[arg(long = "session-key")]
     session_key: Option<String>,
@@ -119,6 +137,9 @@ pub struct SessionsPromptArgs {
 #[derive(Debug, Args)]
 pub struct SessionsTargetArgs {
     session_id: String,
+    /// Assert that the session belongs to this Array target.
+    #[arg(long)]
+    target: Option<String>,
     /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
     #[arg(long = "session-key")]
     session_key: Option<String>,
@@ -176,6 +197,10 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                     path.push_str("&threshold=");
                     path.push_str(&encode_query_value(threshold));
                 }
+                if let Some(target) = args.target.as_deref() {
+                    path.push_str("&target=");
+                    path.push_str(&encode_query_value(target));
+                }
                 let body = local_daemon_request(&config, CliMethod::Get, &path, None).await?;
                 let sessions = body["data"]["sessions"]
                     .as_array()
@@ -219,6 +244,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 let session_access = resolve_session_access(&config, args.session_key)?;
                 let body = serde_json::json!({
                     "cwd": args.cwd,
+                    "target_id": args.target,
                     "mcp_servers": [],
                 });
                 let response = session_daemon_request(
@@ -253,6 +279,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
                 let body = serde_json::json!({
                     "cwd": args.cwd,
                     "message_id": args.message_id,
+                    "target_id": args.target,
                 });
                 let encoded = encode_path_segment(&args.session_id);
                 let path = format!("/v1/sessions/{encoded}/fork");
@@ -285,7 +312,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
             SessionsCommand::Cancel(args) => {
                 let session_access = resolve_session_access(&config, args.session_key)?;
                 let encoded = encode_path_segment(&args.session_id);
-                let path = format!("/v1/sessions/{encoded}/cancel");
+                let path = session_target_path(&format!("/v1/sessions/{encoded}/cancel"), args.target.as_deref());
                 session_daemon_request(
                     &config,
                     &base_url,
@@ -309,7 +336,7 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
             SessionsCommand::Close(args) => {
                 let session_access = resolve_session_access(&config, args.session_key)?;
                 let encoded = encode_path_segment(&args.session_id);
-                let path = format!("/v1/sessions/{encoded}");
+                let path = session_target_path(&format!("/v1/sessions/{encoded}"), args.target.as_deref());
                 let response = session_daemon_request(
                     &config,
                     &base_url,
@@ -360,6 +387,10 @@ fn sessions_list_path(args: &SessionsListArgs, query_limit: u32) -> Result<Strin
     if let Some(until) = until {
         query.push_str("&until=");
         query.push_str(&encode_query_value(&until));
+    }
+    if let Some(target) = args.target.as_deref() {
+        query.push_str("&target=");
+        query.push_str(&encode_query_value(target));
     }
     Ok(format!("/v1/sessions?{query}"))
 }
@@ -428,6 +459,13 @@ fn encode_query_value(input: &str) -> String {
     out
 }
 
+fn session_target_path(base_path: &str, target: Option<&str>) -> String {
+    let Some(target) = target else {
+        return base_path.to_owned();
+    };
+    format!("{base_path}?target={}", encode_query_value(target))
+}
+
 async fn run_sessions_load_or_resume(
     config: &Config,
     base_url: &str,
@@ -438,6 +476,7 @@ async fn run_sessions_load_or_resume(
     let session_access = resolve_session_access(config, args.session_key.clone())?;
     let body = serde_json::json!({
         "cwd": args.cwd,
+        "target_id": args.target,
     });
     let encoded = encode_path_segment(&args.session_id);
     let path = format!("/v1/sessions/{encoded}/{action}");
@@ -484,7 +523,10 @@ async fn run_sessions_prompt(
     };
     let body = serde_json::json!({ "prompt": prompt_text });
     let encoded_session = encode_path_segment(&args.session_id);
-    let path = format!("/v1/sessions/{encoded_session}/prompt");
+    let path = session_target_path(
+        &format!("/v1/sessions/{encoded_session}/prompt"),
+        args.target.as_deref(),
+    );
     let response = session_daemon_request(
         config,
         base_url,
@@ -514,7 +556,10 @@ async fn run_sessions_prompt(
     }
 
     let encoded_prompt = encode_path_segment(&prompt_id);
-    let status_path = format!("/v1/sessions/{encoded_session}/prompts/{encoded_prompt}");
+    let status_path = session_target_path(
+        &format!("/v1/sessions/{encoded_session}/prompts/{encoded_prompt}"),
+        args.target.as_deref(),
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout_secs);
     let mut delay_ms: u64 = 250;
     loop {
@@ -603,12 +648,30 @@ mod tests {
                 range: None,
                 range_start: None,
                 range_end: None,
+                target: None,
             },
             51,
         )
         .expect("list path");
 
         assert_eq!(path, "/v1/sessions?limit=51&range=month");
+    }
+
+    #[test]
+    fn list_path_includes_target_when_present() {
+        let path = sessions_list_path(
+            &SessionsListArgs {
+                limit: 50,
+                range: None,
+                range_start: None,
+                range_end: None,
+                target: Some("codex".to_owned()),
+            },
+            51,
+        )
+        .expect("list path");
+
+        assert_eq!(path, "/v1/sessions?limit=51&range=month&target=codex");
     }
 
     #[test]
@@ -640,6 +703,7 @@ mod tests {
                 range: Some("year".to_owned()),
                 range_start: Some("2026-05-01T00:00:00Z".to_owned()),
                 range_end: Some("7d".to_owned()),
+                target: None,
             },
             51,
         )
@@ -657,6 +721,7 @@ mod tests {
                 range: None,
                 range_start: Some("2026-05-01T00:00:00Z".to_owned()),
                 range_end: None,
+                target: None,
             },
             51,
         )

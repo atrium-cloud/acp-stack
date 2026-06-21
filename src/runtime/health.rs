@@ -430,9 +430,23 @@ fn collect_workspace(root: &str) -> WorkspaceHealth {
 }
 
 async fn collect_agent(state: &AppState, process_probe: AgentProcessProbe) -> AgentHealth {
-    let snapshot = state.agent_supervisor.snapshot().await;
-    let id = state.config.agent.id.clone();
-    let orphaned_process_pids = orphaned_agent_process_pids(&process_probe, snapshot.pid);
+    let (id, supervisor) = match state.default_agent_target().await {
+        Ok((config, target)) => (config.agent.id, target.supervisor),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to resolve default agent target for health report");
+            (
+                state.config.agent.id.clone(),
+                state.agent_supervisor.clone(),
+            )
+        }
+    };
+    let snapshot = supervisor.snapshot().await;
+    // Every supervised Array target owns a live process. Orphan detection must
+    // exclude ALL supervised pids, not just the primary's — otherwise each
+    // legitimately-running secondary target is misreported as a leaked process
+    // and `orphaned_process_count` stays permanently > 0 in any fleet.
+    let supervised_pids = supervised_target_pids(state).await;
+    let orphaned_process_pids = orphaned_agent_process_pids(&process_probe, &supervised_pids);
     AgentHealth {
         configured: !id.is_empty(),
         id,
@@ -457,13 +471,26 @@ fn collect_agent_process_probe(store: &StateStore) -> AgentProcessProbe {
     }
 }
 
+/// Collect the live pids of every supervised Array target (primary plus
+/// secondaries) so orphan detection can distinguish a leaked process from a
+/// process this daemon is legitimately supervising.
+async fn supervised_target_pids(state: &AppState) -> BTreeSet<u32> {
+    let mut pids = BTreeSet::new();
+    for target in state.agent_targets.targets() {
+        if let Some(pid) = target.supervisor.snapshot().await.pid {
+            pids.insert(pid);
+        }
+    }
+    pids
+}
+
 fn orphaned_agent_process_pids(
     process_probe: &AgentProcessProbe,
-    current_pid: Option<u32>,
+    supervised_pids: &BTreeSet<u32>,
 ) -> Vec<u32> {
     let mut pids = BTreeSet::new();
     for process in &process_probe.started_processes {
-        if Some(process.pid) == current_pid {
+        if supervised_pids.contains(&process.pid) {
             continue;
         }
         if process_group_is_alive(process.pid) {
@@ -691,7 +718,7 @@ mod tests {
     #[test]
     fn orphan_probe_without_started_processes_is_empty() {
         let probe = AgentProcessProbe::default();
-        assert!(orphaned_agent_process_pids(&probe, None).is_empty());
+        assert!(orphaned_agent_process_pids(&probe, &std::collections::BTreeSet::new()).is_empty());
     }
 
     #[test]
@@ -704,7 +731,34 @@ mod tests {
             }],
             probe_error: None,
         };
-        assert!(orphaned_agent_process_pids(&probe, Some(std::process::id())).is_empty());
+        let supervised = std::collections::BTreeSet::from([std::process::id()]);
+        assert!(orphaned_agent_process_pids(&probe, &supervised).is_empty());
+    }
+
+    #[test]
+    fn orphan_probe_excludes_every_supervised_target_pid() {
+        // A secondary Array target's live pid must be treated as supervised,
+        // not orphaned: both supervised pids are excluded before the liveness
+        // probe runs, so a multi-target fleet reports zero orphans.
+        let primary_pid = std::process::id();
+        let secondary_pid = primary_pid.wrapping_add(1).max(2);
+        let probe = AgentProcessProbe {
+            started_processes: vec![
+                AgentStartedProcess {
+                    created_at: "2026-05-28T00:00:00.000000000Z".to_owned(),
+                    agent_id: Some("opencode".to_owned()),
+                    pid: primary_pid,
+                },
+                AgentStartedProcess {
+                    created_at: "2026-05-28T00:00:00.000000000Z".to_owned(),
+                    agent_id: Some("codex".to_owned()),
+                    pid: secondary_pid,
+                },
+            ],
+            probe_error: None,
+        };
+        let supervised = std::collections::BTreeSet::from([primary_pid, secondary_pid]);
+        assert!(orphaned_agent_process_pids(&probe, &supervised).is_empty());
     }
 
     #[test]

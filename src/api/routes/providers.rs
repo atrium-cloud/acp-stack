@@ -64,10 +64,8 @@ impl From<AgentProviderSummary> for ProviderJson {
 pub(crate) async fn providers_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<ProvidersResponse>, StackError> {
-    // Read agent.id from the live cache so the response stays
-    // consistent with what `/v1/sessions` and `/v1/models` see after
-    // a `POST /v1/agent/restart` has picked up a changed agent id.
-    let agent_id = state.live_agent_config.lock().await.id.clone();
+    let (config, _) = state.default_agent_target().await?;
+    let agent_id = config.agent.id;
     let providers = providers_for_agent(&agent_id)
         .into_iter()
         .map(ProviderJson::from)
@@ -91,23 +89,11 @@ pub(crate) struct ModelsResponse {
 pub(crate) async fn models_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<ModelsResponse>, StackError> {
-    // Read agent.id from the live cache so the response stays
-    // consistent with what `/v1/sessions` would create after the
-    // most recent `POST /v1/agent/restart`. The discovery dance
-    // spawns the configured agent over stdio and blocks until
-    // `session/new` returns; model_discovery wraps the session/new
-    // call in a timeout and always tears down the provisional bridge
-    // before returning.
-    let agent = state.live_agent_config.lock().await.clone();
-    let agent_id = agent.id.clone();
-    let workspace_root = state.config.workspace.root.clone();
+    // Resolve the default target from disk so `acps agent default set`
+    // and Array config edits are visible without a daemon restart.
+    let (config, _) = state.default_agent_target().await?;
+    let agent_id = config.agent.id.clone();
     let home = home_dir()?;
-    // Reuse the live agent config in a synthetic Config so
-    // model_discovery's existing signature works unchanged. We only
-    // need the agent block + workspace.root.
-    let mut config = (*state.config).clone();
-    config.agent = agent;
-    config.workspace.root = workspace_root;
     let response =
         fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
     // Surface a malformed/missing `model` advertisement as an error

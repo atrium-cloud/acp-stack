@@ -1005,6 +1005,28 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
     });
     let runtime_user = starter_runtime_user(args)?;
 
+    let agent = AgentConfig {
+        id: STARTER_AGENT_ID.to_owned(),
+        name: STARTER_AGENT_NAME.to_owned(),
+        command: STARTER_AGENT_COMMAND.to_owned(),
+        args: Vec::new(),
+        cwd: Some(workspace_root.clone()),
+        env: Vec::new(),
+        expected_sha256: None,
+        restart: STARTER_AGENT_RESTART.to_owned(),
+        mode: None,
+        model: None,
+        harness_version: None,
+        adapter: None,
+        provider: None,
+        subagent: None,
+        auto_update: None,
+        install: Some(AgentInstallConfig {
+            install_type: STARTER_AGENT_INSTALL_TYPE.to_owned(),
+            creates: STARTER_AGENT_INSTALL_CREATES.to_owned(),
+            shell: Some(STARTER_AGENT_INSTALL_COMMAND.to_owned()),
+        }),
+    };
     let starter = Config {
         config_version: config::SUPPORTED_CONFIG_VERSION,
         api: ApiConfig {
@@ -1040,28 +1062,8 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
             local_retention_days: STARTER_LOCAL_RETENTION_DAYS,
             supabase: Some(starter_supabase_config(args)),
         },
-        agent: AgentConfig {
-            id: STARTER_AGENT_ID.to_owned(),
-            name: STARTER_AGENT_NAME.to_owned(),
-            command: STARTER_AGENT_COMMAND.to_owned(),
-            args: Vec::new(),
-            cwd: Some(workspace_root),
-            env: Vec::new(),
-            expected_sha256: None,
-            restart: STARTER_AGENT_RESTART.to_owned(),
-            mode: None,
-            model: None,
-            harness_version: None,
-            adapter: None,
-            provider: None,
-            subagent: None,
-            auto_update: None,
-            install: Some(AgentInstallConfig {
-                install_type: STARTER_AGENT_INSTALL_TYPE.to_owned(),
-                creates: STARTER_AGENT_INSTALL_CREATES.to_owned(),
-                shell: Some(STARTER_AGENT_INSTALL_COMMAND.to_owned()),
-            }),
-        },
+        agent: agent.clone(),
+        array: config::ArrayConfig::from_agent(agent),
         permissions: Default::default(),
         commands: Default::default(),
         prompts: Default::default(),

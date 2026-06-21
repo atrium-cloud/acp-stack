@@ -295,6 +295,14 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
         .as_array()
         .and_then(|rows| rows.first())
         .expect("session row present");
+    assert_eq!(
+        session.get("target_id").and_then(|v| v.as_str()),
+        Some("agent_a")
+    );
+    assert_eq!(
+        session.get("agent_session_id").and_then(|v| v.as_str()),
+        Some("sess_1")
+    );
     assert_eq!(session.get("cwd").and_then(|v| v.as_str()), Some(""));
     assert!(session.get("title").and_then(|v| v.as_str()).is_none());
     assert!(
