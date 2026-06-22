@@ -8,6 +8,8 @@ Use the systemd installer when you want `acps` to run as an unprivileged service
 - Root access for user creation and unit installation.
 - Local `acps` release binary.
 
+On fresh VM images, install the common agent toolchain first with [Linux VM Dependencies](./vm.md).
+
 ## Install
 
 Place the release binaries on the host, then run the installer:

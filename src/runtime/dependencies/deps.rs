@@ -69,7 +69,12 @@ fn check_runtime(entry: &DependencyEntry) -> DepStatus {
 }
 
 fn check_executable(entry: &DependencyEntry, kind: DepKind, label: &str) -> DepStatus {
-    match resolve_command_path(&entry.name) {
+    let expected = entry
+        .install
+        .as_ref()
+        .and_then(|install| install.creates.as_deref())
+        .unwrap_or(&entry.name);
+    match resolve_command_path(expected) {
         Some(path) => DepStatus {
             name: entry.name.clone(),
             kind,
@@ -87,8 +92,7 @@ fn check_executable(entry: &DependencyEntry, kind: DepKind, label: &str) -> DepS
             path: None,
             feature: entry.feature.clone(),
             reason: Some(format!(
-                "{label} `{}` not found or not executable on PATH",
-                entry.name,
+                "{label} `{expected}` not found or not executable on PATH",
             )),
         },
     }
@@ -296,7 +300,8 @@ fn executable_file(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
     use crate::config::{
-        DependenciesConfig, DependencyEntry, McpConfig, McpServerConfig, McpStdioServer,
+        DependenciesConfig, DependencyEntry, DependencyInstallAction, McpConfig, McpServerConfig,
+        McpStdioServer,
     };
 
     fn minimal_config(deps: DependenciesConfig, mcp: McpConfig) -> Config {
@@ -423,6 +428,40 @@ mod tests {
                 .is_some_and(|reason| reason.contains("not executable")),
             "{entry:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_install_creates_path_drives_availability() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let creates = tempdir.path().join("agent-work-base.done");
+        std::fs::write(&creates, "#!/bin/sh\n").expect("write marker");
+        std::fs::set_permissions(&creates, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod marker");
+        let deps = DependenciesConfig {
+            commands: vec![DependencyEntry {
+                name: "acp-stack-agent-work-base".to_owned(),
+                required: true,
+                feature: Some("agent-work".to_owned()),
+                install: Some(DependencyInstallAction {
+                    shell: "true".to_owned(),
+                    creates: Some(creates.to_string_lossy().into_owned()),
+                    scope: Default::default(),
+                    timeout_secs: None,
+                }),
+            }],
+            ..Default::default()
+        };
+        let report = check_dependencies(&minimal_config(deps, McpConfig::default()));
+        let entry = &report.dependencies[0];
+        assert!(entry.available, "{entry:?}");
+        assert_eq!(
+            entry.path.as_deref(),
+            Some(creates.to_string_lossy().as_ref())
+        );
+        assert_eq!(entry.feature.as_deref(), Some("agent-work"));
     }
 
     #[test]

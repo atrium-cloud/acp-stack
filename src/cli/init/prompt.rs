@@ -32,7 +32,6 @@ pub(super) struct HostedPromptItem {
 pub(super) enum HostedPromptStyle {
     Select,
     SearchableSelect,
-    Multiselect,
     Confirm,
     Text,
     Password,
@@ -55,7 +54,6 @@ pub(super) enum HostedPromptOutcome<T> {
 
 pub(super) trait HostedPromptDriver: Send + Sync {
     fn select(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<usize>>>;
-    fn multiselect(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Vec<usize>>>;
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>>;
     fn text(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<String>>>;
     fn password(&self, request: HostedPromptRequest)
@@ -130,44 +128,6 @@ pub(super) fn searchable_select<T: Clone + Eq>(
     items: &[(T, String, String)],
 ) -> Result<Option<T>> {
     select_inner(interactive, prompt, items, true)
-}
-
-pub(super) fn multiselect<T: Clone + Eq>(
-    interactive: bool,
-    prompt: &str,
-    items: &[(T, String, String)],
-) -> Result<Vec<T>> {
-    if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
-        let request = hosted_request(HostedPromptStyle::Multiselect, prompt, false, None, items);
-        return match driver.multiselect(request)? {
-            HostedPromptOutcome::Handled(indices) => indices
-                .into_iter()
-                .map(|index| {
-                    items.get(index).map(|(value, _, _)| value.clone()).ok_or(
-                        StackError::InvalidParam {
-                            field: "init",
-                            reason: format!("hosted init selected invalid item index {index}"),
-                        },
-                    )
-                })
-                .collect(),
-            HostedPromptOutcome::Unhandled => Ok(Vec::new()),
-        };
-    }
-    if !interactive || items.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut builder = cliclack::multiselect::<T>(prompt)
-        .required(false)
-        .max_rows(12);
-    for (value, label, hint) in items {
-        builder = builder.item(value.clone(), label, hint);
-    }
-    match builder.interact() {
-        Ok(values) => Ok(values),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(cancelled()),
-        Err(error) => Err(map_interact_error(error)),
-    }
 }
 
 fn select_inner<T: Clone + Eq>(
@@ -350,15 +310,6 @@ mod tests {
     fn select_returns_none_when_not_interactive() {
         let items = [(1u8, "one".to_owned(), String::new())];
         assert_eq!(select(false, "pick", &items).expect("select"), None);
-    }
-
-    #[test]
-    fn multiselect_returns_empty_when_not_interactive() {
-        let items = [(1u8, "one".to_owned(), String::new())];
-        assert_eq!(
-            multiselect(false, "pick", &items).expect("multiselect"),
-            Vec::<u8>::new()
-        );
     }
 
     #[test]

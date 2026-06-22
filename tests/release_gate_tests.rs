@@ -183,6 +183,111 @@ fn systemd_installer_includes_registry_install_tools() {
 }
 
 #[test]
+fn vm_dependency_profile_includes_agent_work_tools_without_build_toolchain() {
+    let script = std::fs::read_to_string("scripts/install-agent-vm-deps.sh")
+        .expect("read VM dependency installer");
+    for tool in [
+        "ca-certificates",
+        "bash",
+        "curl",
+        "git",
+        "openssh-client",
+        "nodejs",
+        "npm",
+        "python3",
+        "python3-venv",
+        "https://astral.sh/uv/install.sh",
+        "tar",
+        "gzip",
+        "xz-utils",
+        "zstd",
+        "unzip",
+        "zip",
+        "jq",
+        "ripgrep",
+        "patch",
+        "diffutils",
+        "procps",
+    ] {
+        assert!(
+            script.contains(tool),
+            "VM dependency profile must include {tool}"
+        );
+    }
+    for package in ["build-essential", "pkg-config", "python3-dev"] {
+        assert!(
+            !script
+                .lines()
+                .skip_while(|line| !line.contains("BASE_APT_PACKAGES"))
+                .take_while(|line| !line.contains(")"))
+                .any(|line| line.contains(package)),
+            "base VM dependency profile must not include {package}"
+        );
+    }
+}
+
+#[test]
+fn browser_vm_profile_installs_browser_use_mcp_surface_with_policy_controls() {
+    let install_script = std::fs::read_to_string("scripts/install-agent-vm-deps.sh")
+        .expect("read VM dependency installer");
+    for required in [
+        "BROWSER_FONT_APT_PACKAGES",
+        "browser-use[core]",
+        "browser_use_python_version=\"3.14\"",
+        "verify_browser_python",
+        "browser-use-mcp.py",
+        "acp-stack-browser-use-mcp",
+        "render_browser_launcher",
+        "@BROWSER_USE_VENV@",
+    ] {
+        assert!(
+            install_script.contains(required),
+            "browser VM profile must include {required}"
+        );
+    }
+
+    let wrapper = std::fs::read_to_string("scripts/browser-use-mcp.py")
+        .expect("read Browser Use MCP wrapper");
+    for required in [
+        "--allowed-domain",
+        "--allow-credentials",
+        "--allow-payments",
+        "--browser-executable",
+        "--download-dir",
+        "--audit-log",
+        "BROWSER_USE_API_KEY",
+        "BrowserProfile",
+        "FastMCP",
+        "allowed_domains",
+        "downloads_path",
+        "executable_path",
+        "run_browser_task",
+        "--self-test",
+    ] {
+        assert!(
+            wrapper.contains(required),
+            "Browser Use MCP wrapper must include {required}"
+        );
+    }
+
+    let docs = std::fs::read_to_string("docs/deploy/vm.md").expect("read VM docs");
+    for required in [
+        "scripts/install-agent-vm-deps.sh --profile browser",
+        "acp-stack-browser-use-mcp",
+        "BROWSER_USE_API_KEY",
+        "--allowed-domain",
+    ] {
+        assert!(docs.contains(required), "VM docs must document {required}");
+    }
+
+    let status = std::process::Command::new("python3")
+        .args(["scripts/browser-use-mcp.py", "--self-test"])
+        .status()
+        .expect("run Browser Use MCP wrapper self-test");
+    assert!(status.success(), "Browser Use MCP wrapper self-test failed");
+}
+
+#[test]
 fn railway_docs_require_persistent_workspace_volume() {
     let docs = std::fs::read_to_string("docs/deploy/docker.md").expect("read Docker docs");
     for required in [
