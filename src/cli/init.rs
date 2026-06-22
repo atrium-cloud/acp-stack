@@ -68,7 +68,7 @@ use self::skills::{
 use self::starter_config::{
     AgentEnvCollection, append_agent_env_refs, apply_agent_env_collection,
     collect_agent_env_refs_for_init, configure_stack_update_for_init,
-    prompt_starter_config_selections_if_needed, push_args_deps_to_config,
+    prompt_environment_configuration_if_needed, push_args_deps_to_config,
     reject_agent_env_refs_for_existing_config, reject_deps_args_for_existing_config,
     reject_starter_only_mcp_args_for_existing_config, should_apply_deps_for_init, starter_config,
     validate_deployment_overrides_match_existing, validate_stack_update_args,
@@ -365,6 +365,10 @@ pub struct InitArgs {
     /// Suppress the end-of-init testflight even in interactive runs.
     #[arg(long)]
     pub(super) skip_testflight: bool,
+    #[arg(skip)]
+    pub(super) standard_agent_work_deps: bool,
+    #[arg(skip)]
+    pub(super) browser_use_profile: bool,
     #[arg(skip)]
     pub(super) prompt_agent_env_refs: bool,
     #[arg(skip)]
@@ -1131,7 +1135,7 @@ fn run_init_with_output(
         }
     }
     if creating_config && !args.resume {
-        prompt_starter_config_selections_if_needed(&mut args, &registry)?;
+        prompt_environment_configuration_if_needed(&mut args, &registry)?;
     }
     // Operator agent env refs (flags + interactive add-loop). On a fresh run the
     // interactive loop also collects masked values; on resume only the replayed

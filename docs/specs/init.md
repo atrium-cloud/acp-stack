@@ -4,7 +4,7 @@
 
 ## Interactive And Non-Interactive
 
-`acps init` runs interactively when stdin is a TTY and `--non-interactive` is not set. In that mode it prompts for missing choices. Agent, provider, and advertised model selectors are searchable. Optional setup is selected from one grouped prompt before any selected item asks for details; selecting Skip continues without optional setup. Esc and Ctrl-C abort init. When stdin is not a TTY, or `--non-interactive` is passed, every prompt is skipped and the corresponding value must be supplied by flag.
+`acps init` runs interactively when stdin is a TTY and `--non-interactive` is not set. In that mode it prompts for missing choices. Agent, provider, and advertised model selectors are searchable. Environment configuration chooses a Standard or Advanced setup path, then asks per-item opt-in prompts; declining every prompt continues without environment changes. Esc and Ctrl-C abort init. When stdin is not a TTY, or `--non-interactive` is passed, every prompt is skipped and the corresponding value must be supplied by flag.
 
 The non-interactive contract: a first run that creates a new config requires `--agent <id>`, the `--custom-agent-*` flag set, or a complete imported config. Provider, MCP, and agent env secret refs must resolve when used. A non-interactive first run with no agent path fails before writing config.
 
@@ -42,21 +42,18 @@ The operator-facing sequence, in order:
         - Non-interactive runs use `--custom-agent-*`.
         - The id must not be a registry agent id.
         - Provider/model setup is handled by the agent environment, not init flags.
-4. Starter-config selections (new config only).
-    - Sources:
-        - Code sources are Git repos.
-        - Data sources are local paths, HTTPS archives, or S3 buckets.
-    - MCP:
-        - Add custom stdio servers with command, args, and env refs.
-        - Add custom HTTP servers with URL and header refs.
-    - Agent env:
-        - Add secret ref names to `[agent].env`.
-        - Interactive runs can collect masked values.
-    - Dependencies:
-        - Add `[dependencies.commands]` install actions with user or system scope.
-        - Flags pre-populate the matching sections and skip those prompts.
-    - Agent Skills:
-        - Choose whether to install Agent Skills before testflight.
+4. Environment configuration (new config only).
+    a. Standard setup
+        - Install essential dependencies including `nodejs`, `python` 3.14, `git` (yes/no)
+        - Install `browser-use` (yes/no)
+        - Add essential agent skills (yes/no) -(if yes)-> add essential agent skills from three trusted sources
+        - Add data sources (now/later) -(if now)-> add a local path, HTTPS archive/download, or S3 bucket
+    b. Advanced setup
+        - Install custom dependencies (add dependency/skip)
+        - Add agent skills (now/later) -(if now)-> search in the three preloaded sources
+        - Add MCP servers (add MCP/skip)
+        - Add agent env (now/later)
+        - Add data sources (now/later) -(if now)-> add a local path, HTTPS archive/download, or S3 bucket
 5. Config and state.
     - Write a starter config or validate the existing/imported config.
     - Open SQLite state and run migrations.

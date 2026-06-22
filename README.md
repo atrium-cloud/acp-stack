@@ -4,6 +4,7 @@
 
 ## Deployment
 
+- Linux VM dependencies: [docs/deploy/vm.md](docs/deploy/vm.md)
 - Docker deployment: [docs/deploy/docker.md](docs/deploy/docker.md)
 - systemd deployment: [docs/deploy/systemd.md](docs/deploy/systemd.md)
 - Public edge options: [Cloudflare](docs/deploy/cloudflare.md), [Nginx](docs/deploy/nginx.md), or [Caddy](docs/deploy/caddy.md)

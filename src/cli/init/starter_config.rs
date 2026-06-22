@@ -31,6 +31,81 @@ use super::{
     prompt, prompts_enabled,
 };
 
+const STANDARD_AGENT_WORK_FEATURE: &str = "agent-work";
+const STANDARD_AGENT_WORK_BUNDLE_NAME: &str = "acp-stack-agent-work-base";
+const STANDARD_AGENT_WORK_BUNDLE_CREATES: &str = "/usr/local/share/acp-stack/agent-work-base.done";
+const BROWSER_USE_FEATURE: &str = "browser";
+const BROWSER_USE_MCP_COMMAND: &str = "acp-stack-browser-use-mcp";
+const AGENT_WORK_PYTHON_VERSION: &str = "3.14";
+const AGENT_WORK_PYTHON_INSTALL_DIR: &str = "/opt/acp-stack/python";
+const BROWSER_USE_PYTHON_VERSION: &str = "3.14";
+const BROWSER_USE_PREFIX: &str = "/opt/acp-stack/browser-use";
+const BROWSER_USE_SHARE_DIR: &str = "/usr/local/share/acp-stack";
+const BROWSER_USE_WRAPPER_PATH: &str = "/usr/local/share/acp-stack/browser-use-mcp.py";
+const BROWSER_USE_LAUNCHER_PATH: &str = "/usr/local/bin/acp-stack-browser-use-mcp";
+
+// Centralized package manifest for init's Standard Setup path. This mirrors the
+// VM base profile: broad agent-work tools, no build toolchains or language
+// headers, and no inferred package-manager behavior.
+const STANDARD_AGENT_WORK_APT_PACKAGES: &[&str] = &[
+    "ca-certificates",
+    "bash",
+    "curl",
+    "git",
+    "openssh-client",
+    "nodejs",
+    "npm",
+    "python3",
+    "python3-venv",
+    "tar",
+    "gzip",
+    "xz-utils",
+    "zstd",
+    "unzip",
+    "zip",
+    "jq",
+    "ripgrep",
+    "patch",
+    "diffutils",
+    "procps",
+];
+
+const STANDARD_AGENT_WORK_COMMANDS: &[&str] = &[
+    "bash",
+    "curl",
+    "git",
+    "ssh",
+    "node",
+    "npm",
+    "python3",
+    "python3.14",
+    "uv",
+    "tar",
+    "gzip",
+    "xz",
+    "zstd",
+    "unzip",
+    "zip",
+    "jq",
+    "rg",
+    "patch",
+    "diff",
+    "ps",
+];
+
+const BROWSER_USE_APT_PACKAGES: &[&str] = &[
+    "ca-certificates",
+    "curl",
+    "fonts-noto",
+    "fonts-noto-color-emoji",
+    "fonts-noto-cjk",
+    "fonts-liberation",
+    "fonts-dejavu",
+    "fonts-freefont-ttf",
+];
+
+const BUILD_HEAVY_APT_PACKAGES: &[&str] = &["build-essential", "pkg-config", "python3-dev"];
+
 pub(super) fn validate_deployment_overrides_match_existing(
     args: &InitArgs,
     config: &Config,
@@ -262,9 +337,197 @@ pub(super) fn deps_from_args(args: &InitArgs) -> Result<Vec<DependencyEntry>> {
     Ok(entries)
 }
 
+fn standard_agent_work_install_shell() -> String {
+    let packages = STANDARD_AGENT_WORK_APT_PACKAGES.join(" ");
+    format!(
+        r#"set -eu
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends {packages}
+if ! command -v uv >/dev/null 2>&1; then
+  tmp_installer="$(mktemp)"
+  trap 'rm -f "${{tmp_installer}}"' EXIT
+  curl -LsSf https://astral.sh/uv/install.sh -o "${{tmp_installer}}"
+  UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "${{tmp_installer}}"
+fi
+install -d -m 0755 /usr/local/bin
+if ! command -v python3.14 >/dev/null 2>&1; then
+  UV_PYTHON_INSTALL_DIR={python_install_dir} UV_PYTHON_BIN_DIR=/usr/local/bin uv python install {python_version}
+fi
+command -v python3.14 >/dev/null 2>&1
+install -d -m 0755 /usr/local/share/acp-stack
+: > {bundle_marker}
+chmod 0755 {bundle_marker}"#,
+        python_install_dir = AGENT_WORK_PYTHON_INSTALL_DIR,
+        python_version = AGENT_WORK_PYTHON_VERSION,
+        bundle_marker = STANDARD_AGENT_WORK_BUNDLE_CREATES,
+    )
+}
+
+fn browser_use_launcher_script() -> String {
+    include_str!("../../../scripts/browser-use-mcp")
+        .replace("@BROWSER_USE_VENV@", BROWSER_USE_PREFIX)
+        .replace("@BROWSER_USE_MCP_SCRIPT@", BROWSER_USE_WRAPPER_PATH)
+}
+
+fn browser_use_install_shell() -> String {
+    let packages = BROWSER_USE_APT_PACKAGES.join(" ");
+    let launcher_script = browser_use_launcher_script();
+    let wrapper_script = include_str!("../../../scripts/browser-use-mcp.py");
+    format!(
+        r#"set -eu
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends {packages}
+if ! command -v uv >/dev/null 2>&1; then
+  tmp_installer="$(mktemp)"
+  trap 'rm -f "${{tmp_installer}}"' EXIT
+  curl -LsSf https://astral.sh/uv/install.sh -o "${{tmp_installer}}"
+  UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "${{tmp_installer}}"
+fi
+if apt-cache show chromium >/dev/null 2>&1; then
+  chromium_package=chromium
+elif apt-cache show chromium-browser >/dev/null 2>&1; then
+  chromium_package=chromium-browser
+else
+  echo "no Chromium package found in apt metadata" >&2
+  exit 1
+fi
+apt-get install -y -qq --no-install-recommends "${{chromium_package}}"
+install -d -m 0755 "$(dirname "{browser_prefix}")" "{browser_share_dir}" "$(dirname "{browser_launcher}")"
+uv venv --python {python_version} "{browser_prefix}"
+"{browser_prefix}/bin/python" - <<'PY'
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit(f"Browser Use requires Python 3.11+; venv has {{sys.version.split()[0]}}")
+PY
+uv pip install --python "{browser_prefix}/bin/python" --upgrade 'browser-use[core]'
+"{browser_prefix}/bin/browser-use" install
+cat > "{browser_wrapper}" <<'ACP_STACK_BROWSER_USE_MCP_PY'
+{wrapper_script}
+ACP_STACK_BROWSER_USE_MCP_PY
+chmod 0644 "{browser_wrapper}"
+cat > "{browser_launcher}" <<'ACP_STACK_BROWSER_USE_MCP_SH'
+{launcher_script}
+ACP_STACK_BROWSER_USE_MCP_SH
+chmod 0755 "{browser_launcher}"
+command -v {browser_command} >/dev/null 2>&1
+"{browser_launcher}" --help >/dev/null"#,
+        browser_command = BROWSER_USE_MCP_COMMAND,
+        browser_launcher = BROWSER_USE_LAUNCHER_PATH,
+        browser_prefix = BROWSER_USE_PREFIX,
+        browser_share_dir = BROWSER_USE_SHARE_DIR,
+        browser_wrapper = BROWSER_USE_WRAPPER_PATH,
+        python_version = BROWSER_USE_PYTHON_VERSION,
+        wrapper_script = wrapper_script.trim_end(),
+        launcher_script = launcher_script.trim_end(),
+    )
+}
+
+fn check_only_dependency(name: &str, feature: &str) -> DependencyEntry {
+    DependencyEntry {
+        name: name.to_owned(),
+        required: true,
+        feature: Some(feature.to_owned()),
+        install: None,
+    }
+}
+
+fn push_unique_dependency(
+    category: &'static str,
+    dependencies: &mut Vec<DependencyEntry>,
+    entry: DependencyEntry,
+) -> Result<()> {
+    if dependencies
+        .iter()
+        .any(|existing| existing.name == entry.name)
+    {
+        return Err(StackError::InvalidParam {
+            field: "dependencies",
+            reason: format!(
+                "dependency `{}` is already declared under {category}",
+                entry.name
+            ),
+        });
+    }
+    dependencies.push(entry);
+    Ok(())
+}
+
+fn push_standard_agent_work_deps_to_config(config: &mut Config) -> Result<()> {
+    push_unique_dependency(
+        "commands",
+        &mut config.dependencies.commands,
+        DependencyEntry {
+            name: STANDARD_AGENT_WORK_BUNDLE_NAME.to_owned(),
+            required: true,
+            feature: Some(STANDARD_AGENT_WORK_FEATURE.to_owned()),
+            install: Some(DependencyInstallAction {
+                shell: standard_agent_work_install_shell(),
+                creates: Some(STANDARD_AGENT_WORK_BUNDLE_CREATES.to_owned()),
+                scope: DependencyInstallScope::System,
+                timeout_secs: None,
+            }),
+        },
+    )?;
+    for command in STANDARD_AGENT_WORK_COMMANDS {
+        push_unique_dependency(
+            "commands",
+            &mut config.dependencies.commands,
+            check_only_dependency(command, STANDARD_AGENT_WORK_FEATURE),
+        )?;
+    }
+    for package in STANDARD_AGENT_WORK_APT_PACKAGES {
+        push_unique_dependency(
+            "packages",
+            &mut config.dependencies.packages,
+            check_only_dependency(package, STANDARD_AGENT_WORK_FEATURE),
+        )?;
+    }
+    assert_standard_agent_work_excludes_build_packages()?;
+    Ok(())
+}
+
+fn push_browser_use_profile_to_config(config: &mut Config) -> Result<()> {
+    push_unique_dependency(
+        "commands",
+        &mut config.dependencies.commands,
+        DependencyEntry {
+            name: BROWSER_USE_MCP_COMMAND.to_owned(),
+            required: true,
+            feature: Some(BROWSER_USE_FEATURE.to_owned()),
+            install: Some(DependencyInstallAction {
+                shell: browser_use_install_shell(),
+                creates: Some(BROWSER_USE_MCP_COMMAND.to_owned()),
+                scope: DependencyInstallScope::System,
+                timeout_secs: None,
+            }),
+        },
+    )
+}
+
+fn assert_standard_agent_work_excludes_build_packages() -> Result<()> {
+    for package in STANDARD_AGENT_WORK_APT_PACKAGES {
+        if BUILD_HEAVY_APT_PACKAGES.contains(package) {
+            return Err(StackError::InvalidParam {
+                field: "standard setup",
+                reason: format!("standard dependency profile must not include `{package}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Append flag-declared dependencies to `config.dependencies.commands`,
 /// rejecting a name that is already declared (e.g. an auto-added `cloudflared`).
 pub(super) fn push_args_deps_to_config(config: &mut Config, args: &InitArgs) -> Result<()> {
+    if args.standard_agent_work_deps {
+        push_standard_agent_work_deps_to_config(config)?;
+    }
+    if args.browser_use_profile {
+        push_browser_use_profile_to_config(config)?;
+    }
     for entry in deps_from_args(args)? {
         if config
             .dependencies
@@ -468,22 +731,16 @@ pub(super) fn configure_stack_update_for_init(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OptionalSetupSection {
-    Skip,
-    CodeSource,
-    DataSource,
-    McpStdioServer,
-    McpHttpServer,
-    Dependency,
-    AgentEnvironment,
-    AgentSkills,
+enum EnvironmentSetupPath {
+    Standard,
+    Advanced,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum OptionalSetupSelection {
-    Skip,
-    Apply,
-    MixedSkip,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum McpTransportChoice {
+    Stdio,
+    Http,
+    Done,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -500,7 +757,7 @@ enum DataSourceKind {
     S3,
 }
 
-pub(super) fn prompt_starter_config_selections_if_needed(
+pub(super) fn prompt_environment_configuration_if_needed(
     args: &mut InitArgs,
     registry: &RegistryCatalog,
 ) -> Result<()> {
@@ -508,117 +765,134 @@ pub(super) fn prompt_starter_config_selections_if_needed(
     if !interactive {
         return Ok(());
     }
-    let mut sections = Vec::new();
-    if args.code_from.is_empty() {
-        sections.push((
-            OptionalSetupSection::CodeSource,
-            "Code source (e.g., GitHub)".to_owned(),
-            "Git repository".to_owned(),
-        ));
+    let setup_path = prompt::select(
+        interactive,
+        "Environment configuration",
+        &[
+            (
+                EnvironmentSetupPath::Standard,
+                "Standard Setup".to_owned(),
+                "Opinionated defaults: essential dependencies, browser-use, skills, data sources"
+                    .to_owned(),
+            ),
+            (
+                EnvironmentSetupPath::Advanced,
+                "Advanced Setup".to_owned(),
+                "Clean slate: custom dependencies, skills, MCP, agent env, data sources".to_owned(),
+            ),
+        ],
+    )?;
+    // An interactive terminal always yields a choice (Esc aborts init upstream),
+    // so `None` only arises when a hosted driver leaves this out-of-v1-scope
+    // prompt unhandled; that skips environment configuration like a
+    // non-interactive run rather than failing.
+    match setup_path {
+        Some(EnvironmentSetupPath::Standard) => prompt_standard_setup(interactive, args),
+        Some(EnvironmentSetupPath::Advanced) => prompt_advanced_setup(interactive, args, registry),
+        None => Ok(()),
     }
-    if args.data_from.is_empty() && args.prompt_data_sources.is_empty() {
-        sections.push((
-            OptionalSetupSection::DataSource,
-            "Data source (e.g., S3 bucket)".to_owned(),
-            "Local, HTTPS, or S3".to_owned(),
-        ));
+}
+
+// Standard Setup: four opinionated prompts. Declining every one is the intended
+// "set it up later" path, so there is deliberately no separate skip option.
+fn prompt_standard_setup(interactive: bool, args: &mut InitArgs) -> Result<()> {
+    if prompt::confirm(interactive, "Install essential dependencies?", true)? {
+        args.standard_agent_work_deps = true;
     }
-    if args.mcp_stdio.is_empty() && args.prompt_mcp_stdio.is_empty() {
-        sections.push((
-            OptionalSetupSection::McpStdioServer,
-            "MCP stdio server (e.g., local tool)".to_owned(),
-            "Command, args, env refs".to_owned(),
-        ));
+    if prompt::confirm(interactive, "Install browser-use?", false)? {
+        args.browser_use_profile = true;
     }
-    if args.mcp_http.is_empty() && args.prompt_mcp_http.is_empty() {
-        sections.push((
-            OptionalSetupSection::McpHttpServer,
-            "MCP HTTP server (e.g., remote MCP)".to_owned(),
-            "URL and header refs".to_owned(),
-        ));
+    if prompt::confirm(interactive, "Add essential agent skills?", false)? {
+        // The curated essential-skills install from the three trusted sources
+        // lands in a follow-up commit; this prompt reserves the Standard-setup
+        // step so the flow matches docs/specs/init.md step 4a.
     }
-    if args.dep.is_empty() && args.dep_system.is_empty() {
-        sections.push((
-            OptionalSetupSection::Dependency,
-            "Dependency install (e.g., ripgrep)".to_owned(),
-            "Install commands for this runtime".to_owned(),
-        ));
+    if args.data_from.is_empty()
+        && args.prompt_data_sources.is_empty()
+        && prompt::confirm(interactive, "Add data sources now?", false)?
+    {
+        prompt_data_sources(interactive, args)?;
     }
-    if args.agent_env_ref.is_empty() {
-        sections.push((
-            OptionalSetupSection::AgentEnvironment,
-            "Agent environment (e.g., GITHUB_TOKEN)".to_owned(),
-            "Secret-backed variables".to_owned(),
-        ));
+    Ok(())
+}
+
+// Advanced Setup: a clean slate of up to five opt-in prompts. Each is gated on
+// the matching values not already arriving by flag, so flags suppress re-prompts.
+// MCP lives only here on purpose: editing servers through a shell wizard is
+// awkward, and operators can add them later by editing config.
+fn prompt_advanced_setup(
+    interactive: bool,
+    args: &mut InitArgs,
+    registry: &RegistryCatalog,
+) -> Result<()> {
+    if args.dep.is_empty()
+        && args.dep_system.is_empty()
+        && prompt::confirm(interactive, "Add custom dependencies?", false)?
+    {
+        prompt_deps(interactive, args)?;
     }
     if agent_supports_skills(args, registry)
         && !args.no_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
+        && prompt::confirm(interactive, "Add agent skills?", false)?
     {
-        sections.push((
-            OptionalSetupSection::AgentSkills,
-            "Agent Skills (e.g., OpenAI)".to_owned(),
-            "Install selected skills".to_owned(),
-        ));
+        args.prompt_skills = true;
     }
-    if sections.is_empty() {
-        return Ok(());
+    if args.mcp_stdio.is_empty()
+        && args.prompt_mcp_stdio.is_empty()
+        && args.mcp_http.is_empty()
+        && args.prompt_mcp_http.is_empty()
+        && prompt::confirm(interactive, "Add MCP servers?", false)?
+    {
+        prompt_mcp_servers(interactive, args)?;
     }
-    sections.insert(
-        0,
-        (
-            OptionalSetupSection::Skip,
-            "Skip".to_owned(),
-            "Continue without optional setup".to_owned(),
-        ),
-    );
-
-    let selections = loop {
-        let selections = prompt::multiselect(interactive, "Optional setup", &sections)?;
-        match classify_optional_setup_selection(&selections) {
-            OptionalSetupSelection::Skip => return Ok(()),
-            OptionalSetupSelection::Apply => break selections,
-            OptionalSetupSelection::MixedSkip => {
-                println!("Select Skip by itself, or choose setup items.");
-            }
-        }
-    };
-    if selections.contains(&OptionalSetupSection::CodeSource) {
-        prompt_repeated_values(
-            interactive,
-            "code source git URL",
-            "code source git URL (blank to finish)",
-            &mut args.code_from,
-        )?;
+    if args.agent_env_ref.is_empty()
+        && prompt::confirm(interactive, "Add agent environment variables?", false)?
+    {
+        args.prompt_agent_env_refs = true;
     }
-    if selections.contains(&OptionalSetupSection::DataSource) {
+    if args.data_from.is_empty()
+        && args.prompt_data_sources.is_empty()
+        && prompt::confirm(interactive, "Add data sources now?", false)?
+    {
         prompt_data_sources(interactive, args)?;
     }
-    if selections.contains(&OptionalSetupSection::McpStdioServer) {
-        prompt_mcp_stdio_servers(interactive, args)?;
-    }
-    if selections.contains(&OptionalSetupSection::McpHttpServer) {
-        prompt_mcp_http_servers(interactive, args)?;
-    }
-    if selections.contains(&OptionalSetupSection::Dependency) {
-        prompt_deps(interactive, args)?;
-    }
-    args.prompt_agent_env_refs = selections.contains(&OptionalSetupSection::AgentEnvironment);
-    args.prompt_skills = selections.contains(&OptionalSetupSection::AgentSkills);
     Ok(())
 }
 
-fn classify_optional_setup_selection(
-    selections: &[OptionalSetupSection],
-) -> OptionalSetupSelection {
-    let has_skip = selections.contains(&OptionalSetupSection::Skip);
-    match (selections.is_empty(), has_skip, selections.len()) {
-        (true, _, _) => OptionalSetupSelection::Skip,
-        (false, true, 1) => OptionalSetupSelection::Skip,
-        (false, true, _) => OptionalSetupSelection::MixedSkip,
-        (false, false, _) => OptionalSetupSelection::Apply,
+// "Add MCP servers" is one Advanced step spanning both transports: the operator
+// picks a transport, adds rows for it, and repeats until choosing Done.
+fn prompt_mcp_servers(interactive: bool, args: &mut InitArgs) -> Result<()> {
+    loop {
+        let choice = prompt::select(
+            interactive,
+            "MCP transport",
+            &[
+                (
+                    McpTransportChoice::Stdio,
+                    "stdio server".to_owned(),
+                    "Local command, args, env refs".to_owned(),
+                ),
+                (
+                    McpTransportChoice::Http,
+                    "HTTP server".to_owned(),
+                    "Remote URL and header refs".to_owned(),
+                ),
+                (
+                    McpTransportChoice::Done,
+                    "Done".to_owned(),
+                    "Finish adding MCP servers".to_owned(),
+                ),
+            ],
+        )?;
+        match choice {
+            Some(McpTransportChoice::Stdio) => prompt_mcp_stdio_servers(interactive, args)?,
+            Some(McpTransportChoice::Http) => prompt_mcp_http_servers(interactive, args)?,
+            Some(McpTransportChoice::Done) | None => break,
+        }
     }
+    Ok(())
 }
 
 fn agent_supports_skills(args: &InitArgs, registry: &RegistryCatalog) -> bool {
@@ -929,31 +1203,6 @@ fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
         match scope {
             DependencyInstallScope::User => args.dep.push(entry),
             DependencyInstallScope::System => args.dep_system.push(entry),
-        }
-    }
-    Ok(())
-}
-
-fn prompt_repeated_values(
-    interactive: bool,
-    label: &str,
-    value_prompt: &str,
-    values: &mut Vec<String>,
-) -> Result<()> {
-    if !values.is_empty() {
-        if interactive {
-            println!("{label}: already configured ({})", values.len());
-        }
-        return Ok(());
-    }
-    // Free-form entries (URLs, name=command, secret refs) have no fixed option
-    // set; blank input finishes the selected item without extra confirmations.
-    while let Some(value) = prompt::text(interactive, value_prompt, false)? {
-        let value = value.trim().to_owned();
-        if !value.is_empty() {
-            values.push(value);
-        } else {
-            break;
         }
     }
     Ok(())
@@ -1423,7 +1672,27 @@ fn reject_unsupported_https_data_source(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[derive(Debug, Parser)]
+    struct TestInitArgs {
+        #[command(flatten)]
+        args: InitArgs,
+    }
+
+    fn parse_init_args(args: &[&str]) -> InitArgs {
+        let mut argv = vec!["init-test"];
+        argv.extend_from_slice(args);
+        TestInitArgs::parse_from(argv).args
+    }
+
+    fn starter_config_from_args(args: &InitArgs) -> Config {
+        let raw = starter_config(args).expect("starter config");
+        config::load_config_from_str(&raw).expect("starter config validates")
+    }
 
     fn collection(fresh: &[(&str, &str)]) -> AgentEnvCollection {
         AgentEnvCollection {
@@ -1484,41 +1753,328 @@ mod tests {
         assert_eq!(store.get("GITHUB_TOKEN").expect("stored"), "ghp_value");
     }
 
+    // Scripts the hosted-prompt driver so the interactive environment-config flow
+    // can be exercised headlessly: `selects`/`confirms` are dequeued in call order,
+    // and text/password return None so any add-loop finishes immediately.
+    struct ScriptedPromptDriver {
+        selects: Mutex<VecDeque<Option<usize>>>,
+        confirms: Mutex<VecDeque<bool>>,
+    }
+
+    impl ScriptedPromptDriver {
+        fn new(selects: Vec<Option<usize>>, confirms: Vec<bool>) -> Self {
+            Self {
+                selects: Mutex::new(VecDeque::from(selects)),
+                confirms: Mutex::new(VecDeque::from(confirms)),
+            }
+        }
+    }
+
+    impl prompt::HostedPromptDriver for ScriptedPromptDriver {
+        fn select(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+            Ok(prompt::HostedPromptOutcome::Handled(
+                self.selects
+                    .lock()
+                    .expect("selects lock")
+                    .pop_front()
+                    .expect("scripted select"),
+            ))
+        }
+
+        fn confirm(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<bool>> {
+            Ok(prompt::HostedPromptOutcome::Handled(
+                self.confirms
+                    .lock()
+                    .expect("confirms lock")
+                    .pop_front()
+                    .expect("scripted confirm"),
+            ))
+        }
+
+        fn text(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+            Ok(prompt::HostedPromptOutcome::Handled(None))
+        }
+
+        fn password(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+            Ok(prompt::HostedPromptOutcome::Handled(None))
+        }
+
+        fn progress(&self, _message: String) {}
+
+        fn result(&self, _payload: serde_json::Value) {}
+    }
+
+    // Models a hosted driver that leaves the environment-config prompt outside its
+    // v1 scope: every prompt is Unhandled, so the flow must skip cleanly.
+    struct UnhandledPromptDriver;
+
+    impl prompt::HostedPromptDriver for UnhandledPromptDriver {
+        fn select(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn confirm(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<bool>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn text(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn password(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn progress(&self, _message: String) {}
+
+        fn result(&self, _payload: serde_json::Value) {}
+    }
+
+    fn run_environment_configuration(
+        driver: Arc<dyn prompt::HostedPromptDriver>,
+        args: &mut InitArgs,
+    ) -> Result<()> {
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        prompt::with_hosted_driver(driver, || {
+            prompt_environment_configuration_if_needed(args, &registry)
+        })
+    }
+
+    // Standard Setup (path index 0): essential deps + browser-use accepted, skills
+    // reserved, data declined. It must touch none of the Advanced-only seams and
+    // must make exactly one select (the path choice) — extra selects would drain
+    // the single-item queue and panic.
     #[test]
-    fn optional_setup_empty_selection_skips() {
-        assert_eq!(
-            classify_optional_setup_selection(&[]),
-            OptionalSetupSelection::Skip
-        );
+    fn standard_setup_enables_essential_deps_and_browser_use() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(0)],
+            vec![true, true, false, false],
+        ));
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_environment_configuration(driver, &mut args).expect("standard setup");
+
+        assert!(args.standard_agent_work_deps);
+        assert!(args.browser_use_profile);
+        assert!(!args.prompt_skills);
+        assert!(!args.prompt_agent_env_refs);
+        assert!(args.prompt_data_sources.is_empty());
+    }
+
+    // Standard Setup with every prompt declined enables nothing.
+    #[test]
+    fn standard_setup_decline_all_enables_nothing() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(0)],
+            vec![false, false, false, false],
+        ));
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_environment_configuration(driver, &mut args).expect("standard setup");
+
+        assert!(!args.standard_agent_work_deps);
+        assert!(!args.browser_use_profile);
+        assert!(!args.prompt_skills);
+        assert!(args.prompt_data_sources.is_empty());
+    }
+
+    // Advanced Setup (path index 1) with a non-skills agent: deps off, MCP off,
+    // agent env on, data off. `placebo` is absent from the embedded registry, so
+    // `agent_supports_skills` is false and the skills prompt is skipped — hence
+    // four confirms, not five.
+    #[test]
+    fn advanced_setup_routes_agent_env_without_standard_fields() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(1)],
+            vec![false, false, true, false],
+        ));
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_environment_configuration(driver, &mut args).expect("advanced setup");
+
+        assert!(args.prompt_agent_env_refs);
+        assert!(!args.prompt_skills);
+        assert!(!args.standard_agent_work_deps);
+        assert!(!args.browser_use_profile);
+    }
+
+    // Advanced Setup offers the skills step only when the agent supports skills;
+    // `opencode` does, so accepting it routes into the skills flow.
+    #[test]
+    fn advanced_setup_routes_agent_skills_for_skills_capable_agent() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(1)],
+            vec![false, true, false, false, false],
+        ));
+        let mut args = parse_init_args(&["--agent", "opencode"]);
+
+        run_environment_configuration(driver, &mut args).expect("advanced setup");
+
+        assert!(args.prompt_skills);
+        assert!(!args.prompt_agent_env_refs);
+    }
+
+    // A hosted driver that leaves the path prompt Unhandled skips environment
+    // configuration instead of failing, matching non-interactive behavior.
+    #[test]
+    fn unhandled_hosted_prompt_skips_environment_configuration() {
+        let driver = Arc::new(UnhandledPromptDriver);
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_environment_configuration(driver, &mut args).expect("skip is not an error");
+
+        assert!(!args.standard_agent_work_deps);
+        assert!(!args.browser_use_profile);
+        assert!(!args.prompt_skills);
+        assert!(!args.prompt_agent_env_refs);
     }
 
     #[test]
-    fn optional_setup_skip_alone_skips() {
+    fn standard_setup_profile_declares_base_dependencies_without_build_toolchain() {
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+        args.standard_agent_work_deps = true;
+        let mut config = starter_config_from_args(&args);
+
+        push_args_deps_to_config(&mut config, &args).expect("push standard deps");
+
+        let bundle = config
+            .dependencies
+            .commands
+            .iter()
+            .find(|entry| entry.name == STANDARD_AGENT_WORK_BUNDLE_NAME)
+            .expect("standard bundle dependency");
+        let install = bundle.install.as_ref().expect("bundle install action");
+        assert_eq!(bundle.feature.as_deref(), Some(STANDARD_AGENT_WORK_FEATURE));
+        assert_eq!(install.scope, DependencyInstallScope::System);
         assert_eq!(
-            classify_optional_setup_selection(&[OptionalSetupSection::Skip]),
-            OptionalSetupSelection::Skip
+            install.creates.as_deref(),
+            Some(STANDARD_AGENT_WORK_BUNDLE_CREATES)
         );
+        assert!(install.shell.contains("apt-get install"));
+        assert!(
+            install
+                .shell
+                .contains("UV_PYTHON_INSTALL_DIR=/opt/acp-stack/python UV_PYTHON_BIN_DIR=/usr/local/bin uv python install 3.14"),
+            "{}",
+            install.shell
+        );
+
+        for command in [
+            "node",
+            "npm",
+            "python3",
+            "python3.14",
+            "uv",
+            "git",
+            "rg",
+            "jq",
+        ] {
+            assert!(
+                config
+                    .dependencies
+                    .commands
+                    .iter()
+                    .any(|entry| entry.name == command
+                        && entry.feature.as_deref() == Some(STANDARD_AGENT_WORK_FEATURE)
+                        && entry.install.is_none()),
+                "missing command dependency {command}"
+            );
+        }
+        for package in STANDARD_AGENT_WORK_APT_PACKAGES {
+            assert!(
+                config
+                    .dependencies
+                    .packages
+                    .iter()
+                    .any(|entry| entry.name == *package
+                        && entry.feature.as_deref() == Some(STANDARD_AGENT_WORK_FEATURE)),
+                "missing package dependency {package}"
+            );
+        }
+        for package in BUILD_HEAVY_APT_PACKAGES {
+            assert!(
+                !config
+                    .dependencies
+                    .packages
+                    .iter()
+                    .any(|entry| entry.name == *package),
+                "standard setup must not include {package}"
+            );
+            assert!(
+                !install.shell.contains(package),
+                "standard install shell must not include {package}"
+            );
+        }
+
+        let canonical = config.to_canonical_toml().expect("canonical config");
+        config::load_config_from_str(&canonical).expect("canonical config validates");
     }
 
     #[test]
-    fn optional_setup_real_selection_applies() {
-        assert_eq!(
-            classify_optional_setup_selection(&[
-                OptionalSetupSection::CodeSource,
-                OptionalSetupSection::DataSource,
-            ]),
-            OptionalSetupSelection::Apply
-        );
-    }
+    fn browser_use_profile_declares_dependency_without_generic_mcp_prompt_config() {
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+        args.browser_use_profile = true;
+        let mut config = starter_config_from_args(&args);
 
-    #[test]
-    fn optional_setup_rejects_mixed_skip_selection() {
-        assert_eq!(
-            classify_optional_setup_selection(&[
-                OptionalSetupSection::Skip,
-                OptionalSetupSection::McpHttpServer,
-            ]),
-            OptionalSetupSelection::MixedSkip
-        );
+        push_args_deps_to_config(&mut config, &args).expect("push browser deps");
+
+        let browser = config
+            .dependencies
+            .commands
+            .iter()
+            .find(|entry| entry.name == BROWSER_USE_MCP_COMMAND)
+            .expect("browser-use launcher dependency");
+        assert_eq!(browser.feature.as_deref(), Some(BROWSER_USE_FEATURE));
+        let install = browser.install.as_ref().expect("browser install action");
+        assert_eq!(install.scope, DependencyInstallScope::System);
+        assert_eq!(install.creates.as_deref(), Some(BROWSER_USE_MCP_COMMAND));
+        for required in [
+            "apt-get install",
+            "chromium",
+            "chromium-browser",
+            "uv venv --python 3.14",
+            "browser-use[core]",
+            BROWSER_USE_PREFIX,
+            BROWSER_USE_WRAPPER_PATH,
+            BROWSER_USE_LAUNCHER_PATH,
+            "FastMCP",
+            "BROWSER_USE_API_KEY",
+            "BROWSER_USE_VENV=\"${BROWSER_USE_VENV:-/opt/acp-stack/browser-use}\"",
+            "BROWSER_USE_MCP_SCRIPT=\"${BROWSER_USE_MCP_SCRIPT:-/usr/local/share/acp-stack/browser-use-mcp.py}\"",
+            "exec \"${BROWSER_USE_VENV}/bin/python\"",
+        ] {
+            assert!(
+                install.shell.contains(required),
+                "browser install shell must include {required}"
+            );
+        }
+        assert!(config.mcp.servers.is_empty());
+
+        let canonical = config.to_canonical_toml().expect("canonical config");
+        config::load_config_from_str(&canonical).expect("canonical config validates");
     }
 }
