@@ -586,6 +586,8 @@ fn empty_init_args() -> InitArgs {
         skip_workspace_init: false,
         testflight: false,
         skip_testflight: false,
+        standard_agent_work_deps: false,
+        browser_use_profile: false,
         prompt_agent_env_refs: false,
         prompt_skills: false,
         prompt_data_sources: Vec::new(),
@@ -1042,25 +1044,6 @@ impl HostedPromptDriver for SessionPromptDriver {
         Ok(HostedPromptOutcome::Handled(selection))
     }
 
-    fn multiselect(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Vec<usize>>> {
-        let Some(value) = self.session.request_input(request.clone())? else {
-            return Ok(HostedPromptOutcome::Unhandled);
-        };
-        let Some(values) = value.as_array() else {
-            return Err(StackError::InvalidParam {
-                field: "init",
-                reason: "multiselect input must be an array".to_owned(),
-            });
-        };
-        let mut indices = Vec::new();
-        for value in values {
-            if let Some(index) = parse_optional_index(value, &request)? {
-                indices.push(index);
-            }
-        }
-        Ok(HostedPromptOutcome::Handled(indices))
-    }
-
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>> {
         let Some(value) = self.session.request_input(request.clone())? else {
             return Ok(HostedPromptOutcome::Unhandled);
@@ -1114,7 +1097,6 @@ fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool {
                 || request.prompt.starts_with("provider for ")
                 || request.prompt.starts_with("select ")
         }
-        HostedPromptStyle::Multiselect => false,
         HostedPromptStyle::Confirm => {
             request.prompt.contains("configure it as a custom provider")
                 || request.prompt == "run testflight now?"
@@ -1151,7 +1133,6 @@ fn prompt_style_label(style: HostedPromptStyle) -> &'static str {
     match style {
         HostedPromptStyle::Select => "select",
         HostedPromptStyle::SearchableSelect => "searchable_select",
-        HostedPromptStyle::Multiselect => "multiselect",
         HostedPromptStyle::Confirm => "confirm",
         HostedPromptStyle::Text => "text",
         HostedPromptStyle::Password => "password",

@@ -34,6 +34,8 @@ This document records technology choices that affect maintenance or deployment. 
 | ----------------- | ----------------------------- |
 | Docker            | container deployment          |
 | systemd           | host service deployment       |
+| uv                | optional VM Python tooling    |
+| Browser Use       | optional browser MCP profile  |
 | Cloudflare Tunnel | preferred public-edge profile |
 | Nginx/Caddy       | reverse proxy alternatives    |
 
