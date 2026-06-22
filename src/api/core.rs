@@ -91,6 +91,7 @@ use crate::auth::{AuthVerifierSet, KeyKind};
 use crate::config::{AgentConfig, Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
+use crate::runtime::agent::model_catalog::AgentModelCatalogManager;
 use crate::runtime::agent::supervisor::AgentSupervisor;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::mediation::commands::CommandGateway;
@@ -116,6 +117,7 @@ pub struct AppState {
     pub max_request_bytes: usize,
     pub active_requests: Arc<AtomicU64>,
     pub agent_supervisor: Arc<AgentSupervisor>,
+    pub model_catalog: Arc<AgentModelCatalogManager>,
     pub(crate) agent_targets: Arc<AgentTargetRegistry>,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
@@ -222,6 +224,10 @@ impl RuntimePaths {
             config_path,
             state_path,
         }
+    }
+
+    pub fn model_catalog_cache_path(&self) -> PathBuf {
+        AgentModelCatalogManager::cache_path_for_state_path(&self.state_path)
     }
 
     fn from_state_defaults(state: &StateStore) -> Self {
@@ -414,6 +420,9 @@ impl AppState {
         let agent_targets = Arc::new(AgentTargetRegistry::from_config(&config_arc));
         let primary_agent_target = agent_targets.primary();
         let live_agent_config = primary_agent_target.live_agent_config.clone();
+        let model_catalog = Arc::new(AgentModelCatalogManager::new(
+            runtime_paths.model_catalog_cache_path(),
+        ));
         let local_session_auth = Arc::new(TokioRwLock::new(config_arc.local.session_auth));
         let array_enabled = Arc::new(AtomicBool::new(config_arc.array.enabled));
         Self {
@@ -428,6 +437,7 @@ impl AppState {
             max_request_bytes,
             active_requests: Arc::new(AtomicU64::new(0)),
             agent_supervisor: primary_agent_target.supervisor.clone(),
+            model_catalog,
             agent_targets,
             event_hub,
             commands,
