@@ -9,6 +9,7 @@ use super::agent::open_mcp_servers;
 use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
+use crate::runtime::agent::model_catalog::selected_agent_model;
 use crate::runtime::agent::supervisor::parse_prompt_blocks;
 use crate::runtime::agent::supervisor::{SessionListSyncResult, resolve_session_cwd};
 use crate::state::{
@@ -737,13 +738,18 @@ pub(crate) async fn sessions_prompt_handler(
     if blocks.is_empty() {
         return Err(StackError::PromptBodyEmpty);
     }
+    let target = target_for_existing_session(&state, &id, params.target_id.as_deref()).await?;
+    let agent_for_prompt = target.live_agent_config.lock().await.clone();
+    state
+        .model_catalog
+        .ensure_prompt_supported(selected_agent_model(&agent_for_prompt), &blocks)
+        .await?;
     // Canonical JSON of the parsed blocks is durable storage; the original
     // request body shape is what the agent sees, so we serialize the typed
     // ACP value (consistent with how we read it back).
     let prompt_json = serde_json::to_string(&blocks).map_err(|err| {
         StackError::PromptBodyInvalid(format!("failed to canonicalize prompt: {err}"))
     })?;
-    let target = target_for_existing_session(&state, &id, params.target_id.as_deref()).await?;
     let record = target
         .supervisor
         .submit_prompt(&id, blocks, prompt_json, &state.state)
