@@ -42,10 +42,21 @@ impl Harness {
     }
 
     async fn spawn_with(mutate: impl FnOnce(&mut Config)) -> Self {
+        Self::spawn_inner(mutate, None).await
+    }
+
+    async fn spawn_with_models_cache(mutate: impl FnOnce(&mut Config), models: Value) -> Self {
+        Self::spawn_inner(mutate, Some(models)).await
+    }
+
+    async fn spawn_inner(mutate: impl FnOnce(&mut Config), models: Option<Value>) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
+        if let Some(models) = models {
+            write_models_dev_cache(tempdir.path(), models);
+        }
         let mut config = test_config();
         let workspace_root = tempdir.path().join("workspace");
         let uploads_root = workspace_root.join("uploads");
@@ -127,6 +138,21 @@ fn http() -> reqwest::Client {
     reqwest::Client::builder().build().expect("client")
 }
 
+fn write_models_dev_cache(root: &std::path::Path, models: Value) {
+    let payload = json!({
+        "version": 1,
+        "source_url": "https://models.dev/models.json",
+        "fetched_at": 9_999_999_999u64,
+        "last_failed_refresh_attempt_at": null,
+        "models": models,
+    });
+    std::fs::write(
+        root.join("models-dev-models.json"),
+        serde_json::to_vec_pretty(&payload).expect("cache json"),
+    )
+    .expect("write models.dev cache");
+}
+
 fn admin_bearer() -> String {
     format!("Bearer {ADMIN_KEY}")
 }
@@ -173,6 +199,21 @@ async fn create_session(harness: &Harness) -> String {
         .as_str()
         .expect("session id present")
         .to_owned()
+}
+
+async fn prompt_count_for_session(harness: &Harness, session_id: &str) -> i64 {
+    let state_path = {
+        let state = harness.state.lock().await;
+        state.path().to_path_buf()
+    };
+    let connection = rusqlite::Connection::open(state_path).expect("open state db");
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM prompts WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .expect("prompt count")
 }
 
 #[tokio::test]
@@ -244,6 +285,296 @@ async fn create_session_applies_model_with_custom_config_option_id() {
         .send()
         .await
         .expect("prompt");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn prompt_gate_allows_text_prompt_for_known_text_model() {
+    let model_id = "provider/text-only";
+    let harness = Harness::spawn_with_models_cache(
+        |config| {
+            config.agent.model = Some(model_id.to_owned());
+            config
+                .agent
+                .args
+                .extend(["--model-config-option".to_owned(), model_id.to_owned()]);
+        },
+        json!({
+            model_id: {
+                "id": model_id,
+                "modalities": { "input": ["text"] }
+            }
+        }),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "text is fine" }))
+        .send()
+        .await
+        .expect("prompt");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn prompt_gate_rejects_image_for_known_text_model_without_prompt_row() {
+    let model_id = "provider/text-only";
+    let harness = Harness::spawn_with_models_cache(
+        |config| {
+            config.agent.model = Some(model_id.to_owned());
+            config
+                .agent
+                .args
+                .extend(["--model-config-option".to_owned(), model_id.to_owned()]);
+        },
+        json!({
+            model_id: {
+                "id": model_id,
+                "modalities": { "input": ["text"] }
+            }
+        }),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({
+            "prompt": [{
+                "type": "image",
+                "data": "aW1hZ2U=",
+                "mimeType": "image/png"
+            }]
+        }))
+        .send()
+        .await
+        .expect("prompt");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "prompt.unsupported_modality");
+    assert_eq!(prompt_count_for_session(&harness, &session_id).await, 0);
+}
+
+#[tokio::test]
+async fn prompt_gate_rejects_video_blob_for_known_text_model() {
+    let model_id = "provider/text-only";
+    let harness = Harness::spawn_with_models_cache(
+        |config| {
+            config.agent.model = Some(model_id.to_owned());
+            config
+                .agent
+                .args
+                .extend(["--model-config-option".to_owned(), model_id.to_owned()]);
+        },
+        json!({
+            model_id: {
+                "id": model_id,
+                "modalities": { "input": ["text"] }
+            }
+        }),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({
+            "prompt": [{
+                "type": "resource",
+                "resource": {
+                    "blob": "dmlkZW8=",
+                    "uri": "file:///clip.mp4",
+                    "mimeType": "video/mp4"
+                }
+            }]
+        }))
+        .send()
+        .await
+        .expect("prompt");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "prompt.unsupported_modality");
+}
+
+#[tokio::test]
+async fn prompt_gate_allows_pdf_blob_for_known_text_model() {
+    let model_id = "provider/text-only";
+    let harness = Harness::spawn_with_models_cache(
+        |config| {
+            config.agent.model = Some(model_id.to_owned());
+            config
+                .agent
+                .args
+                .extend(["--model-config-option".to_owned(), model_id.to_owned()]);
+        },
+        json!({
+            model_id: {
+                "id": model_id,
+                "modalities": { "input": ["text"] }
+            }
+        }),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({
+            "prompt": [{
+                "type": "resource",
+                "resource": {
+                    "blob": "cGRm",
+                    "uri": "file:///doc.pdf",
+                    "mimeType": "application/pdf"
+                }
+            }]
+        }))
+        .send()
+        .await
+        .expect("prompt");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn prompt_gate_allows_image_for_unknown_model() {
+    let model_id = "provider/unlisted";
+    let harness = Harness::spawn_with_models_cache(
+        |config| {
+            config.agent.model = Some(model_id.to_owned());
+            config
+                .agent
+                .args
+                .extend(["--model-config-option".to_owned(), model_id.to_owned()]);
+        },
+        json!({
+            "provider/text-only": {
+                "id": "provider/text-only",
+                "modalities": { "input": ["text"] }
+            }
+        }),
+    )
+    .await;
+    let session_id = create_session(&harness).await;
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({
+            "prompt": [{
+                "type": "image",
+                "data": "aW1hZ2U=",
+                "mimeType": "image/png"
+            }]
+        }))
+        .send()
+        .await
+        .expect("prompt");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn prompt_gate_uses_array_target_model_for_media_checks() {
+    let primary_model = "provider/text-only";
+    let secondary_model = "provider/vision";
+    let harness = Harness::spawn_with_models_cache(
+        |config| {
+            config.array.enabled = true;
+            config.agent.model = Some(primary_model.to_owned());
+            config
+                .agent
+                .args
+                .extend(["--model-config-option".to_owned(), primary_model.to_owned()]);
+            let mut secondary = config.agent.clone();
+            secondary.id = "codex".to_owned();
+            secondary.name = "Codex".to_owned();
+            secondary.model = Some(secondary_model.to_owned());
+            secondary.args = vec![
+                "acp".to_owned(),
+                "--model-config-option".to_owned(),
+                secondary_model.to_owned(),
+            ];
+            config.array.targets.push(ArrayTargetConfig {
+                id: "codex".to_owned(),
+                agent: secondary,
+            });
+        },
+        json!({
+            primary_model: {
+                "id": primary_model,
+                "modalities": { "input": ["text"] }
+            },
+            secondary_model: {
+                "id": secondary_model,
+                "modalities": { "input": ["text", "image"] }
+            }
+        }),
+    )
+    .await;
+    let client = http();
+    let start = client
+        .post(format!("{}/v1/array/targets/codex/start", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .send()
+        .await
+        .expect("start codex");
+    assert_eq!(start.status(), StatusCode::OK);
+
+    let create = client
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "target": "codex" }))
+        .send()
+        .await
+        .expect("create session");
+    assert_eq!(create.status(), StatusCode::OK);
+    let session_id = create.json::<Value>().await.expect("create json")["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let response = client
+        .post(format!(
+            "{}/v1/sessions/{}/prompt?target=codex",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({
+            "prompt": [{
+                "type": "image",
+                "data": "aW1hZ2U=",
+                "mimeType": "image/png"
+            }]
+        }))
+        .send()
+        .await
+        .expect("prompt");
+
     assert_eq!(response.status(), StatusCode::OK);
 }
 

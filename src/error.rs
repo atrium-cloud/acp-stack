@@ -599,6 +599,9 @@ pub enum StackError {
     #[error("prompt body is not valid ACP content: {0}")]
     PromptBodyInvalid(String),
 
+    #[error("model `{model}` does not support prompt input modality `{modality}`")]
+    PromptUnsupportedModality { model: String, modality: String },
+
     // === workspace (runtime path access) ===
     #[error("workspace path `{requested}` is invalid: {reason}")]
     WorkspacePathInvalid { reason: String, requested: String },

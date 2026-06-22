@@ -14,6 +14,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         PromptSessionMismatch { .. } => "prompt.session_mismatch",
         PromptBodyEmpty => "prompt.body_empty",
         PromptBodyInvalid(_) => "prompt.body_invalid",
+        PromptUnsupportedModality { .. } => "prompt.unsupported_modality",
         _ => return None,
     })
 }
@@ -33,6 +34,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         } => format!("session `{session_id}` does not own prompt `{prompt_id}`"),
         PromptBodyEmpty => "prompt body must include at least one content block".to_owned(),
         PromptBodyInvalid(_) => "prompt body is not valid ACP content".to_owned(),
+        PromptUnsupportedModality { model, modality } => {
+            format!("model `{model}` does not support `{modality}` prompt input")
+        }
         _ => return None,
     })
 }
@@ -44,7 +48,9 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         SessionClosed { .. } | SessionNotActive { .. } | PromptSessionMismatch { .. } => {
             StatusCode::CONFLICT
         }
-        PromptBodyEmpty | PromptBodyInvalid(_) => StatusCode::BAD_REQUEST,
+        PromptBodyEmpty | PromptBodyInvalid(_) | PromptUnsupportedModality { .. } => {
+            StatusCode::BAD_REQUEST
+        }
         _ => return None,
     })
 }

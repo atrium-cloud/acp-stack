@@ -5,6 +5,7 @@ pub mod claude_code_provider_profiles;
 pub mod config_io;
 pub(crate) mod inference_failure;
 pub mod mcp;
+pub mod model_catalog;
 pub mod model_discovery;
 pub mod provider_keys;
 pub mod session_sink;
