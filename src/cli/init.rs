@@ -277,8 +277,24 @@ pub struct InitArgs {
         conflicts_with = "no_skills"
     )]
     pub(super) skills: Vec<String>,
+    /// Plugin bundle source: openai.
+    #[arg(
+        long = "plugins-source",
+        requires = "plugins",
+        conflicts_with = "no_skills"
+    )]
+    pub(super) plugins_source: Option<String>,
+    /// Comma-separated dash-case plugin bundles to install as Agent Skills.
+    #[arg(
+        long = "plugins",
+        value_name = "NAME",
+        value_delimiter = ',',
+        requires = "plugins_source",
+        conflicts_with = "no_skills"
+    )]
+    pub(super) plugins: Vec<String>,
     /// Skip Agent Skills during init.
-    #[arg(long, conflicts_with_all = ["skills_source", "skills"])]
+    #[arg(long, conflicts_with_all = ["skills_source", "skills", "plugins_source", "plugins"])]
     pub(super) no_skills: bool,
     /// Configure a public edge profile during init.
     #[arg(long, value_enum)]
@@ -1134,8 +1150,9 @@ fn run_init_with_output(
             AgentSelection::Custom(spec) => custom_agent_spec = Some(spec),
         }
     }
+    let skill_catalog = SkillCatalog::load_embedded()?;
     if creating_config && !args.resume {
-        prompt_environment_configuration_if_needed(&mut args, &registry)?;
+        prompt_environment_configuration_if_needed(&mut args, &registry, &skill_catalog)?;
     }
     // Operator agent env refs (flags + interactive add-loop). On a fresh run the
     // interactive loop also collects masked values; on resume only the replayed
@@ -1341,7 +1358,7 @@ fn run_init_with_output(
     };
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
     let supabase_configured = apply_supabase_to_config_for_init(&args, &mut config)?;
-    prompt_init_skills_if_needed(&mut args, &config, &registry)?;
+    prompt_init_skills_if_needed(&mut args, &config, &registry, &skill_catalog)?;
     if agent_applied || edge_requested || supabase_configured {
         let canonical = config.to_canonical_toml()?;
         config = config::load_config_from_str(&canonical)?;
@@ -1352,10 +1369,14 @@ fn run_init_with_output(
         && !args.no_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
+        && args.plugins_source.is_none()
+        && args.plugins.is_empty()
         && let Some(recorded) = recorded_args.as_ref()
     {
         args.skills_source = recorded.skills_source.clone();
         args.skills = recorded.skills.clone();
+        args.plugins_source = recorded.plugins_source.clone();
+        args.plugins = recorded.plugins.clone();
         args.no_skills = recorded.no_skills;
     }
     if resumed && let Some(recorded) = recorded_args.as_ref() {
@@ -1432,7 +1453,6 @@ fn run_init_with_output(
         return finalize_with_error(&store, &init_run, error);
     }
 
-    let skill_catalog = SkillCatalog::load_embedded()?;
     let skill_install_plan =
         resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog)?;
 
@@ -1643,7 +1663,7 @@ fn run_init_with_output(
     // Step 3: agent_skills_install — install selected Agent Skills before
     // first launch/testflight. Agent harnesses auto-detect the files.
     // -----------------------------------------------------------------
-    let mut skill_install_report: Option<SkillInstallReport> = None;
+    let mut skill_install_reports: Vec<SkillInstallReport> = Vec::new();
     let skill_step_needs_resume =
         step_needs_resume(&prior_init_steps, step_kind::AGENT_SKILLS_INSTALL);
     if skill_install_plan.is_some() || skill_step_needs_resume {
@@ -1666,15 +1686,35 @@ fn run_init_with_output(
             &init_run,
             9,
             step_kind::AGENT_SKILLS_INSTALL,
-            || Ok(skill_install_postcondition_holds(&verify_plan)),
             || {
-                let report = install_init_skills(&plan)?;
-                let payload = serde_json::to_string(&report).map_err(|source| {
-                    StackError::SkillInstallFailed {
-                        reason: format!("serialize skill install report: {source}"),
-                    }
+                Ok(skill_install_postcondition_holds(
+                    &verify_plan,
+                    &prior_init_steps,
+                ))
+            },
+            || {
+                let reports = install_init_skills(&plan)?;
+                let requested_skills = plan
+                    .skills
+                    .as_ref()
+                    .map(|skills| skills.skills.clone())
+                    .unwrap_or_default();
+                let requested_plugins = plan
+                    .plugins
+                    .as_ref()
+                    .map(|plugins| plugins.plugins.clone())
+                    .unwrap_or_default();
+                let payload = serde_json::to_string(&serde_json::json!({
+                    "request": {
+                        "skills": requested_skills,
+                        "plugins": requested_plugins,
+                    },
+                    "reports": &reports,
+                }))
+                .map_err(|source| StackError::SkillInstallFailed {
+                    reason: format!("serialize skill install report: {source}"),
                 })?;
-                skill_install_report = Some(report);
+                skill_install_reports = reports;
                 Ok(StepOutcome::with_payload(payload))
             },
         );
@@ -2079,7 +2119,7 @@ fn run_init_with_output(
         init_println!(output_mode, "agent path: {}", outcome.path().display());
         init_println!(output_mode, "agent sha256: {}", outcome.sha256());
     }
-    if let Some(report) = skill_install_report {
+    for report in skill_install_reports {
         for entry in report.installed {
             init_println!(
                 output_mode,

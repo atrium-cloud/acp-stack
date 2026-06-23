@@ -40,6 +40,12 @@ name = "fact-check-data"
 path = "src/bin/fact_check_data.rs"
 required-features = ["dev-tools"]
 
+# Dev-only: refreshes/checks the generated Agent Skills and plugin bundle index.
+[[bin]]
+name = "sync-skills-catalog"
+path = "src/bin/sync_skills_catalog.rs"
+required-features = ["dev-tools"]
+
 [dependencies]
 base64 = "0.22.1"
 clap = { version = "4.6.1", features = ["derive"] }

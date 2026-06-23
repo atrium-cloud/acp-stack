@@ -222,8 +222,20 @@ fn check_skill_sources(
                 ));
             }
         }
+        if let Some(commit) = source.indexed_commit.as_deref() {
+            let indexed: GithubCommit =
+                http.github_json(&format!("/repos/{repo}/commits/{commit}"))?;
+            report.ok(format!(
+                "skill source `{}` indexed commit exists at {}",
+                source.id, indexed.sha
+            ));
+        }
 
-        let directory_ref = source.verified_commit.as_deref().unwrap_or(&source.branch);
+        let directory_ref = source
+            .indexed_commit
+            .as_deref()
+            .or(source.verified_commit.as_deref())
+            .unwrap_or(&source.branch);
         for directory in &source.directories {
             let path = directory.path.trim_matches('/');
             let _: Value = http.github_json(&format!(
@@ -232,6 +244,16 @@ fn check_skill_sources(
             report.ok(format!(
                 "skill source `{}` directory `{}` exists at `{directory_ref}`",
                 source.id, directory.path
+            ));
+        }
+        for plugin_bundle in &source.plugin_bundles {
+            let path = plugin_bundle.path.trim_matches('/');
+            let _: Value = http.github_json(&format!(
+                "/repos/{repo}/contents/{path}?ref={directory_ref}"
+            ))?;
+            report.ok(format!(
+                "skill source `{}` plugin bundle `{}` exists at `{directory_ref}`",
+                source.id, plugin_bundle.path
             ));
         }
     }

@@ -32,6 +32,8 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "output_max_tokens": args.output_max_tokens,
         "skills_source": args.skills_source,
         "skills": args.skills,
+        "plugins_source": args.plugins_source,
+        "plugins": args.plugins,
         "no_skills": args.no_skills,
         "edge": args.edge.map(|value| value.as_config_value()),
         "exposure": args.exposure.map(|value| value.as_config_value()),
@@ -98,6 +100,9 @@ pub(super) struct RecordedInitArgs {
     pub(super) skills_source: Option<String>,
     #[serde(default)]
     pub(super) skills: Vec<String>,
+    pub(super) plugins_source: Option<String>,
+    #[serde(default)]
+    pub(super) plugins: Vec<String>,
     #[serde(default)]
     pub(super) no_skills: bool,
     pub(super) edge: Option<String>,
