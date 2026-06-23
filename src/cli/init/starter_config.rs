@@ -15,6 +15,10 @@ use crate::runtime::dependencies::deps_apply::{
     DepApplyCandidate, candidate_summary_line, summarize_candidates,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::runtime::install::skill_installer::{
+    ANTHROPIC_SKILLS_SOURCE_ID, OPENAI_PLUGINS_SOURCE_ID, SOURCE_ANTHROPIC, SOURCE_OPENAI,
+};
+use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::secrets::SecretStore;
 
 use super::super::logging::{
@@ -760,6 +764,7 @@ enum DataSourceKind {
 pub(super) fn prompt_environment_configuration_if_needed(
     args: &mut InitArgs,
     registry: &RegistryCatalog,
+    skill_catalog: &SkillCatalog,
 ) -> Result<()> {
     let interactive = prompts_enabled(args);
     if !interactive {
@@ -787,25 +792,39 @@ pub(super) fn prompt_environment_configuration_if_needed(
     // prompt unhandled; that skips environment configuration like a
     // non-interactive run rather than failing.
     match setup_path {
-        Some(EnvironmentSetupPath::Standard) => prompt_standard_setup(interactive, args),
+        Some(EnvironmentSetupPath::Standard) => {
+            prompt_standard_setup(interactive, args, registry, skill_catalog)
+        }
         Some(EnvironmentSetupPath::Advanced) => prompt_advanced_setup(interactive, args, registry),
         None => Ok(()),
     }
 }
 
-// Standard Setup: four opinionated prompts. Declining every one is the intended
-// "set it up later" path, so there is deliberately no separate skip option.
-fn prompt_standard_setup(interactive: bool, args: &mut InitArgs) -> Result<()> {
+// Standard Setup: up to four opinionated prompts. Declining every offered one is
+// the intended "set it up later" path, so there is deliberately no separate
+// skip option.
+fn prompt_standard_setup(
+    interactive: bool,
+    args: &mut InitArgs,
+    registry: &RegistryCatalog,
+    skill_catalog: &SkillCatalog,
+) -> Result<()> {
     if prompt::confirm(interactive, "Install essential dependencies?", true)? {
         args.standard_agent_work_deps = true;
     }
     if prompt::confirm(interactive, "Install browser-use?", false)? {
         args.browser_use_profile = true;
     }
-    if prompt::confirm(interactive, "Add essential agent skills?", false)? {
-        // The curated essential-skills install from the three trusted sources
-        // lands in a follow-up commit; this prompt reserves the Standard-setup
-        // step so the flow matches docs/specs/init.md step 4a.
+    if agent_supports_skills(args, registry)
+        && essential_agent_skills_available(skill_catalog)
+        && !args.no_skills
+        && args.skills_source.is_none()
+        && args.skills.is_empty()
+        && args.plugins_source.is_none()
+        && args.plugins.is_empty()
+        && prompt::confirm(interactive, "Add essential agent skills?", false)?
+    {
+        apply_essential_agent_skills(args, skill_catalog);
     }
     if args.data_from.is_empty()
         && args.prompt_data_sources.is_empty()
@@ -835,6 +854,8 @@ fn prompt_advanced_setup(
         && !args.no_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
+        && args.plugins_source.is_none()
+        && args.plugins.is_empty()
         && prompt::confirm(interactive, "Add agent skills?", false)?
     {
         args.prompt_skills = true;
@@ -902,6 +923,29 @@ fn agent_supports_skills(args: &InitArgs, registry: &RegistryCatalog) -> bool {
     registry.lookup(agent_id).is_some_and(|entry| {
         entry.supports_agent_skills && entry.agent_skills_install_dir.is_some()
     })
+}
+
+fn essential_agent_skills_available(skill_catalog: &SkillCatalog) -> bool {
+    !skill_catalog
+        .essential_skill_names(ANTHROPIC_SKILLS_SOURCE_ID)
+        .is_empty()
+        || !skill_catalog
+            .essential_plugin_names(OPENAI_PLUGINS_SOURCE_ID)
+            .is_empty()
+}
+
+fn apply_essential_agent_skills(args: &mut InitArgs, skill_catalog: &SkillCatalog) {
+    let skills = skill_catalog.essential_skill_names(ANTHROPIC_SKILLS_SOURCE_ID);
+    if !skills.is_empty() {
+        args.skills_source = Some(SOURCE_ANTHROPIC.to_owned());
+        args.skills = skills;
+    }
+
+    let plugins = skill_catalog.essential_plugin_names(OPENAI_PLUGINS_SOURCE_ID);
+    if !plugins.is_empty() {
+        args.plugins_source = Some(SOURCE_OPENAI.to_owned());
+        args.plugins = plugins;
+    }
 }
 
 fn prompt_data_sources(interactive: bool, args: &mut InitArgs) -> Result<()> {
@@ -1859,20 +1903,21 @@ mod tests {
         args: &mut InitArgs,
     ) -> Result<()> {
         let registry = RegistryCatalog::load_embedded().expect("registry");
+        let skill_catalog = SkillCatalog::load_embedded().expect("skill catalog");
         prompt::with_hosted_driver(driver, || {
-            prompt_environment_configuration_if_needed(args, &registry)
+            prompt_environment_configuration_if_needed(args, &registry, &skill_catalog)
         })
     }
 
-    // Standard Setup (path index 0): essential deps + browser-use accepted, skills
-    // reserved, data declined. It must touch none of the Advanced-only seams and
-    // must make exactly one select (the path choice) — extra selects would drain
-    // the single-item queue and panic.
+    // Standard Setup (path index 0): essential deps + browser-use accepted,
+    // skills skipped for a non-skills agent, data declined. It must touch none
+    // of the Advanced-only seams and must make exactly one select (the path
+    // choice) — extra selects would drain the single-item queue and panic.
     #[test]
     fn standard_setup_enables_essential_deps_and_browser_use() {
         let driver = Arc::new(ScriptedPromptDriver::new(
             vec![Some(0)],
-            vec![true, true, false, false],
+            vec![true, true, false],
         ));
         let mut args = parse_init_args(&["--agent", "placebo"]);
 
@@ -1890,7 +1935,7 @@ mod tests {
     fn standard_setup_decline_all_enables_nothing() {
         let driver = Arc::new(ScriptedPromptDriver::new(
             vec![Some(0)],
-            vec![false, false, false, false],
+            vec![false, false, false],
         ));
         let mut args = parse_init_args(&["--agent", "placebo"]);
 
@@ -1900,6 +1945,47 @@ mod tests {
         assert!(!args.browser_use_profile);
         assert!(!args.prompt_skills);
         assert!(args.prompt_data_sources.is_empty());
+    }
+
+    #[test]
+    fn standard_setup_adds_essential_skills_for_skills_capable_agent() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(0)],
+            vec![false, false, true, false],
+        ));
+        let mut args = parse_init_args(&["--agent", "opencode"]);
+
+        run_environment_configuration(driver, &mut args).expect("standard setup");
+
+        assert_eq!(args.skills_source.as_deref(), Some(SOURCE_ANTHROPIC));
+        assert_eq!(args.skills, ["docx", "pptx", "xlsx", "pdf"]);
+        assert_eq!(args.plugins_source.as_deref(), Some(SOURCE_OPENAI));
+        assert_eq!(args.plugins, ["github"]);
+        assert!(!args.prompt_skills);
+        assert!(args.prompt_data_sources.is_empty());
+    }
+
+    #[test]
+    fn standard_setup_keeps_explicit_skill_flags() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(0)],
+            vec![false, false, false],
+        ));
+        let mut args = parse_init_args(&[
+            "--agent",
+            "opencode",
+            "--skills-source",
+            "anthropic",
+            "--skills",
+            "docx",
+        ]);
+
+        run_environment_configuration(driver, &mut args).expect("standard setup");
+
+        assert_eq!(args.skills_source.as_deref(), Some(SOURCE_ANTHROPIC));
+        assert_eq!(args.skills, ["docx"]);
+        assert!(args.plugins_source.is_none());
+        assert!(args.plugins.is_empty());
     }
 
     // Advanced Setup (path index 1) with a non-skills agent: deps off, MCP off,

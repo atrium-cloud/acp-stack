@@ -10,6 +10,7 @@ on:
       - Dockerfile
       - scripts/docker-entrypoint.sh
       - scripts/build-release.sh
+      - data/skills.toml
       - src/**
       - tests/release_gate_tests.rs
       - tests/release_acceptance_tests.rs
@@ -23,6 +24,7 @@ on:
       - Dockerfile
       - scripts/docker-entrypoint.sh
       - scripts/build-release.sh
+      - data/skills.toml
       - src/**
       - tests/release_gate_tests.rs
       - tests/release_acceptance_tests.rs
@@ -57,3 +59,6 @@ jobs:
 
       - name: Run release acceptance tests
         run: cargo test --test release_acceptance_tests --features dev-tools,test-fixtures --locked
+
+      - name: Check skills catalog sync
+        run: cargo run --features dev-tools --bin sync-skills-catalog -- --check

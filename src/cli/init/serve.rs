@@ -560,6 +560,8 @@ fn empty_init_args() -> InitArgs {
         output_max_tokens: None,
         skills_source: None,
         skills: Vec::new(),
+        plugins_source: None,
+        plugins: Vec::new(),
         no_skills: true,
         edge: None,
         exposure: None,
