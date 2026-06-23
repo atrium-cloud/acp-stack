@@ -311,6 +311,10 @@ fn release_workflow_runs_acceptance_gate() {
         "release workflow must trigger on release acceptance test changes"
     );
     assert!(
+        workflow.contains("data/skills.toml"),
+        "release workflow must trigger on skills catalog changes"
+    );
+    assert!(
         workflow.contains(
             "cargo test --test release_acceptance_tests --features dev-tools,test-fixtures --locked"
         ),
@@ -319,5 +323,9 @@ fn release_workflow_runs_acceptance_gate() {
     assert!(
         workflow.contains("cargo check --no-default-features --bin acps --locked"),
         "release workflow must compile the dev-build feature set"
+    );
+    assert!(
+        workflow.contains("cargo run --features dev-tools --bin sync-skills-catalog -- --check"),
+        "release workflow must check the skills catalog snapshot"
     );
 }

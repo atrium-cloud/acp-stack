@@ -2372,6 +2372,30 @@ fn init_rejects_source_without_skills() {
 }
 
 #[test]
+fn init_rejects_plugins_without_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--plugins", "cloudflare"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--plugins-source"));
+}
+
+#[test]
+fn init_rejects_plugin_source_without_plugins() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--plugins-source", "openai"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--plugins"));
+}
+
+#[test]
 fn init_validates_skill_names_before_download() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
@@ -2395,6 +2419,51 @@ fn init_validates_skill_names_before_download() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("invalid skill name"));
+}
+
+#[test]
+fn init_validates_plugin_names_before_download() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "openai",
+            "--skip-testflight",
+            "--skip-workspace-init",
+            "--plugins-source",
+            "openai",
+            "--plugins",
+            "BadPlugin",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid plugin name"));
+}
+
+#[test]
+fn init_rejects_no_skills_with_plugins() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "init",
+            "--no-skills",
+            "--plugins-source",
+            "openai",
+            "--plugins",
+            "cloudflare",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
 }
 
 #[test]
