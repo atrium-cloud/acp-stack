@@ -63,9 +63,10 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 | `acps array add <agent>` | local | add a target for a registry agent; rejects an already-configured harness |
 | `acps array set --target <id> ...` | local | configure provider, model, mode, or custom provider for one target (same flags as `acps agent set`) |
 | `acps array install\|start\|stop\|restart [--target <id>] [--admin-key <key>]` | admin | drive one target, or every configured target when `--target` is omitted |
+| `acps array restart auto [--target <id>] [--admin-key <key>]` | admin | queue guarded restarts when selected targets become idle |
 | `acps agent default set <target>` | local | repoint `primary_target` at an existing target |
 
-`acps array status` reads the local read-only socket and does not require a session key. The four daemon actions call the running daemon with the admin key (required when stdin is not a terminal). With Array off, `start` and `restart` are restricted to the primary target; `install` and `stop` are unrestricted (install is idempotent, and stop on a non-running target is a no-op). When `--target` is omitted, the command attempts every target, prints a per-target result line, and exits non-zero if any target failed — a single failing target never aborts the rest of the batch.
+`acps array status` reads the local read-only socket and does not require a session key. The four daemon actions call the running daemon with the admin key (required when stdin is not a terminal). With Array off, `start` and `restart` are restricted to the primary target; `install` and `stop` are unrestricted (install is idempotent, and stop on a non-running target is a no-op). When `--target` is omitted, the command attempts every target, prints a per-target result line, and exits non-zero if any target failed — a single failing target never aborts the rest of the batch. `restart auto` uses the same fan-out but queues each restart until the target has no pending/running prompts and no pending ACP permission requests.
 
 ## API
 
@@ -76,7 +77,7 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 | `POST /v1/array/targets/{target_id}/install` | admin | install one target's harness |
 | `POST /v1/array/targets/{target_id}/start` | admin | start one target's process |
 | `POST /v1/array/targets/{target_id}/stop` | admin | stop one target's process |
-| `POST /v1/array/targets/{target_id}/restart` | admin | restart one target's process |
+| `POST /v1/array/targets/{target_id}/restart` | admin | restart one target's process; `?auto=true` queues a guarded restart |
 
 The un-suffixed `/v1/agent/*` routes operate on `primary_target`. Session routes accept `?target=<id>` (alias `target`) to address a specific target. An unknown `target_id` returns `400 request.invalid_param`. Start/restart of a non-primary target while Array is off is rejected with `400` and an "Array mode is off" message; tiering matches the single-agent surface (read-only status/capabilities are session-tier, process control is admin-tier).
 

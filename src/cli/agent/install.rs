@@ -13,7 +13,7 @@ use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_di
 use crate::secrets::SecretStore;
 use crate::state::{StateStore, default_state_path};
 
-use super::{AgentDaemonArgs, AgentInstallArgs};
+use super::{AgentDaemonArgs, AgentInstallArgs, AgentRestartArgs};
 use crate::cli::core::{
     OutputFormat, daemon_base_url, print_json, resolve_admin_key, validate_local_admin_key,
 };
@@ -32,8 +32,46 @@ pub(super) fn run_agent_daemon_post(
         .build()
         .map_err(|source| StackError::ServeIo { source })?;
     let body = runtime.block_on(post_agent_daemon(&base_url, path, &admin_key))?;
+    print_agent_daemon_result(&body, label, output)
+}
+
+pub(in crate::cli) fn run_agent_restart(
+    args: AgentRestartArgs,
+    output: OutputFormat,
+) -> Result<()> {
+    let config = Config::load_from_default_path()?;
+    let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
+    let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    let path = if args.command.is_some() {
+        "/v1/agent/restart?auto=true"
+    } else {
+        "/v1/agent/restart"
+    };
+    let body = runtime.block_on(post_agent_daemon(&base_url, path, &admin_key))?;
+    print_agent_daemon_result(&body, "restart", output)
+}
+
+fn print_agent_daemon_result(
+    body: &serde_json::Value,
+    label: &'static str,
+    output: OutputFormat,
+) -> Result<()> {
     if output.is_json() {
-        print_json(body.get("data").unwrap_or(&body))?;
+        print_json(body.get("data").unwrap_or(body))?;
+        return Ok(());
+    }
+    if label == "restart" && body["data"]["queued"].as_bool() == Some(true) {
+        let target_id = body["data"]["target_id"].as_str().unwrap_or("unknown");
+        let already_queued = body["data"]["already_queued"].as_bool() == Some(true);
+        println!("agent restart: queued");
+        println!("target: {target_id}");
+        if already_queued {
+            println!("status: already_queued");
+        }
         return Ok(());
     }
     if label == "start" || label == "restart" {

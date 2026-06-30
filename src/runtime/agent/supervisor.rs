@@ -242,6 +242,10 @@ pub struct AgentSupervisor {
     /// session-tier handlers — the durable `prompts` row is the source of
     /// truth for clients polling status.
     prompts: Arc<TokioMutex<HashMap<String, PromptHandle>>>,
+    /// Serializes prompt submission with guarded restarts so `restart auto`
+    /// cannot pass an idle check while a new prompt has cloned the bridge but not
+    /// yet inserted its durable prompt row.
+    dispatch_gate: Arc<TokioMutex<()>>,
 }
 
 #[derive(Clone)]
@@ -287,6 +291,7 @@ impl AgentSupervisor {
             capabilities: Arc::new(RwLock::new(None)),
             last_pid: Arc::new(RwLock::new(None)),
             prompts: Arc::new(TokioMutex::new(HashMap::new())),
+            dispatch_gate: Arc::new(TokioMutex::new(())),
         }
     }
 
@@ -396,6 +401,38 @@ impl AgentSupervisor {
     /// Tear down the running agent. Returns the agent's exit status if
     /// available. Records `agent.stopped` regardless of clean exit.
     pub async fn stop(
+        &self,
+        target_id: &str,
+        state: &Arc<TokioMutex<StateStore>>,
+        event_hub: &EventHub,
+    ) -> Result<Option<i32>> {
+        let _dispatch_guard = self.dispatch_gate.lock().await;
+        self.stop_inner(target_id, state, event_hub).await
+    }
+
+    pub async fn stop_when_restart_safe(
+        &self,
+        target_id: &str,
+        state: &Arc<TokioMutex<StateStore>>,
+        event_hub: &EventHub,
+    ) -> Result<std::result::Result<Option<i32>, Vec<crate::state::RestartBlockerRecord>>> {
+        let _dispatch_guard = self.dispatch_gate.lock().await;
+        let blockers = {
+            let guard = state.lock().await;
+            guard.query_restart_blockers(Some(target_id))?
+        };
+        if !blockers.is_empty() {
+            return Ok(Err(blockers));
+        }
+        let exit = match self.stop_inner(target_id, state, event_hub).await {
+            Ok(exit) => exit,
+            Err(StackError::AgentNotRunning) => None,
+            Err(err) => return Err(err),
+        };
+        Ok(Ok(exit))
+    }
+
+    async fn stop_inner(
         &self,
         target_id: &str,
         state: &Arc<TokioMutex<StateStore>>,
@@ -964,6 +1001,7 @@ impl AgentSupervisor {
         prompt_json: String,
         state: &Arc<TokioMutex<StateStore>>,
     ) -> Result<PromptRecord> {
+        let _dispatch_guard = self.dispatch_gate.lock().await;
         let bridge = self.bridge().await?;
         let agent_session_id = {
             let guard = state.lock().await;

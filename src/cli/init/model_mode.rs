@@ -223,7 +223,7 @@ pub(super) fn configure_model_and_mode_for_init(
                     format!("agent command `{}` is not on PATH", config.agent.command,)
                 }
                 (false, true) => format!(
-                    "spawn cwd `{}` does not exist; create it or run workspace materialize first",
+                    "spawn cwd `{}` does not exist; create it or run `acps workspace sync` first",
                     spawn_cwd.display(),
                 ),
                 (false, false) => unreachable!(),

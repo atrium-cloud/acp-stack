@@ -6,13 +6,14 @@
 
 | Area           | Commands                                                                    |
 | -------------- | --------------------------------------------------------------------------- |
-| Instance       | `acps init`, `acps init serve`, `acps serve`, `acps status`, `acps update`, `acps reset --yes` |
+| Instance       | `acps init`, `acps init serve`, `acps serve`, `acps status`, `acps restart`, `acps update`, `acps reset --yes` |
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
 | Agents         | `acps agent install`, `update`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test`, `default set` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
 | Array          | `acps array status/on/off/add/set/install/start/stop/restart`               |
+| Workspace      | `acps workspace status`, `code-source`, `data-source`, `sync`, `sandbox`    |
 | Sessions       | `acps sessions list/status/new/load/resume/fork/prompt/cancel/close`        |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
@@ -56,7 +57,7 @@ acps init \
 
 Interactive init may prompt for a config source, then for missing choices. Environment configuration chooses Standard Setup or Advanced Setup. Standard Setup offers opinionated yes/no prompts for essential dependencies, browser-use, Agent Skills, and data sources; accepting essential Agent Skills installs Anthropic `docx`, `pptx`, `xlsx`, and `pdf`, plus the OpenAI `github` plugin bundle. Advanced Setup offers custom dependencies, Agent Skills, MCP servers, agent environment refs, and data sources. Declining every environment prompt continues without environment changes. MCP stdio setup collects command, args, and env refs together; MCP HTTP setup collects URL and header refs together. Agent, provider, and advertised model selectors are searchable. `--from-file`, `--from-toml`, and `--from-base64` initialize from an existing `acps-config.toml`; the interactive source prompt offers file import and base64 paste, while `--from-toml` is for scripted raw TOML input. The base64 form is the same TOML content encoded for safer terminal paste. Non-interactive first runs require `--agent <id>`, the `--custom-agent-*` set, or a complete imported config; scripts should pass `--non-interactive` with the selected real agent id, explicit provider flags when provider setup is required, and resolvable secret refs. A custom (non-registry) agent is declared with `--custom-agent-id`, `--custom-agent-command`, and `--custom-agent-install` (optionally `--custom-agent-name`, repeatable `--custom-agent-arg`, and `--custom-agent-creates`); it writes an `[agent.install]` shell escape hatch, is also offered as a "Custom agent…" choice in the interactive picker, and conflicts with the `--provider`/`--model` init flags (custom agents configure those through their own environment). Repeatable `--agent-env-ref <name>` adds extra secret-backed environment variables to `[agent].env` (new config only); the named secret must already resolve in the store, while interactive runs can collect masked values when Agent environment is selected. Repeatable `--dep <name=shell>` (user scope) and `--dep-system <name=shell>` (system scope) declare `[dependencies.commands]` install actions (new config only). `--deps-apply` runs the pending install actions during init; it confirms interactively, and non-interactive runs additionally require `--deps-apply-yes`. Apply outcomes are recorded under `acps installer history --agent deps_apply`. `--stack-update <on|security|off>` sets the `[updates.acp_stack]` policy (on = all compatible, security = security-critical only, off = manual); `--stack-update-frequency <freq>` sets the schedule at day/week granularity (minimum 1 day, e.g. `1d`, `3w`) for non-off policies. Omitting both in a non-interactive run keeps the defaults (security-critical, `1d`). Re-running init preserves existing API keys and config unless an explicit option requests a fresh run.
 
-`--workspace-root`, `--workspace-uploads`, `--runtime-user`, and `--sandbox` affect only a new starter config. Once config exists, contradictory deployment overrides are rejected.
+`--workspace-root`, `--workspace-uploads`, `--runtime-user`, and `--sandbox` affect only a new starter config. Once config exists, use `acps workspace *` for supported post-init workspace changes.
 
 `--sandbox <off|unshare|bwrap|custom>` sets `[workspace.sandbox].mode` on a new starter config (default `off`); it only applies when the starter config is being created, and `custom` additionally requires a `wrapper`, which must be supplied through an imported config. See [security.md](security.md#sandbox) for backend requirements.
 
@@ -103,6 +104,25 @@ acps config import --base64 <code> [--force] [--dry-run] [--admin-key <key>]
 ```
 
 Export reads the current config file and emits canonical TOML with secret references only. Import validates and canonicalizes TOML before writing it and requires the admin key. Text output reports progress for file-writing export and import operations. Without `--force`, import refuses to replace an existing config. `--dry-run` reports what would change without writing. After a successful replace, import asks the currently configured daemon to apply `[local].session_auth`; if the daemon is unreachable or rejects the local admin key, the value applies on next daemon start.
+
+## Workspace Commands
+
+```sh
+acps workspace status
+acps workspace code-source list
+acps workspace code-source add --repo <repo> [--branch <branch>] [--credential-ref <ref>] [--name <name>] [--no-sync]
+acps workspace data-source list
+acps workspace data-source add --type <local|https|s3> [source flags] [--name <name>] [--no-sync]
+acps workspace sync
+acps workspace sandbox status
+acps workspace sandbox set --mode <off|unshare|bwrap|custom> [--wrapper-arg <arg>]...
+```
+
+`workspace status` prints configured workspace paths, source counts, and sandbox mode. `code-source add` appends a Git source under `workspace.root/usr/code`; `data-source add` appends a local, HTTPS, or S3 source under `workspace.root/usr/data`. Source additions validate and write canonical config, then run `workspace sync` by default. `--no-sync` writes config only.
+
+`workspace sync` creates missing workspace base directories and syncs every configured source. Existing source destinations with matching sentinels are verified and skipped.
+
+`workspace sandbox set` manages only `[workspace.sandbox].mode` and `wrapper`; existing extra mask and allow paths are preserved. Non-`off` modes are preflighted before config is written. Sandbox changes require a supervised-agent restart with `acps restart`; they do not require a daemon restart.
 
 ## Secret Commands
 
@@ -179,15 +199,21 @@ acps agent update set --frequency 3d
 
 `--frequency` accepts duration suffixes such as `12h`, `1d`, `3d`, and `4w`.
 
-`acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information through the local read-only route. `acps agent check` reports whether managed install steps are present and current.
+`acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps restart` is the preferred top-level alias for `acps agent restart`; both accept `--admin-key <key>`. `acps restart auto` and `acps agent restart auto` queue a supervised-agent restart that runs once the target has no pending/running prompts and no pending ACP permission requests. Active sessions with no in-flight prompt are safe; terminal latest prompts are safe. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information through the local read-only route. `acps agent check` reports whether managed install steps are present and current.
 
 `acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional.
 
 `acps agent default set <target>` repoints the Array primary target at an existing target without touching the others, so the default `acps agent *` surfaces follow it.
 
+## Restart Levels
+
+A supervised-agent restart is sufficient for agent process settings: provider, model, mode, agent environment refs, command/args, and the workspace sandbox used by the agent harness.
+
+A daemon restart is required for daemon startup-cached settings: workspace root and uploads paths, default shell, max file bytes, MCP declarations, mediated command policy/env/timeouts/sandbox, HTTP/CORS/rate limits/body caps, permission service defaults, and logging sink wiring.
+
 ## Array
 
-`acps array *` manages multi-target Array mode. `acps array status` prints the Array config and, when the daemon is reachable, per-target process state and pid through the local read-only route. `acps array on` and `off` toggle Array mode without deleting configured targets. `acps array add <agent>` adds a registry agent as a new target and rejects an already-configured harness. `acps array set --target <id> ...` configures provider, model, mode, or a custom provider for one target with the same flags as `acps agent set`. `acps array install|start|stop|restart [--target <id>] [--admin-key <key>]` drives one target, or every configured target when `--target` is omitted — it attempts each target, prints a per-target result line, and exits non-zero if any failed. With Array off, `start` and `restart` are limited to the primary target; `install` and `stop` are unrestricted. See [array.md](array.md) for the full model, validation, and API.
+`acps array *` manages multi-target Array mode. `acps array status` prints the Array config and, when the daemon is reachable, per-target process state and pid through the local read-only route. `acps array on` and `off` toggle Array mode without deleting configured targets. `acps array add <agent>` adds a registry agent as a new target and rejects an already-configured harness. `acps array set --target <id> ...` configures provider, model, mode, or a custom provider for one target with the same flags as `acps agent set`. `acps array install|start|stop|restart [--target <id>] [--admin-key <key>]` drives one target, or every configured target when `--target` is omitted — it attempts each target, prints a per-target result line, and exits non-zero if any failed. `acps array restart auto [--target <id>]` queues guarded restarts for the selected targets. With Array off, `start` and `restart` are limited to the primary target; `install` and `stop` are unrestricted. See [array.md](array.md) for the full model, validation, and API.
 
 ## Sessions
 
