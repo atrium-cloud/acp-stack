@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - Dockerfile
+      - scripts/browser-use-mcp
+      - scripts/browser-use-mcp.py
       - scripts/docker-entrypoint.sh
       - scripts/docker-test.sh
       - Cargo.toml
@@ -23,6 +25,8 @@ on:
   pull_request:
     paths:
       - Dockerfile
+      - scripts/browser-use-mcp
+      - scripts/browser-use-mcp.py
       - scripts/docker-entrypoint.sh
       - scripts/docker-test.sh
       - Cargo.toml

@@ -8,6 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY data ./data
 COPY migrations ./migrations
+COPY scripts/browser-use-mcp scripts/browser-use-mcp.py ./scripts/
 
 RUN cargo build --locked --release
 
