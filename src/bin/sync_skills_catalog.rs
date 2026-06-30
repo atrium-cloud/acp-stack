@@ -39,10 +39,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let body = std::fs::read_to_string(SKILLS_TOML_PATH)?;
     let catalog = SkillCatalog::from_toml(&body)?;
     let mut sources = catalog.sources().to_vec();
-    let http = GithubClient::new()?;
 
-    for source in &mut sources {
-        refresh_source(&http, source)?;
+    if mode == Mode::Write {
+        let http = GithubClient::new()?;
+        refresh_sources(&http, mode, &mut sources)?;
     }
 
     let rendered = render_catalog(&sources);
@@ -90,8 +90,22 @@ fn set_mode(slot: &mut Option<Mode>, next: Mode) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn refresh_sources(
+    http: &impl GithubApi,
+    mode: Mode,
+    sources: &mut [SkillSource],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if mode == Mode::Check {
+        return Ok(());
+    }
+    for source in sources {
+        refresh_source(http, source)?;
+    }
+    Ok(())
+}
+
 fn refresh_source(
-    http: &GithubClient,
+    http: &impl GithubApi,
     source: &mut SkillSource,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let repo = format!("{}/{}", source.owner, source.repo);
@@ -222,6 +236,12 @@ struct GithubClient {
     client: Client,
 }
 
+trait GithubApi {
+    fn commit(&self, repo: &str, branch: &str) -> Result<GithubCommit, Box<dyn std::error::Error>>;
+
+    fn tree(&self, repo: &str, commit: &str) -> Result<GithubTree, Box<dyn std::error::Error>>;
+}
+
 impl GithubClient {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::builder()
@@ -230,7 +250,9 @@ impl GithubClient {
             .build()?;
         Ok(Self { client })
     }
+}
 
+impl GithubApi for GithubClient {
     fn commit(&self, repo: &str, branch: &str) -> Result<GithubCommit, Box<dyn std::error::Error>> {
         self.github_json(&format!(
             "https://api.github.com/repos/{repo}/commits/{}",
@@ -243,7 +265,9 @@ impl GithubClient {
             "https://api.github.com/repos/{repo}/git/trees/{commit}?recursive=1"
         ))
     }
+}
 
+impl GithubClient {
     fn github_json<T: for<'de> Deserialize<'de>>(
         &self,
         url: &str,
@@ -315,19 +339,19 @@ fn curl_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, Box<dyn std::
     .into())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GithubCommit {
     sha: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GithubTree {
     tree: Vec<GithubTreeItem>,
     #[serde(default)]
     truncated: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GithubTreeItem {
     path: String,
     mode: String,
@@ -424,6 +448,13 @@ fn toml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    use acp_stack::runtime::install::skill_registry::PluginBundleDirectory;
+
+    const OLD_COMMIT: &str = "1111111111111111111111111111111111111111";
+    const NEW_COMMIT: &str = "2222222222222222222222222222222222222222";
+    const VERIFIED_COMMIT: &str = "3333333333333333333333333333333333333333";
 
     #[test]
     fn mode_defaults_to_check() {
@@ -448,6 +479,55 @@ mod tests {
 
         assert_eq!(snapshot.installable_plugins, vec!["cloudflare"]);
         assert_eq!(snapshot.excluded_plugins, vec!["no-skills"]);
+    }
+
+    #[test]
+    fn check_mode_does_not_refresh_sources() {
+        let http = FakeGithubApi::new(NEW_COMMIT, plugin_tree());
+        let mut source = plugin_source(Some(OLD_COMMIT), None);
+
+        refresh_sources(&http, Mode::Check, std::slice::from_mut(&mut source))
+            .expect("refresh sources");
+
+        assert!(http.commit_calls.borrow().is_empty());
+        assert!(http.tree_calls.borrow().is_empty());
+        assert_eq!(source.indexed_commit.as_deref(), Some(OLD_COMMIT));
+        assert!(source.plugin_bundles[0].installable_plugins.is_empty());
+    }
+
+    #[test]
+    fn write_mode_advances_indexed_commit_to_branch_head() {
+        let http = FakeGithubApi::new(NEW_COMMIT, plugin_tree());
+        let mut source = plugin_source(Some(OLD_COMMIT), None);
+
+        refresh_sources(&http, Mode::Write, std::slice::from_mut(&mut source))
+            .expect("refresh sources");
+
+        assert_eq!(
+            http.commit_calls.borrow().as_slice(),
+            &[("openai/plugins".to_owned(), "main".to_owned())]
+        );
+        assert_eq!(
+            http.tree_calls.borrow().as_slice(),
+            &[("openai/plugins".to_owned(), NEW_COMMIT.to_owned())]
+        );
+        assert_eq!(source.indexed_commit.as_deref(), Some(NEW_COMMIT));
+    }
+
+    #[test]
+    fn verified_commit_clears_indexed_commit_and_uses_verified_reference_on_write() {
+        let http = FakeGithubApi::new(NEW_COMMIT, plugin_tree());
+        let mut source = plugin_source(Some(OLD_COMMIT), Some(VERIFIED_COMMIT));
+
+        refresh_sources(&http, Mode::Write, std::slice::from_mut(&mut source))
+            .expect("refresh sources");
+
+        assert!(http.commit_calls.borrow().is_empty());
+        assert_eq!(
+            http.tree_calls.borrow().as_slice(),
+            &[("openai/plugins".to_owned(), VERIFIED_COMMIT.to_owned())]
+        );
+        assert_eq!(source.indexed_commit, None);
     }
 
     #[test]
@@ -519,6 +599,83 @@ excluded_plugins = []
             path: path.to_owned(),
             mode: "100644".to_owned(),
             kind: "blob".to_owned(),
+        }
+    }
+
+    fn plugin_tree() -> GithubTree {
+        GithubTree {
+            tree: vec![
+                tree_dir("plugins/cloudflare"),
+                tree_blob("plugins/cloudflare/skills/wrangler/SKILL.md"),
+            ],
+            truncated: false,
+        }
+    }
+
+    fn plugin_source(indexed_commit: Option<&str>, verified_commit: Option<&str>) -> SkillSource {
+        SkillSource {
+            id: "openai-plugins".to_owned(),
+            name: "OpenAI Plugin Skills".to_owned(),
+            owner: "openai".to_owned(),
+            repo: "plugins".to_owned(),
+            url: "https://github.com/openai/plugins".to_owned(),
+            docs: vec!["https://github.com/openai/plugins".to_owned()],
+            official: true,
+            trusted: true,
+            reviewed_at: "2026-06-23".to_owned(),
+            branch: "main".to_owned(),
+            verified_commit: verified_commit.map(str::to_owned),
+            indexed_commit: indexed_commit.map(str::to_owned),
+            descriptor: SKILL_DESCRIPTOR.to_owned(),
+            directories: Vec::new(),
+            plugin_bundles: vec![PluginBundleDirectory {
+                path: "plugins".to_owned(),
+                source_url: "https://github.com/openai/plugins/tree/main/plugins".to_owned(),
+                verified: true,
+                installable_plugins: Vec::new(),
+                essential_plugins: Vec::new(),
+                excluded_plugins: Vec::new(),
+            }],
+        }
+    }
+
+    struct FakeGithubApi {
+        commit_sha: String,
+        tree: GithubTree,
+        commit_calls: RefCell<Vec<(String, String)>>,
+        tree_calls: RefCell<Vec<(String, String)>>,
+    }
+
+    impl FakeGithubApi {
+        fn new(commit_sha: &str, tree: GithubTree) -> Self {
+            Self {
+                commit_sha: commit_sha.to_owned(),
+                tree,
+                commit_calls: RefCell::new(Vec::new()),
+                tree_calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl GithubApi for FakeGithubApi {
+        fn commit(
+            &self,
+            repo: &str,
+            branch: &str,
+        ) -> Result<GithubCommit, Box<dyn std::error::Error>> {
+            self.commit_calls
+                .borrow_mut()
+                .push((repo.to_owned(), branch.to_owned()));
+            Ok(GithubCommit {
+                sha: self.commit_sha.clone(),
+            })
+        }
+
+        fn tree(&self, repo: &str, commit: &str) -> Result<GithubTree, Box<dyn std::error::Error>> {
+            self.tree_calls
+                .borrow_mut()
+                .push((repo.to_owned(), commit.to_owned()));
+            Ok(self.tree.clone())
         }
     }
 }
