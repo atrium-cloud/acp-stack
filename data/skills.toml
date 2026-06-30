@@ -137,7 +137,7 @@ official = true
 trusted = true
 reviewed_at = "2026-06-23"
 branch = "main"
-indexed_commit = "e855fa51ab1ff84c358ba9a1560d4cc83e82e870"
+indexed_commit = "3fdeeb4970a1fa176ccabf873ae64fd6053cb2b0"
 descriptor = "SKILL.md"
 
 [[sources.plugin_bundles]]
@@ -166,6 +166,7 @@ installable_plugins = [
   "daloopa",
   "datasite",
   "deepnote",
+  "digitalocean",
   "dnb-finance-analytics",
   "expo",
   "figma",
@@ -197,6 +198,7 @@ installable_plugins = [
   "outlook-email",
   "plugin-eval",
   "posthog",
+  "replayio",
   "remotion",
   "render",
   "sentry",
