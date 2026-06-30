@@ -98,6 +98,15 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     let loaded_config = Config::load_from_path_with_legacy(&config_path)?;
     let config = loaded_config.config;
 
+    // Fail closed: if a sandbox backend is configured but cannot run on this
+    // host, refuse to serve rather than start a daemon that silently fails the
+    // security posture at the first agent spawn.
+    if config.workspace.sandbox.mode != config::SandboxMode::Off
+        && let Err(reason) = crate::runtime::sandbox::preflight(&config.workspace.sandbox)
+    {
+        return Err(crate::error::StackError::SandboxFailed { reason });
+    }
+
     let state_path = default_state_path(&home);
     let state_dir = parent_dir(&state_path)?;
     create_dir_owner_only(state_dir)?;

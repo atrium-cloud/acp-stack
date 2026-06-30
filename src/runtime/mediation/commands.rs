@@ -243,6 +243,8 @@ impl CommandGateway {
             command_id: record.id.clone(),
             shell: self.config.workspace.default_shell.clone(),
             command: request.command.clone(),
+            sandbox: self.config.workspace.sandbox.clone(),
+            workspace_root: std::path::PathBuf::from(&self.config.workspace.root),
             cwd: execution_cwd,
             env: request.env.clone(),
             timeout_duration,

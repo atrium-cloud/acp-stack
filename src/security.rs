@@ -96,6 +96,17 @@ pub struct SecurityCheckInputs<'a> {
     pub recent_direct_cloudflare_mode_requests: i64,
     pub recent_missing_cloudflare_header_requests: i64,
     pub dependency_failures: &'a [DependencySecurityFailure],
+    /// Configured agent sandbox mode. `off` plus `sandbox_off_but_capable`
+    /// drives the "you could sandbox but aren't" nudge; non-`off` plus
+    /// `sandbox_unavailable_reason` drives the unavailability finding.
+    pub sandbox_mode: crate::config::SandboxMode,
+    /// `Some(reason)` when the configured (non-`off`) sandbox backend cannot run
+    /// on this host, taken from `sandbox::preflight`. Owned because it is built
+    /// per-request, not borrowed from config.
+    pub sandbox_unavailable_reason: Option<String>,
+    /// True when the sandbox is `off` but the host could run the `unshare`
+    /// backend, so the agent workload needlessly shares the daemon's secrets.
+    pub sandbox_off_but_capable: bool,
 }
 
 /// Compute the list of security findings for the running daemon.
@@ -109,6 +120,7 @@ pub fn check(inputs: SecurityCheckInputs<'_>) -> Vec<SecurityFinding> {
     rules::check_paths(&inputs, &mut findings);
     rules::check_runtime_user(&inputs, &mut findings);
     rules::check_deps(&inputs, &mut findings);
+    rules::check_sandbox(&inputs, &mut findings);
     findings
 }
 
@@ -150,6 +162,9 @@ mod tests {
             recent_direct_cloudflare_mode_requests: 0,
             recent_missing_cloudflare_header_requests: 0,
             dependency_failures: &[],
+            sandbox_mode: crate::config::SandboxMode::Off,
+            sandbox_unavailable_reason: None,
+            sandbox_off_but_capable: false,
         }
     }
 
@@ -838,6 +853,9 @@ mod tests {
             recent_direct_cloudflare_mode_requests: 0,
             recent_missing_cloudflare_header_requests: 0,
             dependency_failures: &dependency_failures,
+            sandbox_mode: crate::config::SandboxMode::Off,
+            sandbox_unavailable_reason: None,
+            sandbox_off_but_capable: false,
         };
         let findings = check(inputs);
         assert_remediations_present(&findings);

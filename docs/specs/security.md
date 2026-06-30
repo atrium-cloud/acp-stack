@@ -102,6 +102,34 @@ Production deployments should:
 - terminate TLS at a reverse proxy or Cloudflare Tunnel
 - keep runtime auth and origin checks enabled behind the edge
 
+## Sandbox
+
+By default the agent harness and mediated shells run in the same process tree and OS user as the daemon, which holds the runtime's secrets, config, and control socket. For an untrusted workload this means in-runtime policy is bypassable and the on-disk secrets are directly readable. `[workspace.sandbox]` wraps every harness and mediated-shell spawn in an isolation backend so the workload cannot read the daemon's sensitive paths or reach its socket. The default is `off`, which preserves single-process behavior unchanged.
+
+The masked set is always derived from the runtime's own path helpers — the config directory (`~/.config/acp-stack`, holding config and the age key) and the state directory (`~/.local/share/acp-stack`, holding the secret store, state database, and local socket) — so an operator cannot misconfigure the protection away. `[workspace.sandbox].mask_paths` only adds to that set.
+
+Backends are selected by `[workspace.sandbox].mode`:
+
+- `off` — no wrapping.
+- `unshare` — runs the workload in fresh mount, pid, ipc, and uts namespaces with a private `/proc`, the sensitive paths masked with `tmpfs`, then all capabilities and `no_new_privs` dropped before exec. Requires the daemon to hold `CAP_SYS_ADMIN`, as in a privileged container.
+- `bwrap` — the same masking through `bubblewrap`, for hosts with unprivileged user namespaces.
+- `custom` — an operator-supplied wrapper argv in `[workspace.sandbox].wrapper`, for any other mechanism such as `systemd-run` or `firejail`.
+
+Secrets referenced in `[agent].env` are still delivered to the harness through its environment under every backend; only on-disk secrets and the control socket are masked. The same wrapping applies to mediated shell commands, so a shell command the agent runs cannot read the daemon's secrets either.
+
+```mermaid
+flowchart TB
+    subgraph Daemon["Daemon — trusted, holds privilege"]
+        Sensitive["age key · secret store · config · control socket"]
+        Wrap["sandbox::wrap per spawn"]
+    end
+    subgraph Workload["Workload — untrusted"]
+        Harness["agent harness / mediated shell"]
+    end
+    Wrap -->|"new namespaces · tmpfs-mask sensitive paths · drop caps · no_new_privs"| Harness
+    Harness -. cannot read .-> Sensitive
+```
+
 ## Security Self-Check
 
 The admin-tier public `GET /v1/security/check` route and keyless local `acps security check` diagnostic report findings for common misconfiguration: unsafe binds, wildcard browser origins, excessive auth failures, loose file modes, ownership mismatches, unwritable workspaces, unavailable required dependencies, and external logging delivery failures.

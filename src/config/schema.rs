@@ -151,10 +151,58 @@ pub struct WorkspaceConfig {
     pub default_shell: String,
     pub runtime_user: String,
     pub max_file_bytes: u64,
+    /// Isolation backend that the agent harness and mediated shells run inside.
+    /// Default `off` preserves single-process behavior; other modes wrap each
+    /// spawn so the workload cannot read the daemon's secrets/state or reach its
+    /// control socket. See [`SandboxConfig`].
+    #[serde(default, skip_serializing_if = "SandboxConfig::is_off")]
+    pub sandbox: SandboxConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_sources: Vec<CodeSourceConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data_sources: Vec<DataSourceConfig>,
+}
+
+/// Selects how the agent harness and mediated shells are isolated from the
+/// daemon. The daemon always derives the set of its own sensitive paths to mask
+/// (config dir, state dir) from its path helpers, so an operator cannot forget
+/// to protect them; the fields below only add to or parameterize that.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    #[serde(default)]
+    pub mode: SandboxMode,
+    /// Wrapper argv for `mode = "custom"`: prepended to the harness command
+    /// (e.g. `["systemd-run", "--scope", "-p", "..."]`). Required for `custom`,
+    /// ignored otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wrapper: Vec<String>,
+    /// Extra absolute paths to mask (read-deny) on top of the daemon's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask_paths: Vec<String>,
+    /// Extra absolute paths the workload may read+write (e.g. bwrap binds)
+    /// beyond the workspace root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_paths: Vec<String>,
+}
+
+impl SandboxConfig {
+    pub fn is_off(&self) -> bool {
+        *self == SandboxConfig::default()
+    }
+}
+
+/// Isolation mechanism. `unshare` requires the daemon to hold `CAP_SYS_ADMIN`
+/// (privileged container); `bwrap` requires unprivileged user namespaces;
+/// `custom` delegates to an operator-supplied [`SandboxConfig::wrapper`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMode {
+    #[default]
+    Off,
+    Unshare,
+    Bwrap,
+    Custom,
 }
 
 /// Source for code that init should seed under `<workspace.root>/usr/code/`.

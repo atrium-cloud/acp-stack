@@ -27,8 +27,9 @@ pub use self::schema::{
     DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
     EdgeConfig, HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig,
     McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
-    PromptsConfig, SecurityConfig, SecurityHttpConfig, StackUpdateConfig, StackUpdatePolicy,
-    SupabaseLoggingBackend, SupabaseLoggingConfig, UpdatesConfig, WorkspaceConfig,
+    PromptsConfig, SandboxConfig, SandboxMode, SecurityConfig, SecurityHttpConfig,
+    StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig,
+    UpdatesConfig, WorkspaceConfig,
 };
 pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};

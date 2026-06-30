@@ -308,6 +308,7 @@ async fn start_agent_target(
             state: &state.state,
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
+            sandbox: config.workspace.sandbox.clone(),
         })
         .await?;
     {
@@ -447,6 +448,7 @@ async fn restart_agent_target(
             state: &state.state,
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
+            sandbox: fresh_config.workspace.sandbox.clone(),
         })
         .await?;
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
@@ -842,6 +844,7 @@ async fn start_agent_with_config(
             state: &state.state,
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
+            sandbox: config.workspace.sandbox.clone(),
         })
         .await?;
     Ok(())

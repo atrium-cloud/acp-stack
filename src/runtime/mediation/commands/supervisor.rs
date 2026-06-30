@@ -45,6 +45,8 @@ pub(super) struct SupervisorTask {
     pub(super) command_id: String,
     pub(super) shell: String,
     pub(super) command: String,
+    pub(super) sandbox: crate::config::SandboxConfig,
+    pub(super) workspace_root: std::path::PathBuf,
     pub(super) cwd: ResolvedCommandCwd,
     pub(super) env: Option<HashMap<String, String>>,
     pub(super) timeout_duration: Duration,
@@ -342,9 +344,35 @@ impl SupervisorTask {
         self.deregister().await;
     }
 
+    /// Resolve the program + argv to spawn, applying the sandbox backend. `off`
+    /// is a verbatim `shell -c <command>`; other modes wrap it the same way the
+    /// agent harness is wrapped, so a mediated shell cannot read the daemon's
+    /// secrets either.
+    fn sandboxed_command(
+        &self,
+    ) -> std::result::Result<(std::path::PathBuf, Vec<String>), std::io::Error> {
+        let shell_args = vec!["-c".to_owned(), self.command.clone()];
+        if matches!(self.sandbox.mode, crate::config::SandboxMode::Off) {
+            return Ok((std::path::PathBuf::from(&self.shell), shell_args));
+        }
+        let home = crate::fs_util::home_dir().map_err(std::io::Error::other)?;
+        let wrapped = crate::runtime::sandbox::wrap(
+            &self.sandbox,
+            std::path::Path::new(&self.shell),
+            &shell_args,
+            &home,
+            &self.workspace_root,
+            crate::ownership::process_euid(),
+            crate::ownership::process_egid(),
+        )
+        .map_err(std::io::Error::other)?;
+        Ok((wrapped.program, wrapped.args))
+    }
+
     fn spawn_child(&self) -> std::result::Result<tokio::process::Child, std::io::Error> {
-        let mut cmd = Command::new(&self.shell);
-        cmd.arg("-c").arg(&self.command);
+        let (program, args) = self.sandboxed_command()?;
+        let mut cmd = Command::new(&program);
+        cmd.args(&args);
         #[cfg(unix)]
         let cwd_handle = self.cwd.open_verified()?;
         #[cfg(unix)]
@@ -692,6 +720,8 @@ mod tests {
             command_id: "cmd_missing".to_owned(),
             shell: "/bin/sh".to_owned(),
             command: format!("printf spawned > {}", marker.to_string_lossy()),
+            sandbox: Default::default(),
+            workspace_root: tempdir.path().to_path_buf(),
             cwd: resolve_cwd_under_workspace(tempdir.path(), &tempdir.path().to_string_lossy())
                 .expect("resolved cwd"),
             env: None,

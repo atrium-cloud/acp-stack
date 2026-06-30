@@ -83,6 +83,7 @@ async fn assert_real_agent_advertises_model(
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
         None,
+        &Default::default(),
     )
     .await
     .expect("real ACP agent should initialize");
@@ -121,6 +122,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
         None,
+        &Default::default(),
     )
     .await
     .expect("real ACP agent should initialize");
@@ -153,6 +155,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
         None,
+        &Default::default(),
     )
     .await
     .expect("real ACP agent should initialize");

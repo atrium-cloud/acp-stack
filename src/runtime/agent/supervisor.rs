@@ -260,6 +260,7 @@ struct RestartContext {
     state_store: Arc<TokioMutex<StateStore>>,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
+    sandbox: crate::config::SandboxConfig,
 }
 
 pub struct AgentStartRequest<'a> {
@@ -270,6 +271,7 @@ pub struct AgentStartRequest<'a> {
     pub state: &'a Arc<TokioMutex<StateStore>>,
     pub event_hub: EventHub,
     pub permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
+    pub sandbox: crate::config::SandboxConfig,
 }
 
 impl Default for AgentSupervisor {
@@ -342,6 +344,7 @@ impl AgentSupervisor {
             state_store: request.state.clone(),
             event_hub: request.event_hub.clone(),
             permissions: request.permissions.clone(),
+            sandbox: request.sandbox.clone(),
         };
         match self.do_start(request).await {
             Ok((capabilities, bridge)) => {
@@ -385,6 +388,7 @@ impl AgentSupervisor {
             request.state,
             request.event_hub,
             request.permissions,
+            request.sandbox,
         )
         .await
     }
@@ -1207,6 +1211,7 @@ impl AgentSupervisor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_agent_bridge(
     target_id: &str,
     agent: &AgentConfig,
@@ -1215,6 +1220,7 @@ async fn spawn_agent_bridge(
     state: &Arc<TokioMutex<StateStore>>,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
+    sandbox: crate::config::SandboxConfig,
 ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
     let cwd = resolve_agent_cwd(agent, workspace_root);
 
@@ -1244,7 +1250,7 @@ async fn spawn_agent_bridge(
         target_id.to_owned(),
         state.clone(),
     ));
-    let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions).await {
+    let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions, &sandbox).await {
         Ok(bridge) => bridge,
         Err(err) => {
             let data = json!({
@@ -1428,6 +1434,7 @@ async fn monitor_bridge_exit(
         &restart_context.state_store,
         restart_context.event_hub.clone(),
         restart_context.permissions.clone(),
+        restart_context.sandbox.clone(),
     )
     .await
     {
