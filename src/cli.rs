@@ -18,6 +18,7 @@ mod status;
 mod subagent;
 #[cfg(feature = "stack-self-update")]
 mod update;
+mod workspace;
 mod ws;
 
 pub use core::{Cli, run};

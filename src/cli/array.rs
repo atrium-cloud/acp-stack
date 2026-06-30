@@ -82,7 +82,7 @@ pub enum ArrayCommand {
     /// Stop one target or every configured target.
     Stop(ArrayDaemonArgs),
     /// Restart one target or every configured target.
-    Restart(ArrayDaemonArgs),
+    Restart(ArrayRestartArgs),
 }
 
 #[derive(Debug, Args)]
@@ -141,6 +141,34 @@ pub struct ArrayDaemonArgs {
     admin_key: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct ArrayRestartArgs {
+    /// Target id. Omit to apply to every configured target.
+    #[arg(long)]
+    target: Option<String>,
+    /// Admin API key. Required when stdin is not a terminal.
+    #[arg(long = "admin-key", global = true)]
+    admin_key: Option<String>,
+    #[command(subcommand)]
+    command: Option<ArrayRestartCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArrayRestartCommand {
+    /// Queue restarts that run when active ACP sessions are idle.
+    Auto(ArrayRestartAutoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayRestartAutoArgs {
+    /// Target id. Omit to apply to every configured target.
+    #[arg(long)]
+    target: Option<String>,
+    /// Admin API key. Required when stdin is not a terminal.
+    #[arg(long = "admin-key")]
+    admin_key: Option<String>,
+}
+
 pub(super) fn run_array_command(command: ArrayCommand, output: OutputFormat) -> Result<()> {
     match command {
         ArrayCommand::Status => run_array_status(output),
@@ -151,7 +179,7 @@ pub(super) fn run_array_command(command: ArrayCommand, output: OutputFormat) -> 
         ArrayCommand::Install(args) => run_array_daemon(args, ArrayDaemonAction::Install, output),
         ArrayCommand::Start(args) => run_array_daemon(args, ArrayDaemonAction::Start, output),
         ArrayCommand::Stop(args) => run_array_daemon(args, ArrayDaemonAction::Stop, output),
-        ArrayCommand::Restart(args) => run_array_daemon(args, ArrayDaemonAction::Restart, output),
+        ArrayCommand::Restart(args) => run_array_restart(args, output),
     }
 }
 
@@ -751,6 +779,38 @@ fn run_array_daemon(
     action: ArrayDaemonAction,
     output: OutputFormat,
 ) -> Result<()> {
+    run_array_daemon_with_auto(args, action, false, output)
+}
+
+fn run_array_restart(args: ArrayRestartArgs, output: OutputFormat) -> Result<()> {
+    match args.command {
+        Some(ArrayRestartCommand::Auto(auto_args)) => run_array_daemon_with_auto(
+            ArrayDaemonArgs {
+                target: auto_args.target,
+                admin_key: auto_args.admin_key.or(args.admin_key),
+            },
+            ArrayDaemonAction::Restart,
+            true,
+            output,
+        ),
+        None => run_array_daemon_with_auto(
+            ArrayDaemonArgs {
+                target: args.target,
+                admin_key: args.admin_key,
+            },
+            ArrayDaemonAction::Restart,
+            false,
+            output,
+        ),
+    }
+}
+
+fn run_array_daemon_with_auto(
+    args: ArrayDaemonArgs,
+    action: ArrayDaemonAction,
+    auto: bool,
+    output: OutputFormat,
+) -> Result<()> {
     let config = Config::load_from_default_path()?;
     ensure_daemon_action_allowed(&config, args.target.as_deref(), action)?;
     let targets = resolve_targets(&config, args.target.as_deref())?;
@@ -771,7 +831,11 @@ fn run_array_daemon(
     let mut failures: Vec<String> = Vec::new();
     for target in targets {
         let encoded = encode_path_segment(&target.id);
-        let path = format!("/v1/array/targets/{encoded}/{action}");
+        let path = if auto {
+            format!("/v1/array/targets/{encoded}/{action}?auto=true")
+        } else {
+            format!("/v1/array/targets/{encoded}/{action}")
+        };
         match runtime.block_on(daemon_request(
             &base_url,
             CliMethod::Post,
@@ -808,7 +872,17 @@ fn run_array_daemon(
             let target_id = result["target_id"].as_str().unwrap_or("?");
             let agent_id = result["agent_id"].as_str().unwrap_or("?");
             if result["status"].as_str() == Some("ok") {
-                println!("array {action}: target={target_id} agent={agent_id} ok");
+                let response = &result["response"];
+                if response["queued"].as_bool() == Some(true) {
+                    let suffix = if response["already_queued"].as_bool() == Some(true) {
+                        " already_queued"
+                    } else {
+                        ""
+                    };
+                    println!("array {action}: target={target_id} agent={agent_id} queued{suffix}");
+                } else {
+                    println!("array {action}: target={target_id} agent={agent_id} ok");
+                }
             } else {
                 let error = result["error"].as_str().unwrap_or("unknown error");
                 println!("array {action}: target={target_id} agent={agent_id} error: {error}");
