@@ -8,6 +8,8 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - Dockerfile
+      - scripts/browser-use-mcp
+      - scripts/browser-use-mcp.py
       - scripts/docker-entrypoint.sh
       - scripts/build-release.sh
       - data/skills.toml
@@ -22,6 +24,8 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - Dockerfile
+      - scripts/browser-use-mcp
+      - scripts/browser-use-mcp.py
       - scripts/docker-entrypoint.sh
       - scripts/build-release.sh
       - data/skills.toml

@@ -149,6 +149,15 @@ fn docker_test_runtime_uses_fixture_enabled_binaries() {
 }
 
 #[test]
+fn docker_builder_includes_browser_use_embedded_scripts() {
+    let dockerfile = std::fs::read_to_string("Dockerfile").expect("read Dockerfile");
+    assert!(
+        dockerfile.contains("COPY scripts/browser-use-mcp scripts/browser-use-mcp.py ./scripts/"),
+        "Docker builder must include scripts embedded by starter_config.rs"
+    );
+}
+
+#[test]
 fn docker_entrypoint_maps_provider_init_env_vars() {
     let entrypoint =
         std::fs::read_to_string("scripts/docker-entrypoint.sh").expect("read Docker entrypoint");
@@ -328,4 +337,22 @@ fn release_workflow_runs_acceptance_gate() {
         workflow.contains("cargo run --features dev-tools --bin sync-skills-catalog -- --check"),
         "release workflow must check the skills catalog snapshot"
     );
+    for script in ["scripts/browser-use-mcp", "scripts/browser-use-mcp.py"] {
+        assert!(
+            workflow.contains(script),
+            "release workflow must trigger on Browser Use embedded script changes: {script}"
+        );
+    }
+}
+
+#[test]
+fn docker_workflow_triggers_on_browser_use_embedded_script_changes() {
+    let workflow =
+        std::fs::read_to_string(".github/workflows/docker-test.yml").expect("read Docker workflow");
+    for script in ["scripts/browser-use-mcp", "scripts/browser-use-mcp.py"] {
+        assert!(
+            workflow.contains(script),
+            "Docker workflow must trigger on Browser Use embedded script changes: {script}"
+        );
+    }
 }
