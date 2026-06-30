@@ -8427,7 +8427,7 @@ async fn sessions_new_list_prompt_close_round_trip() {
 
     acps_command()
         .env("HOME", home.path())
-        .args(["sessions", "list"])
+        .args(["sessions", "list", "--range", "all"])
         .assert()
         .success()
         .stdout(predicates::str::contains(session_id.as_str()));
