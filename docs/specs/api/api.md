@@ -83,13 +83,14 @@ Secret values are never returned by the API. Auth keys are not secret-store entr
 | `POST /v1/agent/start`       | admin   | starts the supervised agent process                           |
 | `POST /v1/agent/stop`        | admin   | stops the supervised agent process                            |
 | `POST /v1/agent/restart`     | admin   | restarts the supervised agent process                         |
+| `GET /v1/agent/restart-blockers` | admin | returns active-session blockers for guarded restart        |
 | `POST /v1/agent/switch`      | admin   | switches harness, installs it, and returns model choices      |
 | `GET /v1/agent/status`       | session | returns configured identity and process state                 |
 | `GET /v1/agent/capabilities` | session | returns the latest ACP capability snapshot when available     |
 | `GET /v1/providers`          | session | lists provider ids available for the configured agent         |
 | `GET /v1/models`             | session | lists ACP-advertised model and mode choices when discoverable |
 
-Agent start/restart uses the current `[agent]` config and injected secret refs. Provider/model changes that require process reload are applied after restart.
+Agent start/restart uses the current `[agent]` config and injected secret refs. Provider/model changes that require process reload are applied after restart. `POST /v1/agent/restart?require_idle=true` returns blockers instead of restarting when active sessions have in-flight prompts or pending ACP permission requests. `POST /v1/agent/restart?auto=true` queues a restart that runs once the same blockers clear. `GET /v1/agent/restart-blockers` returns `{ "target_id": "...", "blockers": [...] }`; blocker rows include `session_id`, `target_id`, `state`, and either prompt fields (`prompt_id`, `prompt_status`, `prompt_stop_reason`) or `permission_id`. State values are `prompt_sent`, `working`, `permission_required`, and defensive `blocked`.
 
 `POST /v1/agent/switch` accepts `{ "agent": "<id>", "provider": "<optional-provider-id>", "api_key_ref": "<optional-ref>", "drop": false }`. The route validates provider compatibility, copies compatible provider secret refs when the target expects a different default ref, installs the target harness, provisions agent-owned config without a model, discovers ACP-advertised model values when the target supports model selection, writes canonical config, restarts the supervised agent only if it was already running, and optionally removes source agent-owned config. Source cleanup failures are reported as `cleanup_errors` without rolling back a successful switch. `drop` does not delete secrets, installed harnesses/adapters, or sessions.
 

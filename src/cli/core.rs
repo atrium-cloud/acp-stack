@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use super::agent::AgentCommand;
+use super::agent::{AgentCommand, AgentRestartArgs};
 use super::array::ArrayCommand;
 use super::auth::AuthCommand;
 use super::config::ConfigCommand;
@@ -31,6 +31,7 @@ use super::sessions::SessionsCommand;
 use super::subagent::SubagentCommand;
 #[cfg(feature = "stack-self-update")]
 use super::update::UpdateCommand;
+use super::workspace::WorkspaceCommand;
 use super::ws::WsCommand;
 
 #[derive(Debug, Parser)]
@@ -148,6 +149,21 @@ enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    /// Restart the supervised agent process.
+    #[command(after_help = "Examples:
+  acps restart
+  acps restart auto")]
+    Restart(AgentRestartArgs),
+    /// Inspect or change workspace sources and sandbox settings.
+    #[command(after_help = "Examples:
+  acps workspace status
+  acps workspace sync
+  acps workspace code-source list
+  acps workspace sandbox set --mode bwrap")]
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
     },
     /// Manage multi-agent Array targets.
     #[command(after_help = "Examples:
@@ -295,6 +311,10 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Command::Logs { command } => super::logs::run_logs_command(command, output),
         Command::Agent { command } => super::agent::run_agent_command(command, output),
+        Command::Restart(args) => super::agent::run_agent_restart(args, output.effective()),
+        Command::Workspace { command } => {
+            super::workspace::run_workspace_command(command, output.effective())
+        }
         Command::Array { command } => super::array::run_array_command(command, output.effective()),
         Command::Subagent { command } => {
             output.reject_json("subagent")?;
@@ -537,6 +557,8 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/agent/stop"
     } else if bare == "/v1/agent/restart" {
         "/v1/agent/restart"
+    } else if bare == "/v1/agent/restart-blockers" {
+        "/v1/agent/restart-blockers"
     } else if bare == "/v1/agent/switch" {
         "/v1/agent/switch"
     } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/capabilities") {
@@ -934,7 +956,8 @@ fn strip_ansi(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_base_url, static_path_label, strip_ansi};
+    use super::{Cli, Command, daemon_base_url, static_path_label, strip_ansi};
+    use clap::Parser;
 
     #[test]
     fn strip_ansi_removes_csi_sequences() {
@@ -1004,9 +1027,74 @@ mod tests {
                 "/v1/auth/local-session-access",
             ),
             ("/v1/agent/restart", "/v1/agent/restart"),
+            ("/v1/agent/restart-blockers", "/v1/agent/restart-blockers"),
         ];
         for (input, expected) in cases {
             assert_eq!(static_path_label(input), expected);
+        }
+    }
+
+    #[test]
+    fn cli_parses_top_level_restart_auto() {
+        let cli = Cli::try_parse_from(["acps", "restart", "auto"]).expect("restart auto parses");
+        match cli.command {
+            Command::Restart(args) => {
+                assert!(args.command.is_some());
+            }
+            other => panic!("expected restart command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_agent_and_array_restart_auto() {
+        Cli::try_parse_from(["acps", "agent", "restart", "auto"])
+            .expect("agent restart auto parses");
+        Cli::try_parse_from(["acps", "array", "restart", "auto"])
+            .expect("array restart auto parses");
+        Cli::try_parse_from(["acps", "array", "restart", "auto", "--target", "codex"])
+            .expect("array restart auto target parses");
+        Cli::try_parse_from(["acps", "array", "restart", "--target", "codex", "auto"])
+            .expect("array parent target restart auto parses");
+    }
+
+    #[test]
+    fn cli_parses_workspace_commands() {
+        for args in [
+            vec!["acps", "workspace", "status"],
+            vec!["acps", "workspace", "sync"],
+            vec!["acps", "workspace", "code-source", "list"],
+            vec![
+                "acps",
+                "workspace",
+                "code-source",
+                "add",
+                "--repo",
+                "https://github.com/example/app.git",
+                "--no-sync",
+            ],
+            vec![
+                "acps",
+                "workspace",
+                "data-source",
+                "add",
+                "--type",
+                "local",
+                "--path",
+                "/data/input",
+                "--no-sync",
+            ],
+            vec![
+                "acps",
+                "workspace",
+                "sandbox",
+                "set",
+                "--mode",
+                "custom",
+                "--wrapper-arg",
+                "systemd-run",
+            ],
+        ] {
+            Cli::try_parse_from(args).expect("workspace command parses");
         }
     }
 }

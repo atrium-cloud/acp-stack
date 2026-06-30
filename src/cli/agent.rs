@@ -13,6 +13,7 @@ use super::core::OutputFormatChoice;
 use crate::error::Result;
 
 pub(in crate::cli) use self::install::operator_registry_override;
+pub(in crate::cli) use self::install::run_agent_restart;
 pub(in crate::cli) use self::set::{
     claude_code_provider_model_is_explicit, default_api_key_ref_for_agent_provider,
     default_custom_provider_api, model_values_for_cli_display, parse_custom_provider_api,
@@ -36,7 +37,7 @@ pub enum AgentCommand {
     /// Ask the running daemon to stop the configured agent.
     Stop(AgentDaemonArgs),
     /// Ask the running daemon to restart the configured agent.
-    Restart(AgentDaemonArgs),
+    Restart(AgentRestartArgs),
     /// Print the latest persisted agent state from SQLite.
     Status,
     /// Report whether the installed managed harness/adapter is stale against upstream.
@@ -99,6 +100,21 @@ pub struct AgentDaemonArgs {
     /// Admin API key. Required when stdin is not a terminal.
     #[arg(long = "admin-key")]
     pub(super) admin_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentRestartArgs {
+    /// Admin API key. Required when stdin is not a terminal.
+    #[arg(long = "admin-key", global = true)]
+    pub(super) admin_key: Option<String>,
+    #[command(subcommand)]
+    pub(super) command: Option<AgentRestartCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentRestartCommand {
+    /// Queue a restart that runs when active ACP sessions are idle.
+    Auto,
 }
 
 #[derive(Debug, Args)]
@@ -202,12 +218,7 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
         AgentCommand::Stop(args) => {
             self::install::run_agent_daemon_post(args, "/v1/agent/stop", "stop", output.effective())
         }
-        AgentCommand::Restart(args) => self::install::run_agent_daemon_post(
-            args,
-            "/v1/agent/restart",
-            "restart",
-            output.effective(),
-        ),
+        AgentCommand::Restart(args) => self::install::run_agent_restart(args, output.effective()),
         AgentCommand::Status => self::status::run_agent_status(output.effective()),
         AgentCommand::Check => self::check::run_agent_check(output.effective()),
         AgentCommand::Update(args) => self::update::run_agent_update(args, output.effective()),

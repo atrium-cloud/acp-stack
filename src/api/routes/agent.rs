@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -350,10 +352,12 @@ async fn stop_agent_target(
 ) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
     state.refresh_array_runtime_from_disk().await?;
     let target = state.agent_target(target_id)?;
+    cancel_pending_acp_permissions_for_target(state, target_id, "agent-stopped").await;
     let exit_status = target
         .supervisor
         .stop(&target.target_id, &state.state, &state.event_hub)
         .await?;
+    cancel_pending_acp_permissions_for_target(state, target_id, "agent-stopped").await;
     let stopped_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
     Ok(ApiSuccess::new(AgentStopResponse {
         stopped_at,
@@ -372,6 +376,36 @@ pub(crate) struct AgentRestartResponse {
     pid: Option<u32>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AgentRestartQuery {
+    #[serde(default)]
+    require_idle: bool,
+    #[serde(default)]
+    auto: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum AgentRestartResultResponse {
+    Restarted(AgentRestartResponse),
+    Blocked(AgentRestartBlockedResponse),
+    Queued(AgentRestartQueuedResponse),
+}
+
+#[derive(Serialize)]
+pub(crate) struct AgentRestartBlockedResponse {
+    restarted: bool,
+    target_id: String,
+    blockers: Vec<AgentRestartBlockerResponse>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AgentRestartQueuedResponse {
+    queued: bool,
+    already_queued: bool,
+    target_id: String,
+}
+
 /// Stop the supervised agent (if running) and start it again, reading
 /// the freshly-on-disk `[agent]` block instead of the daemon's
 /// in-memory `Arc<Config>` snapshot. Used by operators after
@@ -386,22 +420,132 @@ pub(crate) struct AgentRestartResponse {
 /// same `[agent]` block used to spawn the supervised process.
 pub(crate) async fn agent_restart_handler(
     State(state): State<AppState>,
-) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
+    Query(query): Query<AgentRestartQuery>,
+) -> std::result::Result<ApiSuccess<AgentRestartResultResponse>, StackError> {
     let target_id = state.default_target_id().await?;
-    restart_agent_target(&state, &target_id).await
+    if query.auto {
+        return queue_agent_restart(&state, target_id).await;
+    }
+    restart_agent_target(&state, &target_id, query.require_idle).await
+}
+
+#[derive(Serialize)]
+pub(crate) struct AgentRestartBlockersResponse {
+    target_id: String,
+    blockers: Vec<AgentRestartBlockerResponse>,
+}
+
+#[derive(Serialize)]
+struct AgentRestartBlockerResponse {
+    session_id: String,
+    target_id: String,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission_id: Option<String>,
+}
+
+pub(crate) async fn agent_restart_blockers_handler(
+    State(state): State<AppState>,
+) -> std::result::Result<ApiSuccess<AgentRestartBlockersResponse>, StackError> {
+    let target_id = state.default_target_id().await?;
+    restart_blockers_for_target(&state, &target_id).await
+}
+
+async fn restart_blockers_for_target(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentRestartBlockersResponse>, StackError> {
+    state.refresh_array_runtime_from_disk().await?;
+    let blockers = {
+        let store = state.state.lock().await;
+        store.query_restart_blockers(Some(target_id))?
+    }
+    .into_iter()
+    .map(AgentRestartBlockerResponse::from)
+    .collect();
+    Ok(ApiSuccess::new(AgentRestartBlockersResponse {
+        target_id: target_id.to_owned(),
+        blockers,
+    }))
 }
 
 pub(crate) async fn array_agent_restart_handler(
     State(state): State<AppState>,
     Path(target_id): Path<String>,
-) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
-    restart_agent_target(&state, &target_id).await
+    Query(query): Query<AgentRestartQuery>,
+) -> std::result::Result<ApiSuccess<AgentRestartResultResponse>, StackError> {
+    if query.auto {
+        return queue_agent_restart(&state, target_id).await;
+    }
+    restart_agent_target(&state, &target_id, query.require_idle).await
+}
+
+const AGENT_RESTART_AUTO_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+async fn queue_agent_restart(
+    state: &AppState,
+    target_id: String,
+) -> std::result::Result<ApiSuccess<AgentRestartResultResponse>, StackError> {
+    let fresh_config = state.refresh_array_runtime_from_disk().await?;
+    ensure_array_process_start_allowed(&fresh_config, &target_id)?;
+    state.agent_target(&target_id)?;
+    let already_queued = state
+        .queued_agent_restarts
+        .insert(target_id.clone(), ())
+        .is_some();
+    if !already_queued {
+        let state = state.clone();
+        let target_id_for_task = target_id.clone();
+        tokio::spawn(async move {
+            queued_agent_restart_worker(state, target_id_for_task).await;
+        });
+    }
+    Ok(ApiSuccess::new(AgentRestartResultResponse::Queued(
+        AgentRestartQueuedResponse {
+            queued: true,
+            already_queued,
+            target_id,
+        },
+    )))
+}
+
+async fn queued_agent_restart_worker(state: AppState, target_id: String) {
+    loop {
+        match restart_agent_target(&state, &target_id, true).await {
+            Ok(ApiSuccess {
+                data: AgentRestartResultResponse::Blocked(_),
+                ..
+            }) => {
+                tokio::time::sleep(AGENT_RESTART_AUTO_POLL_INTERVAL).await;
+            }
+            Ok(_) => {
+                state.queued_agent_restarts.remove(&target_id);
+                return;
+            }
+            Err(err) => {
+                state.queued_agent_restarts.remove(&target_id);
+                tracing::warn!(
+                    error = %err,
+                    target_id,
+                    "queued agent restart failed"
+                );
+                return;
+            }
+        }
+    }
 }
 
 async fn restart_agent_target(
     state: &AppState,
     target_id: &str,
-) -> std::result::Result<ApiSuccess<AgentRestartResponse>, StackError> {
+    require_idle: bool,
+) -> std::result::Result<ApiSuccess<AgentRestartResultResponse>, StackError> {
     // Load + validate the fresh on-disk config AND resolve env BEFORE
     // stopping the currently running agent. A malformed config or a
     // missing required secret should fail this call cleanly and leave
@@ -416,14 +560,43 @@ async fn restart_agent_target(
     // there was nothing to stop (acceptable — a "restart" against a
     // stopped agent degenerates into a plain start); inner
     // `Option<i32>` is the optional exit status of the prior process.
-    let prior_exit_status = match target
-        .supervisor
-        .stop(&target.target_id, &state.state, &state.event_hub)
-        .await
-    {
-        Ok(code) => code,
-        Err(StackError::AgentNotRunning) => None,
-        Err(err) => return Err(err),
+    let prior_exit_status = if require_idle {
+        match target
+            .supervisor
+            .stop_when_restart_safe(&target.target_id, &state.state, &state.event_hub)
+            .await?
+        {
+            Ok(code) => {
+                cancel_pending_acp_permissions_for_target(state, target_id, "agent-restarted")
+                    .await;
+                code
+            }
+            Err(blockers) => {
+                return Ok(ApiSuccess::new(AgentRestartResultResponse::Blocked(
+                    AgentRestartBlockedResponse {
+                        restarted: false,
+                        target_id: target_id.to_owned(),
+                        blockers: blockers
+                            .into_iter()
+                            .map(AgentRestartBlockerResponse::from)
+                            .collect(),
+                    },
+                )));
+            }
+        }
+    } else {
+        cancel_pending_acp_permissions_for_target(state, target_id, "agent-restarted").await;
+        let code = match target
+            .supervisor
+            .stop(&target.target_id, &state.state, &state.event_hub)
+            .await
+        {
+            Ok(code) => code,
+            Err(StackError::AgentNotRunning) => None,
+            Err(err) => return Err(err),
+        };
+        cancel_pending_acp_permissions_for_target(state, target_id, "agent-restarted").await;
+        code
     };
     let stopped_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
 
@@ -454,13 +627,57 @@ async fn restart_agent_target(
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
     let pid = target.supervisor.snapshot().await.pid;
 
-    Ok(ApiSuccess::new(AgentRestartResponse {
-        stopped_at,
-        started_at,
-        prior_exit_status,
-        capabilities,
-        pid,
-    }))
+    Ok(ApiSuccess::new(AgentRestartResultResponse::Restarted(
+        AgentRestartResponse {
+            stopped_at,
+            started_at,
+            prior_exit_status,
+            capabilities,
+            pid,
+        },
+    )))
+}
+
+impl From<crate::state::RestartBlockerRecord> for AgentRestartBlockerResponse {
+    fn from(row: crate::state::RestartBlockerRecord) -> Self {
+        Self {
+            session_id: row.session_id,
+            target_id: row.target_id,
+            state: row.state,
+            prompt_id: row.prompt_id,
+            prompt_status: row.prompt_status,
+            prompt_stop_reason: row.prompt_stop_reason,
+            permission_id: row.permission_id,
+        }
+    }
+}
+
+async fn cancel_pending_acp_permissions_for_target(
+    state: &AppState,
+    target_id: &str,
+    reason: &str,
+) {
+    let permission_ids_result = {
+        let store = state.state.lock().await;
+        store.query_pending_acp_permission_ids_for_target(target_id)
+    };
+    let permission_ids: Vec<String> = match permission_ids_result {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, target_id, "failed to load pending ACP permissions before agent stop");
+            return;
+        }
+    };
+    for permission_id in permission_ids {
+        if let Err(err) = state.permissions.cancel(&permission_id, reason).await {
+            tracing::warn!(
+                error = %err,
+                permission_id,
+                target_id,
+                "failed to cancel pending ACP permission before agent stop",
+            );
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

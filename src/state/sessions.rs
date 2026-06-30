@@ -106,6 +106,17 @@ pub struct SessionStatusPermissionRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartBlockerRecord {
+    pub session_id: String,
+    pub target_id: String,
+    pub state: String,
+    pub prompt_id: Option<String>,
+    pub prompt_status: Option<String>,
+    pub prompt_stop_reason: Option<String>,
+    pub permission_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionUpdateBounds {
     pub first_updated_at: String,
     pub latest_updated_at: String,
@@ -478,8 +489,8 @@ impl StateStore {
                        ) AS row_number
                 FROM activity
             )
-            SELECT s.id,
-                   s.target_id,
+            SELECT s.id AS session_id,
+                   s.target_id AS target_id,
                    s.agent_session_id,
                    s.created_at,
                    s.updated_at,
@@ -636,8 +647,8 @@ impl StateStore {
                 )
                 WHERE row_number = 1
             )
-            SELECT s.id,
-                   s.target_id,
+            SELECT s.id AS session_id,
+                   s.target_id AS target_id,
                    s.agent_session_id,
                    s.created_at,
                    s.updated_at,
@@ -728,6 +739,85 @@ impl StateStore {
                 })
             },
         )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn query_restart_blockers(
+        &self,
+        target_id: Option<&str>,
+    ) -> Result<Vec<RestartBlockerRecord>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            WITH active_sessions AS (
+                SELECT id, target_id, updated_at
+                FROM sessions
+                WHERE status = ?1
+                  AND (?2 IS NULL OR target_id = ?2)
+            )
+            SELECT s.id,
+                   s.target_id,
+                   CASE p.status
+                       WHEN 'pending' THEN 'prompt_sent'
+                       WHEN 'running' THEN 'working'
+                       ELSE 'blocked'
+                   END AS state,
+                   p.id AS prompt_id,
+                   p.status AS prompt_status,
+                   p.stop_reason AS prompt_stop_reason,
+                   NULL AS permission_id,
+                   p.created_at AS blocker_created_at,
+                   0 AS blocker_priority
+            FROM active_sessions s
+            JOIN prompts p ON p.session_id = s.id
+            WHERE p.status IN ('pending', 'running')
+            UNION ALL
+            SELECT s.id,
+                   s.target_id,
+                   'permission_required' AS state,
+                   NULL AS prompt_id,
+                   NULL AS prompt_status,
+                   NULL AS prompt_stop_reason,
+                   pr.id AS permission_id,
+                   pr.created_at AS blocker_created_at,
+                   1 AS blocker_priority
+            FROM active_sessions s
+            JOIN permission_requests pr ON pr.subject_id = s.id
+            WHERE pr.status = 'pending'
+              AND pr.source = 'acp'
+              AND pr.subject_id IS NOT NULL
+            ORDER BY 8 DESC, 9 DESC, 1 ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![SESSION_STATUS_ACTIVE, target_id], |row| {
+            Ok(RestartBlockerRecord {
+                session_id: row.get(0)?,
+                target_id: row.get(1)?,
+                state: row.get(2)?,
+                prompt_id: row.get(3)?,
+                prompt_status: row.get(4)?,
+                prompt_stop_reason: row.get(5)?,
+                permission_id: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn query_pending_acp_permission_ids_for_target(
+        &self,
+        target_id: &str,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT pr.id
+            FROM permission_requests pr
+            JOIN sessions s ON s.id = pr.subject_id
+            WHERE pr.status = 'pending'
+              AND pr.source = 'acp'
+              AND s.target_id = ?1
+            ORDER BY pr.created_at ASC, pr.id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![target_id], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
