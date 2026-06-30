@@ -81,6 +81,7 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
         std::env::temp_dir(),
         null_sink(),
         None,
+        &Default::default(),
     )
     .await
     .expect("bridge spawns");
@@ -98,6 +99,7 @@ async fn shutdown_terminates_the_child() {
         std::env::temp_dir(),
         null_sink(),
         None,
+        &Default::default(),
     )
     .await
     .expect("spawn ok");
@@ -134,6 +136,7 @@ async fn terminate_probe_terminates_the_child() {
         std::env::temp_dir(),
         null_sink(),
         None,
+        &Default::default(),
     )
     .await
     .expect("spawn ok");
@@ -173,9 +176,16 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
     env.insert("HOME".into(), "secret-home".into());
     env.insert("ACP_STACK_EXPLICIT_ENV".into(), "present".into());
 
-    let bridge = AcpBridge::spawn(&config, env, std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("bridge spawns");
+    let bridge = AcpBridge::spawn(
+        &config,
+        env,
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("bridge spawns");
     let caps = bridge.capabilities();
     assert_eq!(caps.agent_title.as_deref(), Some("env assertions passed"));
     assert_ne!(home, "secret-home");
@@ -194,6 +204,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         std::env::temp_dir(),
         sink_dyn,
         None,
+        &Default::default(),
     )
     .await
     .expect("spawn");
@@ -248,9 +259,16 @@ async fn new_session_returns_custom_model_config_option_id() {
         "--model-config-option-id".into(),
         "agent-model".into(),
     ]);
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
 
     let new_session = bridge
         .new_session(std::env::temp_dir(), vec![])
@@ -269,6 +287,7 @@ async fn list_sessions_returns_agent_sessions() {
         std::env::temp_dir(),
         null_sink(),
         None,
+        &Default::default(),
     )
     .await
     .expect("spawn");
@@ -288,9 +307,16 @@ async fn list_sessions_returns_agent_sessions() {
 async fn list_sessions_follows_pagination() {
     let mut config = fake_agent_config();
     config.args.push("--session-list-paginated".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
 
     let sessions = bridge.list_sessions().await.expect("session/list");
     let ids = sessions
@@ -305,9 +331,16 @@ async fn list_sessions_follows_pagination() {
 async fn list_sessions_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-list-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
     assert!(!bridge.capabilities().supports_list_sessions());
 
     let err = bridge
@@ -327,9 +360,16 @@ async fn list_sessions_returns_unsupported_capability_when_agent_disables_flag()
 async fn list_sessions_rejects_repeated_cursor() {
     let mut config = fake_agent_config();
     config.args.push("--session-list-repeated-cursor".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
 
     let err = bridge
         .list_sessions()
@@ -350,9 +390,16 @@ async fn list_sessions_rejects_repeated_cursor() {
 async fn load_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-load-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
     assert!(!bridge.capabilities().supports_load_session());
 
     let err = bridge
@@ -377,9 +424,16 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
 async fn resume_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-resume-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
 
     let err = bridge
         .resume_session(
@@ -403,9 +457,16 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
 async fn close_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-close-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
 
     let err = bridge
         .close_session(agent_client_protocol::schema::SessionId::new(
@@ -431,6 +492,7 @@ async fn fork_session_returns_child_session() {
         std::env::temp_dir(),
         null_sink(),
         None,
+        &Default::default(),
     )
     .await
     .expect("spawn");
@@ -453,9 +515,16 @@ async fn fork_session_returns_child_session() {
 async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-fork-session".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
 
     let err = bridge
         .fork_session(
@@ -482,9 +551,16 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
         "--expect-fork-message-id".into(),
         "00000000-0000-4000-8000-000000000001".into(),
     ]);
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
     assert!(bridge.capabilities().supports_fork_message_id());
 
     let fork = bridge
@@ -504,9 +580,16 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
 async fn fork_session_rejects_message_id_when_capability_is_missing() {
     let mut config = fake_agent_config();
     config.args.push("--no-cap-fork-message-id".into());
-    let bridge = AcpBridge::spawn(&config, fake_env(), std::env::temp_dir(), null_sink(), None)
-        .await
-        .expect("spawn");
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+    )
+    .await
+    .expect("spawn");
     assert!(bridge.capabilities().supports_fork_session());
     assert!(!bridge.capabilities().supports_fork_message_id());
 
@@ -574,6 +657,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
             std::env::temp_dir(),
             sink_dyn,
             None,
+            &Default::default(),
         )
         .await
         .expect("spawn"),
@@ -625,6 +709,7 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
         std::env::temp_dir(),
         null_sink(),
         None,
+        &Default::default(),
     )
     .await
     .expect("spawn");

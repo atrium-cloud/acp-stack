@@ -89,8 +89,15 @@ pub async fn fetch_session_config_with_timeout(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
 
-    let bridge =
-        AcpBridge::spawn(&config.agent, env, cwd.clone(), Arc::new(NoopSink), None).await?;
+    let bridge = AcpBridge::spawn(
+        &config.agent,
+        env,
+        cwd.clone(),
+        Arc::new(NoopSink),
+        None,
+        &config.workspace.sandbox,
+    )
+    .await?;
     let discovery =
         match tokio::time::timeout(timeout_duration, bridge.new_session(cwd, Vec::new())).await {
             Ok(result) => result,

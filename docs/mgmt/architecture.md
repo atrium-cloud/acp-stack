@@ -36,6 +36,7 @@ flowchart LR
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |
+| Sandbox          | optional isolation backend wrapping each harness and mediated-shell spawn so the workload cannot read the daemon's secrets/state or reach its socket |
 | Permissions      | durable approval, denial, cancellation, and expiry                |
 | Dependencies     | declaration checks and explicit install actions                   |
 | Logging          | local event history, metrics, and optional external sink          |
@@ -49,6 +50,7 @@ flowchart LR
 - The secret store is the only source for secret values.
 - External telemetry sinks consume the same normalized event stream as local SQLite logging.
 - Agent behavior stays behind ACP; `acp-stack` owns runtime mediation around it.
+- The sandbox backend is selected by config and is portable across deployments; the set of masked sensitive paths is derived from the runtime's own path helpers, never from operator config.
 - `acps init serve` exposes only bootstrap init routes and exits after result acknowledgement; normal session/admin routes are not available in bootstrap mode.
 - The local socket is allowlisted for low-risk observability plus admin-enabled session-tier HTTP access; public admin APIs are not exposed through it.
 - Deployment profiles should not change runtime behavior, only process and edge shape.

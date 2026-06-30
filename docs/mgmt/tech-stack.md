@@ -35,6 +35,8 @@ This document records technology choices that affect maintenance or deployment. 
 | Docker            | container deployment          |
 | systemd           | host service deployment       |
 | uv                | optional VM Python tooling    |
+| util-linux (`unshare`, `setpriv`) | agent sandbox: namespace creation and privilege drop for the `unshare` backend |
+| bubblewrap (`bwrap`) | agent sandbox: unprivileged-user-namespace backend (optional) |
 | Browser Use       | optional browser MCP profile  |
 | Cloudflare Tunnel | preferred public-edge profile |
 | Nginx/Caddy       | reverse proxy alternatives    |

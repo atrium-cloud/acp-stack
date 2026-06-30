@@ -110,6 +110,17 @@ pub fn process_euid() -> u32 {
     0
 }
 
+#[cfg(unix)]
+pub fn process_egid() -> u32 {
+    // SAFETY: `getegid` is async-signal-safe and has no documented failure mode.
+    unsafe { libc::getegid() }
+}
+
+#[cfg(not(unix))]
+pub fn process_egid() -> u32 {
+    0
+}
+
 /// Resolve a username (e.g. `"acp"`) to a uid via `getpwnam_r`. Returns
 /// `Ok(None)` when the user does not exist, which the caller maps to "skip the
 /// runtime.user_mismatch finding rather than failing the check".

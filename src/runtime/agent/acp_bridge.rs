@@ -328,15 +328,34 @@ impl AcpBridge {
         cwd: PathBuf,
         sink: Arc<dyn SessionEventSink>,
         permissions: Option<PermissionService>,
+        sandbox: &crate::config::SandboxConfig,
     ) -> Result<Self> {
         let command_path = resolve_command_path(&agent.command, &cwd).ok_or_else(|| {
             StackError::AgentInitializeFailed {
                 reason: format!("agent command `{}` not found on PATH", agent.command),
             }
         })?;
-        let mut command = Command::new(command_path);
+        // `off` is a verbatim passthrough so single-process behavior is unchanged
+        // and HOME need not be resolvable; other modes wrap the spawn.
+        let wrapped = if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
+            crate::runtime::sandbox::WrappedCommand {
+                program: command_path,
+                args: agent.args.clone(),
+            }
+        } else {
+            crate::runtime::sandbox::wrap(
+                sandbox,
+                &command_path,
+                &agent.args,
+                &crate::fs_util::home_dir()?,
+                &cwd,
+                crate::ownership::process_euid(),
+                crate::ownership::process_egid(),
+            )?
+        };
+        let mut command = Command::new(&wrapped.program);
         command
-            .args(&agent.args)
+            .args(&wrapped.args)
             .current_dir(&cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

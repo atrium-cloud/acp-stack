@@ -304,6 +304,7 @@ mod tests {
             uploads: root.join("uploads").display().to_string(),
             default_shell: "/bin/bash".to_owned(),
             runtime_user: "acp".to_owned(),
+            sandbox: Default::default(),
             max_file_bytes: 8_388_608,
             code_sources: Vec::new(),
             data_sources: Vec::new(),

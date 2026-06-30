@@ -52,6 +52,9 @@ pub enum StackError {
     #[error("failed to provision agent config at {path}: {reason}")]
     AgentConfigProvision { path: PathBuf, reason: String },
 
+    #[error("sandbox setup failed: {reason}")]
+    SandboxFailed { reason: String },
+
     #[error("failed to set owner-only permissions on {path}: {source}")]
     PermissionSet {
         path: PathBuf,

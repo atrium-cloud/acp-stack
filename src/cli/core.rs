@@ -206,6 +206,12 @@ enum Command {
         #[command(subcommand)]
         command: WsCommand,
     },
+    /// Internal: in-namespace masking step for the sandbox. Not for direct use.
+    #[command(name = "__sandbox-exec", hide = true)]
+    SandboxExec {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
 }
 
 #[cfg(feature = "dev-tools")]
@@ -234,6 +240,13 @@ pub fn run() -> Result<()> {
 }
 
 fn run_cli(cli: Cli) -> Result<()> {
+    // The internal sandbox helper runs inside the sandbox namespaces, where the
+    // state DB may be masked, and on success it execs and never returns. Dispatch
+    // it before the output/error-recording machinery so a failure never tries to
+    // open (or spuriously write) the durable `cli.error` log.
+    if let Command::SandboxExec { args } = cli.command {
+        return crate::runtime::sandbox::run_exec(args);
+    }
     let output = OutputFormatChoice::new(cli.format);
     let result = match cli.command {
         Command::Completion { shell } => {
@@ -299,6 +312,10 @@ fn run_cli(cli: Cli) -> Result<()> {
             super::metrics::run_metrics_command(command, output.effective())
         }
         Command::Ws { command } => super::ws::run_ws_command(command, output.effective()),
+        // Dispatched in the fast path above, before this match.
+        Command::SandboxExec { .. } => {
+            unreachable!("__sandbox-exec is dispatched before output handling")
+        }
     };
 
     if let Err(error) = &result {

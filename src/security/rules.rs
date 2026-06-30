@@ -12,6 +12,7 @@ mod keys;
 mod paths;
 mod proxy;
 mod runtime_user;
+mod sandbox;
 
 pub(super) use bind::check_bind;
 pub(super) use cloudflare::check_cloudflare;
@@ -21,3 +22,4 @@ pub(super) use keys::check_keys;
 pub(super) use paths::check_paths;
 pub(super) use proxy::check_proxy;
 pub(super) use runtime_user::check_runtime_user;
+pub(super) use sandbox::check_sandbox;

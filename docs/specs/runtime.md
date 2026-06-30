@@ -10,6 +10,8 @@ The supervisor owns the configured agent process. It starts the agent with:
 - a scrubbed environment with managed `PATH` and the runtime user's `HOME`; `[agent].env` cannot override these reserved keys
 - secret values listed in `[agent].env`
 
+When `[workspace.sandbox]` is enabled, the agent process and mediated shells are launched inside an isolation backend that masks the daemon's secrets, config, state, and control socket from the workload. The backend is the same user as the daemon, so the managed `HOME`, `PATH`, and workspace are unchanged; only the runtime's own sensitive paths are hidden. See [security.md#sandbox](security.md#sandbox).
+
 Lifecycle transitions are recorded in durable state and published to live subscribers. Agent start, stop, and restart are admin operations. With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start. `restart = "never"` leaves the process stopped. Planned stop, restart, and daemon shutdown do not trigger crash recovery.
 
 Readiness scans recent `agent.started` lifecycle rows for live Unix process groups whose PID is not the currently supervised process. A match is reported as an orphaned agent or adapter process group and degrades `/v1/health/ready`.

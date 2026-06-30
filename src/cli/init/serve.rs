@@ -494,6 +494,7 @@ struct StartInitRequest {
     workspace_root: Option<String>,
     workspace_uploads: Option<String>,
     runtime_user: Option<String>,
+    sandbox: Option<String>,
     #[serde(default)]
     code_from: Vec<String>,
     #[serde(default)]
@@ -519,6 +520,7 @@ impl StartInitRequest {
         args.workspace_root = self.workspace_root;
         args.workspace_uploads = self.workspace_uploads;
         args.runtime_user = self.runtime_user;
+        args.sandbox = self.sandbox;
         args.code_from = self.code_from;
         args.data_from = self.data_from;
         args.skip_testflight = self.skip_testflight.unwrap_or(false);
@@ -573,6 +575,7 @@ fn empty_init_args() -> InitArgs {
         workspace_root: None,
         workspace_uploads: None,
         runtime_user: None,
+        sandbox: None,
         code_from: Vec::new(),
         data_from: Vec::new(),
         mcp_preset: Vec::new(),
@@ -1301,6 +1304,17 @@ mod tests {
             .join()
             .expect("driver thread")
             .expect("driver result")
+    }
+
+    #[test]
+    fn start_init_request_maps_sandbox_into_args() {
+        // `deny_unknown_fields` means the platform payload is rejected outright
+        // unless `sandbox` is a known field; this also covers the arg mapping.
+        let request: StartInitRequest =
+            serde_json::from_str(r#"{"agent":"placebo","sandbox":"unshare"}"#)
+                .expect("sandbox must be an accepted request field");
+        let args = request.into_init_args();
+        assert_eq!(args.sandbox.as_deref(), Some("unshare"));
     }
 
     #[test]

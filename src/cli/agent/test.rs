@@ -145,8 +145,9 @@ fn run_agent_test_with(
         .enable_all()
         .build()
         .map_err(|source| StackError::ServeIo { source })?;
+    let sandbox = config.workspace.sandbox.clone();
     let report = runtime.block_on(async move {
-        run_agent_test_inner(agent, env, cwd, prompt, timeout, progress_timeout).await
+        run_agent_test_inner(agent, env, cwd, prompt, timeout, progress_timeout, sandbox).await
     })?;
 
     let fs_outcome = match expect_fs.as_deref() {
@@ -379,9 +380,10 @@ async fn run_agent_test_inner(
     prompt: String,
     prompt_timeout: Duration,
     progress_timeout: Duration,
+    sandbox: crate::config::SandboxConfig,
 ) -> Result<AgentTestReport> {
     let sink = Arc::new(AgentTestSessionEventSink::new());
-    let bridge = AcpBridge::spawn(&agent, env, cwd.clone(), sink.clone(), None)
+    let bridge = AcpBridge::spawn(&agent, env, cwd.clone(), sink.clone(), None, &sandbox)
         .await
         .map_err(agent_test_spawn_error)?;
 

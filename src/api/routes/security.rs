@@ -118,6 +118,14 @@ pub(crate) async fn security_check_handler(
         recent_origin_counts.missing_headers,
         dependency_failures.len(),
     );
+    let sandbox = &state.config.workspace.sandbox;
+    let sandbox_unavailable_reason = if sandbox.mode != crate::config::SandboxMode::Off {
+        crate::runtime::sandbox::preflight(sandbox).err()
+    } else {
+        None
+    };
+    let sandbox_off_but_capable = sandbox.mode == crate::config::SandboxMode::Off
+        && crate::runtime::sandbox::host_supports_unshare();
     let findings = crate::security::check(crate::security::SecurityCheckInputs {
         effective_bind: state.effective_bind.as_str(),
         http: &state.config.security.http,
@@ -137,6 +145,9 @@ pub(crate) async fn security_check_handler(
         recent_direct_cloudflare_mode_requests: recent_origin_counts.direct,
         recent_missing_cloudflare_header_requests: recent_origin_counts.missing_headers,
         dependency_failures: &dependency_failures,
+        sandbox_mode: sandbox.mode,
+        sandbox_unavailable_reason,
+        sandbox_off_but_capable,
     });
 
     // Serialize each finding's details payload once so we can hand the

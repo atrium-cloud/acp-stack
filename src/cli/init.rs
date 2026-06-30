@@ -331,6 +331,13 @@ pub struct InitArgs {
     /// Runtime user to write into a newly-created starter config.
     #[arg(long)]
     pub(super) runtime_user: Option<String>,
+    /// Agent sandbox mode to write into a newly-created starter config:
+    /// off (default), unshare, bwrap, or custom. Sets
+    /// `[workspace.sandbox].mode`; only applied when the starter config is
+    /// being created. `custom` additionally requires a wrapper, which must be
+    /// supplied via an imported config.
+    #[arg(long = "sandbox", value_name = "off|unshare|bwrap|custom")]
+    pub(super) sandbox: Option<String>,
     /// Pre-seed `[[workspace.code_sources]]` with one or more git
     /// repositories. Repeatable. Accepts an `https://...`, `git@host:repo`,
     /// or other supported repo URL. Only applied when the starter config is

@@ -6,9 +6,9 @@ use http::header::HeaderName;
 use crate::config::{
     self, AgentConfig, AgentInstallConfig, ApiConfig, CodeSourceConfig, Config, DataSourceConfig,
     DependencyEntry, DependencyInstallAction, DependencyInstallScope, EdgeConfig, HttpHeaderRef,
-    LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer, SecurityConfig,
-    SecurityHttpConfig, StackUpdatePolicy, SupabaseLoggingConfig, WorkspaceConfig,
-    is_valid_secret_ref_name, normalize_day_or_week_duration,
+    LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer, SandboxConfig,
+    SandboxMode, SecurityConfig, SecurityHttpConfig, StackUpdatePolicy, SupabaseLoggingConfig,
+    WorkspaceConfig, is_valid_secret_ref_name, normalize_day_or_week_duration,
 };
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps_apply::{
@@ -128,6 +128,11 @@ pub(super) fn validate_deployment_overrides_match_existing(
         "--runtime-user",
         args.runtime_user.as_deref(),
         &config.workspace.runtime_user,
+    )?;
+    reject_conflicting_deployment_override(
+        "--sandbox",
+        args.sandbox.as_deref(),
+        sandbox_mode_str(config.workspace.sandbox.mode),
     )
 }
 
@@ -606,6 +611,43 @@ pub(super) fn should_apply_deps_for_init(
 /// months).
 fn validate_update_frequency(raw: &str) -> Result<String> {
     normalize_day_or_week_duration("stack-update-frequency", raw)
+}
+
+fn sandbox_mode_str(mode: SandboxMode) -> &'static str {
+    match mode {
+        SandboxMode::Off => "off",
+        SandboxMode::Unshare => "unshare",
+        SandboxMode::Bwrap => "bwrap",
+        SandboxMode::Custom => "custom",
+    }
+}
+
+fn parse_sandbox_mode(raw: &str) -> Result<SandboxMode> {
+    match raw {
+        "off" => Ok(SandboxMode::Off),
+        "unshare" => Ok(SandboxMode::Unshare),
+        "bwrap" => Ok(SandboxMode::Bwrap),
+        "custom" => Ok(SandboxMode::Custom),
+        other => Err(StackError::InvalidParam {
+            field: "--sandbox",
+            reason: format!("expected off|unshare|bwrap|custom, got `{other}`"),
+        }),
+    }
+}
+
+/// Sandbox config for a freshly-created starter config. Only the `mode` is
+/// settable here (the rest of `[workspace.sandbox]` is reserved for hand-edited
+/// or imported configs); an absent flag keeps the `off` default so a plain
+/// `acps init` is unchanged. `custom` needs a wrapper that this flag cannot
+/// supply, so config validation rejects it downstream — fail-fast, by design.
+fn sandbox_from_args(args: &InitArgs) -> Result<SandboxConfig> {
+    let Some(raw) = args.sandbox.as_deref() else {
+        return Ok(SandboxConfig::default());
+    };
+    Ok(SandboxConfig {
+        mode: parse_sandbox_mode(raw)?,
+        ..SandboxConfig::default()
+    })
 }
 
 fn parse_stack_update_policy(raw: &str) -> Result<StackUpdatePolicy> {
@@ -1346,6 +1388,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
             uploads: workspace_uploads,
             default_shell: STARTER_DEFAULT_SHELL.to_owned(),
             runtime_user,
+            sandbox: sandbox_from_args(args)?,
             max_file_bytes: STARTER_WORKSPACE_MAX_FILE_BYTES,
             code_sources: code_sources_from_args(args),
             data_sources: data_sources_from_args(args)?,
@@ -2037,6 +2080,66 @@ mod tests {
         assert!(!args.browser_use_profile);
         assert!(!args.prompt_skills);
         assert!(!args.prompt_agent_env_refs);
+    }
+
+    #[test]
+    fn sandbox_flag_sets_workspace_sandbox_mode() {
+        let args = parse_init_args(&["--agent", "placebo", "--sandbox", "unshare"]);
+        let config = starter_config_from_args(&args);
+        assert_eq!(config.workspace.sandbox.mode, SandboxMode::Unshare);
+
+        let canonical = config.to_canonical_toml().expect("canonical config");
+        assert!(
+            canonical.contains("[workspace.sandbox]") && canonical.contains("mode = \"unshare\""),
+            "expected the sandbox section in the generated config:\n{canonical}"
+        );
+    }
+
+    #[test]
+    fn sandbox_absent_keeps_off_and_omits_section() {
+        let args = parse_init_args(&["--agent", "placebo"]);
+        let config = starter_config_from_args(&args);
+        assert_eq!(config.workspace.sandbox.mode, SandboxMode::Off);
+
+        let canonical = config.to_canonical_toml().expect("canonical config");
+        assert!(
+            !canonical.contains("[workspace.sandbox]"),
+            "an `off` sandbox must not serialize a section:\n{canonical}"
+        );
+    }
+
+    #[test]
+    fn sandbox_flag_rejects_unknown_mode() {
+        let args = parse_init_args(&["--agent", "placebo", "--sandbox", "bogus"]);
+        let error = starter_config(&args).expect_err("an unknown sandbox mode must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("expected off|unshare|bwrap|custom"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn sandbox_override_must_match_existing_config() {
+        let existing = starter_config_from_args(&parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--sandbox",
+            "unshare",
+        ]));
+
+        // Re-running with the same value is a no-op, not a conflict.
+        let same = parse_init_args(&["--agent", "placebo", "--sandbox", "unshare"]);
+        validate_deployment_overrides_match_existing(&same, &existing)
+            .expect("a matching sandbox override is accepted");
+
+        // A different value is rejected rather than silently ignored, so an
+        // operator cannot believe they enabled a sandbox that stays off.
+        let conflict = parse_init_args(&["--agent", "placebo", "--sandbox", "off"]);
+        let error = validate_deployment_overrides_match_existing(&conflict, &existing)
+            .expect_err("a conflicting sandbox override must be rejected");
+        assert!(error.to_string().contains("unshare"), "got: {error}");
     }
 
     #[test]

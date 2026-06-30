@@ -110,6 +110,24 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
             });
         }
     }
+    // Sandbox: a custom backend with no wrapper is unusable and would otherwise
+    // only fail at the first agent spawn; mask/allow paths are bind/mount targets
+    // and must be absolute. Fail closed at config load.
+    let sandbox = &config.workspace.sandbox;
+    if sandbox.mode == crate::config::SandboxMode::Custom && sandbox.wrapper.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.wrapper",
+            reason: "mode = \"custom\" requires a non-empty wrapper argv".to_owned(),
+        });
+    }
+    for path in sandbox.mask_paths.iter().chain(sandbox.allow_paths.iter()) {
+        if !Path::new(path).is_absolute() {
+            return Err(StackError::InvalidParam {
+                field: "workspace.sandbox",
+                reason: format!("sandbox mask/allow path `{path}` must be absolute"),
+            });
+        }
+    }
     if let Some(socket_path) = &config.local.socket_path {
         validate_optional_config_path("local.socket_path", socket_path)?;
     }
