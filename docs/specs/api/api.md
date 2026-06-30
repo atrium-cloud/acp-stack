@@ -47,7 +47,7 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 
 | Route                                      | Contract |
 | ------------------------------------------ | -------- |
-| `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args |
+| `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args (including `sandbox` mode for `[workspace.sandbox]`) |
 | `GET /v1/init/sessions/{id}`              | returns non-secret status, pending input, recent progress, and `completed_awaiting_ack` when a result exists |
 | `GET /v1/init/sessions/{id}/events?after_seq=N` | replays non-secret progress and input lifecycle events |
 | `GET /v1/init/sessions/{id}/ws`           | upgrades to the hosted init WebSocket |
