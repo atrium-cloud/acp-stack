@@ -51,7 +51,7 @@ const AGENT_CRASH_RESTART_BACKOFF: Duration = Duration::from_millis(250);
 /// observes the subprocess directly.
 const AGENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, McpServer, PromptRequest, PromptResponse, SessionId as AcpSessionId, StopReason,
 };
 use serde::{Deserialize, Serialize};
@@ -67,8 +67,8 @@ use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpBridgeExit, AcpBridgeExitReason, AgentCapabilitiesDto,
     AgentSessionConfigCategory, AgentSessionModelSelection, SessionEventSink,
-    StateStoreSessionSink, resolve_command_path, session_config_id_for_value,
-    session_model_selection_for_value,
+    StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
+    session_config_id_for_value, session_model_selection_for_value,
 };
 use crate::secrets::SecretStore;
 use crate::state::{
@@ -684,18 +684,11 @@ impl AgentSupervisor {
                 .as_ref()
                 .and_then(|provider| provider.model.as_deref())
         }) {
-            match session_model_selection_for_value(&response, model)? {
-                AgentSessionModelSelection::ConfigOption { config_id } => {
-                    bridge
-                        .set_session_config_option(response.session_id.clone(), &config_id, model)
-                        .await?;
-                }
-                AgentSessionModelSelection::LegacyModel => {
-                    bridge
-                        .set_session_model(response.session_id.clone(), model)
-                        .await?;
-                }
-            }
+            let AgentSessionModelSelection::ConfigOption { config_id } =
+                session_model_selection_for_value(&response, model)?;
+            bridge
+                .set_session_config_option(response.session_id.clone(), &config_id, model)
+                .await?;
         }
 
         // Persist after the agent confirms. If we inserted first and the
@@ -749,7 +742,6 @@ impl AgentSupervisor {
         let requested_cwd =
             cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root));
         let resolved_cwd = resolve_session_cwd(Some(requested_cwd), workspace_root)?;
-        let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         bridge
             .load_session(
                 AcpSessionId::new(record.agent_session_id.clone()),
@@ -806,7 +798,6 @@ impl AgentSupervisor {
         let requested_cwd =
             cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root));
         let resolved_cwd = resolve_session_cwd(Some(requested_cwd), workspace_root)?;
-        let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         bridge
             .resume_session(
                 AcpSessionId::new(record.agent_session_id.clone()),
@@ -882,7 +873,6 @@ impl AgentSupervisor {
             Some(cwd.unwrap_or_else(|| stored_or_workspace_cwd(&parent.cwd, workspace_root))),
             workspace_root,
         )?;
-        let resolved_cwd = resolve_session_cwd(Some(resolved_cwd), workspace_root)?;
         let parent_agent_session_id = parent.agent_session_id.clone();
         let response = bridge
             .fork_session(
@@ -1045,7 +1035,7 @@ impl AgentSupervisor {
         let prompt_id_owned = prompt_id.clone();
         let message_id_owned = message_id.clone();
         let acp_request = PromptRequest::new(AcpSessionId::new(agent_session_id), prompt_blocks)
-            .message_id(message_id);
+            .meta(prompt_message_id_meta(&message_id));
 
         let join = tokio::spawn(async move {
             // Flip `pending -> running` so clients polling immediately after
@@ -1073,7 +1063,7 @@ impl AgentSupervisor {
                 _ = cancel_inner.cancelled() => Outcome::Cancelled,
             };
             if let Outcome::Settled(Ok(response)) = &outcome
-                && response.user_message_id.as_deref() == Some(message_id_owned.as_str())
+                && meta_message_id(response.meta.as_ref()) == Some(message_id_owned.as_str())
             {
                 let guard = state_clone.lock().await;
                 if let Err(err) =
@@ -1762,7 +1752,7 @@ fn stop_reason_str(reason: StopReason) -> String {
 pub fn parse_prompt_blocks(prompt: &Value) -> Result<Vec<ContentBlock>> {
     let blocks = match prompt {
         Value::String(text) => vec![ContentBlock::Text(
-            agent_client_protocol::schema::TextContent::new(text.clone()),
+            agent_client_protocol::schema::v1::TextContent::new(text.clone()),
         )],
         Value::Array(items) => {
             if items.is_empty() {

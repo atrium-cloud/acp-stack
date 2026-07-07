@@ -7,7 +7,7 @@
 //! `session/new` (or load/resume) call — they never enter SQLite, never enter
 //! any event payload, and never leave this resolver alongside the names.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
 };
 

@@ -19,7 +19,7 @@ This roadmap is a planning document for maintainers. Product contracts live unde
 
 The following remain outside the initial release:
 
-- multiple active agents per runtime
+- multiple targets sharing one harness (Array v1 ships multi-target but requires a distinct harness per target)
 - broad cross-distro package/runtime reconciliation
 - complete OS-level interception of arbitrary shell activity
 - built-in TLS termination or advanced WAF policy

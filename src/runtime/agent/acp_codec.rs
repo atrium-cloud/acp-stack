@@ -9,10 +9,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
-    NewSessionResponse, PermissionOptionId, RequestPermissionOutcome, RequestPermissionRequest,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
-    SessionNotification,
+use agent_client_protocol::schema::v1::{
+    Meta, NewSessionResponse, PermissionOptionId, RequestPermissionOutcome,
+    RequestPermissionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectOptions, SessionNotification,
 };
 
 use crate::error::{Result, StackError};
@@ -23,6 +23,36 @@ use crate::runtime::mediation::permissions::{
 };
 
 use super::acp_bridge::NotificationDrain;
+
+/// `_meta` namespace for acp-stack's local protocol extensions (also read by
+/// `AgentCapabilitiesDto::supports_fork_message_id`).
+const ACP_STACK_META_KEY: &str = "acpStack";
+const MESSAGE_ID_META_KEY: &str = "messageId";
+
+/// Wire shape of the local prompt message-id extension since ACP v1 dropped
+/// the unstable top-level `messageId` fields: the client stamps
+/// `_meta.acpStack.messageId` on `session/prompt`, and an agent that recorded
+/// it echoes the same shape on the `session/prompt` response.
+pub fn prompt_message_id_meta(message_id: &str) -> Meta {
+    let mut stack = serde_json::Map::new();
+    stack.insert(
+        MESSAGE_ID_META_KEY.to_owned(),
+        serde_json::Value::String(message_id.to_owned()),
+    );
+    let mut meta = Meta::new();
+    meta.insert(
+        ACP_STACK_META_KEY.to_owned(),
+        serde_json::Value::Object(stack),
+    );
+    meta
+}
+
+pub fn meta_message_id(meta: Option<&Meta>) -> Option<&str> {
+    meta?
+        .get(ACP_STACK_META_KEY)?
+        .get(MESSAGE_ID_META_KEY)?
+        .as_str()
+}
 
 pub fn session_config_id_for_value(
     config_options: Option<&[SessionConfigOption]>,
@@ -105,12 +135,6 @@ pub fn session_model_selection_for_value(
     {
         return Ok(AgentSessionModelSelection::ConfigOption { config_id });
     }
-    if legacy_session_model_values(response)
-        .iter()
-        .any(|candidate| candidate == value)
-    {
-        return Ok(AgentSessionModelSelection::LegacyModel);
-    }
     Err(StackError::AgentConfigProvision {
         path: PathBuf::from("ACP session config options"),
         reason: format!("agent did not advertise `{value}` as an available `model`"),
@@ -118,36 +142,10 @@ pub fn session_model_selection_for_value(
 }
 
 pub fn session_model_values(response: &NewSessionResponse) -> Result<Vec<String>> {
-    if let Some(config_options) = response.config_options.as_deref()
-        && let Ok(values) =
-            session_config_values(Some(config_options), AgentSessionConfigCategory::Model)
-    {
-        return Ok(values);
-    }
-    let mut values = legacy_session_model_values(response);
-    values.sort();
-    values.dedup();
-    if values.is_empty() {
-        return Err(StackError::AgentConfigProvision {
-            path: PathBuf::from("ACP session config options"),
-            reason: "agent did not advertise a `model` session config option".to_owned(),
-        });
-    }
-    Ok(values)
-}
-
-fn legacy_session_model_values(response: &NewSessionResponse) -> Vec<String> {
-    response
-        .models
-        .as_ref()
-        .map(|models| {
-            models
-                .available_models
-                .iter()
-                .map(|model| model.model_id.0.to_string())
-                .collect()
-        })
-        .unwrap_or_default()
+    session_config_values(
+        response.config_options.as_deref(),
+        AgentSessionConfigCategory::Model,
+    )
 }
 
 fn session_config_option_contains_value(option: &SessionConfigOption, value: &str) -> bool {
@@ -262,7 +260,7 @@ mod tests {
     use crate::runtime::mediation::permissions::PermissionService;
     use crate::state::StateStore;
     use agent_client_protocol::JsonRpcMessage;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         AgentNotification, PermissionOption, PermissionOptionId, PermissionOptionKind,
         RequestPermissionRequest, SessionId, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
@@ -440,7 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn session_model_helpers_accept_legacy_model_state() {
+    fn session_model_helpers_reject_removed_legacy_model_state() {
+        // ACP v1 dropped the pre-1.0 `models` session state; an agent that
+        // only advertises the legacy shape gets a clear provisioning error
+        // instead of silent acceptance.
         let response: NewSessionResponse = serde_json::from_str(
             r#"{
                 "sessionId": "sess_legacy",
@@ -455,17 +456,21 @@ mod tests {
                 }
             }"#,
         )
-        .expect("legacy model state deserializes");
+        .expect("unknown fields are ignored on deserialize");
 
-        assert_eq!(
-            session_model_values(&response).expect("legacy model values"),
-            ["opencode-go/deepseek-v4-flash"]
-        );
-        assert_eq!(
-            session_model_selection_for_value(&response, "opencode-go/deepseek-v4-flash")
-                .expect("legacy model should validate"),
-            AgentSessionModelSelection::LegacyModel
-        );
+        let err = session_model_values(&response).expect_err("legacy models must be rejected");
+        assert!(err.to_string().contains("model"));
+        let err = session_model_selection_for_value(&response, "opencode-go/deepseek-v4-flash")
+            .expect_err("legacy model selection must be rejected");
+        assert!(err.to_string().contains("opencode-go/deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn prompt_message_id_meta_round_trips() {
+        let meta = prompt_message_id_meta("msg_test_1");
+        assert_eq!(meta_message_id(Some(&meta)), Some("msg_test_1"));
+        assert_eq!(meta_message_id(None), None);
+        assert_eq!(meta_message_id(Some(&Meta::new())), None);
     }
 
     #[tokio::test]

@@ -194,7 +194,7 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
 
 #[tokio::test]
 async fn new_session_round_trips_and_prompt_emits_notifications() {
-    use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
 
     let sink = Arc::new(InMemorySink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
@@ -227,7 +227,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         .stop_reason;
     assert!(matches!(
         stop,
-        agent_client_protocol::schema::StopReason::EndTurn
+        agent_client_protocol::schema::v1::StopReason::EndTurn
     ));
 
     // Notifications go through a tokio::spawn inside the sink, so let the
@@ -404,7 +404,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
 
     let err = bridge
         .load_session(
-            agent_client_protocol::schema::SessionId::new("sess_does_not_exist"),
+            agent_client_protocol::schema::v1::SessionId::new("sess_does_not_exist"),
             std::env::temp_dir(),
             vec![],
         )
@@ -437,7 +437,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
 
     let err = bridge
         .resume_session(
-            agent_client_protocol::schema::SessionId::new("sess_does_not_exist"),
+            agent_client_protocol::schema::v1::SessionId::new("sess_does_not_exist"),
             std::env::temp_dir(),
             vec![],
         )
@@ -469,7 +469,7 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
     .expect("spawn");
 
     let err = bridge
-        .close_session(agent_client_protocol::schema::SessionId::new(
+        .close_session(agent_client_protocol::schema::v1::SessionId::new(
             "sess_does_not_exist",
         ))
         .await
@@ -500,7 +500,7 @@ async fn fork_session_returns_child_session() {
 
     let fork = bridge
         .fork_session(
-            agent_client_protocol::schema::SessionId::new("sess_parent"),
+            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             None,
@@ -528,7 +528,7 @@ async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() 
 
     let err = bridge
         .fork_session(
-            agent_client_protocol::schema::SessionId::new("sess_parent"),
+            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             None,
@@ -565,7 +565,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
 
     let fork = bridge
         .fork_session(
-            agent_client_protocol::schema::SessionId::new("sess_parent"),
+            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             Some("00000000-0000-4000-8000-000000000001".to_owned()),
@@ -595,7 +595,7 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
 
     let err = bridge
         .fork_session(
-            agent_client_protocol::schema::SessionId::new("sess_parent"),
+            agent_client_protocol::schema::v1::SessionId::new("sess_parent"),
             std::env::temp_dir(),
             vec![],
             Some("00000000-0000-4000-8000-000000000001".to_owned()),
@@ -646,7 +646,7 @@ impl SessionEventSink for BlockingSink {
 
 #[tokio::test]
 async fn shutdown_waits_for_connection_task_before_flushing_sink() {
-    use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
+    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
 
     let sink = Arc::new(BlockingSink::default());
     let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
@@ -702,7 +702,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
 
 #[tokio::test]
 async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
-    use agent_client_protocol::schema::{ContentBlock, PromptRequest, StopReason, TextContent};
+    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, StopReason, TextContent};
     let bridge = AcpBridge::spawn(
         &fake_agent_config(),
         fake_env(),

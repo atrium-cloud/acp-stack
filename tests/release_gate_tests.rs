@@ -316,12 +316,20 @@ fn release_workflow_runs_acceptance_gate() {
     let workflow = std::fs::read_to_string(".github/workflows/release-gate-tests.yml")
         .expect("read release gate workflow");
     assert!(
-        workflow.contains("tests/release_acceptance_tests.rs"),
-        "release workflow must trigger on release acceptance test changes"
+        !workflow.contains("paths:"),
+        "release gate workflow must run unfiltered so every change to main is gated"
     );
     assert!(
-        workflow.contains("data/skills.toml"),
-        "release workflow must trigger on skills catalog changes"
+        workflow.contains("cargo fmt --check"),
+        "release workflow must enforce formatting"
+    );
+    assert!(
+        workflow.contains("cargo clippy --all-targets --all-features --locked -- -D warnings"),
+        "release workflow must enforce clippy with warnings denied"
+    );
+    assert!(
+        workflow.contains("cargo test --all-targets --all-features --locked"),
+        "release workflow must run the full test suite"
     );
     assert!(
         workflow.contains(
@@ -337,12 +345,9 @@ fn release_workflow_runs_acceptance_gate() {
         workflow.contains("cargo run --features dev-tools --bin sync-skills-catalog -- --check"),
         "release workflow must check the skills catalog snapshot"
     );
-    for script in ["scripts/browser-use-mcp", "scripts/browser-use-mcp.py"] {
-        assert!(
-            workflow.contains(script),
-            "release workflow must trigger on Browser Use embedded script changes: {script}"
-        );
-    }
+    // Browser Use script changes are gated by the unfiltered trigger: the
+    // full test suite step runs release_gate_tests, whose wrapper self-test
+    // covers the embedded scripts on every push and PR.
 }
 
 #[test]

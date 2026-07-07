@@ -118,6 +118,8 @@ pub fn setup_sql(schema: &str, table_prefix: &str, writer_password: &str) -> Str
 
     format!(
         r#"
+CREATE SCHEMA IF NOT EXISTS {schema};
+
 CREATE TABLE IF NOT EXISTS {migrations} (
     version bigint PRIMARY KEY,
     name text NOT NULL,
@@ -589,6 +591,22 @@ mod tests {
 
     fn generated_relation(name: &str) -> String {
         format!("\"public\".\"acp_stack_{name}\"")
+    }
+
+    #[test]
+    fn setup_sql_creates_schema_before_any_qualified_statement() {
+        let sql = setup_sql("telemetry", "acp_stack_", "test_writer_password");
+        let create_schema = "CREATE SCHEMA IF NOT EXISTS \"telemetry\";";
+        let create_at = sql
+            .find(create_schema)
+            .expect("setup SQL must create the target schema");
+        let first_qualified = sql
+            .find("\"telemetry\".")
+            .expect("setup SQL must qualify objects with the schema");
+        assert!(
+            create_at < first_qualified,
+            "CREATE SCHEMA must precede the first schema-qualified statement so the DDL applies cleanly on a fresh database"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{NewSessionResponse, SessionConfigOption};
+use agent_client_protocol::schema::v1::{NewSessionResponse, SessionConfigOption};
 
 use crate::config::Config;
 use crate::dev_gates::{
