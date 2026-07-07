@@ -3,16 +3,17 @@
 //! Every persistence call site that runs while external logging is enabled
 //! enqueues an outbox row in the same transaction that writes the source row,
 //! so a crash between the source INSERT and the enqueue cannot drop a row
-//! from the delivery pipeline. The background worker selects pending rows
-//! ordered by `(status, next_attempt_at, created_at)` and POSTs them to
-//! PostgREST with `Prefer: resolution=merge-duplicates,return=minimal`,
-//! making replay idempotent.
+//! from the delivery pipeline. The background worker claims due pending rows
+//! into `sending`, POSTs them to PostgREST with
+//! `Prefer: resolution=merge-duplicates,return=minimal`, and acks or releases
+//! the claim, making replay idempotent.
 //!
 //! Source rows can change (UPDATEs on `sessions`, `commands`, prompts, ...).
 //! The outbox key is `"{source_table}:{source_id}"`, so an UPSERT flips a
-//! previously-sent row back to `pending` and clears retry bookkeeping; the
-//! worker re-uploads the latest row contents and PostgREST's
-//! `merge-duplicates` collapses duplicates server-side.
+//! previously-sent — or currently `sending` — row back to `pending` and
+//! clears retry bookkeeping; the claim guards on `mark_sent`/`mark_failure`
+//! keep such a row pending so the worker re-uploads the latest row contents,
+//! and PostgREST's `merge-duplicates` collapses duplicates server-side.
 
 use crate::error::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -69,19 +70,28 @@ pub fn enqueue(
     Ok(())
 }
 
-/// Pull at most `limit` rows that are due for delivery. Rows in `sending` are
-/// excluded so a crashed worker cannot starve them forever; the worker that
-/// claims them must transition back to `pending` (via `mark_failure`) or
-/// `sent` (via `mark_sent`) before exiting.
+/// Claim at most `limit` rows that are due for delivery, flipping them to
+/// `sending` in the same statement. The claim is what makes `mark_sent` safe
+/// against a concurrent re-enqueue: `enqueue`'s ON CONFLICT resets a claimed
+/// row to `pending`, and the status guards on `mark_sent`/`mark_failure` then
+/// leave it alone so the updated source content is re-uploaded on the next
+/// poll instead of being silently acked with stale content. A worker that
+/// crashes mid-flight leaves rows in `sending`; `recover_in_flight` resets
+/// them at worker startup.
 pub fn next_batch(conn: &Connection, limit: usize, now: &str) -> Result<Vec<OutboxRow>> {
     let mut statement = conn.prepare(
         r#"
-        SELECT id, source_table, source_id, created_at, attempts
-        FROM sink_outbox
-        WHERE status = 'pending'
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
-        ORDER BY created_at ASC, id ASC
-        LIMIT ?2
+        UPDATE sink_outbox
+        SET status = 'sending'
+        WHERE id IN (
+            SELECT id
+            FROM sink_outbox
+            WHERE status = 'pending'
+              AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?2
+        )
+        RETURNING id, source_table, source_id, created_at, attempts
         "#,
     )?;
     let rows = statement.query_map(params![now, limit as i64], |row| {
@@ -93,11 +103,32 @@ pub fn next_batch(conn: &Connection, limit: usize, now: &str) -> Result<Vec<Outb
             attempts: row.get(4)?,
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut batch = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    // RETURNING does not guarantee the subquery's ordering.
+    batch.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+    Ok(batch)
 }
 
-/// Mark a batch of rows as delivered. Idempotent: missing ids are silently
-/// skipped (a worker that retries a partially-acked batch should not crash).
+/// Reset rows stranded in `sending` back to `pending`. The worker calls this
+/// at the top of every poll, before claiming the next batch: between polls no
+/// claim is legitimately live, so anything still `sending` was stranded by a
+/// crashed worker or a mark_* write error in the previous cycle.
+pub fn recover_in_flight(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        r#"
+        UPDATE sink_outbox
+        SET status = 'pending'
+        WHERE status = 'sending'
+        "#,
+        [],
+    )?)
+}
+
+/// Mark a batch of claimed rows as delivered. Idempotent: missing ids are
+/// silently skipped (a worker that retries a partially-acked batch should not
+/// crash). The `status = 'sending'` guard is load-bearing: a row re-enqueued
+/// to `pending` while its previous content was mid-POST must survive the ack
+/// so the updated content is delivered on the next poll.
 pub fn mark_sent(conn: &Connection, ids: &[String], now: &str) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
@@ -110,6 +141,7 @@ pub fn mark_sent(conn: &Connection, ids: &[String], now: &str) -> Result<()> {
         UPDATE sink_outbox
         SET status = 'sent', last_attempt_at = ?, last_error = NULL
         WHERE id IN ({placeholders})
+          AND status = 'sending'
         "#,
     );
     let mut bindings: Vec<rusqlite::types::Value> =
@@ -121,9 +153,12 @@ pub fn mark_sent(conn: &Connection, ids: &[String], now: &str) -> Result<()> {
     Ok(())
 }
 
-/// Bump retry bookkeeping for a batch that failed to deliver. The new
-/// `next_attempt_at` is computed by the caller (typically exponential
-/// backoff with jitter).
+/// Release a claimed batch that failed to deliver back to `pending` with
+/// bumped retry bookkeeping. The new `next_attempt_at` is computed by the
+/// caller (typically exponential backoff with jitter). Rows re-enqueued
+/// mid-flight are left alone (same guard rationale as `mark_sent`): their
+/// reset bookkeeping should not be clobbered with a failure from the stale
+/// upload.
 pub fn mark_failure(
     conn: &Connection,
     ids: &[String],
@@ -140,11 +175,13 @@ pub fn mark_failure(
     let sql = format!(
         r#"
         UPDATE sink_outbox
-        SET attempts = attempts + 1,
+        SET status = 'pending',
+            attempts = attempts + 1,
             last_error = ?,
             last_attempt_at = ?,
             next_attempt_at = ?
         WHERE id IN ({placeholders})
+          AND status = 'sending'
         "#,
     );
     let mut bindings: Vec<rusqlite::types::Value> = vec![
@@ -206,7 +243,7 @@ pub fn open_failure_count(conn: &Connection) -> Result<i64> {
         r#"
         SELECT COUNT(*)
         FROM sink_outbox
-        WHERE status = 'pending' AND attempts > 0
+        WHERE status IN ('pending', 'sending') AND attempts > 0
         "#,
         [],
         |row| row.get(0),
@@ -584,6 +621,10 @@ impl StateStore {
         next_batch(self.connection(), limit, now)
     }
 
+    pub fn recover_sink_outbox_in_flight(&self) -> Result<usize> {
+        recover_in_flight(self.connection())
+    }
+
     pub fn hydrate_sink_outbox_row(
         &self,
         source_table: &str,
@@ -678,6 +719,8 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .expect("enqueue");
+        let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").expect("claim");
+        assert_eq!(claimed.len(), 1);
         mark_failure(
             store.connection(),
             &["sessions:sess_1".to_owned()],
@@ -722,6 +765,8 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
+        let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(claimed.len(), 1);
         mark_sent(
             store.connection(),
             &["events:evt_1".to_owned()],
@@ -743,6 +788,8 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
+        let claimed = next_batch(store.connection(), 10, "2026-01-01T00:00:01Z").unwrap();
+        assert_eq!(claimed.len(), 1);
         mark_failure(
             store.connection(),
             &["events:evt_1".to_owned()],
@@ -757,6 +804,110 @@ mod tests {
         let batch_later = next_batch(store.connection(), 10, "2099-01-02T00:00:00Z").unwrap();
         assert_eq!(batch_later.len(), 1);
         assert_eq!(batch_later[0].attempts, 1);
+    }
+
+    #[test]
+    fn next_batch_claims_rows_and_excludes_them_from_later_polls() {
+        let (_dir, store) = fresh_store();
+        enqueue(
+            store.connection(),
+            "events",
+            "evt_1",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(claimed.len(), 1);
+        let second = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert!(second.is_empty(), "claimed rows must not be re-selected");
+    }
+
+    #[test]
+    fn mark_sent_does_not_clobber_row_reenqueued_mid_flight() {
+        let (_dir, store) = fresh_store();
+        enqueue(
+            store.connection(),
+            "sessions",
+            "sess_1",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(claimed.len(), 1);
+        // The source row is updated while its previous content is mid-POST.
+        enqueue(
+            store.connection(),
+            "sessions",
+            "sess_1",
+            "2026-01-01T00:00:05Z",
+        )
+        .unwrap();
+        mark_sent(
+            store.connection(),
+            &["sessions:sess_1".to_owned()],
+            "2026-01-01T00:00:06Z",
+        )
+        .unwrap();
+        let batch = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(
+            batch.len(),
+            1,
+            "re-enqueued row must survive the stale ack and be redelivered"
+        );
+        assert_eq!(batch[0].created_at, "2026-01-01T00:00:05Z");
+    }
+
+    #[test]
+    fn mark_failure_does_not_clobber_row_reenqueued_mid_flight() {
+        let (_dir, store) = fresh_store();
+        enqueue(
+            store.connection(),
+            "commands",
+            "cmd_1",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(claimed.len(), 1);
+        enqueue(
+            store.connection(),
+            "commands",
+            "cmd_1",
+            "2026-01-01T00:00:05Z",
+        )
+        .unwrap();
+        mark_failure(
+            store.connection(),
+            &["commands:cmd_1".to_owned()],
+            "5xx upstream",
+            "2099-01-01T00:00:00Z",
+            "2026-01-01T00:00:06Z",
+        )
+        .unwrap();
+        // The stale upload's failure must not push the fresh content behind
+        // the retry backoff gate.
+        let batch = next_batch(store.connection(), 10, "2026-01-01T00:00:07Z").unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].attempts, 0);
+    }
+
+    #[test]
+    fn recover_in_flight_resets_stranded_sending_rows() {
+        let (_dir, store) = fresh_store();
+        enqueue(
+            store.connection(),
+            "events",
+            "evt_1",
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let claimed = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(claimed.len(), 1);
+        // Simulated worker crash: the claim is never acked or released.
+        let recovered = recover_in_flight(store.connection()).unwrap();
+        assert_eq!(recovered, 1);
+        let batch = next_batch(store.connection(), 10, "2099-01-01T00:00:00Z").unwrap();
+        assert_eq!(batch.len(), 1, "recovered row must be selectable again");
     }
 
     #[test]

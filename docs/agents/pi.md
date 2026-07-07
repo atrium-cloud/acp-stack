@@ -2,6 +2,8 @@
 
 Pi Agent is adapter-backed. `acp-stack` launches `pi-acp`, which launches Pi in RPC mode.
 
+`pi-acp` 0.0.31 or newer is required: older adapter releases advertise models through the pre-1.0 ACP `models` session state, which `acp-stack` no longer consumes on ACP v1 (verified 2026-07-07: 0.0.27 fails model selection, 0.0.31 advertises a `model` session config option). `acps` installs the latest adapter from npm, so this only affects externally managed installs.
+
 ## Setup
 
 ```sh

@@ -172,11 +172,13 @@ fn auto_frequency_skip_report(
             field: "updates.acp_stack.frequency",
         },
     )?;
-    let recent = state
-        .query_stack_update_runs(20)?
-        .into_iter()
-        .find(|run| run.operation == STACK_UPDATE_OPERATION_INSTALL && run.auto);
-    let Some(recent) = recent else {
+    // Skip rows are themselves persisted as INSTALL+auto runs stamped at "now";
+    // using one as the frequency reference would re-arm the window on every
+    // timer fire and never let an update through once frequency exceeds the
+    // timer cadence. Only runs that actually attempted an update count, and
+    // the query must not be bounded by a recent-row window that accumulated
+    // skip rows could push the real attempt out of.
+    let Some(recent) = state.latest_stack_auto_install_attempt()? else {
         return Ok(None);
     };
     let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(&recent.started_at) else {
@@ -448,6 +450,12 @@ fn update_decision(
 ) -> StackUpdateDecision {
     if normalize_version(current_version) == normalize_version(&manifest.version) {
         return StackUpdateDecision::UpToDate;
+    }
+    // Auto mode must never downgrade: if upstream `latest` resolves below the
+    // running version (e.g. a newer release was yanked), leave the rollback
+    // decision to an explicit manual install command.
+    if auto && is_version_downgrade(current_version, &manifest.version) {
+        return StackUpdateDecision::ManualOnly;
     }
     if policy == StackUpdatePolicy::Manual && auto {
         return StackUpdateDecision::ManualOnly;
@@ -907,6 +915,16 @@ fn is_major_upgrade(current: &str, target: &str) -> bool {
     target.major > current.major
 }
 
+fn is_version_downgrade(current: &str, target: &str) -> bool {
+    let Some(current) = parse_version(current) else {
+        return false;
+    };
+    let Some(target) = parse_version(target) else {
+        return false;
+    };
+    target < current
+}
+
 fn parse_version(value: &str) -> Option<Version> {
     Version::parse(normalize_version(value)).ok()
 }
@@ -1079,6 +1097,34 @@ restart = "on-crash"
     }
 
     #[test]
+    fn auto_mode_never_installs_a_downgrade() {
+        let older = manifest("0.0.9", StackReleaseClassification::SecurityCritical);
+        assert_eq!(
+            update_decision(
+                StackUpdatePolicy::Compatible,
+                "0.1.0",
+                &older,
+                false,
+                false,
+                true,
+            ),
+            StackUpdateDecision::ManualOnly
+        );
+        // An explicit manual command may still roll back deliberately.
+        assert_eq!(
+            update_decision(
+                StackUpdatePolicy::Compatible,
+                "0.1.0",
+                &older,
+                false,
+                false,
+                false,
+            ),
+            StackUpdateDecision::Install
+        );
+    }
+
+    #[test]
     fn major_or_breaking_release_is_blocked_without_override() {
         let major = manifest("1.0.0", StackReleaseClassification::SecurityCritical);
         let mut breaking = manifest("0.1.1", StackReleaseClassification::SecurityCritical);
@@ -1237,6 +1283,112 @@ restart = "on-crash"
             })
             .expect("events");
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn auto_frequency_gate_ignores_skip_runs_as_reference() {
+        let (_tempdir, store) = test_store();
+        store
+            .append_stack_update_run(NewStackUpdateRun {
+                operation: STACK_UPDATE_OPERATION_INSTALL,
+                status: STACK_UPDATE_STATUS_SKIPPED,
+                current_version: "0.1.0",
+                target_version: None,
+                target_tag: None,
+                classification: None,
+                breaking: false,
+                major_upgrade: false,
+                policy: "security-critical",
+                auto: true,
+                message: Some("auto-update checked recently; next check waits for 1d"),
+                payload_json: "{}",
+            })
+            .expect("seed skip run");
+
+        let report =
+            auto_frequency_skip_report(&test_config(), &store).expect("frequency gate query");
+        assert!(
+            report.is_none(),
+            "a recent skip row must not re-arm the frequency window"
+        );
+    }
+
+    #[test]
+    fn auto_frequency_gate_counts_up_to_date_check_as_reference() {
+        let (_tempdir, store) = test_store();
+        // An up-to-date auto run is persisted as skipped but DID resolve a
+        // release upstream, so it must re-arm the frequency window.
+        store
+            .append_stack_update_run(NewStackUpdateRun {
+                operation: STACK_UPDATE_OPERATION_INSTALL,
+                status: STACK_UPDATE_STATUS_SKIPPED,
+                current_version: "0.1.0",
+                target_version: Some("0.1.0"),
+                target_tag: Some("v0.1.0"),
+                classification: Some("regular"),
+                breaking: false,
+                major_upgrade: false,
+                policy: "security-critical",
+                auto: true,
+                message: Some("already up to date"),
+                payload_json: "{}",
+            })
+            .expect("seed up-to-date run");
+
+        let report =
+            auto_frequency_skip_report(&test_config(), &store).expect("frequency gate query");
+        assert!(
+            report.is_some(),
+            "a recent up-to-date check must close the frequency gate"
+        );
+    }
+
+    #[test]
+    fn auto_frequency_gate_reference_survives_many_accumulated_skip_rows() {
+        let (_tempdir, store) = test_store();
+        store
+            .append_stack_update_run(NewStackUpdateRun {
+                operation: STACK_UPDATE_OPERATION_INSTALL,
+                status: STACK_UPDATE_STATUS_SUCCEEDED,
+                current_version: "0.1.0",
+                target_version: Some("0.1.0"),
+                target_tag: Some("v0.1.0"),
+                classification: Some("regular"),
+                breaking: false,
+                major_upgrade: false,
+                policy: "security-critical",
+                auto: true,
+                message: Some("previous real attempt"),
+                payload_json: "{}",
+            })
+            .expect("seed real run");
+        // Enough newer skip rows to overflow any fixed recent-row window
+        // (e.g. a long frequency with a daily timer).
+        for _ in 0..25 {
+            store
+                .append_stack_update_run(NewStackUpdateRun {
+                    operation: STACK_UPDATE_OPERATION_INSTALL,
+                    status: STACK_UPDATE_STATUS_SKIPPED,
+                    current_version: "0.1.0",
+                    target_version: None,
+                    target_tag: None,
+                    classification: None,
+                    breaking: false,
+                    major_upgrade: false,
+                    policy: "security-critical",
+                    auto: true,
+                    message: Some("auto-update checked recently; next check waits for 1d"),
+                    payload_json: "{}",
+                })
+                .expect("seed skip run");
+        }
+
+        let report =
+            auto_frequency_skip_report(&test_config(), &store).expect("frequency gate query");
+        assert!(
+            report.is_some(),
+            "the real attempt must stay the reference even behind many skip rows"
+        );
     }
 
     fn make_archive(contents: &[(&str, &[u8])]) -> Vec<u8> {

@@ -1172,6 +1172,20 @@ fn run_init_with_output(
         AgentEnvCollection::default()
     };
 
+    // `--resume` skips the real-agent preflight above, so with no config on
+    // disk the starter-config branch below would persist `agent.id =
+    // "placeholder"` before `resolve_init_run` gets a chance to reject a
+    // resume with nothing to resume. Resolving the run first keeps the
+    // preflight invariant; a legitimate resume after a manually deleted
+    // config still proceeds and repairs the config from the recorded run.
+    if args.resume && !config_path.exists() {
+        pre_create_owner_only(&state_path)?;
+        let store = StateStore::open(&state_path)?;
+        store.migrate()?;
+        set_owner_only_file(&state_path)?;
+        resolve_init_run(&args, &store)?;
+    }
+
     let mut legacy_auth = None;
     let config_status = if config_path.exists() {
         // Repair perms before validation so a failure to parse the file does not

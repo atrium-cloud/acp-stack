@@ -110,12 +110,6 @@ impl StateStore {
     /// it back to the caller.
     pub fn record_security_run(&self, input: NewSecurityRun<'_>) -> Result<SecurityRunRecord> {
         validate_json_payload(self.connection(), input.inputs_json)?;
-        for finding in input.findings {
-            assert_finding_severity(finding.severity);
-            if let Some(details) = finding.details_json {
-                validate_json_payload(self.connection(), details)?;
-            }
-        }
 
         let mut critical_count = 0i64;
         let mut warning_count = 0i64;
@@ -123,8 +117,14 @@ impl StateStore {
             match finding.severity {
                 SECURITY_FINDING_SEVERITY_CRITICAL => critical_count += 1,
                 SECURITY_FINDING_SEVERITY_WARNING => warning_count += 1,
-                // assert above guarantees one of the two; this branch is unreachable in practice.
-                other => panic!("unexpected security finding severity: {other}"),
+                other => {
+                    return Err(crate::error::StackError::SecurityFindingSeverityInvalid {
+                        severity: other.to_owned(),
+                    });
+                }
+            }
+            if let Some(details) = finding.details_json {
+                validate_json_payload(self.connection(), details)?;
             }
         }
         let ok = critical_count == 0 && warning_count == 0;
@@ -259,16 +259,6 @@ impl StateStore {
     }
 }
 
-fn assert_finding_severity(severity: &str) {
-    if severity != SECURITY_FINDING_SEVERITY_WARNING
-        && severity != SECURITY_FINDING_SEVERITY_CRITICAL
-    {
-        panic!(
-            "security finding severity must be one of \"warning\"|\"critical\", got {severity:?}"
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +305,34 @@ mod tests {
         assert_eq!(fetched, run);
         let findings = store.get_findings_for_run(&run.id).expect("findings");
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn record_run_with_invalid_severity_returns_typed_error_and_persists_nothing() {
+        let (_dir, store) = open_store();
+        let findings = vec![finding("auth.failure_threshold", "info", "bogus severity")];
+        let err = store
+            .record_security_run(NewSecurityRun {
+                started_at: "2026-05-28T00:00:00Z",
+                auth_failure_count: 0,
+                inputs_json: "{}",
+                findings: &findings,
+            })
+            .expect_err("invalid severity must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::StackError::SecurityFindingSeverityInvalid { ref severity }
+                if severity == "info"
+        ));
+        let runs = store
+            .query_security_runs(SecurityRunFilter {
+                limit: 10,
+                after_id: None,
+                since: None,
+                until: None,
+            })
+            .expect("list runs");
+        assert!(runs.is_empty(), "rejected run must not be persisted");
     }
 
     #[test]

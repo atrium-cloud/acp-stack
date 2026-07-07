@@ -743,6 +743,9 @@ pub enum StackError {
         source: serde_json::Error,
     },
 
+    #[error("security finding severity must be one of \"warning\"|\"critical\", got {severity:?}")]
+    SecurityFindingSeverityInvalid { severity: String },
+
     // === auth_http (HTTP-edge auth) ===
     #[error("rate limit exceeded; retry later")]
     RateLimited,

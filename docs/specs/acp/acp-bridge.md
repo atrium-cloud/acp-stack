@@ -29,7 +29,17 @@ If an agent does not advertise an optional capability, the corresponding runtime
 - `session/resume` requires `supports_resume_session`
 - `session/fork` requires `supports_fork_session`
 
-Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Forking at a prompt breakpoint also requires explicit `sessionCapabilities.fork.messageId` support; otherwise only current-head fork is allowed. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Forking at a prompt breakpoint also requires explicit `sessionCapabilities.fork.messageId` support, advertised either as a `messageId` object on the fork capability or under its `_meta` (`_meta.acpStack.messageId` or `_meta.messageId`); otherwise only current-head fork is allowed. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+
+### Prompt Message IDs (local extension)
+
+ACP v1 assigns message ids on agent-emitted update chunks but has no client-proposed prompt message id, so prompt breakpoints for `session/fork` remain a local extension (tracked in `docs/todos/v0.1.0/phase_5.md` until upstream exposes an equivalent `session/fork` shape). The wire shape rides ACP's `_meta` extensibility point:
+
+- `session/prompt` requests carry `_meta.acpStack.messageId` with a runtime-generated id.
+- An agent that recorded the id acknowledges it by echoing the same `_meta.acpStack.messageId` shape on the `session/prompt` response. Only acknowledged ids are accepted as fork breakpoints.
+- `session/fork` requests carry the breakpoint as a top-level `messageId` param.
+
+Before ACP 1.0 this extension used the SDK's unstable top-level `messageId`/`userMessageId` prompt fields; agents still speaking that pre-1.0 shape are not acknowledged and therefore cannot be forked at a breakpoint.
 
 Sessions learned from `session/list` are persisted only when their CWD is an existing directory under `[workspace].root`. Load, resume, and fork recheck the stored CWD before passing it back to the agent. Explicit load/resume CWDs update local session state after the agent accepts the call.
 

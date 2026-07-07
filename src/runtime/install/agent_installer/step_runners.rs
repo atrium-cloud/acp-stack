@@ -454,6 +454,12 @@ pub(super) fn run_shell_install(
     )
 }
 
+/// Serializes `npm install -g --prefix` runs. The harness and adapter
+/// installers run on parallel threads against the same managed prefix, and
+/// npm has no cross-process lock for global installs into one prefix, so two
+/// concurrent runs can corrupt the shared `node_modules` tree.
+static NPM_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn run_npm_install(
     package: &str,
     agent_env: &HashMap<String, String>,
@@ -473,6 +479,9 @@ fn run_npm_install(
         prefix.to_string_lossy().into_owned(),
         package.to_owned(),
     ];
+    let _guard = NPM_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir])
 }
 

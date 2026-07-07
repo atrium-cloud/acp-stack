@@ -425,6 +425,11 @@ fn extract_tar_gz(
                 reason: format!("tar entry path read failed: {source}"),
             })?
             .into_owned();
+        // A directory or symlink entry can share the binary's leaf name;
+        // unpacking one would plant a non-regular file at the destination.
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let leaf = match path.file_name() {
             Some(name) => name.to_owned(),
             None => continue,
@@ -471,6 +476,9 @@ fn extract_zip(
                     repo: repo.to_owned(),
                     reason: format!("zip entry read failed: {source}"),
                 })?;
+        if entry.is_dir() {
+            continue;
+        }
         let entry_name = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
             None => continue,
@@ -745,5 +753,47 @@ mod tests {
             std::fs::read(tempdir.path().join("codex")).expect("codex binary should exist"),
             b"#!/bin/sh\n"
         );
+    }
+
+    #[test]
+    fn extract_tar_gz_skips_non_file_entries_matching_binary_name() {
+        let mut tar_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut tar_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+
+            // Symlink entry sharing the binary's leaf name, ahead of the real file.
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_entry_type(tar::EntryType::Symlink);
+            link_header.set_size(0);
+            link_header.set_cksum();
+            builder
+                .append_link(&mut link_header, "aliases/codex", "/etc/passwd")
+                .expect("symlink entry should append");
+
+            let payload = b"#!/bin/sh\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "bin/codex", &payload[..])
+                .expect("tar entry should append");
+            let encoder = builder.into_inner().expect("tar should finish");
+            encoder.finish().expect("gzip should finish");
+        }
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        extract_tar_gz(&tar_bytes, tempdir.path(), "codex", "codex", "openai/codex")
+            .expect("regular-file entry should extract");
+
+        let dest = tempdir.path().join("codex");
+        let metadata = std::fs::symlink_metadata(&dest).expect("dest should exist");
+        assert!(
+            metadata.is_file(),
+            "destination must be the regular file, not the symlink entry"
+        );
+        assert_eq!(std::fs::read(&dest).expect("read dest"), b"#!/bin/sh\n");
     }
 }

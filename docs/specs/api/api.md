@@ -221,9 +221,11 @@ The reconnect flow is: read `GET /v1/commands/{id}`, subscribe to `commands.{id}
 | Route                               | Tier    | Contract                                   |
 | ----------------------------------- | ------- | ------------------------------------------ |
 | `GET /v1/permissions/pending`       | session | lists pending requests                     |
+| `GET /v1/permissions/{id}`          | session | returns a single permission request        |
 | `POST /v1/permissions/{id}/approve` | session | approves a request                         |
 | `POST /v1/permissions/{id}/deny`    | session | denies a request                           |
-| `POST /v1/permissions/{id}/cancel`  | session | cancels a request owned by the caller flow |
+
+Cancellation is not an HTTP operation: pending requests are cancelled internally when their owning flow ends (session close, mediated-command cancel).
 
 Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators, command substitution, or process substitution require review before execution, including in `permissions.mode = "auto"`. Policy matching considers shell-word-normalized command words, so constructed spellings such as quoted or escaped command names can be denied or routed to review.
 
@@ -252,7 +254,7 @@ The runtime never invents package-manager commands. Only install actions declare
 | `GET /v1/logs/events`        | session | returns durable event rows; supports `category=` and `order=` |
 | `GET /v1/logs/commands`      | session | returns command history; supports `order=`                    |
 | `GET /v1/logs/permissions`   | session | returns permission history; supports `order=`                 |
-| `GET /v1/logs/security`      | admin   | returns security events; `order=` applies to both result streams |
+| `GET /v1/logs/security`      | session | returns security events; `order=` applies to both result streams |
 | `GET /v1/logs/sessions`      | session | returns session-scoped history; supports `order=`             |
 | `GET /v1/metrics/summary`    | session | returns aggregate metrics for a time window                   |
 

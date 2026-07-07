@@ -2907,6 +2907,26 @@ fn init_resume_restores_recorded_edge_request_before_edge_step_exists() {
 }
 
 #[test]
+fn init_resume_with_nothing_to_resume_writes_no_placeholder_config() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["init", "--resume"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no resumable init run found"));
+
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/acp-stack/acps-config.toml")
+            .exists(),
+        "a failed --resume must not leave a starter config on disk"
+    );
+}
+
+#[test]
 fn init_resume_restores_recorded_provider_args_before_provider_step_exists() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");

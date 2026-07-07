@@ -830,6 +830,6 @@ fn agent_session_config_values(
 fn read_agent_new_session_response(
     home: &Path,
     config: &Config,
-) -> Result<agent_client_protocol::schema::NewSessionResponse> {
+) -> Result<agent_client_protocol::schema::v1::NewSessionResponse> {
     fetch_session_config(home, config)
 }

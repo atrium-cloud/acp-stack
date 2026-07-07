@@ -298,10 +298,10 @@ fn host_has_cap_sys_admin() -> bool {
         return false;
     };
     for line in status.lines() {
-        if let Some(hex) = line.strip_prefix("CapEff:") {
-            if let Ok(bits) = u64::from_str_radix(hex.trim(), 16) {
-                return (bits >> CAP_SYS_ADMIN_BIT) & 1 == 1;
-            }
+        if let Some(hex) = line.strip_prefix("CapEff:")
+            && let Ok(bits) = u64::from_str_radix(hex.trim(), 16)
+        {
+            return (bits >> CAP_SYS_ADMIN_BIT) & 1 == 1;
         }
     }
     false

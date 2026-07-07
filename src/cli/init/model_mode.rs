@@ -385,7 +385,7 @@ fn configure_model_for_init(
     args: &InitArgs,
     config: &mut Config,
     config_path: &Path,
-    response: &agent_client_protocol::schema::NewSessionResponse,
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
     agent_name: &str,
     provider_backed: bool,
 ) -> Result<ModelModeAction> {

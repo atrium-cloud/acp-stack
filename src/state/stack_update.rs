@@ -117,6 +117,35 @@ impl StateStore {
         Ok(run)
     }
 
+    /// Latest auto `install` run that contacted upstream. This is the
+    /// reference point for the auto-update frequency window, so it must
+    /// exclude frequency skips (which are recorded without any upstream
+    /// contact and would re-arm the window on every timer fire) while still
+    /// counting up-to-date/blocked/manual-only skips, which did resolve a
+    /// release. Frequency skips are the only runs recorded as `skipped` with
+    /// neither a resolved `target_version` nor a `target_tag`. The query is
+    /// unbounded because a fixed-size recent-row scan would let accumulated
+    /// skip rows push the reference out of view.
+    pub fn latest_stack_auto_install_attempt(&self) -> Result<Option<StackUpdateRun>> {
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT id, started_at, finished_at, operation, status, current_version,
+                   target_version, target_tag, classification, breaking, major_upgrade,
+                   policy, auto, message, payload_json
+            FROM stack_update_runs
+            WHERE operation = ?1 AND auto = 1
+              AND NOT (status = ?2 AND target_version IS NULL AND target_tag IS NULL)
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )?;
+        let mut rows = statement.query_map(
+            params![STACK_UPDATE_OPERATION_INSTALL, STACK_UPDATE_STATUS_SKIPPED],
+            row_to_stack_update_run,
+        )?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
     pub fn query_stack_update_runs(&self, limit: u32) -> Result<Vec<StackUpdateRun>> {
         let mut statement = self.connection().prepare(
             r#"

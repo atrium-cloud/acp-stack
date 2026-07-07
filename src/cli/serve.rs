@@ -197,7 +197,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     // mediated subprocesses via `kill_on_drop`, but their `commands` rows
     // are not finalized along the way. Mark them `failed` so polling
     // clients see them settle.
-    let reconciled_commands = store.reconcile_orphaned_commands("daemon restart")?;
+    let reconciled_commands = store.reconcile_orphaned_commands()?;
     if reconciled_commands > 0 {
         tracing::info!(
             reconciled = reconciled_commands,

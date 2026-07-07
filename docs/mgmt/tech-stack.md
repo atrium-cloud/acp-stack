@@ -12,7 +12,7 @@ This document records technology choices that affect maintenance or deployment. 
 | SQLite                    | local durable state                                        |
 | tokio-postgres            | Supabase Postgres logging backend                          |
 | age-compatible encryption | local secret store                                         |
-| agent-client-protocol SDK | ACP client boundary to agents                              |
+| agent-client-protocol SDK | ACP client boundary to agents (1.x, protocol v1 schema)    |
 | cliclack                  | interactive `acps init` prompts and searchable selectors   |
 | rpassword                 | hidden terminal prompts for admin-key entry                |
 | clap_complete             | shell completion script generation for `acps`              |
