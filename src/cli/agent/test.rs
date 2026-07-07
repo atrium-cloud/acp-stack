@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use agent_client_protocol::schema::{ContentBlock, PromptRequest, StopReason, TextContent};
+use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, StopReason, TextContent};
 use tokio::sync::Notify;
 
 use crate::config::{self, Config};
@@ -482,7 +482,7 @@ async fn run_agent_test_prompt(
 async fn apply_agent_test_session_config(
     bridge: &AcpBridge,
     agent: &crate::config::AgentConfig,
-    response: &agent_client_protocol::schema::NewSessionResponse,
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
 ) -> Result<()> {
     if let Some(mode) = agent.mode.as_deref() {
         let config_id = session_config_id_for_value(
@@ -500,18 +500,11 @@ async fn apply_agent_test_session_config(
             .as_ref()
             .and_then(|provider| provider.model.as_deref())
     }) {
-        match session_model_selection_for_value(response, model)? {
-            AgentSessionModelSelection::ConfigOption { config_id } => {
-                bridge
-                    .set_session_config_option(response.session_id.clone(), &config_id, model)
-                    .await?;
-            }
-            AgentSessionModelSelection::LegacyModel => {
-                bridge
-                    .set_session_model(response.session_id.clone(), model)
-                    .await?;
-            }
-        }
+        let AgentSessionModelSelection::ConfigOption { config_id } =
+            session_model_selection_for_value(response, model)?;
+        bridge
+            .set_session_config_option(response.session_id.clone(), &config_id, model)
+            .await?;
     }
     Ok(())
 }

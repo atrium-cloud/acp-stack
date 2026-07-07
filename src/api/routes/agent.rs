@@ -259,7 +259,7 @@ async fn load_fresh_config_for_target(
 /// secret store is only opened when there's something to resolve.
 pub(super) fn open_mcp_servers(
     config: &Config,
-) -> Result<Vec<agent_client_protocol::schema::McpServer>> {
+) -> Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
     if config.mcp.servers.is_empty() {
         return Ok(Vec::new());
     }

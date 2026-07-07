@@ -3,13 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
     ContentChunk, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-    ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
     SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionInfo,
     SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
@@ -452,8 +453,13 @@ async fn handle_set_config_option(
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
-    let value = request.value.0.as_ref();
-    if state.args.expect_model_config.as_deref() == Some(value)
+    let SessionConfigOptionValue::ValueId { value } = &request.value else {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            "placebo expects value-id session config values".to_owned(),
+        ));
+    };
+    if state.args.expect_model_config.as_deref() == Some(value.0.as_ref())
         && request.config_id.0.as_ref() == state.args.model_config_option_id.as_str()
     {
         state.model_configured = true;
@@ -584,7 +590,27 @@ async fn handle_prompt(
             StopReason::EndTurn
         }
     };
-    responder.respond(PromptResponse::new(stop_reason).user_message_id(request.message_id.clone()))
+    // Echo the local message-id extension: acp-stack stamps
+    // `_meta.acpStack.messageId` on `session/prompt` and treats the same shape
+    // on the response as the acknowledgment.
+    let mut response = PromptResponse::new(stop_reason);
+    if let Some(message_id) = request
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("acpStack"))
+        .and_then(|stack| stack.get("messageId"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let mut stack = serde_json::Map::new();
+        stack.insert(
+            "messageId".to_owned(),
+            serde_json::Value::String(message_id.to_owned()),
+        );
+        let mut meta = serde_json::Map::new();
+        meta.insert("acpStack".to_owned(), serde_json::Value::Object(stack));
+        response = response.meta(meta);
+    }
+    responder.respond(response)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -593,7 +619,7 @@ struct PlaceboForkSessionRequest {
     session_id: SessionId,
     cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
+    mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
 }

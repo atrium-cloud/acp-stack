@@ -14,7 +14,7 @@ use acp_stack::runtime::agent::acp_bridge::{
     AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_values,
     session_model_selection_for_value, session_model_values,
 };
-use agent_client_protocol::schema::{ContentBlock, PromptRequest, TextContent};
+use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
 
 const REAL_AGENT_TESTS_ENV: &str = "ACP_STACK_RUN_REAL_AGENT_TESTS";
 

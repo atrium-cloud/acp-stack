@@ -238,6 +238,22 @@ async fn process_one_batch(
     let now = current_timestamp();
     let batch_result = {
         let guard = state.lock().await;
+        // The worker is strictly sequential, so between polls no row is
+        // legitimately claimed: anything still `sending` was stranded by a
+        // crashed previous worker or by a mark_* write error in the last
+        // cycle, and must be released before claiming the next batch.
+        match guard.recover_sink_outbox_in_flight() {
+            Ok(0) => {}
+            Ok(recovered) => {
+                tracing::warn!(
+                    rows = recovered,
+                    "recovered sink outbox rows stranded by an interrupted upload"
+                );
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to recover in-flight sink outbox rows");
+            }
+        }
         guard.next_sink_outbox_batch(BATCH_SIZE, &now)
     };
     let batch = match batch_result {

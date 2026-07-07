@@ -3,9 +3,10 @@
 -- Every persistence call site that runs while external logging is enabled
 -- enqueues an outbox row in the same transaction that writes the source row,
 -- so a crash between the source INSERT and the enqueue cannot drop a row from
--- the delivery pipeline. The background worker selects pending rows ordered by
--- `(status, next_attempt_at, created_at)` and POSTs them to PostgREST with
--- `Prefer: resolution=merge-duplicates,return=minimal`, making replay safe.
+-- the delivery pipeline. The background worker claims due pending rows into
+-- `sending`, POSTs them to PostgREST with
+-- `Prefer: resolution=merge-duplicates,return=minimal`, and acks or releases
+-- the claim, making replay safe.
 
 CREATE TABLE IF NOT EXISTS sink_outbox (
     id TEXT PRIMARY KEY,

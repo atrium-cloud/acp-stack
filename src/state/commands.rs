@@ -407,10 +407,11 @@ impl StateStore {
     /// teardown), but the SQLite rows are not finalized in that path. Without
     /// this sweep, every `running` / `pending` row from the previous run is
     /// permanently stuck and a CLI/HTTP poll would never see them settle.
+    /// Unlike prompts, `commands` has no error-message column, so no reason
+    /// text is recorded; the caller logs it instead.
     /// Returns the number of rows transitioned to `failed`.
-    pub fn reconcile_orphaned_commands(&self, reason: &str) -> Result<usize> {
+    pub fn reconcile_orphaned_commands(&self) -> Result<usize> {
         let now = current_timestamp();
-        let _ = reason; // recorded via finished_at + a synthetic event below
         if !self.external_logging_enabled() {
             let affected = self.connection().execute(
                 r#"

@@ -24,14 +24,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
     AgentNotification, CancelNotification, CloseSessionRequest, ForkSessionResponse,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
     LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionConfigOptionCategory, SessionId,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigValueId, SessionId,
     SessionInfo, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SetSessionModelRequest, SetSessionModelResponse,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest, UntypedMessage,
@@ -57,8 +57,8 @@ use crate::state::FailureClass;
 // before the extraction. Preserve those paths with re-exports so the split is
 // internal to `runtime::agent`.
 pub use crate::runtime::agent::acp_codec::{
-    session_config_id_for_value, session_config_values, session_model_selection_for_value,
-    session_model_values,
+    meta_message_id, prompt_message_id_meta, session_config_id_for_value, session_config_values,
+    session_model_selection_for_value, session_model_values,
 };
 pub use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
 
@@ -85,7 +85,6 @@ pub enum AgentSessionConfigCategory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSessionModelSelection {
     ConfigOption { config_id: String },
-    LegacyModel,
 }
 
 impl AgentSessionConfigCategory {
@@ -196,7 +195,7 @@ impl AgentCapabilitiesDto {
                 reason: format!("failed to serialize agent capabilities: {err}"),
             }
         })?;
-        let protocol_version = serde_json::to_value(&response.protocol_version)
+        let protocol_version = serde_json::to_value(response.protocol_version)
             .ok()
             .and_then(|v| v.as_u64())
             .and_then(|v| u16::try_from(v).ok())
@@ -300,10 +299,17 @@ impl NotificationDrain {
 
     async fn wait_idle(&self) {
         loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            // Register the waiter before re-checking the count: notify_waiters()
+            // stores no permit, so a wakeup fired between an unregistered check
+            // and the await would be lost and the final 1->0 transition never
+            // notifies again.
+            notified.as_mut().enable();
             if self.active.load(Ordering::SeqCst) == 0 {
                 return;
             }
-            self.idle.notified().await;
+            notified.await;
         }
     }
 }
@@ -711,31 +717,17 @@ impl AcpBridge {
         value: &str,
     ) -> Result<SetSessionConfigOptionResponse> {
         let connection = self.connection().await?;
-        let request =
-            SetSessionConfigOptionRequest::new(session_id, config_id.to_owned(), value.to_owned());
+        let request = SetSessionConfigOptionRequest::new(
+            session_id,
+            config_id.to_owned(),
+            SessionConfigValueId::new(value.to_owned()),
+        );
         connection
             .send_request(request)
             .block_task()
             .await
             .map_err(|err| StackError::AgentRequestFailed {
                 method: "session/set_config_option",
-                message: err.to_string(),
-            })
-    }
-
-    pub async fn set_session_model(
-        &self,
-        session_id: SessionId,
-        model_id: &str,
-    ) -> Result<SetSessionModelResponse> {
-        let connection = self.connection().await?;
-        let request = SetSessionModelRequest::new(session_id, model_id.to_owned());
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/set_model",
                 message: err.to_string(),
             })
     }
@@ -765,9 +757,9 @@ impl AcpBridge {
         Ok(())
     }
 
-    /// `session/resume`. Gated by the `unstable_session_resume` SDK feature
-    /// (enabled at the workspace level). The agent may still reject if it
-    /// does not implement resume — that surfaces as `agent.request_failed`.
+    /// `session/resume`. Stable in ACP v1; gated only by the agent's
+    /// advertised capability. The agent may still reject if it does not
+    /// implement resume — that surfaces as `agent.request_failed`.
     pub async fn resume_session(
         &self,
         session_id: SessionId,
@@ -792,7 +784,8 @@ impl AcpBridge {
         Ok(())
     }
 
-    /// `session/close`. Gated by the `unstable_session_close` SDK feature.
+    /// `session/close`. Stable in ACP v1; gated only by the agent's
+    /// advertised capability.
     pub async fn close_session(&self, session_id: SessionId) -> Result<()> {
         if !self.capabilities.supports_close_session() {
             return Err(StackError::AgentUnsupportedCapability {
@@ -1120,4 +1113,60 @@ fn command_search_paths() -> Vec<PathBuf> {
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NotificationDrain;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn wait_idle_returns_immediately_when_no_guards_active() {
+        let drain = Arc::new(NotificationDrain::default());
+        tokio::time::timeout(Duration::from_secs(1), drain.wait_idle())
+            .await
+            .expect("wait_idle must not block with zero active guards");
+    }
+
+    #[tokio::test]
+    async fn wait_idle_completes_when_last_guard_drops() {
+        let drain = Arc::new(NotificationDrain::default());
+        let first = drain.enter();
+        let second = drain.enter();
+
+        let waiter = tokio::spawn({
+            let drain = Arc::clone(&drain);
+            async move { drain.wait_idle().await }
+        });
+
+        // An intermediate N->1 drop must not release the waiter.
+        drop(first);
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("wait_idle must observe the final guard drop")
+            .expect("waiter task must not panic");
+    }
+
+    #[tokio::test]
+    async fn wait_idle_observes_notification_fired_after_registration() {
+        let drain = Arc::new(NotificationDrain::default());
+        let guard = drain.enter();
+
+        let mut waiter = Box::pin(drain.wait_idle());
+        // First poll registers the waiter while a guard is still active.
+        assert!(
+            futures::poll!(waiter.as_mut()).is_pending(),
+            "wait_idle must be pending while a guard is active"
+        );
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("registered waiter must be woken by the final guard drop");
+    }
 }
