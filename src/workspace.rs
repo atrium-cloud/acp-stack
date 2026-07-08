@@ -175,6 +175,53 @@ pub fn resolve_workspace_path(root: &Path, requested: &str, intent: PathIntent) 
     }
 }
 
+/// Resolve an ABSOLUTE path (as ACP `fs/*` methods send) to a verified path
+/// inside `root`. The path must lexically sit under the workspace root; the
+/// remainder is then routed through `resolve_workspace_path`, which supplies
+/// the canonicalization, `..` rejection, and symlink handling — the absolute
+/// entry point must never be weaker than the relative one.
+pub fn resolve_workspace_abs_path(
+    root: &Path,
+    requested: &Path,
+    intent: PathIntent,
+) -> Result<PathBuf> {
+    let display = requested.to_string_lossy().into_owned();
+    if !requested.is_absolute() {
+        return Err(StackError::WorkspacePathInvalid {
+            reason: "must be an absolute path".to_owned(),
+            requested: display,
+        });
+    }
+    let canonical_root = root.canonicalize().map_err(|source| {
+        if source.kind() == ErrorKind::NotFound {
+            StackError::WorkspaceNotFound {
+                requested: display.clone(),
+            }
+        } else {
+            StackError::WorkspaceIo {
+                requested: display.clone(),
+                source,
+            }
+        }
+    })?;
+    // Accept both the canonical root and the configured (possibly symlinked)
+    // spelling: agents echo back whatever cwd they were given at session/new.
+    let relative = requested
+        .strip_prefix(&canonical_root)
+        .or_else(|_| requested.strip_prefix(root))
+        .map_err(|_| StackError::WorkspacePathInvalid {
+            reason: "outside the session workspace".to_owned(),
+            requested: display.clone(),
+        })?;
+    let relative_str = relative
+        .to_str()
+        .ok_or_else(|| StackError::WorkspacePathInvalid {
+            reason: "not valid UTF-8".to_owned(),
+            requested: display.clone(),
+        })?;
+    resolve_workspace_path(root, relative_str, intent)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {

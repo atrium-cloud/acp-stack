@@ -210,7 +210,7 @@ Request body:
 }
 ```
 
-Command status values are `pending`, `running`, `exited`, `failed`, and `canceled`. Command records include `last_output_event_id`, `last_output_at`, `last_output_seq`, `output_bytes`, and `last_progress_at` for reconnect and liveness checks.
+Command status values are `pending`, `running`, `exited`, `failed`, and `canceled`. Command records include `last_output_event_id`, `last_output_at`, `last_output_seq`, `output_bytes`, and `last_progress_at` for reconnect and liveness checks, plus `origin` (`operator` for gateway submissions, `acp` for agent-created client terminals) and `session_id` (set on `acp`-origin rows).
 
 Output is persisted up to the configured byte cap and streamed on the command WebSocket topic while the command runs. `GET /v1/commands/{id}/output` accepts `limit`, `after`, and `order=asc|desc` and returns `{ chunks, next_cursor }`. Each chunk is shaped as `{ event_id, created_at, command_id, stream, seq, data }`.
 
