@@ -183,8 +183,17 @@ CREATE TABLE IF NOT EXISTS {commands} (
     last_output_at timestamptz,
     last_output_seq bigint,
     output_bytes bigint NOT NULL DEFAULT 0,
-    last_progress_at timestamptz
+    last_progress_at timestamptz,
+    origin text NOT NULL DEFAULT 'operator',
+    session_id text
 );
+
+-- Additive drift guard for mirrors created before these columns existed:
+-- CREATE TABLE IF NOT EXISTS is a no-op on an existing table, but the ingest
+-- function below is regenerated with the full column list and would fail
+-- against the old shape. Mirrors local migration 023.
+ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'operator';
+ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS session_id text;
 
 CREATE TABLE IF NOT EXISTS {permission_requests} (
     id text PRIMARY KEY,
@@ -461,6 +470,8 @@ fn columns_for(source_table: &str) -> Result<&'static [&'static str]> {
             "last_output_seq",
             "output_bytes",
             "last_progress_at",
+            "origin",
+            "session_id",
         ]),
         "permission_requests" => Ok(&[
             "id",
@@ -607,6 +618,21 @@ mod tests {
             create_at < first_qualified,
             "CREATE SCHEMA must precede the first schema-qualified statement so the DDL applies cleanly on a fresh database"
         );
+    }
+
+    #[test]
+    fn setup_sql_adds_drift_guards_for_late_commands_columns() {
+        let sql = generated_sql();
+        let commands = generated_relation("commands");
+        // Existing mirrors created before origin/session_id must gain the
+        // columns additively, or the regenerated ingest function fails on
+        // its EXCLUDED.origin assignment.
+        assert!(sql.contains(&format!(
+            "ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'operator';"
+        )));
+        assert!(sql.contains(&format!(
+            "ALTER TABLE {commands} ADD COLUMN IF NOT EXISTS session_id text;"
+        )));
     }
 
     #[test]

@@ -383,7 +383,7 @@ async fn run_agent_test_inner(
     sandbox: crate::config::SandboxConfig,
 ) -> Result<AgentTestReport> {
     let sink = Arc::new(AgentTestSessionEventSink::new());
-    let bridge = AcpBridge::spawn(&agent, env, cwd.clone(), sink.clone(), None, &sandbox)
+    let bridge = AcpBridge::spawn(&agent, env, cwd.clone(), sink.clone(), None, &sandbox, None)
         .await
         .map_err(agent_test_spawn_error)?;
 

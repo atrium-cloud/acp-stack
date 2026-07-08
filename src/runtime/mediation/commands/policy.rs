@@ -788,7 +788,7 @@ fn glob_match_inner(pattern: &[u8], input: &[u8]) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ResolvedCommandCwd {
+pub(crate) struct ResolvedCommandCwd {
     path: PathBuf,
     #[cfg(unix)]
     identity: FileIdentity,
@@ -796,16 +796,16 @@ pub(super) struct ResolvedCommandCwd {
 
 impl ResolvedCommandCwd {
     #[cfg(not(unix))]
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(super) fn display_path(&self) -> String {
+    pub(crate) fn display_path(&self) -> String {
         self.path.to_string_lossy().into_owned()
     }
 
     #[cfg(unix)]
-    pub(super) fn open_verified(&self) -> std::io::Result<std::fs::File> {
+    pub(crate) fn open_verified(&self) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
 
         let file = std::fs::OpenOptions::new()
@@ -840,7 +840,7 @@ impl FileIdentity {
     }
 }
 
-pub(super) fn resolve_cwd_under_workspace(
+pub(crate) fn resolve_cwd_under_workspace(
     root: &Path,
     requested: &str,
 ) -> Result<ResolvedCommandCwd> {

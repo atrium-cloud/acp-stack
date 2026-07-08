@@ -21,9 +21,10 @@
 //! supervisor task, output streaming primitives, policy evaluation, and
 //! process-control helpers live in sibling submodules.
 
-mod output;
-mod policy;
-mod process;
+pub(crate) mod exec;
+pub(crate) mod output;
+pub(crate) mod policy;
+pub(crate) mod process;
 mod supervisor;
 
 use std::collections::HashMap;
@@ -183,6 +184,8 @@ impl CommandGateway {
                 command: &request.command,
                 cwd: cwd_owned.as_deref(),
                 env_json: env_json.as_deref(),
+                origin: crate::state::CommandOrigin::Operator,
+                session_id: None,
             })?
         };
 

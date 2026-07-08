@@ -5,19 +5,22 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ContentChunk, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
+    AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
+    CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest, ForkSessionResponse,
+    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionInfo,
-    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
+    ReadTextFileRequest, ReleaseTerminalRequest, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
+    SessionForkCapabilities, SessionId, SessionInfo, SessionListCapabilities, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, TerminalId, TerminalOutputRequest, TextContent,
+    WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::{
-    Agent, Client, ConnectionTo, Dispatch, Error, JsonRpcMessage, JsonRpcRequest, Responder,
-    UntypedMessage,
+    Agent, Client, ConnectionTo, Dispatch, Error, Handled, JsonRpcMessage, JsonRpcRequest,
+    Responder, UntypedMessage,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -136,6 +139,52 @@ struct AcpArgs {
     model_config_option: Option<String>,
     #[arg(long, default_value = "model")]
     model_config_option_id: String,
+    /// Strict-agent mode: return session config options only when the client
+    /// advertised `session.configOptions` support at initialize.
+    #[arg(long)]
+    require_client_config_options: bool,
+    /// Strict-agent mode: drive `terminal/*` only when the client advertised
+    /// `terminal: true` at initialize.
+    #[arg(long)]
+    require_terminal: bool,
+    /// During prompt handling, run this program through a client terminal and
+    /// report the round-trip as a `terminal-report:` message chunk.
+    #[arg(long)]
+    terminal_command: Option<String>,
+    #[arg(long)]
+    terminal_arg: Vec<String>,
+    #[arg(long)]
+    terminal_byte_limit: Option<u64>,
+    #[arg(long)]
+    terminal_cwd: Option<PathBuf>,
+    /// Kill the terminal right after creation instead of waiting for natural
+    /// exit.
+    #[arg(long)]
+    terminal_kill: bool,
+    /// Create the terminal and leave it running: no wait, kill, or release.
+    /// Exercises the client's shutdown kill-and-release path.
+    #[arg(long)]
+    terminal_orphan: bool,
+    /// Call `terminal/release` with an unknown id and report the error code.
+    #[arg(long)]
+    terminal_release_unknown: bool,
+    /// Strict-agent mode: drive `fs/*` only when the client advertised both
+    /// `fs.readTextFile` and `fs.writeTextFile` at initialize.
+    #[arg(long)]
+    require_fs: bool,
+    /// During prompt handling, write this file via `fs/write_text_file` and
+    /// report the round-trip.
+    #[arg(long)]
+    fs_write_path: Option<PathBuf>,
+    #[arg(long, default_value = "fs-probe-content")]
+    fs_write_content: String,
+    /// During prompt handling, read this file via `fs/read_text_file`.
+    #[arg(long)]
+    fs_read_path: Option<PathBuf>,
+    #[arg(long)]
+    fs_read_line: Option<u32>,
+    #[arg(long)]
+    fs_read_limit: Option<u32>,
     #[arg(long)]
     expect_model_config: Option<String>,
     #[arg(long)]
@@ -156,6 +205,7 @@ struct PlaceboState {
     created_sessions: Vec<CreatedSession>,
     cancelled_sessions: HashSet<String>,
     model_configured: bool,
+    client_capabilities: Option<ClientCapabilities>,
 }
 
 impl PlaceboState {
@@ -168,11 +218,23 @@ impl PlaceboState {
             created_sessions: Vec::new(),
             cancelled_sessions: HashSet::new(),
             model_configured: false,
+            client_capabilities: None,
         }
+    }
+
+    fn client_advertised_config_options(&self) -> bool {
+        self.client_capabilities
+            .as_ref()
+            .and_then(|caps| caps.session.as_ref())
+            .and_then(|session| session.config_options.as_ref())
+            .is_some()
     }
 
     fn model_config_options(&self) -> Option<Vec<SessionConfigOption>> {
         let model = self.args.model_config_option.as_ref()?;
+        if self.args.require_client_config_options && !self.client_advertised_config_options() {
+            return None;
+        }
         Some(vec![
             SessionConfigOption::select(
                 self.args.model_config_option_id.clone(),
@@ -302,8 +364,19 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_dispatch(
-            async move |message: Dispatch, connection: ConnectionTo<Client>| {
-                message.respond_with_error(Error::method_not_found(), connection)
+            // Only claim unhandled REQUESTS. Responses and notifications must
+            // fall through to the SDK's internal routing — swallowing a
+            // response here would poison the placebo's own outbound requests
+            // (e.g. the terminal probe's terminal/create).
+            async move |message: Dispatch, connection: ConnectionTo<Client>| match message {
+                Dispatch::Request(..) => {
+                    message.respond_with_error(Error::method_not_found(), connection)?;
+                    Ok(Handled::Yes)
+                }
+                other => Ok(Handled::No {
+                    message: other,
+                    retry: false,
+                }),
             },
             agent_client_protocol::on_receive_dispatch!(),
         )
@@ -320,10 +393,11 @@ async fn handle_initialize(
     responder: Responder<InitializeResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
-    let state = state.lock().await;
+    let mut state = state.lock().await;
     if state.args.initialize_error {
         return responder.respond_with_error(Error::new(-32000, "fake initialize failure"));
     }
+    state.client_capabilities = Some(request.client_capabilities.clone());
     let mut session_capabilities = SessionCapabilities::new();
     if !state.args.no_cap_list_session {
         session_capabilities = session_capabilities.list(SessionListCapabilities::new());
@@ -579,6 +653,252 @@ async fn handle_prompt(
     if let Some(message) = args.prompt_inference_error_after_update {
         return responder.respond_with_error(Error::new(-32000, message));
     }
+    // The client probes send requests back to the client, so they must run
+    // off the event loop (block_task inside a handler deadlocks). The
+    // responder moves into the spawned task and answers from there.
+    let probe_requested = args.terminal_command.is_some()
+        || args.terminal_release_unknown
+        || args.fs_write_path.is_some()
+        || args.fs_read_path.is_some();
+    if probe_requested {
+        let (terminal_advertised, fs_advertised) = {
+            let state = state.lock().await;
+            let caps = state.client_capabilities.as_ref();
+            (
+                caps.is_some_and(|caps| caps.terminal),
+                caps.is_some_and(|caps| caps.fs.read_text_file && caps.fs.write_text_file),
+            )
+        };
+        let state_for_task = Arc::clone(&state);
+        let probe_connection = connection.clone();
+        return connection.spawn(async move {
+            let terminal_report = run_terminal_probe(
+                &args,
+                &request.session_id,
+                &probe_connection,
+                terminal_advertised,
+            )
+            .await;
+            let report = match terminal_report {
+                Ok(mut report) => {
+                    match run_fs_probe(&args, &request.session_id, &probe_connection, fs_advertised)
+                        .await
+                    {
+                        Ok(fs_report) => {
+                            report.extend(fs_report);
+                            report
+                        }
+                        Err(error) => return responder.respond_with_error(error),
+                    }
+                }
+                Err(error) => return responder.respond_with_error(error),
+            };
+            let report = serde_json::Value::Object(report);
+            probe_connection.send_notification(SessionNotification::new(
+                request.session_id.clone(),
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(format!("terminal-report:{report}")),
+                ))),
+            ))?;
+            finish_prompt(state_for_task, request, responder).await
+        });
+    }
+    finish_prompt(state, request, responder).await
+}
+
+/// `fs/*` round-trip driven against the client. Runs in a spawned task.
+async fn run_fs_probe(
+    args: &AcpArgs,
+    session_id: &SessionId,
+    connection: &ConnectionTo<Client>,
+    fs_advertised: bool,
+) -> agent_client_protocol::Result<serde_json::Map<String, serde_json::Value>> {
+    let mut report = serde_json::Map::new();
+    if args.fs_write_path.is_none() && args.fs_read_path.is_none() {
+        return Ok(report);
+    }
+    if args.require_fs && !fs_advertised {
+        report.insert(
+            "fs_skipped".to_owned(),
+            serde_json::json!("fs-not-advertised"),
+        );
+        return Ok(report);
+    }
+    if let Some(path) = &args.fs_write_path {
+        let write = WriteTextFileRequest::new(
+            session_id.clone(),
+            path.clone(),
+            args.fs_write_content.clone(),
+        );
+        match connection.send_request(write).block_task().await {
+            Ok(_) => {
+                report.insert("fs_write_ok".to_owned(), serde_json::json!(true));
+            }
+            Err(error) => {
+                report.insert(
+                    "fs_write_error_code".to_owned(),
+                    serde_json::json!(error.code),
+                );
+            }
+        }
+    }
+    if let Some(path) = &args.fs_read_path {
+        let mut read = ReadTextFileRequest::new(session_id.clone(), path.clone());
+        if let Some(line) = args.fs_read_line {
+            read = read.line(line);
+        }
+        if let Some(limit) = args.fs_read_limit {
+            read = read.limit(limit);
+        }
+        match connection.send_request(read).block_task().await {
+            Ok(response) => {
+                report.insert(
+                    "fs_read_content".to_owned(),
+                    serde_json::json!(response.content),
+                );
+            }
+            Err(error) => {
+                report.insert(
+                    "fs_read_error_code".to_owned(),
+                    serde_json::json!(error.code),
+                );
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Terminal round-trip driven against the client, reported as a JSON object.
+/// Runs in a spawned task; `block_task` is safe here.
+async fn run_terminal_probe(
+    args: &AcpArgs,
+    session_id: &SessionId,
+    connection: &ConnectionTo<Client>,
+    terminal_advertised: bool,
+) -> agent_client_protocol::Result<serde_json::Map<String, serde_json::Value>> {
+    let mut report = serde_json::Map::new();
+    if args.terminal_release_unknown {
+        let error = connection
+            .send_request(ReleaseTerminalRequest::new(
+                session_id.clone(),
+                TerminalId::new("term_unknown"),
+            ))
+            .block_task()
+            .await
+            .err();
+        report.insert(
+            "release_unknown_error_code".to_owned(),
+            serde_json::json!(error.map(|error| error.code)),
+        );
+    }
+    let Some(command) = &args.terminal_command else {
+        return Ok(report);
+    };
+    if args.require_terminal && !terminal_advertised {
+        report.insert(
+            "skipped".to_owned(),
+            serde_json::json!("terminal-not-advertised"),
+        );
+        return Ok(report);
+    }
+    let mut create = CreateTerminalRequest::new(session_id.clone(), command.clone())
+        .args(args.terminal_arg.clone());
+    if let Some(limit) = args.terminal_byte_limit {
+        create = create.output_byte_limit(limit);
+    }
+    if let Some(cwd) = &args.terminal_cwd {
+        create = create.cwd(cwd.clone());
+    }
+    let created = match connection.send_request(create).block_task().await {
+        Ok(created) => created,
+        Err(error) => {
+            report.insert(
+                "create_error_code".to_owned(),
+                serde_json::json!(error.code),
+            );
+            return Ok(report);
+        }
+    };
+    let terminal_id = created.terminal_id;
+    if args.terminal_orphan {
+        report.insert("orphaned".to_owned(), serde_json::json!(true));
+        return Ok(report);
+    }
+    if args.terminal_kill {
+        // Poll until the child has produced output before killing, so the
+        // output-stays-readable-after-kill assertion is deterministic.
+        for _ in 0..100 {
+            let output = connection
+                .send_request(TerminalOutputRequest::new(
+                    session_id.clone(),
+                    terminal_id.clone(),
+                ))
+                .block_task()
+                .await?;
+            if !output.output.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        connection
+            .send_request(KillTerminalRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .block_task()
+            .await?;
+    }
+    let exit = connection
+        .send_request(WaitForTerminalExitRequest::new(
+            session_id.clone(),
+            terminal_id.clone(),
+        ))
+        .block_task()
+        .await?;
+    report.insert(
+        "exit_code".to_owned(),
+        serde_json::json!(exit.exit_status.exit_code),
+    );
+    report.insert(
+        "signal".to_owned(),
+        serde_json::json!(exit.exit_status.signal),
+    );
+    let output = connection
+        .send_request(TerminalOutputRequest::new(
+            session_id.clone(),
+            terminal_id.clone(),
+        ))
+        .block_task()
+        .await?;
+    report.insert("output".to_owned(), serde_json::json!(output.output));
+    report.insert("truncated".to_owned(), serde_json::json!(output.truncated));
+    connection
+        .send_request(ReleaseTerminalRequest::new(
+            session_id.clone(),
+            terminal_id.clone(),
+        ))
+        .block_task()
+        .await?;
+    let post_release_error = connection
+        .send_request(TerminalOutputRequest::new(
+            session_id.clone(),
+            terminal_id.clone(),
+        ))
+        .block_task()
+        .await
+        .err();
+    report.insert(
+        "post_release_error_code".to_owned(),
+        serde_json::json!(post_release_error.map(|error| error.code)),
+    );
+    Ok(report)
+}
+
+async fn finish_prompt(
+    state: SharedState,
+    request: PromptRequest,
+    responder: Responder<PromptResponse>,
+) -> agent_client_protocol::Result<()> {
     let stop_reason = {
         let mut state = state.lock().await;
         if state

@@ -11,7 +11,7 @@ use std::time::Duration;
 /// emitting a chunk. A command that emits a giant line without a newline
 /// (`yes`, `dd if=/dev/zero …`) still produces chunks of at most this many
 /// bytes — `[commands].max_output_bytes` then caps the cumulative total.
-pub(super) const BOUNDED_READ_CHUNK_BYTES: usize = 4 * 1024;
+pub(crate) const BOUNDED_READ_CHUNK_BYTES: usize = 4 * 1024;
 
 /// Hard cap on the post-`child.wait()` drain. Without this, a child that
 /// detaches a grandchild via `setsid`/`nohup` keeps the stdout/stderr pipes
@@ -20,12 +20,12 @@ pub(super) const BOUNDED_READ_CHUNK_BYTES: usize = 4 * 1024;
 /// command row in `running`. 5s is generous for legitimate finalization
 /// (descendant ACKs, last buffered output) and short enough that an escaped
 /// descendant doesn't keep a supervisor task alive indefinitely.
-pub(super) const POST_WAIT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const POST_WAIT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
-pub(super) struct OutputChunk {
-    pub(super) stream: String,
-    pub(super) data: String,
+pub(crate) struct OutputChunk {
+    pub(crate) stream: String,
+    pub(crate) data: String,
 }
 
 #[derive(Debug)]
@@ -78,7 +78,7 @@ impl OptionFlatten for Option<i32> {
 /// sequence) are deferred into `residue_start..` for the next read to
 /// complete. Invalid bytes inside an otherwise-complete prefix are kept and
 /// decoded lossy by the caller.
-pub(super) fn utf8_split_boundary(buf: &[u8]) -> (usize, usize) {
+pub(crate) fn utf8_split_boundary(buf: &[u8]) -> (usize, usize) {
     // Look back up to 3 bytes for an incomplete UTF-8 leading sequence.
     let len = buf.len();
     for offset in 1..=3 {
@@ -111,7 +111,7 @@ pub(super) fn utf8_split_boundary(buf: &[u8]) -> (usize, usize) {
     (0, 0)
 }
 
-pub(super) fn floor_char_boundary(input: &str, max: usize) -> usize {
+pub(crate) fn floor_char_boundary(input: &str, max: usize) -> usize {
     if max >= input.len() {
         return input.len();
     }
@@ -120,6 +120,78 @@ pub(super) fn floor_char_boundary(input: &str, max: usize) -> usize {
         cutoff -= 1;
     }
     cutoff
+}
+
+/// Pump one child pipe into bounded `OutputChunk`s, carrying partial UTF-8
+/// sequences across reads so a multi-byte glyph split across the read
+/// boundary is decoded once, not twice with replacement chars on either side.
+pub(crate) async fn read_stream<R>(
+    reader: R,
+    stream: &'static str,
+    tx: tokio::sync::mpsc::Sender<OutputChunk>,
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let mut reader = reader;
+    let mut buffer = vec![0u8; BOUNDED_READ_CHUNK_BYTES];
+    // Bounded to 3 bytes max — the maximum residue from any valid UTF-8
+    // prefix.
+    let mut carryover: Vec<u8> = Vec::with_capacity(4);
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                if !carryover.is_empty() {
+                    // Flush any leftover bytes that never completed a UTF-8
+                    // sequence (a child that printed garbage and exited).
+                    let chunk = String::from_utf8_lossy(&carryover).into_owned();
+                    let _ = tx
+                        .send(OutputChunk {
+                            stream: stream.to_owned(),
+                            data: chunk,
+                        })
+                        .await;
+                }
+                return;
+            }
+            Ok(read) => {
+                let mut combined = std::mem::take(&mut carryover);
+                combined.extend_from_slice(&buffer[..read]);
+                let (decoded_end, residue_start) = utf8_split_boundary(&combined);
+                // Bound the carryover at 3 bytes. A child emitting an endless
+                // stream of stray continuation bytes (e.g. raw binary garbage
+                // starting with 0x80…) would otherwise grow this buffer
+                // unbounded because the boundary helper keeps deferring.
+                // Flush anything longer than that as lossy text and reset.
+                let (decoded_end, residue_start) = if combined.len() - residue_start > 3 {
+                    (combined.len(), combined.len())
+                } else {
+                    (decoded_end, residue_start)
+                };
+                carryover = combined[residue_start..].to_vec();
+                let chunk = String::from_utf8_lossy(&combined[..decoded_end]).into_owned();
+                if !chunk.is_empty()
+                    && tx
+                        .send(OutputChunk {
+                            stream: stream.to_owned(),
+                            data: chunk,
+                        })
+                        .await
+                        .is_err()
+                {
+                    // Receiver gone: the owner moved on. Exit quietly; this is
+                    // the normal teardown path on cancel/timeout.
+                    return;
+                }
+            }
+            Err(error) => {
+                // Surface the read failure so a broken pipe or kernel error
+                // is visible in the durable trail, not silently dropped.
+                tracing::warn!(error = %error, stream = stream, "command output reader hit IO error");
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
