@@ -449,7 +449,7 @@ fn hydrate_commands(conn: &Connection, id: &str) -> Result<Option<Map<String, Va
             SELECT id, created_at, updated_at, status, command, exit_status,
                    started_at, finished_at, cwd, env_json, duration_ms, truncated,
                    last_output_event_id, last_output_at, last_output_seq,
-                   output_bytes, last_progress_at
+                   output_bytes, last_progress_at, origin, session_id
             FROM commands WHERE id = ?1
             "#,
             params![id],
@@ -500,6 +500,12 @@ fn hydrate_commands(conn: &Connection, id: &str) -> Result<Option<Map<String, Va
                 obj.insert(
                     "output_bytes".into(),
                     Value::Number(row.get::<_, i64>(15)?.into()),
+                );
+                obj.insert("origin".into(), Value::String(row.get::<_, String>(17)?));
+                let session_id: Option<String> = row.get(18)?;
+                obj.insert(
+                    "session_id".into(),
+                    session_id.map(Value::String).unwrap_or(Value::Null),
                 );
                 Ok(obj)
             },

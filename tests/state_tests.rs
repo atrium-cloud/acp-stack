@@ -40,7 +40,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        22
+        23
     );
 }
 
@@ -142,6 +142,8 @@ fn command_output_query_filters_by_command_and_pages_forward() {
             command: "printf first",
             cwd: None,
             env_json: None,
+            origin: acp_stack::state::CommandOrigin::Operator,
+            session_id: None,
         })
         .expect("first command");
     let second = store
@@ -149,6 +151,8 @@ fn command_output_query_filters_by_command_and_pages_forward() {
             command: "printf second",
             cwd: None,
             env_json: None,
+            origin: acp_stack::state::CommandOrigin::Operator,
+            session_id: None,
         })
         .expect("second command");
 
@@ -187,6 +191,8 @@ fn command_output_and_progress_update_reconnect_fields() {
             command: "sleep",
             cwd: None,
             env_json: None,
+            origin: acp_stack::state::CommandOrigin::Operator,
+            session_id: None,
         })
         .expect("command");
     let output = store
@@ -1139,7 +1145,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 22")
+            .contains("state schema version 99 is newer than supported version 23")
     );
 }
 
@@ -2375,6 +2381,8 @@ fn metrics_summary_aggregates_within_window() {
             command: "echo hi",
             cwd: None,
             env_json: None,
+            origin: acp_stack::state::CommandOrigin::Operator,
+            session_id: None,
         })
         .unwrap();
     store
@@ -2596,6 +2604,8 @@ fn metrics_summary_exposes_prompt_failure_counters() {
             command: "echo keep window nonempty",
             cwd: None,
             env_json: None,
+            origin: acp_stack::state::CommandOrigin::Operator,
+            session_id: None,
         })
         .expect("command inserted");
 
@@ -3276,7 +3286,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        22
+        23
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

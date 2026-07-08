@@ -37,6 +37,8 @@ pub(crate) struct CommandResponse {
     last_output_seq: Option<i64>,
     output_bytes: i64,
     last_progress_at: Option<String>,
+    origin: String,
+    session_id: Option<String>,
 }
 
 impl From<crate::state::CommandRecord> for CommandResponse {
@@ -58,6 +60,8 @@ impl From<crate::state::CommandRecord> for CommandResponse {
             last_output_seq: record.last_output_seq,
             output_bytes: record.output_bytes,
             last_progress_at: record.last_progress_at,
+            origin: record.origin,
+            session_id: record.session_id,
         }
     }
 }

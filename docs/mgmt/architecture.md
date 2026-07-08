@@ -31,6 +31,7 @@ flowchart LR
 | Agent supervisor | process lifecycle for each configured ACP agent target            |
 | Array            | multi-target fleet: per-target supervision with one primary target as the default and coordination point |
 | ACP bridge       | ACP initialization, sessions, prompts, updates, and permissions   |
+| ACP terminals    | client-side `terminal/*` handlers: per-terminal owning task, registry, capped output buffer, and command-log recording (`src/runtime/agent/acp_terminal.rs`, sharing spawn/kill/read primitives with the command gateway via `commands/exec.rs`) |
 | Model catalog    | cached `models.dev` model metadata for prompt modality gating     |
 | Agent switch     | harness migration planning and provider/API-key compatibility     |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |

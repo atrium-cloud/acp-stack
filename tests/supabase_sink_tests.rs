@@ -234,6 +234,8 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
                 command: "printf hello",
                 cwd: Some("/var/secrets/repo"),
                 env_json: Some(r#"{"TOKEN":"sk-command"}"#),
+                origin: acp_stack::state::CommandOrigin::Acp,
+                session_id: Some("sess_1"),
             })
             .expect("append command");
     }
@@ -334,6 +336,12 @@ async fn happy_path_uploads_grouped_batches_and_marks_sent() {
             .get("last_output_event_id")
             .map(|v| v.is_null())
             .unwrap_or(false)
+    );
+    // The ACP-vs-operator provenance must survive into the external mirror.
+    assert_eq!(command.get("origin").and_then(|v| v.as_str()), Some("acp"));
+    assert_eq!(
+        command.get("session_id").and_then(|v| v.as_str()),
+        Some("sess_1")
     );
 
     // Local outbox state: all rows must be marked sent.

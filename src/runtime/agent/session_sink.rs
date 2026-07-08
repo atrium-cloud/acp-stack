@@ -30,6 +30,18 @@ pub trait SessionEventSink: Send + Sync + 'static {
         Box::pin(async move { Some(agent_session_id.to_owned()) })
     }
 
+    /// The locally recorded cwd of the session, used as the default working
+    /// directory for `terminal/create` requests that omit `cwd`. `None`
+    /// (sinks without session state) makes callers fall back to the
+    /// workspace root.
+    fn session_cwd<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        let _ = agent_session_id;
+        Box::pin(async move { None })
+    }
+
     fn append<'a>(
         &'a self,
         session_id: &'a str,
@@ -107,6 +119,56 @@ fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_j
         out.insert(
             "context_window_max".to_owned(),
             serde_json::Value::Number(serde_json::Number::from(v)),
+        );
+    }
+    Some(serde_json::Value::Object(out))
+}
+
+/// Derive a `tool.execute` event when the inbound `session/update` is a
+/// `tool_call` / `tool_call_update` that identifies itself as an `execute`
+/// tool. Agents that run shell through their own built-in tools (instead of
+/// client terminals) still announce those runs as tool-call blocks; lifting
+/// them out of the generic `session.update` stream makes agent shell activity
+/// filterable in logs without payload parsing. Updates that omit `kind`
+/// (ACP only requires it on the initial `tool_call`) yield `None` — the
+/// derived stream marks command starts plus whatever transitions restate the
+/// kind; the verbatim `session.update` rows keep the full lifecycle.
+fn extract_execute_tool_call(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let update = value.get("update")?;
+    let update_kind = update.get("sessionUpdate").and_then(|v| v.as_str())?;
+    if !matches!(update_kind, "tool_call" | "tool_call_update") {
+        return None;
+    }
+    if update.get("kind").and_then(|v| v.as_str()) != Some("execute") {
+        return None;
+    }
+    let tool_call_id = update.get("toolCallId").and_then(|v| v.as_str())?;
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "session_id".to_owned(),
+        serde_json::Value::String(session_id.to_owned()),
+    );
+    out.insert(
+        "tool_call_id".to_owned(),
+        serde_json::Value::String(tool_call_id.to_owned()),
+    );
+    for key in ["status", "title"] {
+        if let Some(text) = update.get(key).and_then(|v| v.as_str()) {
+            out.insert(key.to_owned(), serde_json::Value::String(text.to_owned()));
+        }
+    }
+    // The common built-in shell tools (Claude Code, OpenCode, Pi) put the
+    // command line at `rawInput.command`; agents without that convention
+    // still carry it in `title`.
+    if let Some(command) = update
+        .get("rawInput")
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str())
+    {
+        out.insert(
+            "command".to_owned(),
+            serde_json::Value::String(command.to_owned()),
         );
     }
     Some(serde_json::Value::Object(out))
@@ -233,6 +295,28 @@ impl StateStoreSessionSink {
                                 "failed to persist usage.reported event"
                             );
                         }
+                        // Agent-side shell runs announced as execute-kind
+                        // tool calls get a derived `tool.execute` event so
+                        // shell activity is filterable even when the agent
+                        // never uses client terminals.
+                        if let Some(execute) =
+                            extract_execute_tool_call(&row.session_id, &row.payload_json)
+                            && let Ok(execute_text) = serde_json::to_string(&execute)
+                            && let Err(err) = guard.append_session_event_with_source(
+                                &row.session_id,
+                                "info",
+                                "tool.execute",
+                                crate::state::EVENT_SOURCE_ACP,
+                                "agent execute tool call",
+                                &execute_text,
+                            )
+                        {
+                            tracing::warn!(
+                                error = %err,
+                                session_id = %row.session_id,
+                                "failed to persist tool.execute event"
+                            );
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -276,6 +360,28 @@ impl SessionEventSink for StateStoreSessionSink {
                         target_id = %self.target_id,
                         agent_session_id,
                         "failed to resolve ACP session id to local session id"
+                    );
+                    None
+                }
+            }
+        })
+    }
+
+    fn session_cwd<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let guard = self.state.lock().await;
+            match guard.get_session_by_target_agent_session_id(&self.target_id, agent_session_id) {
+                Ok(Some(record)) => Some(record.cwd),
+                Ok(None) => None,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        target_id = %self.target_id,
+                        agent_session_id,
+                        "failed to resolve ACP session id to local session cwd"
                     );
                     None
                 }
@@ -384,6 +490,45 @@ mod tests {
         assert_eq!(usage["output_tokens"].as_i64(), Some(3));
     }
 
+    #[test]
+    fn extract_execute_tool_call_lifts_command_from_raw_input() {
+        // Serialized shape of an ACP `tool_call` update from a built-in
+        // shell tool (Claude Code / OpenCode bash convention).
+        let payload = r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"uname -a","kind":"execute","status":"in_progress","rawInput":{"command":"uname -a","description":"print kernel info"}}}"#;
+        let event = super::extract_execute_tool_call("sess_local", payload)
+            .expect("execute tool call extracted");
+        assert_eq!(event["session_id"].as_str(), Some("sess_local"));
+        assert_eq!(event["tool_call_id"].as_str(), Some("call_1"));
+        assert_eq!(event["status"].as_str(), Some("in_progress"));
+        assert_eq!(event["title"].as_str(), Some("uname -a"));
+        assert_eq!(event["command"].as_str(), Some("uname -a"));
+    }
+
+    #[test]
+    fn extract_execute_tool_call_accepts_updates_that_restate_kind() {
+        let payload = r#"{"sessionId":"sess_1","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","kind":"execute","status":"completed"}}"#;
+        let event = super::extract_execute_tool_call("sess_local", payload)
+            .expect("execute tool call update extracted");
+        assert_eq!(event["status"].as_str(), Some("completed"));
+        // No rawInput on this transition: command absent, not empty.
+        assert!(event.get("command").is_none());
+    }
+
+    #[test]
+    fn extract_execute_tool_call_ignores_other_updates() {
+        // Non-execute tool kind.
+        let read_call = r#"{"update":{"sessionUpdate":"tool_call","toolCallId":"call_2","kind":"read","status":"pending"}}"#;
+        assert!(super::extract_execute_tool_call("s", read_call).is_none());
+        // Update without a restated kind (ACP only requires kind on the
+        // initial tool_call) must not fire.
+        let bare_update = r#"{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed"}}"#;
+        assert!(super::extract_execute_tool_call("s", bare_update).is_none());
+        // Non-tool-call updates and garbage.
+        let chunk = r#"{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
+        assert!(super::extract_execute_tool_call("s", chunk).is_none());
+        assert!(super::extract_execute_tool_call("s", "not-json").is_none());
+    }
+
     use crate::state::{NewPromptRecord, NewSessionRecord, PromptStatus, StateStore};
     use rusqlite::params;
 
@@ -450,6 +595,95 @@ mod tests {
             prompt.status, "running",
             "touch must preserve the running status"
         );
+    }
+
+    #[tokio::test]
+    async fn writer_persists_derived_tool_execute_event() {
+        use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session_for_target(
+                "target_a",
+                "agent_sess_1".to_owned(),
+                NewSessionRecord {
+                    id: "sess_local".to_owned(),
+                    agent_id: "target_a".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                },
+            )
+            .expect("session inserted");
+        let state = Arc::new(TokioMutex::new(store));
+
+        let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+        let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"uname -a","kind":"execute","status":"in_progress","rawInput":{"command":"uname -a"}}}"#;
+        sink.append("agent_sess_1", "session.update", payload).await;
+        sink.flush().await;
+
+        let guard = state.lock().await;
+        let derived = guard
+            .query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("tool.execute"),
+                source: Some("acp"),
+                ..Default::default()
+            })
+            .expect("query derived events");
+        assert_eq!(derived.len(), 1, "expected one derived tool.execute event");
+        assert!(derived[0].payload_json.contains("\"command\":\"uname -a\""));
+        assert!(
+            derived[0]
+                .payload_json
+                .contains("\"session_id\":\"sess_local\"")
+        );
+        // The verbatim session.update row is still written alongside.
+        let verbatim = guard
+            .query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
+            .expect("query verbatim events");
+        assert_eq!(verbatim.len(), 1, "expected the verbatim session.update");
+    }
+
+    #[tokio::test]
+    async fn session_cwd_resolves_local_session_record() {
+        use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session_for_target(
+                "target_a",
+                "agent_sess_1".to_owned(),
+                NewSessionRecord {
+                    id: "sess_local".to_owned(),
+                    agent_id: "target_a".to_owned(),
+                    cwd: "/tmp/session-sub".to_owned(),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                },
+            )
+            .expect("session inserted");
+        let state = Arc::new(TokioMutex::new(store));
+        let sink = StateStoreSessionSink::new("target_a".to_owned(), state);
+
+        assert_eq!(
+            sink.session_cwd("agent_sess_1").await,
+            Some("/tmp/session-sub".to_owned())
+        );
+        assert_eq!(sink.session_cwd("agent_sess_unknown").await, None);
     }
 
     #[test]

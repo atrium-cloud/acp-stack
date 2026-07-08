@@ -6,14 +6,16 @@
 //! they translate between ACP protocol types and the daemon's own request
 //! shapes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    Meta, NewSessionResponse, PermissionOptionId, RequestPermissionOutcome,
-    RequestPermissionRequest, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
-    SessionConfigSelectOptions, SessionNotification,
+    Meta, NewSessionResponse, PermissionOptionId, ReadTextFileRequest, ReadTextFileResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionNotification,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{AgentSessionConfigCategory, AgentSessionModelSelection};
@@ -21,6 +23,7 @@ use crate::runtime::agent::session_sink::SessionEventSink;
 use crate::runtime::mediation::permissions::{
     NewPermission, PermissionOutcome, PermissionService, PermissionSource,
 };
+use crate::state::StateStore;
 
 use super::acp_bridge::NotificationDrain;
 
@@ -228,6 +231,120 @@ pub(crate) async fn resolve_acp_permission(
         }
         _ => RequestPermissionOutcome::Cancelled,
     }
+}
+
+/// Byte cap on `fs/read_text_file`. ACP has no size field on the request, so
+/// the client bounds what it will load into memory for one call.
+const ACP_FS_READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// `fs/read_text_file`: workspace-contained disk read with optional 1-based
+/// `line` offset and `limit` line count. Headless, there are no editor
+/// buffers — the disk is the truth.
+pub(crate) async fn handle_read_text_file(
+    workspace_root: &Path,
+    sink: &Arc<dyn SessionEventSink>,
+    request: ReadTextFileRequest,
+) -> std::result::Result<ReadTextFileResponse, AcpFsError> {
+    let agent_session_id = request.session_id.0.to_string();
+    if sink.local_session_id(&agent_session_id).await.is_none() {
+        return Err(unknown_session_error(&agent_session_id));
+    }
+    let path = crate::workspace::resolve_workspace_abs_path(
+        workspace_root,
+        &request.path,
+        crate::workspace::PathIntent::ReadExisting,
+    )
+    .map_err(acp_fs_error)?;
+    let read = crate::workspace::read_file(&path, ACP_FS_READ_MAX_BYTES).map_err(acp_fs_error)?;
+    let content = String::from_utf8(read.content).map_err(|_| {
+        AcpFsError::invalid_params().data(serde_json::json!({
+            "reason": "file is not valid UTF-8 text",
+        }))
+    })?;
+    Ok(ReadTextFileResponse::new(slice_lines(
+        &content,
+        request.line,
+        request.limit,
+    )))
+}
+
+/// `fs/write_text_file`: workspace-contained atomic write-through plus a
+/// durable `fs.write` audit event when state is attached.
+pub(crate) async fn handle_write_text_file(
+    workspace_root: &Path,
+    state: Option<&Arc<TokioMutex<StateStore>>>,
+    sink: &Arc<dyn SessionEventSink>,
+    request: WriteTextFileRequest,
+) -> std::result::Result<WriteTextFileResponse, AcpFsError> {
+    let agent_session_id = request.session_id.0.to_string();
+    let Some(local_session_id) = sink.local_session_id(&agent_session_id).await else {
+        return Err(unknown_session_error(&agent_session_id));
+    };
+    let path = crate::workspace::resolve_workspace_abs_path(
+        workspace_root,
+        &request.path,
+        crate::workspace::PathIntent::WriteOrCreate,
+    )
+    .map_err(acp_fs_error)?;
+    let metadata = crate::workspace::write_file_atomic(&path, request.content.as_bytes())
+        .map_err(acp_fs_error)?;
+    if let Some(state) = state {
+        let payload = serde_json::json!({
+            "session_id": local_session_id,
+            "path": path.to_string_lossy(),
+            "bytes": metadata.size,
+        });
+        let store = state.lock().await;
+        if let Err(error) = store.append_event_with_source(
+            "info",
+            "fs.write",
+            crate::state::EVENT_SOURCE_ACP,
+            "",
+            &payload.to_string(),
+        ) {
+            tracing::warn!(error = %error, "failed to record fs.write audit event");
+        }
+    }
+    Ok(WriteTextFileResponse::new())
+}
+
+type AcpFsError = agent_client_protocol::Error;
+
+fn unknown_session_error(agent_session_id: &str) -> AcpFsError {
+    AcpFsError::invalid_params().data(serde_json::json!({
+        "reason": format!("unknown session `{agent_session_id}`"),
+    }))
+}
+
+/// Map workspace errors onto the ACP error space: missing file is
+/// resource-not-found, containment/validation failures are invalid-params
+/// with the reason in `data`, everything else is internal.
+fn acp_fs_error(error: StackError) -> AcpFsError {
+    match &error {
+        StackError::WorkspaceNotFound { .. } => AcpFsError::resource_not_found(None),
+        StackError::WorkspacePathInvalid { .. }
+        | StackError::WorkspaceSymlinkEscape { .. }
+        | StackError::WorkspaceParentNotFound { .. }
+        | StackError::WorkspaceTooLarge { .. } => {
+            AcpFsError::invalid_params().data(serde_json::json!({
+                "reason": error.to_string(),
+            }))
+        }
+        _ => AcpFsError::into_internal_error(error),
+    }
+}
+
+/// Apply ACP's optional 1-based `line` offset and `limit` line count.
+fn slice_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
+    if line.is_none() && limit.is_none() {
+        return content.to_owned();
+    }
+    let start = line.map_or(0, |line| line.saturating_sub(1) as usize);
+    let selected: Vec<&str> = match limit {
+        Some(limit) => content.lines().skip(start).take(limit as usize).collect(),
+        None => content.lines().skip(start).collect(),
+    };
+    selected.join("\n")
 }
 
 pub(super) fn enqueue_session_notification(

@@ -1278,7 +1278,20 @@ async fn spawn_agent_bridge(
         target_id.to_owned(),
         state.clone(),
     ));
-    let bridge = match AcpBridge::spawn(agent, env, cwd, sink, permissions, &sandbox).await {
+    let bridge = match AcpBridge::spawn(
+        agent,
+        env,
+        cwd,
+        sink,
+        permissions,
+        &sandbox,
+        Some(crate::runtime::agent::acp_bridge::TerminalCommandLog {
+            state: state.clone(),
+            event_hub: event_hub.clone(),
+        }),
+    )
+    .await
+    {
         Ok(bridge) => bridge,
         Err(err) => {
             let data = json!({

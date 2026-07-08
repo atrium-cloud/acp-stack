@@ -32,7 +32,7 @@ pub use agent::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRun, InstallerRunInput, default_installer_log_base,
 };
 pub use auth::{AuthFailure, AuthFailureFilter, AuthKeyRecord};
-pub use commands::{CommandRecord, CommandStatus, NewCommandRecord};
+pub use commands::{CommandOrigin, CommandRecord, CommandStatus, NewCommandRecord};
 pub use core::{StateStore, default_state_path};
 pub use events::{
     EVENT_SOURCE_ACP, EVENT_SOURCE_API, EVENT_SOURCE_CLI, EVENT_SOURCE_COMMAND, EVENT_SOURCE_LOCAL,

@@ -96,6 +96,7 @@ pub async fn fetch_session_config_with_timeout(
         Arc::new(NoopSink),
         None,
         &config.workspace.sandbox,
+        None,
     )
     .await?;
     let discovery =

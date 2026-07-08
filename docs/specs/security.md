@@ -83,9 +83,15 @@ Shell command policy matches both raw and shell-word-normalized command forms. C
 
 Pending requests expire according to config. Approval and denial decisions are durable events.
 
+### ACP client terminals
+
+`terminal/create` executes directly, without a permission-service gate: the VM is the security boundary, and agents send `session/request_permission` separately when their own policy requires review. Compensating controls: every terminal is recorded as an `acp`-origin row in the durable command log with its output and exit status; terminal children inherit the same `[workspace.sandbox]` profile as the agent harness; their working directory is confined to the session workspace; and they receive a clean session environment — managed `PATH` and `HOME` plus the agent-supplied vars, never the `[agent].env` provider secrets injected into the agent process itself.
+
 ## Workspace Boundary
 
 Workspace paths are resolved under `[workspace].root`. The runtime rejects absolute paths from API callers, `..` traversal, embedded NUL bytes, symlink escapes, writes through existing symlink targets, and files above `workspace.max_file_bytes`. Oversized reads/writes/uploads/downloads return `413 workspace.too_large`.
+
+ACP `fs/read_text_file` and `fs/write_text_file` requests carry absolute paths by protocol; those are accepted only when they resolve inside the session workspace through the same canonicalization and symlink refusal, and each write records a durable `fs.write` audit event.
 
 ## Local Interface
 

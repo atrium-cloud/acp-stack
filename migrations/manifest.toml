@@ -129,3 +129,9 @@ id = 22
 name = "array_sessions"
 sqlite_file = "022_array_sessions.sqlite.sql"
 postgres_file = "022_array_sessions.postgres.sql"
+
+[[migration]]
+id = 23
+name = "commands_origin"
+sqlite_file = "023_commands_origin.sqlite.sql"
+postgres_file = "023_commands_origin.postgres.sql"

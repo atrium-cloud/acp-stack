@@ -1,5 +1,6 @@
 pub mod acp_bridge;
 pub mod acp_codec;
+pub(crate) mod acp_terminal;
 pub mod agent_headless_config;
 pub mod claude_code_provider_profiles;
 pub mod config_io;

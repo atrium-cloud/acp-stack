@@ -14,28 +14,26 @@
 //!      under a hard budget, then finalize the row with the terminal status.
 
 use std::collections::HashMap;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::{Mutex as TokioMutex, oneshot, watch};
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep};
 
 use crate::error::Result;
 use crate::events::EventHub;
 use crate::runtime::mediation::permissions::PermissionOutcome;
-use crate::runtime::process_runner::kill_tokio_process_group;
 use crate::state::{CommandStatus, StateStore};
 
 use super::RunningCommand;
+use super::exec::{GraceKillOutcome, kill_with_grace, sandboxed_program};
 use super::output::{
-    BOUNDED_READ_CHUNK_BYTES, OptionFlatten, Outcome, OutputChunk, OutputCounter,
-    POST_WAIT_DRAIN_BUDGET, floor_char_boundary, utf8_split_boundary,
+    OptionFlatten, Outcome, OutputChunk, OutputCounter, POST_WAIT_DRAIN_BUDGET,
+    floor_char_boundary, read_stream,
 };
 use super::policy::ResolvedCommandCwd;
-use super::process::{kill_process_group_pid, send_terminate};
+use super::process::kill_process_group_pid;
 
 pub(super) struct SupervisorTask {
     pub(super) state: Arc<TokioMutex<StateStore>>,
@@ -344,73 +342,15 @@ impl SupervisorTask {
         self.deregister().await;
     }
 
-    /// Resolve the program + argv to spawn, applying the sandbox backend. `off`
-    /// is a verbatim `shell -c <command>`; other modes wrap it the same way the
-    /// agent harness is wrapped, so a mediated shell cannot read the daemon's
-    /// secrets either.
-    fn sandboxed_command(
-        &self,
-    ) -> std::result::Result<(std::path::PathBuf, Vec<String>), std::io::Error> {
+    fn spawn_child(&self) -> std::result::Result<tokio::process::Child, std::io::Error> {
         let shell_args = vec!["-c".to_owned(), self.command.clone()];
-        if matches!(self.sandbox.mode, crate::config::SandboxMode::Off) {
-            return Ok((std::path::PathBuf::from(&self.shell), shell_args));
-        }
-        let home = crate::fs_util::home_dir().map_err(std::io::Error::other)?;
-        let wrapped = crate::runtime::sandbox::wrap(
-            &self.sandbox,
+        let (program, args) = sandboxed_program(
             std::path::Path::new(&self.shell),
             &shell_args,
-            &home,
+            &self.sandbox,
             &self.workspace_root,
-            crate::ownership::process_euid(),
-            crate::ownership::process_egid(),
-        )
-        .map_err(std::io::Error::other)?;
-        Ok((wrapped.program, wrapped.args))
-    }
-
-    fn spawn_child(&self) -> std::result::Result<tokio::process::Child, std::io::Error> {
-        let (program, args) = self.sandboxed_command()?;
-        let mut cmd = Command::new(&program);
-        cmd.args(&args);
-        #[cfg(unix)]
-        let cwd_handle = self.cwd.open_verified()?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let cwd_fd = cwd_handle.as_raw_fd();
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::fchdir(cwd_fd) == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
-            }
-        }
-        #[cfg(not(unix))]
-        cmd.current_dir(self.cwd.path());
-        cmd.env_clear();
-        if let Some(env) = &self.env {
-            for (key, value) in env {
-                cmd.env(key, value);
-            }
-        }
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        // SIGKILL the child if the supervisor task is ever dropped — daemon
-        // shutdown, tokio runtime exit, or a panic in the supervisor itself.
-        // Without this a running command can outlive `acps serve`, and the
-        // SQLite row would stay `running` forever.
-        cmd.kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let child = cmd.spawn();
-        #[cfg(unix)]
-        drop(cwd_handle);
-        child
+        )?;
+        super::exec::spawn_child(&program, &args, &self.cwd, self.env.as_ref())
     }
 
     async fn mark_running(&self) -> Result<()> {
@@ -490,28 +430,17 @@ impl SupervisorTask {
     }
 
     async fn handle_cancel(&self, child: &mut tokio::process::Child) -> Outcome {
-        send_terminate(child);
-        match timeout(self.cancel_grace, child.wait()).await {
-            Ok(Ok(_)) => Outcome::Canceled,
-            Ok(Err(_)) => Outcome::SpawnError,
-            Err(_) => {
-                kill_tokio_process_group(child);
-                let _ = child.wait().await;
+        match kill_with_grace(child, self.cancel_grace).await {
+            GraceKillOutcome::ExitedWithinGrace(Ok(_)) | GraceKillOutcome::KilledAfterGrace => {
                 Outcome::Canceled
             }
+            GraceKillOutcome::ExitedWithinGrace(Err(_)) => Outcome::SpawnError,
         }
     }
 
     async fn handle_timeout(&self, child: &mut tokio::process::Child) -> Outcome {
-        send_terminate(child);
-        match timeout(self.cancel_grace, child.wait()).await {
-            Ok(Ok(_)) | Ok(Err(_)) => Outcome::TimedOut,
-            Err(_) => {
-                kill_tokio_process_group(child);
-                let _ = child.wait().await;
-                Outcome::TimedOut
-            }
-        }
+        kill_with_grace(child, self.cancel_grace).await;
+        Outcome::TimedOut
     }
 
     async fn handle_persistence_error(&self, child: &mut tokio::process::Child) -> Outcome {
@@ -621,82 +550,7 @@ async fn sleep_until(deadline: Instant) {
 }
 
 async fn break_for_persistence_error(child: &mut tokio::process::Child) {
-    send_terminate(child);
-    if timeout(Duration::from_millis(250), child.wait())
-        .await
-        .is_err()
-    {
-        kill_tokio_process_group(child);
-        let _ = child.wait().await;
-    }
-}
-
-async fn read_stream<R>(reader: R, stream: &'static str, tx: tokio::sync::mpsc::Sender<OutputChunk>)
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    use tokio::io::AsyncReadExt;
-    let mut reader = reader;
-    let mut buffer = vec![0u8; BOUNDED_READ_CHUNK_BYTES];
-    // Carry partial UTF-8 sequences across reads so a 3-byte glyph split
-    // across the 4 KiB boundary is decoded once, not twice with replacement
-    // chars on either side. Bounded to 3 bytes max — the maximum residue
-    // from any valid UTF-8 prefix.
-    let mut carryover: Vec<u8> = Vec::with_capacity(4);
-    loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => {
-                if !carryover.is_empty() {
-                    // Flush any leftover bytes that never completed a UTF-8
-                    // sequence (a child that printed garbage and exited).
-                    let chunk = String::from_utf8_lossy(&carryover).into_owned();
-                    let _ = tx
-                        .send(OutputChunk {
-                            stream: stream.to_owned(),
-                            data: chunk,
-                        })
-                        .await;
-                }
-                return;
-            }
-            Ok(read) => {
-                let mut combined = std::mem::take(&mut carryover);
-                combined.extend_from_slice(&buffer[..read]);
-                let (decoded_end, residue_start) = utf8_split_boundary(&combined);
-                // Bound the carryover at 3 bytes. A child emitting an endless
-                // stream of stray continuation bytes (e.g. raw binary garbage
-                // starting with 0x80…) would otherwise grow this buffer
-                // unbounded because the boundary helper keeps deferring.
-                // Flush anything longer than that as lossy text and reset.
-                let (decoded_end, residue_start) = if combined.len() - residue_start > 3 {
-                    (combined.len(), combined.len())
-                } else {
-                    (decoded_end, residue_start)
-                };
-                carryover = combined[residue_start..].to_vec();
-                let chunk = String::from_utf8_lossy(&combined[..decoded_end]).into_owned();
-                if !chunk.is_empty()
-                    && tx
-                        .send(OutputChunk {
-                            stream: stream.to_owned(),
-                            data: chunk,
-                        })
-                        .await
-                        .is_err()
-                {
-                    // Receiver gone: the supervisor moved on. Exit quietly;
-                    // this is the normal teardown path on cancel/timeout.
-                    return;
-                }
-            }
-            Err(error) => {
-                // Surface the read failure so a broken pipe or kernel error
-                // is visible in the durable trail, not silently dropped.
-                tracing::warn!(error = %error, stream = stream, "command output reader hit IO error");
-                return;
-            }
-        }
-    }
+    kill_with_grace(child, Duration::from_millis(250)).await;
 }
 
 #[cfg(test)]

@@ -26,12 +26,16 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentNotification, CancelNotification, CloseSessionRequest, ForkSessionResponse,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigValueId, SessionId,
-    SessionInfo, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    AgentNotification, CancelNotification, ClientCapabilities, ClientSessionCapabilities,
+    CloseSessionRequest, CreateTerminalRequest, FileSystemCapabilities, ForkSessionResponse,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
+    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigOptionsCapabilities,
+    SessionConfigValueId, SessionId, SessionInfo, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest, UntypedMessage,
@@ -46,7 +50,14 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
-use crate::runtime::agent::acp_codec::{enqueue_session_notification, resolve_acp_permission};
+use crate::runtime::agent::acp_codec::{
+    enqueue_session_notification, handle_read_text_file, handle_write_text_file,
+    resolve_acp_permission,
+};
+use crate::runtime::agent::acp_terminal::{
+    TerminalHandlerContext, TerminalRegistry, handle_create_terminal, handle_kill_terminal,
+    handle_release_terminal, handle_terminal_output, handle_wait_for_terminal_exit,
+};
 use crate::runtime::agent::inference_failure::{self, Classified};
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::runtime::process_runner::{forward_host_env_tokio, kill_tokio_process_group};
@@ -60,6 +71,7 @@ pub use crate::runtime::agent::acp_codec::{
     meta_message_id, prompt_message_id_meta, session_config_id_for_value, session_config_values,
     session_model_selection_for_value, session_model_values,
 };
+pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
 pub use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
@@ -249,6 +261,10 @@ pub struct AcpBridge {
     /// sink's background writer task has queued.
     sink: Arc<dyn SessionEventSink>,
     notification_drain: Arc<NotificationDrain>,
+    /// Live client terminals. Terminal children run in their own process
+    /// groups (not the agent's), so shutdown must drain this registry
+    /// explicitly — the agent-pgroup kill never reaches them.
+    terminals: Arc<TerminalRegistry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,6 +344,10 @@ impl AcpBridge {
     /// `env` is the resolved secret-name -> value map for `[agent].env`. We
     /// resolve the command path first, then `env_clear()` so only managed
     /// runtime context and explicitly resolved secrets reach the child.
+    ///
+    /// `command_log` is the durable command-log target (state store plus live
+    /// event hub) for client terminals; `None` (discovery probes, most tests)
+    /// keeps terminals functional without `commands` rows or live events.
     pub async fn spawn(
         agent: &AgentConfig,
         env: HashMap<String, String>,
@@ -335,6 +355,7 @@ impl AcpBridge {
         sink: Arc<dyn SessionEventSink>,
         permissions: Option<PermissionService>,
         sandbox: &crate::config::SandboxConfig,
+        command_log: Option<TerminalCommandLog>,
     ) -> Result<Self> {
         let command_path = resolve_command_path(&agent.command, &cwd).ok_or_else(|| {
             StackError::AgentInitializeFailed {
@@ -430,6 +451,26 @@ impl AcpBridge {
         let bridge_sink = sink.clone();
         let permission_sink = sink.clone();
 
+        // One shared handler context per bridge; each terminal handler
+        // closure gets its own Arc clone below (closure-capture rule).
+        let terminals = Arc::new(TerminalRegistry::default());
+        let terminal_context = Arc::new(TerminalHandlerContext {
+            registry: Arc::clone(&terminals),
+            workspace_root: cwd.clone(),
+            sandbox: sandbox.clone(),
+            command_log,
+            sink: sink.clone(),
+        });
+        let create_context = Arc::clone(&terminal_context);
+        let output_context = Arc::clone(&terminal_context);
+        let wait_context = Arc::clone(&terminal_context);
+        let kill_context = Arc::clone(&terminal_context);
+        let release_context = Arc::clone(&terminal_context);
+        // The fs handlers reuse the same context: they need the workspace
+        // root, state, and sink but not the registry or sandbox.
+        let fs_read_context = Arc::clone(&terminal_context);
+        let fs_write_context = Arc::clone(&terminal_context);
+
         // The SDK's Client.builder().connect_with(...) future drives the IO
         // loop until the closure returns. We spawn it as a tokio task so the
         // bridge handle can outlive the call site, and we use a oneshot
@@ -452,6 +493,108 @@ impl AcpBridge {
                             }
                         };
                         responder.respond(RequestPermissionResponse::new(outcome))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                // Terminal handlers offload to spawned tasks: they can park
+                // for a long time (wait_for_exit on a slow child, kill grace)
+                // and handler callbacks run on the connection's single event
+                // loop, which must keep processing concurrent terminal calls
+                // and session/update notifications meanwhile.
+                .on_receive_request(
+                    async move |request: CreateTerminalRequest, responder, cx| {
+                        let context = Arc::clone(&create_context);
+                        cx.spawn(async move {
+                            match handle_create_terminal(&context, request).await {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: TerminalOutputRequest, responder, cx| {
+                        let context = Arc::clone(&output_context);
+                        cx.spawn(async move {
+                            match handle_terminal_output(&context.registry, request).await {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: WaitForTerminalExitRequest, responder, cx| {
+                        let context = Arc::clone(&wait_context);
+                        cx.spawn(async move {
+                            match handle_wait_for_terminal_exit(&context.registry, request).await {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: KillTerminalRequest, responder, cx| {
+                        let context = Arc::clone(&kill_context);
+                        cx.spawn(async move {
+                            match handle_kill_terminal(&context.registry, request).await {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: ReleaseTerminalRequest, responder, cx| {
+                        let context = Arc::clone(&release_context);
+                        cx.spawn(async move {
+                            match handle_release_terminal(&context.registry, request).await {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: ReadTextFileRequest, responder, cx| {
+                        let context = Arc::clone(&fs_read_context);
+                        cx.spawn(async move {
+                            match handle_read_text_file(
+                                &context.workspace_root,
+                                &context.sink,
+                                request,
+                            )
+                            .await
+                            {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: WriteTextFileRequest, responder, cx| {
+                        let context = Arc::clone(&fs_write_context);
+                        cx.spawn(async move {
+                            match handle_write_text_file(
+                                &context.workspace_root,
+                                context.command_log.as_ref().map(|log| &log.state),
+                                &context.sink,
+                                request,
+                            )
+                            .await
+                            {
+                                Ok(response) => responder.respond(response),
+                                Err(error) => responder.respond_with_error(error),
+                            }
+                        })
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -478,7 +621,10 @@ impl AcpBridge {
                 )
                 .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
                     let response = cx
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .send_request(
+                            InitializeRequest::new(ProtocolVersion::V1)
+                                .client_capabilities(client_capabilities()),
+                        )
                         .block_task()
                         .await
                         .map_err(|err| err.to_string());
@@ -579,6 +725,7 @@ impl AcpBridge {
             spawn_pid,
             sink: bridge_sink,
             notification_drain,
+            terminals,
         })
     }
 
@@ -845,6 +992,11 @@ impl AcpBridge {
         // Clear the cloneable handle so any in-flight session calls fail
         // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
         self.clear_connection().await;
+        // Kill-and-release live client terminals before agent teardown: they
+        // run in their own process groups, so the agent-pgroup SIGKILL below
+        // would orphan them. The supervisor's crash monitor also routes
+        // through shutdown(), so this covers unplanned exits too.
+        self.terminals.drain_all().await;
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }
@@ -884,6 +1036,7 @@ impl AcpBridge {
     pub async fn terminate_probe(&self) -> Result<Option<i32>> {
         self.planned_shutdown.store(true, Ordering::SeqCst);
         self.clear_connection().await;
+        self.terminals.drain_all().await;
 
         let status = match self.child.lock().await.take() {
             Some(mut child) => {
@@ -981,6 +1134,23 @@ impl JsonRpcMessage for StackForkSessionRequest {
 
 impl JsonRpcRequest for StackForkSessionRequest {
     type Response = ForkSessionResponse;
+}
+
+/// Capabilities advertised to every agent at initialize. Each flag flips only
+/// once its agent->client handlers exist: advertising ahead of the handlers
+/// would invite calls we cannot serve. `boolean` config options stay
+/// unadvertised until `set_session_config_option` can send boolean values
+/// (today it only sends `SessionConfigValueId`).
+fn client_capabilities() -> ClientCapabilities {
+    ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true))
+        .terminal(true)
+        .session(
+            ClientSessionCapabilities::new()
+                .config_options(SessionConfigOptionsCapabilities::new()),
+        )
 }
 
 fn spawn_child_exit_watcher(
@@ -1095,7 +1265,7 @@ pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf>
     None
 }
 
-fn agent_process_path() -> Option<std::ffi::OsString> {
+pub(super) fn agent_process_path() -> Option<std::ffi::OsString> {
     let paths = command_search_paths();
     if paths.is_empty() {
         None

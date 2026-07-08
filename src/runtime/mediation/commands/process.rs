@@ -16,7 +16,7 @@ use crate::error::Result;
 use crate::state::CommandRecord;
 
 #[cfg(unix)]
-pub(super) fn send_terminate(child: &tokio::process::Child) {
+pub(crate) fn send_terminate(child: &tokio::process::Child) {
     if let Some(pid) = child.id() {
         // SAFETY: we own the child pid; negative pid targets the whole process
         // group, which we set with `process_group(0)` at spawn time.
@@ -27,7 +27,7 @@ pub(super) fn send_terminate(child: &tokio::process::Child) {
 }
 
 #[cfg(not(unix))]
-pub(super) fn send_terminate(child: &tokio::process::Child) {
+pub(crate) fn send_terminate(child: &tokio::process::Child) {
     let _ = child.start_kill();
 }
 
@@ -41,7 +41,7 @@ pub(super) fn send_terminate(child: &tokio::process::Child) {
 /// captured before `child.wait()` so the post-wait grandchild reap still
 /// works after the kernel removed the child from the process table.
 #[cfg(unix)]
-pub(super) fn kill_process_group_pid(pid: i32) {
+pub(crate) fn kill_process_group_pid(pid: i32) {
     // SAFETY: negative pid targets the process group we created via
     // `process_group(0)` at spawn time. Caller must only pass pids it owns.
     unsafe {
@@ -50,7 +50,7 @@ pub(super) fn kill_process_group_pid(pid: i32) {
 }
 
 #[cfg(not(unix))]
-pub(super) fn kill_process_group_pid(_pid: i32) {}
+pub(crate) fn kill_process_group_pid(_pid: i32) {}
 
 // Unused at the moment but reserved for callers that want to bridge into the
 // gateway via an oneshot. Keeps the API extensible without changing public

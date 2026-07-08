@@ -26,6 +26,17 @@ pub(super) const SUPABASE_EXAMPLE_URL: &str = "https://example.supabase.co";
 pub(super) const SUPABASE_DEFAULT_API_KEY_REF: &str = "SUPABASE_SECRET_KEY";
 pub(super) const SUPABASE_DEFAULT_SCHEMA: &str = "acp_stack";
 
+/// Version history of the hosted logging schema, pushed as Supabase CLI
+/// migrations. `db push` skips versions already recorded on the remote, so
+/// whenever `setup_sql` changes shape, add a NEW entry here carrying the full
+/// (idempotent) setup and demote the previous current entry to a placeholder
+/// body — existing deployments then converge by applying only the new
+/// version, while every prior version must stay listed or `db push` errors
+/// on remote-recorded versions missing from the local migrations directory.
+const SUPABASE_SUPERSEDED_MIGRATIONS: &[&str] = &["20260531000000_acp_stack_logging.sql"];
+const SUPABASE_SUPERSEDED_MIGRATION_BODY: &str = "-- Superseded acp-stack logging schema version. The current version carries\n-- the full idempotent setup; this placeholder keeps the migration history\n-- aligned with deployments that applied it before it was superseded.\n";
+const SUPABASE_CURRENT_MIGRATION: &str = "20260708000000_acp_stack_logging.sql";
+
 pub(super) const SUPABASE_ENABLED_ENV: &str = "ACP_STACK_SUPABASE_ENABLED";
 pub(super) const SUPABASE_URL_ENV: &str = "ACP_STACK_SUPABASE_URL";
 pub(super) const SUPABASE_SCHEMA_ENV: &str = "ACP_STACK_SUPABASE_SCHEMA";
@@ -315,7 +326,20 @@ fn run_supabase_setup(args: SupabaseSetupArgs, output: OutputFormat) -> Result<(
         });
     }
 
-    let writer_password = generate_writer_password();
+    // Reuse the already-provisioned writer password when one is stored:
+    // `db push` skips schema versions the remote has recorded, so a freshly
+    // generated password would land in the secret store without ever
+    // reaching the remote role, breaking mirroring auth on re-runs. A fresh
+    // password is generated only on first setup or when the stored URL does
+    // not round-trip the runtime shape (e.g. a manually set custom URL).
+    let home = home_dir()?;
+    let mut store = SecretStore::open(&home)?;
+    let stored_password = store
+        .contains(SUPABASE_DEFAULT_DB_URL_REF)
+        .then(|| store.get(SUPABASE_DEFAULT_DB_URL_REF))
+        .transpose()?
+        .and_then(writer_password_from_db_url);
+    let writer_password = stored_password.unwrap_or_else(generate_writer_password);
     let db_url = runtime_writer_db_url(&project_ref, &writer_password);
     let tempdir = tempfile::tempdir().map_err(|source| StackError::ConfigWrite {
         path: PathBuf::from("supabase-tempdir"),
@@ -331,7 +355,13 @@ fn run_supabase_setup(args: SupabaseSetupArgs, output: OutputFormat) -> Result<(
         path: migrations_dir.clone(),
         source,
     })?;
-    let migration_path = migrations_dir.join("20260531000000_acp_stack_logging.sql");
+    for superseded in SUPABASE_SUPERSEDED_MIGRATIONS {
+        atomic_write_owner_only(
+            &migrations_dir.join(superseded),
+            SUPABASE_SUPERSEDED_MIGRATION_BODY.as_bytes(),
+        )?;
+    }
+    let migration_path = migrations_dir.join(SUPABASE_CURRENT_MIGRATION);
     let sql = setup_sql(
         SUPABASE_POSTGRES_DEFAULT_SCHEMA,
         SUPABASE_DEFAULT_TABLE_PREFIX,
@@ -344,8 +374,6 @@ fn run_supabase_setup(args: SupabaseSetupArgs, output: OutputFormat) -> Result<(
     }
     run_supabase_cli(tempdir.path(), &db_push_args)?;
 
-    let home = home_dir()?;
-    let mut store = SecretStore::open(&home)?;
     store.set(SUPABASE_DEFAULT_DB_URL_REF, &db_url)?;
     let mut config = Config::load_from_default_path()?;
     let supabase = enabled_supabase_postgres_config(url);
@@ -683,6 +711,19 @@ fn runtime_writer_db_url(project_ref: &str, password: &str) -> String {
     )
 }
 
+/// Inverse of `runtime_writer_db_url`: recover the writer password from a
+/// stored runtime URL so re-running setup reuses it instead of rotating a
+/// password the remote role never receives. Returns `None` for URLs that do
+/// not match the runtime shape (e.g. a manually configured custom URL).
+fn writer_password_from_db_url(db_url: &str) -> Option<String> {
+    let rest = db_url.strip_prefix(&format!("postgresql://{SUPABASE_WRITER_ROLE}:"))?;
+    let (password, host) = rest.split_once('@')?;
+    if password.is_empty() || !host.starts_with("db.") {
+        return None;
+    }
+    Some(password.to_owned())
+}
+
 fn run_supabase_cli(cwd: &std::path::Path, args: &[&str]) -> Result<()> {
     let status = Command::new("supabase")
         .args(args)
@@ -836,6 +877,29 @@ mod tests {
             api_key_ref: SUPABASE_DEFAULT_API_KEY_REF.to_owned(),
             schema: "acp_stack".to_owned(),
         }
+    }
+
+    #[test]
+    fn writer_password_round_trips_through_runtime_db_url() {
+        let password = generate_writer_password();
+        let db_url = runtime_writer_db_url("abcdefghijklmnop", &password);
+        assert_eq!(
+            writer_password_from_db_url(&db_url).as_deref(),
+            Some(password.as_str())
+        );
+        // Custom URLs that do not match the runtime shape must not be
+        // mistaken for a reusable provisioned password.
+        assert_eq!(
+            writer_password_from_db_url("postgresql://someone:secret@host:5432/db"),
+            None
+        );
+        assert_eq!(
+            writer_password_from_db_url(&format!(
+                "postgresql://{SUPABASE_WRITER_ROLE}:secret@custom-pooler.example.com:6543/postgres"
+            )),
+            None
+        );
+        assert_eq!(writer_password_from_db_url("not-a-url"), None);
     }
 
     #[test]
