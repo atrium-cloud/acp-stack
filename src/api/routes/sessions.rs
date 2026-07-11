@@ -10,6 +10,7 @@ use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::model_catalog::selected_agent_model;
+use crate::runtime::agent::session_changes::SessionChangesSnapshot;
 use crate::runtime::agent::supervisor::parse_prompt_blocks;
 use crate::runtime::agent::supervisor::{SessionListSyncResult, resolve_session_cwd};
 use crate::state::{
@@ -861,6 +862,16 @@ pub(crate) async fn sessions_events_handler(
     Ok(ApiSuccess::new(SessionsEventsResponse {
         events: events.into_iter().map(LogEventJson::from).collect(),
     }))
+}
+
+pub(crate) async fn sessions_changes_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<SessionsTargetParams>,
+) -> std::result::Result<ApiSuccess<SessionChangesSnapshot>, StackError> {
+    resolved_stored_target_id(&state, &id, params.target_id.as_deref()).await?;
+    let snapshot = state.session_changes.snapshot(&id).await;
+    Ok(ApiSuccess::new(snapshot))
 }
 
 /// Max number of recent events returned by the snapshot endpoint. Chosen to

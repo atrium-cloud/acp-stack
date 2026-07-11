@@ -2128,6 +2128,76 @@ async fn sessions_snapshot_returns_404_for_unknown_session() {
 }
 
 #[tokio::test]
+async fn sessions_changes_returns_an_empty_ephemeral_snapshot_and_validates_target() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let session_id = "sess_changes_empty".to_owned();
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: session_id.clone(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/changes".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+    }
+
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions/{}/changes",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("changes request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("changes JSON");
+    assert_eq!(body["data"]["session_id"], session_id);
+    assert_eq!(body["data"]["revision"], 0);
+    assert_eq!(body["data"]["truncated"], false);
+    assert_eq!(body["data"]["tool_calls"], json!([]));
+    assert_eq!(
+        body["data"]["generation"]
+            .as_str()
+            .expect("generation")
+            .len(),
+        32
+    );
+
+    let wrong_target = http()
+        .get(format!(
+            "{}/v1/sessions/{}/changes?target_id=wrong",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("wrong target request");
+    assert_eq!(wrong_target.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn sessions_changes_returns_404_for_unknown_session() {
+    let harness = Harness::spawn().await;
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions/sess_does_not_exist/changes",
+            harness.base_url
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("changes request");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn sessions_snapshot_caps_recent_events_at_50() {
     let harness = Harness::spawn_with(|config| {
         config.agent.args.push("--no-cap-list-session".into());

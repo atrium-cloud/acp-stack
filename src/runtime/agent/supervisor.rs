@@ -70,6 +70,7 @@ use crate::runtime::agent::acp_bridge::{
     StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
     session_config_id_for_value, session_model_selection_for_value,
 };
+use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_SYSTEM,
@@ -262,6 +263,7 @@ struct RestartContext {
     workspace_root: String,
     env: HashMap<String, String>,
     state_store: Arc<TokioMutex<StateStore>>,
+    session_changes: SessionChangesHandle,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     sandbox: crate::config::SandboxConfig,
@@ -273,6 +275,7 @@ pub struct AgentStartRequest<'a> {
     pub workspace_root: &'a str,
     pub env: HashMap<String, String>,
     pub state: &'a Arc<TokioMutex<StateStore>>,
+    pub session_changes: &'a SessionChangesHandle,
     pub event_hub: EventHub,
     pub permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     pub sandbox: crate::config::SandboxConfig,
@@ -347,6 +350,7 @@ impl AgentSupervisor {
             workspace_root: request.workspace_root.to_owned(),
             env: request.env.clone(),
             state_store: request.state.clone(),
+            session_changes: request.session_changes.clone(),
             event_hub: request.event_hub.clone(),
             permissions: request.permissions.clone(),
             sandbox: request.sandbox.clone(),
@@ -391,6 +395,7 @@ impl AgentSupervisor {
             request.workspace_root,
             request.env,
             request.state,
+            request.session_changes,
             request.event_hub,
             request.permissions,
             request.sandbox,
@@ -1246,6 +1251,7 @@ async fn spawn_agent_bridge(
     workspace_root: &str,
     env: HashMap<String, String>,
     state: &Arc<TokioMutex<StateStore>>,
+    session_changes: &SessionChangesHandle,
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     sandbox: crate::config::SandboxConfig,
@@ -1274,9 +1280,10 @@ async fn spawn_agent_bridge(
     )
     .await?;
 
-    let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::new(
+    let sink: Arc<dyn SessionEventSink> = Arc::new(StateStoreSessionSink::with_session_changes(
         target_id.to_owned(),
         state.clone(),
+        session_changes.clone(),
     ));
     let bridge = match AcpBridge::spawn(
         agent,
@@ -1473,6 +1480,7 @@ async fn monitor_bridge_exit(
         &restart_context.workspace_root,
         restart_context.env.clone(),
         &restart_context.state_store,
+        &restart_context.session_changes,
         restart_context.event_hub.clone(),
         restart_context.permissions.clone(),
         restart_context.sandbox.clone(),

@@ -92,7 +92,7 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 
 ## Streaming
 
-ACP `session/update` notifications are persisted as durable events and published to WebSocket subscribers. Prompt submission returns quickly with a prompt id; clients can follow live updates or poll durable prompt state.
+ACP `session/update` notifications are persisted as durable events and published to WebSocket subscribers. Explicit `type: "diff"` tool-call content is also reduced into the bounded process-local snapshot returned by `GET /v1/sessions/{id}/changes`; no diff is inferred from tool kind, locations, filesystem calls, or Git. Prompt submission returns quickly with a prompt id; clients can follow live updates or poll durable prompt state.
 
 Two derived events are lifted out of the verbatim `session.update` stream when the payload shape is recognized: `usage.reported` (normalized token/context usage) and `tool.execute` (a `tool_call`/`tool_call_update` block whose kind is `execute` — the shell runs an agent performs through its own built-in tools rather than client terminals, with the command line extracted from `rawInput.command` when present). `tool.execute` fires on every update that states the execute kind; ACP only requires `kind` on the initial `tool_call`, so completion transitions typically remain visible only in the verbatim rows.
 

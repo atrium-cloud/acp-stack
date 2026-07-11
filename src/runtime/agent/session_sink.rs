@@ -9,9 +9,11 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use agent_client_protocol::schema::v1::SessionUpdate;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
+use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::state::{PromptStatus, StateStore};
 
 /// Sink for ACP `session/update` notifications. The bridge writes through this
@@ -23,6 +25,18 @@ use crate::state::{PromptStatus, StateStore};
 /// would drop in-flight writes. `flush` waits for any background writer task
 /// owned by the sink to drain; the bridge calls it during graceful shutdown.
 pub trait SessionEventSink: Send + Sync + 'static {
+    fn capture_session_update<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+        update: &'a SessionUpdate,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        let _ = update;
+        Box::pin(async move {
+            let _ = agent_session_id;
+            true
+        })
+    }
+
     fn local_session_id<'a>(
         &'a self,
         agent_session_id: &'a str,
@@ -69,6 +83,7 @@ pub trait SessionEventSink: Send + Sync + 'static {
 pub struct StateStoreSessionSink {
     target_id: String,
     state: Arc<TokioMutex<StateStore>>,
+    session_changes: SessionChangesHandle,
     tx: TokioMutex<Option<tokio::sync::mpsc::Sender<SessionEventRow>>>,
     writer: TokioMutex<Option<JoinHandle<()>>>,
 }
@@ -237,6 +252,14 @@ pub(crate) const SESSION_EVENT_BUFFER: usize = 1024;
 
 impl StateStoreSessionSink {
     pub fn new(target_id: String, state: Arc<TokioMutex<StateStore>>) -> Self {
+        Self::with_session_changes(target_id, state, SessionChangesHandle::new())
+    }
+
+    pub(crate) fn with_session_changes(
+        target_id: String,
+        state: Arc<TokioMutex<StateStore>>,
+        session_changes: SessionChangesHandle,
+    ) -> Self {
         // Session-update fanout now happens inside
         // `append_session_event_with_source` itself because `StateStore` owns
         // the live `EventHub`; the sink no longer needs its own handle.
@@ -331,6 +354,7 @@ impl StateStoreSessionSink {
         Self {
             target_id,
             state,
+            session_changes,
             tx: TokioMutex::new(Some(tx)),
             writer: TokioMutex::new(Some(writer)),
         }
@@ -338,6 +362,30 @@ impl StateStoreSessionSink {
 }
 
 impl SessionEventSink for StateStoreSessionSink {
+    fn capture_session_update<'a>(
+        &'a self,
+        agent_session_id: &'a str,
+        update: &'a SessionUpdate,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            // Only tool-call updates can carry diff content. Skipping the
+            // session lookup for everything else keeps chunk-heavy streams
+            // off the state-store lock; `append` still resolves and drops
+            // unknown sessions itself.
+            if !matches!(
+                update,
+                SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_)
+            ) {
+                return true;
+            }
+            let Some(local_session_id) = self.local_session_id(agent_session_id).await else {
+                return false;
+            };
+            self.session_changes.apply(&local_session_id, update).await;
+            true
+        })
+    }
+
     fn local_session_id<'a>(
         &'a self,
         agent_session_id: &'a str,
@@ -684,6 +732,105 @@ mod tests {
             Some("/tmp/session-sub".to_owned())
         );
         assert_eq!(sink.session_cwd("agent_sess_unknown").await, None);
+    }
+
+    #[tokio::test]
+    async fn change_capture_maps_same_agent_session_id_to_each_array_target() {
+        use crate::runtime::agent::session_changes::SessionChangesHandle;
+        use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+        use agent_client_protocol::schema::v1::{
+            Diff, SessionUpdate, ToolCall, ToolCallContent, ToolKind,
+        };
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        for (target_id, local_id) in [("target_a", "sess_local_a"), ("target_b", "sess_local_b")] {
+            store
+                .insert_session_for_target(
+                    target_id,
+                    "shared_agent_session".to_owned(),
+                    NewSessionRecord {
+                        id: local_id.to_owned(),
+                        agent_id: target_id.to_owned(),
+                        cwd: "/tmp".to_owned(),
+                        title: None,
+                        metadata_json: "{}".to_owned(),
+                    },
+                )
+                .expect("session inserted");
+        }
+        let state = Arc::new(TokioMutex::new(store));
+        let changes = SessionChangesHandle::new();
+        let sink_a = StateStoreSessionSink::with_session_changes(
+            "target_a".to_owned(),
+            state.clone(),
+            changes.clone(),
+        );
+        let sink_b = StateStoreSessionSink::with_session_changes(
+            "target_b".to_owned(),
+            state,
+            changes.clone(),
+        );
+        let update_for = |new_text: &str| {
+            SessionUpdate::ToolCall(
+                ToolCall::new("call", "edit file")
+                    .kind(ToolKind::Edit)
+                    .content(vec![ToolCallContent::Diff(
+                        Diff::new("/workspace/file", new_text).old_text("before"),
+                    )]),
+            )
+        };
+
+        assert!(
+            sink_a
+                .capture_session_update("shared_agent_session", &update_for("target a"))
+                .await
+        );
+        assert!(
+            sink_b
+                .capture_session_update("shared_agent_session", &update_for("target b"))
+                .await
+        );
+
+        let snapshot_a =
+            serde_json::to_value(changes.snapshot("sess_local_a").await).expect("snapshot a JSON");
+        let snapshot_b =
+            serde_json::to_value(changes.snapshot("sess_local_b").await).expect("snapshot b JSON");
+        assert_eq!(
+            snapshot_a["tool_calls"][0]["content"][0]["newText"],
+            "target a"
+        );
+        assert_eq!(
+            snapshot_b["tool_calls"][0]["content"][0]["newText"],
+            "target b"
+        );
+    }
+
+    #[tokio::test]
+    async fn change_capture_accepts_non_tool_updates_without_a_session_lookup() {
+        use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+        use agent_client_protocol::schema::v1::{
+            ContentBlock, ContentChunk, SessionUpdate, TextContent,
+        };
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        let sink =
+            StateStoreSessionSink::new("target".to_owned(), Arc::new(TokioMutex::new(store)));
+
+        let chunk = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("hello"),
+        )));
+        assert!(
+            sink.capture_session_update("agent_sess_unknown", &chunk)
+                .await
+        );
     }
 
     #[test]

@@ -669,6 +669,7 @@ struct BlockingSink {
     append_started: tokio::sync::Notify,
     allow_append_finish: tokio::sync::Notify,
     flush_started: tokio::sync::Notify,
+    first_append_seen: AtomicBool,
     append_done: AtomicBool,
 }
 
@@ -680,8 +681,10 @@ impl SessionEventSink for BlockingSink {
         _payload_json: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
-            self.append_started.notify_waiters();
-            self.allow_append_finish.notified().await;
+            if !self.first_append_seen.swap(true, Ordering::SeqCst) {
+                self.append_started.notify_one();
+                self.allow_append_finish.notified().await;
+            }
             self.append_done.store(true, Ordering::SeqCst);
         })
     }
@@ -747,6 +750,111 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
     );
 
     sink.allow_append_finish.notify_waiters();
+    shutdown_task
+        .await
+        .expect("shutdown task joins")
+        .expect("shutdown ok");
+    let _ = prompt_task.await.expect("prompt task joins");
+}
+
+#[derive(Default)]
+struct BlockingCaptureSink {
+    capture_started: tokio::sync::Notify,
+    allow_capture_finish: tokio::sync::Notify,
+    flush_started: tokio::sync::Notify,
+    first_capture_seen: AtomicBool,
+    append_done: AtomicBool,
+}
+
+impl SessionEventSink for BlockingCaptureSink {
+    fn capture_session_update<'a>(
+        &'a self,
+        _agent_session_id: &'a str,
+        _update: &'a agent_client_protocol::schema::v1::SessionUpdate,
+    ) -> futures::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            if !self.first_capture_seen.swap(true, Ordering::SeqCst) {
+                self.capture_started.notify_one();
+                self.allow_capture_finish.notified().await;
+            }
+            true
+        })
+    }
+
+    fn append<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _kind: &'a str,
+        _payload_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.append_done.store(true, Ordering::SeqCst);
+        })
+    }
+
+    fn flush<'a>(&'a self) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            assert!(
+                self.append_done.load(Ordering::SeqCst),
+                "shutdown flushed before blocked capture reached the raw append"
+            );
+            self.flush_started.notify_waiters();
+        })
+    }
+}
+
+#[tokio::test]
+async fn shutdown_drains_notification_queued_before_capture_blocks() {
+    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
+
+    let sink = Arc::new(BlockingCaptureSink::default());
+    let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+    let bridge = Arc::new(
+        AcpBridge::spawn(
+            &fake_agent_config(),
+            fake_env(),
+            std::env::temp_dir(),
+            sink_dyn,
+            None,
+            &Default::default(),
+            None,
+        )
+        .await
+        .expect("spawn"),
+    );
+    let response = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect("new session");
+    let prompt = PromptRequest::new(
+        response.session_id,
+        vec![ContentBlock::Text(TextContent::new(
+            "block capture until shutdown",
+        ))],
+    );
+    let prompt_bridge = Arc::clone(&bridge);
+    let prompt_task = tokio::spawn(async move { prompt_bridge.prompt_session(prompt).await });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sink.capture_started.notified(),
+    )
+    .await
+    .expect("capture started");
+
+    let shutdown_bridge = Arc::clone(&bridge);
+    let shutdown_task = tokio::spawn(async move { shutdown_bridge.shutdown().await });
+    let early_flush = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        sink.flush_started.notified(),
+    )
+    .await;
+    assert!(
+        early_flush.is_err(),
+        "sink flushed while capture was blocked"
+    );
+
+    sink.allow_capture_finish.notify_waiters();
     shutdown_task
         .await
         .expect("shutdown task joins")
