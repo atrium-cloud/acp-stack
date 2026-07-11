@@ -69,10 +69,11 @@ use super::routes::security::{
     security_check_handler, security_history_handler, security_history_show_handler,
 };
 use super::routes::sessions::{
-    sessions_cancel_handler, sessions_close_handler, sessions_create_handler,
-    sessions_events_handler, sessions_fork_handler, sessions_get_handler, sessions_list_handler,
-    sessions_load_handler, sessions_prompt_handler, sessions_prompt_status_handler,
-    sessions_resume_handler, sessions_snapshot_handler, sessions_status_handler,
+    sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
+    sessions_create_handler, sessions_events_handler, sessions_fork_handler, sessions_get_handler,
+    sessions_list_handler, sessions_load_handler, sessions_prompt_handler,
+    sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
+    sessions_status_handler,
 };
 use super::routes::status::{
     health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
@@ -92,6 +93,7 @@ use crate::config::{AgentConfig, Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::model_catalog::AgentModelCatalogManager;
+use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::runtime::agent::supervisor::AgentSupervisor;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::mediation::commands::CommandGateway;
@@ -120,6 +122,7 @@ pub struct AppState {
     pub model_catalog: Arc<AgentModelCatalogManager>,
     pub(crate) agent_targets: Arc<AgentTargetRegistry>,
     pub(crate) queued_agent_restarts: Arc<DashMap<String, ()>>,
+    pub(crate) session_changes: SessionChangesHandle,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
     pub permissions: PermissionService,
@@ -441,6 +444,7 @@ impl AppState {
             model_catalog,
             agent_targets,
             queued_agent_restarts: Arc::new(DashMap::new()),
+            session_changes: SessionChangesHandle::new(),
             event_hub,
             commands,
             permissions,
@@ -565,6 +569,7 @@ pub fn build_router(state: AppState) -> Router {
             get(sessions_prompt_status_handler),
         )
         .route("/v1/sessions/{id}/events", get(sessions_events_handler))
+        .route("/v1/sessions/{id}/changes", get(sessions_changes_handler))
         .route("/v1/sessions/{id}/snapshot", get(sessions_snapshot_handler))
         .route("/v1/workspace", get(workspace_metadata_handler))
         .route(

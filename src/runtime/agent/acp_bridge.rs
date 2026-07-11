@@ -52,7 +52,7 @@ use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_codec::{
     enqueue_session_notification, handle_read_text_file, handle_write_text_file,
-    resolve_acp_permission,
+    resolve_acp_permission, spawn_session_notification_queue,
 };
 use crate::runtime::agent::acp_terminal::{
     TerminalHandlerContext, TerminalRegistry, handle_create_terminal, handle_kill_terminal,
@@ -72,6 +72,7 @@ pub use crate::runtime::agent::acp_codec::{
     session_model_selection_for_value, session_model_values,
 };
 pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
+pub use crate::runtime::agent::session_changes::SessionChangesHandle;
 pub use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
@@ -298,7 +299,7 @@ pub struct AcpBridgeExit {
 #[derive(Default)]
 pub(super) struct NotificationDrain {
     active: AtomicUsize,
-    idle: Notify,
+    changed: Notify,
 }
 
 pub(super) struct NotificationGuard {
@@ -313,16 +314,20 @@ impl NotificationDrain {
         }
     }
 
-    async fn wait_idle(&self) {
+    pub(super) async fn wait_idle(&self) {
+        self.wait_at_most(0).await;
+    }
+
+    pub(super) async fn wait_at_most(&self, maximum: usize) {
         loop {
-            let notified = self.idle.notified();
+            let notified = self.changed.notified();
             tokio::pin!(notified);
             // Register the waiter before re-checking the count: notify_waiters()
             // stores no permit, so a wakeup fired between an unregistered check
             // and the await would be lost and the final 1->0 transition never
             // notifies again.
             notified.as_mut().enable();
-            if self.active.load(Ordering::SeqCst) == 0 {
+            if self.active.load(Ordering::SeqCst) <= maximum {
                 return;
             }
             notified.await;
@@ -332,9 +337,8 @@ impl NotificationDrain {
 
 impl Drop for NotificationGuard {
     fn drop(&mut self) {
-        if self.drain.active.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.drain.idle.notify_waiters();
-        }
+        self.drain.active.fetch_sub(1, Ordering::SeqCst);
+        self.drain.changed.notify_waiters();
     }
 }
 
@@ -446,7 +450,7 @@ impl AcpBridge {
         // session_id and then fanned out live through the event hub.
         // Non-session notifications are still logged-and-dropped.
         let notification_drain = Arc::new(NotificationDrain::default());
-        let notification_sink = sink.clone();
+        let notification_queue = spawn_session_notification_queue(sink.clone());
         let notification_drain_for_task = Arc::clone(&notification_drain);
         let bridge_sink = sink.clone();
         let permission_sink = sink.clone();
@@ -603,10 +607,11 @@ impl AcpBridge {
                         match notification {
                             AgentNotification::SessionNotification(session_note) => {
                                 enqueue_session_notification(
-                                    notification_sink.clone(),
+                                    &notification_queue,
                                     Arc::clone(&notification_drain_for_task),
-                                    &session_note,
-                                );
+                                    session_note,
+                                )
+                                .await;
                             }
                             other => {
                                 tracing::debug!(

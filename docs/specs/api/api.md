@@ -123,6 +123,7 @@ The `/v1/agent/*` routes operate on the Array `primary_target`. Session routes a
 | `DELETE /v1/sessions/{id}`                  | session | closes the agent-side session and preserves local history      |
 | `GET /v1/sessions/{id}/prompts/{prompt_id}` | session | returns prompt status                                          |
 | `GET /v1/sessions/{id}/events`              | session | returns durable session events                                 |
+| `GET /v1/sessions/{id}/changes`             | session | returns the process-local ACP file-diff snapshot               |
 | `GET /v1/sessions/{id}/snapshot`            | session | returns session row, in-flight prompts, and recent events      |
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
@@ -132,6 +133,8 @@ Before a prompt row is created, media-bearing prompts are checked against the se
 Session create, load, resume, and fork accept an optional `cwd`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before reuse. Explicit load/resume CWDs are stored after the agent accepts the call. Closed sessions cannot be loaded, resumed, forked, or prompted.
 
 Session close is history-preserving: the runtime calls ACP `session/close` when supported, marks the local row `closed`, and keeps durable events/query history. Permanent deletion is deferred until product semantics are defined.
+
+`GET /v1/sessions/{id}/changes` reduces explicit ACP `type: "diff"` tool-call content into the latest tool-call snapshot. A missing `oldText` is returned as `null` and represents a created file. Tool-call-update content replaces the prior collection when present and otherwise leaves it intact. The snapshot is bounded, process-local, and identified by `generation` plus `revision`; `truncated: true` means whole tool calls were omitted by a capacity limit. It is not rebuilt from SQLite after restart. Raw `session.update` event persistence and WebSocket delivery are unchanged.
 
 `POST /v1/sessions/{id}/fork` also accepts optional `{ "message_id": "<prompt message id>" }`. `message_id` requires an acknowledged ACP prompt message id from the parent session; unsupported fork capabilities return HTTP 501 `agent.unsupported_capability`.
 
