@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod model_catalog;
 pub mod model_discovery;
 pub mod provider_keys;
+pub(crate) mod session_changes;
 pub mod session_sink;
 pub(crate) mod stale_prompt_sweeper;
 pub mod supervisor;

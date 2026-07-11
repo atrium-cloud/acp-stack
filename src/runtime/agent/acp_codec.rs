@@ -13,9 +13,9 @@ use agent_client_protocol::schema::v1::{
     Meta, NewSessionResponse, PermissionOptionId, ReadTextFileRequest, ReadTextFileResponse,
     RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionNotification,
-    WriteTextFileRequest, WriteTextFileResponse,
+    SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{AgentSessionConfigCategory, AgentSessionModelSelection};
@@ -25,12 +25,49 @@ use crate::runtime::mediation::permissions::{
 };
 use crate::state::StateStore;
 
-use super::acp_bridge::NotificationDrain;
+use super::acp_bridge::{NotificationDrain, NotificationGuard};
 
 /// `_meta` namespace for acp-stack's local protocol extensions (also read by
 /// `AgentCapabilitiesDto::supports_fork_message_id`).
 const ACP_STACK_META_KEY: &str = "acpStack";
 const MESSAGE_ID_META_KEY: &str = "messageId";
+
+/// At most one notification may wait behind the worker. A notification owns
+/// both parsed ACP content and its raw JSON payload, so a deeper queue could
+/// multiply memory use for large file diffs. The producer transfers ownership
+/// before waiting, which keeps shutdown cancellation lossless.
+const SESSION_NOTIFICATION_BACKLOG: usize = 1;
+
+pub(super) struct QueuedSessionNotification {
+    agent_session_id: String,
+    update: SessionUpdate,
+    payload: String,
+    _guard: NotificationGuard,
+}
+
+pub(super) type SessionNotificationSender = mpsc::UnboundedSender<QueuedSessionNotification>;
+
+pub(super) fn spawn_session_notification_queue(
+    sink: Arc<dyn SessionEventSink>,
+) -> SessionNotificationSender {
+    let (sender, mut receiver) = mpsc::unbounded_channel::<QueuedSessionNotification>();
+    tokio::spawn(async move {
+        while let Some(notification) = receiver.recv().await {
+            if sink
+                .capture_session_update(&notification.agent_session_id, &notification.update)
+                .await
+            {
+                sink.append(
+                    &notification.agent_session_id,
+                    "session.update",
+                    &notification.payload,
+                )
+                .await;
+            }
+        }
+    });
+    sender
+}
 
 /// Wire shape of the local prompt message-id extension since ACP v1 dropped
 /// the unstable top-level `messageId` fields: the client stamps
@@ -347,10 +384,10 @@ fn slice_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
     selected.join("\n")
 }
 
-pub(super) fn enqueue_session_notification(
-    sink: Arc<dyn SessionEventSink>,
+pub(super) async fn enqueue_session_notification(
+    sender: &SessionNotificationSender,
     drain: Arc<NotificationDrain>,
-    note: &SessionNotification,
+    note: SessionNotification,
 ) {
     // Serialize the verbatim notification payload so downstream queriers can
     // reconstruct the full ACP update without re-deriving from the typed enum.
@@ -361,12 +398,21 @@ pub(super) fn enqueue_session_notification(
             return;
         }
     };
-    let session_id = note.session_id.0.to_string();
-    let guard = drain.enter();
-    tokio::spawn(async move {
-        sink.append(&session_id, "session.update", &payload).await;
-        drop(guard);
-    });
+    let agent_session_id = note.session_id.0.to_string();
+    let notification = QueuedSessionNotification {
+        agent_session_id,
+        update: note.update,
+        payload,
+        _guard: drain.enter(),
+    };
+    if sender.send(notification).is_err() {
+        tracing::warn!("session/update worker stopped; dropping notification");
+        return;
+    }
+    // Ownership has transferred to the drain-owned worker before this await.
+    // The ACP callback is sequential, so at most one additional notification
+    // can queue while the worker is blocked without risking shutdown loss.
+    drain.wait_at_most(SESSION_NOTIFICATION_BACKLOG).await;
 }
 
 #[cfg(test)]
@@ -374,23 +420,38 @@ mod tests {
     use super::*;
     use crate::config::PermissionTimeoutAction;
     use crate::events::EventHub;
+    use crate::runtime::agent::session_changes::SessionChangesHandle;
     use crate::runtime::mediation::permissions::PermissionService;
     use crate::state::StateStore;
     use agent_client_protocol::JsonRpcMessage;
     use agent_client_protocol::schema::v1::{
         AgentNotification, PermissionOption, PermissionOptionId, PermissionOptionKind,
-        RequestPermissionRequest, SessionId, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+        RequestPermissionRequest, SessionId, SessionUpdate, ToolCallId, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
 
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<(String, String, String)>>,
+        changes: SessionChangesHandle,
     }
 
     impl SessionEventSink for RecordingSink {
+        fn capture_session_update<'a>(
+            &'a self,
+            agent_session_id: &'a str,
+            update: &'a SessionUpdate,
+        ) -> futures::future::BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.changes.apply(agent_session_id, update).await;
+                true
+            })
+        }
+
         fn append<'a>(
             &'a self,
             session_id: &'a str,
@@ -405,6 +466,76 @@ mod tests {
                 ));
             })
         }
+    }
+
+    #[derive(Default)]
+    struct BlockingNotificationSink {
+        operations: Mutex<Vec<String>>,
+        first_capture_started: tokio::sync::Notify,
+        release_first_capture: tokio::sync::Notify,
+        first_capture_seen: AtomicBool,
+    }
+
+    impl SessionEventSink for BlockingNotificationSink {
+        fn capture_session_update<'a>(
+            &'a self,
+            _agent_session_id: &'a str,
+            update: &'a SessionUpdate,
+        ) -> futures::future::BoxFuture<'a, bool> {
+            Box::pin(async move {
+                let SessionUpdate::ToolCall(tool_call) = update else {
+                    panic!("test notification must contain a tool call");
+                };
+                self.operations
+                    .lock()
+                    .expect("operations lock")
+                    .push(format!("capture:{}", tool_call.tool_call_id.0));
+                if !self.first_capture_seen.swap(true, Ordering::SeqCst) {
+                    self.first_capture_started.notify_one();
+                    self.release_first_capture.notified().await;
+                }
+                true
+            })
+        }
+
+        fn append<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _kind: &'a str,
+            payload_json: &'a str,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            Box::pin(async move {
+                let payload: serde_json::Value =
+                    serde_json::from_str(payload_json).expect("notification payload JSON");
+                let tool_call_id = payload["update"]["toolCallId"]
+                    .as_str()
+                    .expect("tool call id");
+                self.operations
+                    .lock()
+                    .expect("operations lock")
+                    .push(format!("append:{tool_call_id}"));
+            })
+        }
+    }
+
+    fn tool_call_notification(tool_call_id: &str) -> SessionNotification {
+        let params = serde_json::json!({
+            "sessionId": "sess_queue",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": tool_call_id,
+                "title": format!("Edit {tool_call_id}"),
+                "kind": "edit",
+                "status": "in_progress",
+                "content": []
+            }
+        });
+        let notification = AgentNotification::parse_message("session/update", &params)
+            .expect("tool call notification should deserialize");
+        let AgentNotification::SessionNotification(note) = notification else {
+            panic!("tool call should be a session notification");
+        };
+        note
     }
 
     fn fake_request(session_id: &str) -> RequestPermissionRequest {
@@ -611,14 +742,107 @@ mod tests {
         };
         let sink = Arc::new(RecordingSink::default());
         let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
-        enqueue_session_notification(sink_dyn, Arc::new(NotificationDrain::default()), &note);
+        let drain = Arc::new(NotificationDrain::default());
+        let queue = spawn_session_notification_queue(sink_dyn);
+        enqueue_session_notification(&queue, Arc::clone(&drain), note).await;
+        drain.wait_idle().await;
 
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
         let events = sink.events.lock().expect("sink events");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "sess_usage");
         assert_eq!(events[0].1, "session.update");
         assert!(events[0].2.contains(r#""sessionUpdate":"usage_update""#));
+    }
+
+    #[tokio::test]
+    async fn diff_notification_updates_transient_snapshot_and_preserves_raw_event() {
+        let params = serde_json::json!({
+            "sessionId": "sess_diff",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_1",
+                "title": "Edit secret file",
+                "kind": "edit",
+                "status": "completed",
+                "content": [{
+                    "type": "diff",
+                    "path": "/workspace/.env",
+                    "oldText": "TOKEN=old",
+                    "newText": "TOKEN=new",
+                    "_meta": {"source": "agent"}
+                }]
+            }
+        });
+        let notification = AgentNotification::parse_message("session/update", &params)
+            .expect("diff notification should deserialize");
+        let AgentNotification::SessionNotification(note) = notification else {
+            panic!("diff should be a session notification");
+        };
+        let sink = Arc::new(RecordingSink::default());
+        let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+        let drain = Arc::new(NotificationDrain::default());
+        let queue = spawn_session_notification_queue(sink_dyn);
+        enqueue_session_notification(&queue, Arc::clone(&drain), note).await;
+        drain.wait_idle().await;
+
+        let snapshot =
+            serde_json::to_value(sink.changes.snapshot("sess_diff").await).expect("snapshot JSON");
+        assert_eq!(
+            snapshot["tool_calls"][0]["content"][0]["path"],
+            "/workspace/.env"
+        );
+        assert_eq!(
+            snapshot["tool_calls"][0]["content"][0]["newText"],
+            "TOKEN=new"
+        );
+        let events = sink.events.lock().expect("sink events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "sess_diff");
+        assert!(events[0].2.contains(r#""oldText":"TOKEN=old""#));
+        assert!(events[0].2.contains(r#""newText":"TOKEN=new""#));
+    }
+
+    #[tokio::test]
+    async fn queued_notification_survives_backpressured_producer_cancellation_in_fifo_order() {
+        let sink = Arc::new(BlockingNotificationSink::default());
+        let sink_dyn: Arc<dyn SessionEventSink> = sink.clone();
+        let drain = Arc::new(NotificationDrain::default());
+        let queue = spawn_session_notification_queue(sink_dyn);
+
+        enqueue_session_notification(&queue, Arc::clone(&drain), tool_call_notification("first"))
+            .await;
+        sink.first_capture_started.notified().await;
+
+        let second_queue = queue.clone();
+        let second_drain = Arc::clone(&drain);
+        let mut second_enqueue = tokio::spawn(async move {
+            enqueue_session_notification(
+                &second_queue,
+                second_drain,
+                tool_call_notification("second"),
+            )
+            .await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second_enqueue)
+                .await
+                .is_err(),
+            "second producer should backpressure after transferring queue ownership"
+        );
+        second_enqueue.abort();
+        let _ = second_enqueue.await;
+
+        sink.release_first_capture.notify_one();
+        drain.wait_idle().await;
+
+        assert_eq!(
+            *sink.operations.lock().expect("operations lock"),
+            [
+                "capture:first",
+                "append:first",
+                "capture:second",
+                "append:second"
+            ]
+        );
     }
 }
