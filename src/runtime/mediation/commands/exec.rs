@@ -50,6 +50,7 @@ pub(crate) fn spawn_child(
     args: &[String],
     cwd: &ResolvedCommandCwd,
     env: Option<&HashMap<String, String>>,
+    sandbox: &crate::config::SandboxConfig,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -71,6 +72,11 @@ pub(crate) fn spawn_child(
     }
     #[cfg(not(unix))]
     cmd.current_dir(cwd.path());
+    // Network-isolated spawns need the daemon's stderr at the supervisor's
+    // diagnostic fd; stdout/stderr below are captured pipes, not a channel the
+    // supervisor may write to.
+    #[cfg(unix)]
+    let diag_handle = crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, &mut cmd, args)?;
     cmd.env_clear();
     if let Some(env) = env {
         for (key, value) in env {
@@ -89,6 +95,8 @@ pub(crate) fn spawn_child(
     let child = cmd.spawn();
     #[cfg(unix)]
     drop(cwd_handle);
+    #[cfg(unix)]
+    drop(diag_handle);
     child
 }
 

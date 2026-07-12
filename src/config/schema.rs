@@ -184,6 +184,11 @@ pub struct SandboxConfig {
     /// beyond the workspace root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_paths: Vec<String>,
+    /// Network isolation for each wrapped spawn. Omitted block means `host`
+    /// networking, which preserves the pre-network wrapper byte for byte.
+    /// Only valid with `mode = "unshare"`. See [`SandboxNetworkConfig`].
+    #[serde(default, skip_serializing_if = "SandboxNetworkConfig::is_host")]
+    pub network: SandboxNetworkConfig,
 }
 
 impl SandboxConfig {
@@ -203,6 +208,76 @@ pub enum SandboxMode {
     Unshare,
     Bwrap,
     Custom,
+}
+
+pub const DEFAULT_SANDBOX_NETWORK_PROVIDER_TIMEOUT: &str = "30s";
+
+/// Per-spawn network isolation for the `unshare` backend. `isolated` gives each
+/// wrapped spawn a fresh network namespace; with no `provider` the namespace is
+/// deny-all (not even loopback is configured). An operator-supplied provider
+/// argv is invoked as `<exe> setup|teardown <args...>` to attach veth devices,
+/// routes, DNS, or proxies — acp-stack itself never configures interfaces or
+/// inspects traffic.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxNetworkConfig {
+    #[serde(default)]
+    pub mode: SandboxNetworkMode,
+    /// Lifecycle provider argv. Empty means no provider: deny-all networking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider: Vec<String>,
+    /// Duration string applied independently to provider setup and teardown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_timeout: Option<String>,
+    /// Where provider stderr goes: the daemon's stderr diagnostic channel, or
+    /// discarded. Provider stdout is always discarded.
+    #[serde(default, skip_serializing_if = "SandboxProviderStderr::is_default")]
+    pub provider_stderr: SandboxProviderStderr,
+}
+
+impl SandboxNetworkConfig {
+    pub fn is_host(&self) -> bool {
+        *self == SandboxNetworkConfig::default()
+    }
+
+    pub fn is_isolated(&self) -> bool {
+        self.mode == SandboxNetworkMode::Isolated
+    }
+
+    pub fn provider_timeout_raw(&self) -> &str {
+        self.provider_timeout
+            .as_deref()
+            .unwrap_or(DEFAULT_SANDBOX_NETWORK_PROVIDER_TIMEOUT)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxNetworkMode {
+    #[default]
+    Host,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxProviderStderr {
+    #[default]
+    Daemon,
+    Null,
+}
+
+impl SandboxProviderStderr {
+    fn is_default(&self) -> bool {
+        *self == SandboxProviderStderr::default()
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SandboxProviderStderr::Daemon => "daemon",
+            SandboxProviderStderr::Null => "null",
+        }
+    }
 }
 
 /// Source for code that init should seed under `<workspace.root>/usr/code/`.

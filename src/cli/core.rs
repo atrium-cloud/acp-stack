@@ -228,6 +228,20 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
+    /// Internal: network-namespace lifecycle supervisor for isolated sandbox
+    /// spawns. Not for direct use.
+    #[command(name = "__sandbox-supervise", hide = true)]
+    SandboxSupervise {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Internal: provider process-group monitor for network-isolated sandbox
+    /// spawns. Not for direct use.
+    #[command(name = "__sandbox-provider-supervise", hide = true)]
+    SandboxProviderSupervise {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
 }
 
 #[cfg(feature = "dev-tools")]
@@ -262,6 +276,16 @@ fn run_cli(cli: Cli) -> Result<()> {
     // open (or spuriously write) the durable `cli.error` log.
     if let Command::SandboxExec { args } = cli.command {
         return crate::runtime::sandbox::run_exec(args);
+    }
+    // Same reasoning for the network supervisor: its stdio belongs to the
+    // workload (the ACP transport for agent spawns), and it terminates itself
+    // mirroring the workload's status, so it must never reach the output or
+    // error-recording machinery.
+    if let Command::SandboxSupervise { args } = cli.command {
+        return crate::runtime::sandbox::supervise::run_supervise(args);
+    }
+    if let Command::SandboxProviderSupervise { args } = cli.command {
+        return crate::runtime::sandbox::supervise::run_provider_supervise(args);
     }
     let output = OutputFormatChoice::new(cli.format);
     let result = match cli.command {
@@ -335,6 +359,12 @@ fn run_cli(cli: Cli) -> Result<()> {
         // Dispatched in the fast path above, before this match.
         Command::SandboxExec { .. } => {
             unreachable!("__sandbox-exec is dispatched before output handling")
+        }
+        Command::SandboxSupervise { .. } => {
+            unreachable!("__sandbox-supervise is dispatched before output handling")
+        }
+        Command::SandboxProviderSupervise { .. } => {
+            unreachable!("__sandbox-provider-supervise is dispatched before output handling")
         }
     };
 
