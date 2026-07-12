@@ -632,7 +632,7 @@ pub(crate) async fn handle_create_terminal(
         }
     };
 
-    let spawn_result = spawn_child(&program, &args, &resolved_cwd, Some(&env));
+    let spawn_result = spawn_child(&program, &args, &resolved_cwd, Some(&env), &context.sandbox);
     let child = match spawn_result {
         Ok(child) => child,
         Err(error) => {
@@ -950,6 +950,7 @@ mod tests {
             ],
             &resolved,
             None,
+            &crate::config::SandboxConfig::default(),
         )
         .expect("spawn");
 
@@ -990,6 +991,7 @@ mod tests {
             &["-c".to_owned(), "sleep 30".to_owned()],
             &resolved,
             None,
+            &crate::config::SandboxConfig::default(),
         )
         .expect("spawn");
 
@@ -1200,6 +1202,7 @@ mod tests {
             &["-c".to_owned(), "sleep 30".to_owned()],
             &resolved,
             None,
+            &crate::config::SandboxConfig::default(),
         )
         .expect("spawn");
         let pid = child.id().expect("child pid") as i32;

@@ -122,7 +122,7 @@ acps workspace sandbox set --mode <off|unshare|bwrap|custom> [--wrapper-arg <arg
 
 `workspace sync` creates missing workspace base directories and syncs every configured source. Existing source destinations with matching sentinels are verified and skipped.
 
-`workspace sandbox set` manages only `[workspace.sandbox].mode` and `wrapper`; existing extra mask and allow paths are preserved. Non-`off` modes are preflighted before config is written. Sandbox changes require a supervised-agent restart with `acps restart`; they do not require a daemon restart.
+`workspace sandbox set` manages only `[workspace.sandbox].mode` and `wrapper`; existing extra mask and allow paths and any `[workspace.sandbox.network]` block are preserved. The network block has no CLI flags — it is configured only through imported or directly edited TOML — and a mode change that would conflict with a configured network block (anything other than `unshare`) fails without writing, pointing at the block to remove or change first. Non-`off` modes are preflighted before config is written. `workspace sandbox status` additionally reports the network mode, provider, timeout, and provider stderr routing when network isolation is configured. Sandbox changes require a supervised-agent restart with `acps restart`; they do not require a daemon restart.
 
 ## Secret Commands
 

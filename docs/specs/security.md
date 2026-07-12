@@ -129,6 +129,34 @@ Backends are selected by `[workspace.sandbox].mode`:
 
 Secrets referenced in `[agent].env` are still delivered to the harness through its environment under every backend; only on-disk secrets and the control socket are masked. The same wrapping applies to mediated shell commands, so a shell command the agent runs cannot read the daemon's secrets either.
 
+### Network isolation (`unshare` only)
+
+`[workspace.sandbox.network]` adds per-spawn network-namespace isolation to the `unshare` backend. An omitted block means `mode = "host"`: the workload shares the host network stack and the wrapper is unchanged byte for byte. Any non-default network block with a backend other than `unshare` is rejected at config load; in particular `bwrap` network isolation is not implemented and configuring it would imply an unenforced guarantee. `mode = "host"` with provider settings is likewise rejected — a block that looks configured but enforces nothing must not load. Isolated networking also requires working Linux `pidfd_open` and `pidfd_send_signal` syscalls; startup fails closed when the kernel or seccomp policy blocks them. There is no CLI surface for the block — imported or directly edited TOML is the only way to configure it, and `acps workspace sandbox set` refuses (without writing) a mode change that would conflict with a configured network block.
+
+```toml
+[workspace.sandbox]
+mode = "unshare"
+
+[workspace.sandbox.network]
+mode = "isolated"
+provider = ["/usr/local/libexec/acps-network-provider", "--config", "/etc/provider.toml"]
+provider_timeout = "30s"
+provider_stderr = "daemon"
+```
+
+`isolated` gives every wrapped spawn (agent harness and each mediated command alike) its own fresh network namespace. With an empty `provider` the namespace is deny-all: acp-stack configures nothing, not even loopback. All network policy — veth devices, routes, DNS, gateways, proxies — belongs to the optional operator-supplied lifecycle provider; acp-stack never injects proxy variables, configures interfaces, resolves DNS, or inspects traffic.
+
+The provider is invoked as `<executable> setup <configured-args...>` when the namespace exists but before the workload runs, and `<executable> teardown <configured-args...>` after the workload exits, each bounded independently by `provider_timeout` (default `30s`). The executable must be an absolute path — mediated spawns can run without `PATH` in their environment, so name resolution is not deterministic. Setup is fail-closed: on nonzero exit or timeout the workload is never executed, teardown is attempted for partial-setup cleanup, and the spawn fails. Both phases must be idempotent. Each phase runs in an internal monitor's process group; a liveness fd makes supervisor death kill the monitor, provider, and descendants, so providers must remain in that inherited group and must not daemonize, call `setsid`, or otherwise detach. The provider runs with the supervisor's privileges, `/` as its working directory (never the agent-writable workload cwd), and a cleared environment holding exactly the contract variables (it must set its own `PATH`); agent environment variables and secrets never reach it:
+
+- `ACPS_SANDBOX_NETWORK_PROTOCOL=1` — provider protocol version.
+- `ACPS_SANDBOX_NETWORK_ID=<random-id>` — unique identifier for this wrapped spawn.
+- `ACPS_SANDBOX_NETWORK_NAMESPACE=<proc-fd-path>` — namespace handle usable with `setns` or `nsenter`, valid through teardown.
+- `ACPS_SANDBOX_NETWORK_PID=<host-pid>` — namespace-owning process PID, guaranteed during setup only (it is omitted at teardown).
+
+Provider stdout is always discarded so it cannot corrupt the ACP transport. Provider stderr goes to the daemon's stderr diagnostic channel (`provider_stderr = "daemon"`, the default) or is discarded (`"null"`); it is never attached to a mediated command's captured output. A provider killed by supervisor SIGKILL must reconcile any host resources not tied to namespace destruction on its next run.
+
+Scope of the guarantee: a network namespace isolates the IPv4/IPv6 stacks and abstract-namespace Unix sockets, but it does not block pathname Unix sockets — those are filesystem objects. The daemon's control socket stays protected by the tmpfs path masking above, not by the network namespace.
+
 ```mermaid
 flowchart TB
     subgraph Daemon["Daemon — trusted, holds privilege"]

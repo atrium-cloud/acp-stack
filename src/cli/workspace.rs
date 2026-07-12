@@ -341,6 +341,19 @@ fn add_data_source_to_config(config: &mut Config, source: DataSourceConfig) -> R
 
 fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
     validate_sandbox_args(args)?;
+    // The network block has no CLI surface, so a mode change can never fix an
+    // incompatible combination in the same invocation — fail before any write
+    // with a pointer at the block instead of a generic validation error.
+    if !config.workspace.sandbox.network.is_host() && args.mode != SandboxModeArg::Unshare {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.network",
+            reason: format!(
+                "cannot set sandbox mode `{}` while a [workspace.sandbox.network] block is \
+                 configured; remove or change the network block in the config TOML first",
+                sandbox_mode_label(args.mode.to_config())
+            ),
+        });
+    }
     let mut sandbox_config = config.workspace.sandbox.clone();
     sandbox_config.mode = args.mode.to_config();
     sandbox_config.wrapper = if args.mode == SandboxModeArg::Custom {
@@ -535,6 +548,23 @@ fn print_sandbox_status(config: &Config, output: OutputFormat) -> Result<()> {
             shell_words(&config.workspace.sandbox.wrapper)
         );
     }
+    let network = &config.workspace.sandbox.network;
+    if network.is_isolated() {
+        println!("network: isolated");
+        if network.provider.is_empty() {
+            println!("network provider: none (deny-all)");
+        } else {
+            println!("network provider: {}", shell_words(&network.provider));
+        }
+        println!(
+            "network provider timeout: {}",
+            network.provider_timeout_raw()
+        );
+        println!(
+            "network provider stderr: {}",
+            network.provider_stderr.as_str()
+        );
+    }
     println!("restart required for changes: supervised-agent (`acps restart`)");
     Ok(())
 }
@@ -624,11 +654,26 @@ fn source_reports_json(
 }
 
 fn sandbox_config_json(config: &Config) -> Value {
-    json!({
+    let network = &config.workspace.sandbox.network;
+    let mut value = json!({
         "mode": sandbox_mode_label(config.workspace.sandbox.mode),
         "wrapper": config.workspace.sandbox.wrapper,
         "restart_required_for_changes": "supervised-agent",
-    })
+    });
+    if network.is_isolated()
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            "network".to_owned(),
+            json!({
+                "mode": "isolated",
+                "provider_configured": !network.provider.is_empty(),
+                "provider_timeout": network.provider_timeout_raw(),
+                "provider_stderr": network.provider_stderr.as_str(),
+            }),
+        );
+    }
+    value
 }
 
 fn outcome_label(outcome: &MaterializeOutcome) -> &'static str {
@@ -827,6 +872,27 @@ mod tests {
         .expect_err("custom wrapper must be required");
 
         assert!(error.to_string().contains("--wrapper-arg"));
+    }
+
+    #[test]
+    fn sandbox_set_fails_without_write_when_network_block_conflicts() {
+        let mut config = fixture_config();
+        config.workspace.sandbox.mode = SandboxMode::Unshare;
+        config.workspace.sandbox.network.mode = config::SandboxNetworkMode::Isolated;
+        let before = config.clone();
+
+        for mode in [SandboxModeArg::Off, SandboxModeArg::Bwrap] {
+            let error = apply_sandbox_set(
+                &mut config,
+                &SandboxSetArgs {
+                    mode,
+                    wrapper_args: Vec::new(),
+                },
+            )
+            .expect_err("a configured network block must block the mode change");
+            assert!(error.to_string().contains("workspace.sandbox.network"));
+            assert_eq!(config, before, "config must be untouched on failure");
+        }
     }
 
     #[test]

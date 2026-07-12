@@ -417,10 +417,17 @@ impl AcpBridge {
         #[cfg(unix)]
         command.process_group(0);
         command.kill_on_drop(true);
+        // Network-isolated spawns get the daemon's stderr at the supervisor's
+        // diagnostic fd (a no-op wrapper-detection pass for every other mode).
+        #[cfg(unix)]
+        let diag_handle =
+            crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, &mut command, &wrapped.args)
+                .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
-        let mut child = command
-            .spawn()
-            .map_err(|source| StackError::AgentSpawnFailed { source })?;
+        let spawn_result = command.spawn();
+        #[cfg(unix)]
+        drop(diag_handle);
+        let mut child = spawn_result.map_err(|source| StackError::AgentSpawnFailed { source })?;
         let stdin = child
             .stdin
             .take()

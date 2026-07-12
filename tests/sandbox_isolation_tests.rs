@@ -2,9 +2,9 @@
 //! spawned through the wrapper cannot read a masked path. This is the security
 //! claim the `sandbox.rs` unit tests (argv construction) do not cover.
 //!
-//! Requires Linux and `CAP_SYS_ADMIN` (a privileged container). It probes for
-//! that and skips cleanly when unavailable, so it is a no-op on macOS dev hosts
-//! and unprivileged CI but a real assertion on a privileged Linux runner.
+//! Requires Linux and `CAP_SYS_ADMIN` (a privileged container). The test is
+//! ignored by default; an explicit `--ignored` run fails hard when the runner
+//! lacks the required capability.
 
 #![cfg(target_os = "linux")]
 
@@ -21,11 +21,12 @@ fn unshare_usable() -> bool {
 }
 
 #[test]
+#[ignore = "requires privileged Linux sandbox capabilities"]
 fn unshare_backend_masks_a_secret_from_the_workload() {
-    if !unshare_usable() {
-        eprintln!("skipping sandbox isolation test: unshare/CAP_SYS_ADMIN unavailable");
-        return;
-    }
+    assert!(
+        unshare_usable(),
+        "required sandbox test capability missing: unshare/CAP_SYS_ADMIN unavailable"
+    );
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let secret_dir = tmp.path().join("secret-dir");

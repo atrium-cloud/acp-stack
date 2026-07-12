@@ -350,7 +350,7 @@ impl SupervisorTask {
             &self.sandbox,
             &self.workspace_root,
         )?;
-        super::exec::spawn_child(&program, &args, &self.cwd, self.env.as_ref())
+        super::exec::spawn_child(&program, &args, &self.cwd, self.env.as_ref(), &self.sandbox)
     }
 
     async fn mark_running(&self) -> Result<()> {
