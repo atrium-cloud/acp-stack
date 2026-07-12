@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    atomic_write_owner_only, parent_dir, set_owner_only_file, write_new_file_owner_only,
+    atomic_write_owner_only, parent_dir, set_owner_only_file, validate_owner_only_regular_file,
+    write_new_file_owner_only,
 };
 
 /// Kept as a no-op guard at mutation call sites. Auth keys are stored as
@@ -150,6 +151,23 @@ impl SecretStore {
         let key_path = age_key_path(home);
         let store_path = secret_store_path(home);
         Self::open_at_paths(&key_path, &store_path)
+    }
+
+    /// Open the existing store without repairing permissions. Native-config
+    /// import uses this before restart blockers clear so validation cannot
+    /// mutate any live runtime path.
+    pub fn open_read_only(home: &Path) -> Result<Self> {
+        let key_path = age_key_path(home);
+        let store_path = secret_store_path(home);
+        validate_owner_only_regular_file(&key_path)?;
+        validate_owner_only_regular_file(&store_path)?;
+        let identity = load_identity(&key_path)?;
+        let secrets = decrypt_store(&identity, &store_path)?;
+        Ok(Self {
+            identity,
+            secrets,
+            store_path,
+        })
     }
 
     /// Open an existing store from explicit runtime-managed paths. The daemon

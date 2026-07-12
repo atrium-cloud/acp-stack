@@ -264,6 +264,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             local.clone(),
             runtime_paths,
         );
+        crate::api::routes::native_config::recover_native_config_imports(&app_state).await?;
         let state_handle = app_state.state.clone();
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;

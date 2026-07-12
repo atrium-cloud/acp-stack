@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue, json};
-use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use serde_norway::{Mapping as YamlMapping, Value as YamlValue};
 use toml::{Value as TomlValue, map::Map as TomlMap};
 
 use crate::error::{Result, StackError};
@@ -100,7 +100,7 @@ pub(super) fn read_yaml_mapping(path: &Path) -> Result<YamlMapping> {
         return Ok(YamlMapping::new());
     }
     let value: YamlValue =
-        serde_yaml::from_str(&content).map_err(|source| StackError::AgentConfigProvision {
+        serde_norway::from_str(&content).map_err(|source| StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!("existing YAML is invalid: {source}"),
         })?;
@@ -116,7 +116,7 @@ pub(super) fn read_yaml_mapping(path: &Path) -> Result<YamlMapping> {
 pub(super) fn write_yaml_mapping(path: &Path, mapping: YamlMapping) -> Result<()> {
     let parent = parent_dir(path)?;
     create_dir_owner_only(parent)?;
-    let content = serde_yaml::to_string(&YamlValue::Mapping(mapping)).map_err(|source| {
+    let content = serde_norway::to_string(&YamlValue::Mapping(mapping)).map_err(|source| {
         StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!("failed to serialize YAML: {source}"),

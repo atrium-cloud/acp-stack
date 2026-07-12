@@ -19,6 +19,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         ConfigToml(_) | ConfigSerialize(_) => "config.invalid",
         ImportBase64Decode { .. } => "import.base64_invalid",
         ImportUtf8 { .. } => "import.utf8_invalid",
+        NativeAgentConfig { code } => code,
         DirectoryCreate { .. } => "io.directory_create_failed",
         FileCreate { .. } => "io.file_create_failed",
         FileRemove { .. } => "io.file_remove_failed",
@@ -60,6 +61,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         ConfigSerialize(_) => "failed to serialize config".to_owned(),
         ImportBase64Decode { .. } => "import data was not valid base64".to_owned(),
         ImportUtf8 { .. } => "imported config was not valid UTF-8".to_owned(),
+        NativeAgentConfig { .. } | NativeAgentConfigOperationFailed { .. } => {
+            "native Agent config import failed".to_owned()
+        }
         DirectoryCreate { .. } => "failed to create directory".to_owned(),
         FileCreate { .. } => "failed to create file".to_owned(),
         FileRemove { .. } => "failed to remove file".to_owned(),
@@ -112,10 +116,34 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
 pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
+        NativeAgentConfig {
+            code: "native_config_operation_not_found",
+        } => StatusCode::NOT_FOUND,
+        NativeAgentConfig {
+            code:
+                "native_config_rollback_conflict"
+                | "native_config_rollback_expired"
+                | "native_config_base_config_changed"
+                | "native_config_operation_in_progress"
+                | "native_config_journal_conflict",
+        } => StatusCode::CONFLICT,
+        NativeAgentConfig {
+            code: "native_config_too_large" | "native_config_normalized_too_large",
+        } => StatusCode::PAYLOAD_TOO_LARGE,
+        NativeAgentConfig {
+            code:
+                "native_config_journal_invalid"
+                | "native_config_journal_too_large"
+                | "native_config_journal_too_many"
+                | "native_config_rollback_failed"
+                | "native_config_claude_state_invalid",
+        } => StatusCode::INTERNAL_SERVER_ERROR,
         ConfigToml(_)
         | ConfigSerialize(_)
         | ImportBase64Decode { .. }
         | ImportUtf8 { .. }
+        | NativeAgentConfig { .. }
+        | NativeAgentConfigOperationFailed { .. }
         | ResetNotConfirmed
         | MissingSection { .. }
         | MissingField { .. }

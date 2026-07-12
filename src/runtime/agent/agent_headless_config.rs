@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, json};
-use serde_yaml::Value as YamlValue;
+use serde_norway::Value as YamlValue;
 use toml::{Value as TomlValue, map::Map as TomlMap};
 
 use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi};
@@ -35,7 +35,7 @@ pub(crate) const OPENCODE_AGENT_ID: &str = "opencode";
 // implicit small model. This invalid id is the verified no-call sentinel.
 pub(crate) const OPENCODE_DISABLED_SMALL_MODEL: &str = "invalid/model";
 const CLAUDE_CODE_API_KEY_HELPER_PREFIX: &str = "printenv ";
-const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
+pub(crate) const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
@@ -52,6 +52,158 @@ const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
+];
+pub(crate) const CLAUDE_CODE_CREDENTIAL_ENV_KEYS: &[&str] = &[
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+];
+pub(crate) const CLAUDE_CODE_EXECUTABLE_COMMAND_ROOTS: &[&str] =
+    &["fileSuggestion", "otelHeadersHelper", "statusLine"];
+
+/// Native paths whose semantics are owned by canonical acps configuration or
+/// acps policy. Import removes these before the residual is written, then
+/// this provisioner regenerates the supported subset from canonical config.
+pub(crate) const CLAUDE_CODE_PERMISSION_ROOTS: &[&str] = &[
+    "autoMode",
+    "defaultMode",
+    "disableAutoMode",
+    "disableBypassPermissionsMode",
+    "skipDangerousModePermissionPrompt",
+    "permission",
+    "permissions",
+    "sandbox",
+    "allowedTools",
+    "disallowedTools",
+];
+pub(crate) const CLAUDE_CODE_AUTH_ROOTS: &[&str] = &[
+    "forceLoginGatewayUrl",
+    "forceLoginMethod",
+    "forceLoginOrgUUID",
+];
+pub(crate) const CLAUDE_CODE_CREDENTIAL_ROOTS: &[&str] = &[
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+];
+pub(crate) const CLAUDE_CODE_POLICY_ROOTS: &[&str] = &[
+    "allowAllClaudeAiMcps",
+    "allowManagedHooksOnly",
+    "allowManagedMcpServersOnly",
+    "allowManagedPermissionRulesOnly",
+    "allowedChannelPlugins",
+    "allowedHttpHookUrls",
+    "allowedMcpServers",
+    "blockedMarketplaces",
+    "deniedMcpServers",
+    "disableClaudeAiConnectors",
+    "disabledMcpjsonServers",
+    "disableSideloadFlags",
+    "disableSkillShellExecution",
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
+    "enforceAvailableModels",
+    "forceRemoteSettingsRefresh",
+    "httpHookAllowedEnvVars",
+    "policyHelper",
+    "strictKnownMarketplaces",
+    "strictPluginOnlyCustomization",
+];
+pub(crate) const CLAUDE_CODE_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
+    "advisorModel",
+    "agent",
+    "agents",
+    "availableModels",
+    "effortLevel",
+    "fallbackModel",
+    "instructions",
+    "modelOverrides",
+];
+pub(crate) const CODEX_PERMISSION_ROOTS: &[&str] = &[
+    "approval_policy",
+    "default_permissions",
+    "permissions",
+    "sandbox_mode",
+    "sandbox_workspace_write",
+    "shell_environment_policy",
+    "tools",
+    "web_search",
+];
+pub(crate) const CODEX_AUTH_ROOTS: &[&str] = &[
+    "cli_auth_credentials_store",
+    "forced_chatgpt_workspace_id",
+    "forced_login_method",
+    "mcp_oauth_credentials_store",
+    "projects",
+];
+pub(crate) const CODEX_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
+    "agents",
+    "developer_instructions",
+    "instructions",
+    "model_instructions_file",
+    "profile",
+    "profiles",
+];
+pub(crate) const OPENCODE_PERMISSION_ROOTS: &[&str] =
+    &["permission", "permissions", "sandbox", "tools"];
+pub(crate) const OPENCODE_POLICY_ROOTS: &[&str] = &["share"];
+pub(crate) const OPENCODE_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
+    "agent",
+    "disabled_providers",
+    "enabled_providers",
+    "instructions",
+    "provider",
+    "small_model",
+];
+
+/// Amp `settings.json` uses flat dotted keys (`"amp.commands.allowlist"`),
+/// so these are matched as literal top-level object keys, not nested paths.
+/// Command allowlists gate which shell commands Amp runs without prompting —
+/// a sandbox-escape surface if imported — so they stay owned by acps.
+pub(crate) const AMP_PERMISSION_ROOTS: &[&str] = &[
+    "amp.commands.allowlist",
+    "amp.commands.strict",
+    "amp.dangerouslyAllowAll",
+    "amp.guardedFiles.allowlist",
+    "amp.mcpPermissions",
+    "amp.permissions",
+];
+/// Tool enable/disable filters are a policy surface: dropping one would
+/// silently re-enable a tool the user turned off.
+pub(crate) const AMP_POLICY_ROOTS: &[&str] = &["amp.tools.disable"];
+
+/// Pi trust roots. `defaultProjectTrust` decides whether Pi auto-approves a
+/// workspace's tool calls, so it stays owned by acps rather than imported.
+pub(crate) const PI_PERMISSION_ROOTS: &[&str] = &["defaultProjectTrust"];
+/// Pi keys that invoke a shell/executable. `shellPath`/`shellCommandPrefix`
+/// choose the shell Pi runs commands through and `npmCommand` is the argv Pi
+/// spawns for package installs — both are command-execution surfaces.
+pub(crate) const PI_EXECUTABLE_COMMAND_ROOTS: &[&str] =
+    &["shellPath", "shellCommandPrefix", "npmCommand"];
+/// Pi resource-source roots. Each points at packages, extensions, skills,
+/// prompts, or themes Pi loads and executes, so importing them would pull in
+/// third-party code the operator has not vetted.
+pub(crate) const PI_EXECUTABLE_PLUGIN_ROOTS: &[&str] =
+    &["packages", "extensions", "skills", "prompts", "themes"];
+
+/// Goose approval/permission roots. `GOOSE_MODE`
+/// (`auto`/`approve`/`smart_approve`/`chat`) decides whether Goose runs tool
+/// calls without prompting, and `GOOSE_ALLOWLIST` names a remote URL of
+/// extensions Goose is permitted to load — both permission surfaces acps owns
+/// rather than imports.
+pub(crate) const GOOSE_PERMISSION_ROOTS: &[&str] = &["GOOSE_MODE", "GOOSE_ALLOWLIST"];
+/// Goose planner-model roots. Planning Mode selects a second model+provider
+/// lane (the `/plan` command's dedicated planner) that acps cannot express in
+/// its single-provider canonical config and cannot provision credentials for.
+/// Blocking them keeps a launched Goose from reaching for an unprovisioned
+/// second provider. (Lead/Worker mode and its `GOOSE_LEAD_*` keys were removed
+/// upstream and replaced by these planner keys.)
+pub(crate) const GOOSE_MANAGED_UNSUPPORTED_ROOTS: &[&str] = &[
+    "GOOSE_PLANNER_CONTEXT_LIMIT",
+    "GOOSE_PLANNER_MODEL",
+    "GOOSE_PLANNER_PROVIDER",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1138,7 +1290,7 @@ fn write_or_remove_json_object(path: &Path, root: Map<String, serde_json::Value>
     Ok(())
 }
 
-fn write_or_remove_yaml_mapping(path: &Path, root: serde_yaml::Mapping) -> Result<()> {
+fn write_or_remove_yaml_mapping(path: &Path, root: serde_norway::Mapping) -> Result<()> {
     if root.is_empty() {
         remove_file(path)?;
     } else {
@@ -1621,7 +1773,7 @@ restart = "on-crash"
         assert_eq!(provider["context_limit"], 200_000);
 
         let goose_path = tempdir.path().join(".config/goose/config.yaml");
-        let goose: serde_yaml::Value = serde_yaml::from_str(
+        let goose: serde_norway::Value = serde_norway::from_str(
             &std::fs::read_to_string(goose_path).expect("goose config should be readable"),
         )
         .expect("goose config parses");
@@ -1649,7 +1801,7 @@ restart = "on-crash"
             .join("goose")
             .join("config.yaml");
         assert_eq!(provisioned[0].path, path);
-        let value: serde_yaml::Value = serde_yaml::from_str(
+        let value: serde_norway::Value = serde_norway::from_str(
             &std::fs::read_to_string(&path).expect("goose config should be readable"),
         )
         .expect("goose config yaml parses");
@@ -1684,7 +1836,7 @@ restart = "on-crash"
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
-        let value: serde_yaml::Value = serde_yaml::from_str(
+        let value: serde_norway::Value = serde_norway::from_str(
             &std::fs::read_to_string(&path).expect("goose config should be readable"),
         )
         .expect("goose config yaml parses");
@@ -1719,13 +1871,13 @@ restart = "on-crash"
 
         provision_agent_headless_config(&config, tempdir.path()).expect("provision");
 
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&std::fs::read_to_string(&path).expect("goose readable"))
+        let value: serde_norway::Value =
+            serde_norway::from_str(&std::fs::read_to_string(&path).expect("goose readable"))
                 .expect("goose yaml parses");
         assert_eq!(value["GOOSE_PROVIDER"], "cerebras");
         assert!(
             value.as_mapping().is_some_and(|map| {
-                !map.contains_key(serde_yaml::Value::String("GOOSE_MODEL".to_owned()))
+                !map.contains_key(serde_norway::Value::String("GOOSE_MODEL".to_owned()))
             }),
             "GOOSE_MODEL must be removed when no provider model is configured",
         );
@@ -2101,8 +2253,8 @@ wire_api = "responses"
 
         assert_eq!(cleaned.len(), 2);
         assert!(!custom_provider_path.exists());
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&std::fs::read_to_string(&goose_path).expect("goose readable"))
+        let value: serde_norway::Value =
+            serde_norway::from_str(&std::fs::read_to_string(&goose_path).expect("goose readable"))
                 .expect("goose yaml parses");
         assert_eq!(value["KEEP_ME"], "yes");
         for key in [
@@ -2114,7 +2266,7 @@ wire_api = "responses"
         ] {
             assert!(
                 value.as_mapping().is_some_and(|map| {
-                    !map.contains_key(serde_yaml::Value::String(key.to_owned()))
+                    !map.contains_key(serde_norway::Value::String(key.to_owned()))
                 }),
                 "{key} should be removed"
             );

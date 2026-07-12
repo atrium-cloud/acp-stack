@@ -35,6 +35,7 @@ flowchart LR
 | ACP terminals    | client-side `terminal/*` handlers: per-terminal owning task, registry, capped output buffer, and command-log recording (`src/runtime/agent/acp_terminal.rs`, sharing spawn/kill/read primitives with the command gateway via `commands/exec.rs`) |
 | Model catalog    | cached `models.dev` model metadata for prompt modality gating     |
 | Agent switch     | harness migration planning and provider/API-key compatibility     |
+| Native config import | redacted inspection and transactional semantic replacement of supported harness global config |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |
@@ -52,6 +53,7 @@ flowchart LR
 - The secret store is the only source for secret values.
 - External telemetry sinks consume the same normalized event stream as local SQLite logging.
 - Agent behavior stays behind ACP; `acp-stack` owns runtime mediation around it.
+- Native Agent-config import derives the parser and fixed user-global destination from the configured harness. It separates compatible canonical candidates from protected and unmanaged fields, then commits canonical and harness-native files as one journaled transaction.
 - The sandbox backend is selected by config and is portable across deployments; the set of masked sensitive paths is derived from the runtime's own path helpers, never from operator config.
 - `acps init serve` exposes only bootstrap init routes and exits after result acknowledgement; normal session/admin routes are not available in bootstrap mode.
 - The local socket is allowlisted for low-risk observability plus admin-enabled session-tier HTTP access; public admin APIs are not exposed through it.
