@@ -1952,3 +1952,154 @@ fn rejects_duration_field_exceeding_epoch_floor() {
         "got: {err}"
     );
 }
+
+#[test]
+fn rejects_network_isolation_outside_unshare() {
+    for mode in ["off", "bwrap"] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"{mode}\"\n\
+             [workspace.sandbox.network]\n\
+             mode = \"isolated\"\n"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("network isolation must require the unshare backend");
+        assert!(
+            err.to_string().contains("workspace.sandbox.network"),
+            "got: {err}"
+        );
+    }
+}
+
+#[test]
+fn rejects_empty_network_provider_argv_entries() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"isolated\"\n\
+         provider = [\"/usr/local/libexec/provider\", \" \"]\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("whitespace provider argv entries must be rejected");
+    assert!(
+        err.to_string()
+            .contains("workspace.sandbox.network.provider"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_relative_network_provider_executable() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"isolated\"\n\
+         provider = [\"acps-network-provider\"]\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("a bare-name provider executable must be rejected");
+    assert!(err.to_string().contains("absolute path"), "got: {err}");
+}
+
+#[test]
+fn rejects_host_network_mode_with_provider_settings() {
+    // A host-mode block carrying provider fields would print as configured
+    // isolation while enforcing nothing.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"host\"\n\
+         provider = [\"/usr/local/libexec/provider\"]\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("host networking with provider settings must be rejected");
+    assert!(
+        err.to_string().contains("workspace.sandbox.network"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_zero_network_provider_timeout() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"isolated\"\n\
+         provider_timeout = \"0s\"\n"
+    );
+    let err =
+        load_config_from_str(&config_text).expect_err("zero provider_timeout must be rejected");
+    assert!(
+        err.to_string()
+            .contains("workspace.sandbox.network.provider_timeout"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_invalid_network_provider_timeout() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"isolated\"\n\
+         provider_timeout = \"soon\"\n"
+    );
+    let err =
+        load_config_from_str(&config_text).expect_err("garbage provider_timeout must be rejected");
+    assert!(
+        err.to_string()
+            .contains("workspace.sandbox.network.provider_timeout"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn isolated_network_config_round_trips_and_defaults() {
+    // Empty provider is legal (deny-all networking); timeout falls back to 30s.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"isolated\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("isolated network config parses");
+    assert!(config.workspace.sandbox.network.is_isolated());
+    assert!(config.workspace.sandbox.network.provider.is_empty());
+    assert_eq!(
+        config.workspace.sandbox.network.provider_timeout_raw(),
+        "30s"
+    );
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical network config parses");
+    assert_eq!(reparsed.workspace.sandbox, config.workspace.sandbox);
+}
+
+#[test]
+fn host_network_serializes_to_absent_block() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"host\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("host network config parses");
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    assert!(
+        !canonical.contains("[workspace.sandbox.network]"),
+        "host networking must round-trip to an absent block, got:\n{canonical}"
+    );
+}
