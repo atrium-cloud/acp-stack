@@ -8,6 +8,7 @@ pub(crate) mod inference_failure;
 pub mod mcp;
 pub mod model_catalog;
 pub mod model_discovery;
+pub mod native_config_import;
 pub mod provider_keys;
 pub(crate) mod session_changes;
 pub mod session_sink;

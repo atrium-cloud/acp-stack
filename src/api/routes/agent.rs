@@ -220,7 +220,7 @@ async fn install_agent_for_config(
     })
 }
 
-pub(super) fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, String>> {
+pub(crate) fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, String>> {
     if config.agent.env.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
@@ -293,6 +293,7 @@ async fn start_agent_target(
     state: &AppState,
     target_id: &str,
 ) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
+    let _mutation = state.lock_agent_config_mutation().await?;
     // Re-read disk config and resolve env BEFORE invoking the supervisor so
     // `acps agent set` changes made while the daemon is running are honored
     // by the next start. open_agent_env enforces the same allowlist semantics
@@ -351,6 +352,7 @@ async fn stop_agent_target(
     state: &AppState,
     target_id: &str,
 ) -> std::result::Result<ApiSuccess<AgentStopResponse>, StackError> {
+    let _mutation = state.lock_agent_config_mutation().await?;
     state.refresh_array_runtime_from_disk().await?;
     let target = state.agent_target(target_id)?;
     cancel_pending_acp_permissions_for_target(state, target_id, "agent-stopped").await;
@@ -547,6 +549,7 @@ async fn restart_agent_target(
     target_id: &str,
     require_idle: bool,
 ) -> std::result::Result<ApiSuccess<AgentRestartResultResponse>, StackError> {
+    let _mutation = state.lock_agent_config_mutation().await?;
     // Load + validate the fresh on-disk config AND resolve env BEFORE
     // stopping the currently running agent. A malformed config or a
     // missing required secret should fail this call cleanly and leave
@@ -654,7 +657,7 @@ impl From<crate::state::RestartBlockerRecord> for AgentRestartBlockerResponse {
     }
 }
 
-async fn cancel_pending_acp_permissions_for_target(
+pub(crate) async fn cancel_pending_acp_permissions_for_target(
     state: &AppState,
     target_id: &str,
     reason: &str,
@@ -763,6 +766,7 @@ pub(crate) async fn agent_switch_handler(
     State(state): State<AppState>,
     Json(body): Json<AgentSwitchRequest>,
 ) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
+    let _mutation = state.lock_agent_config_mutation().await?;
     let home = home_dir()?;
     let fresh_config = Config::load_from_path(&state.runtime_paths.config_path)?;
     let registry = RegistryCatalog::load_with_override(
@@ -1092,7 +1096,7 @@ fn apply_switch_secret_migrations(
     Ok(applied)
 }
 
-fn ensure_array_process_start_allowed(config: &Config, target_id: &str) -> Result<()> {
+pub(crate) fn ensure_array_process_start_allowed(config: &Config, target_id: &str) -> Result<()> {
     if config.array.enabled || target_id == config.array.primary_target {
         return Ok(());
     }

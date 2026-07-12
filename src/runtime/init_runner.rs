@@ -37,6 +37,7 @@ pub mod step_kind {
     pub const STATE_INIT: &str = "state_init";
     pub const SECRETS_INIT: &str = "secrets_init";
     pub const AGENT_INSTALL: &str = "agent_install";
+    pub const NATIVE_CONFIG_IMPORT: &str = "native_config_import";
     pub const AGENT_SKILLS_INSTALL: &str = "agent_skills_install";
     pub const DEPS_APPLY: &str = "deps_apply";
     pub const PROVIDER_CONFIGURE: &str = "provider_configure";

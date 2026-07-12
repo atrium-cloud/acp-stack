@@ -97,6 +97,12 @@ ACP `fs/read_text_file` and `fs/write_text_file` requests carry absolute paths b
 
 Keyless local `acps` views use a local Unix socket protected by filesystem permissions. Low-risk observability routes are always available without public session or admin API keys. When `[local].session_auth = "keyless"` is enabled by an admin, same-user local callers can also reach session-tier HTTP routes without bearer auth. Admin-tier operations remain unavailable on the local socket: callers cannot read secret values, rotate keys, import config, apply dependencies, or control public WebSocket disconnections locally.
 
+## Native Config Import
+
+Native Agent-config inspection and mutation are admin-tier operations. Inspection manifests contain paths and classifications, never field values, commands, headers, credentials, or login state. Uploaded content is capped at 1 MiB; the raw document exists only in the process-local, revision-bound inspection draft. A selected import durably stages only the prepared canonical config and stripped native residual. Hosted init does not place the raw document in persisted init arguments, events, progress, or handoff metadata.
+
+Credentials, authentication state, permission and sandbox controls, and other `acps`-owned security fields are removed before an unmanaged residual can be written. Unmanaged hooks, notification commands, command helpers, plugins, or formatters require explicit acknowledgement for the inspected SHA-256 revision. Transaction targets are fixed under the runtime user's home, must pass ownership and regular-file checks, and reject symlinks and linked files; managed directories and files use owner-only permissions.
+
 ## Deployment Posture
 
 Production deployments should:

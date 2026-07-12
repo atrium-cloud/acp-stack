@@ -52,6 +52,12 @@ pub enum StackError {
     #[error("failed to provision agent config at {path}: {reason}")]
     AgentConfigProvision { path: PathBuf, reason: String },
 
+    #[error("native Agent config import failed ({code})")]
+    NativeAgentConfig { code: &'static str },
+
+    #[error("native Agent config import failed ({code})")]
+    NativeAgentConfigOperationFailed { code: String },
+
     #[error("sandbox setup failed: {reason}")]
     SandboxFailed { reason: String },
 
@@ -780,7 +786,10 @@ impl StackError {
     /// Dotted-namespace code suitable for the HTTP error envelope at
     /// `docs/specs/api/api.md:20-42`. Delegates to per-domain helpers so the
     /// variant-to-code table lives next to the matching domain.
-    pub fn error_code(&self) -> &'static str {
+    pub fn error_code(&self) -> &str {
+        if let Self::NativeAgentConfigOperationFailed { code } = self {
+            return code;
+        }
         config::error_code(self)
             .or_else(|| state::error_code(self))
             .or_else(|| security::error_code(self))

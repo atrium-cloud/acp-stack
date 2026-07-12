@@ -1,4 +1,5 @@
 mod check;
+mod config;
 mod default;
 mod install;
 mod set;
@@ -48,10 +49,48 @@ pub enum AgentCommand {
     Test(AgentTestArgs),
     /// Set the provider id, model, and API-key ref used by generated agent config.
     Set(AgentSetArgs),
+    /// Inspect or import the configured harness's native global config.
+    Config(AgentConfigArgs),
     /// Switch to another supported agent harness.
     Switch(AgentSwitchArgs),
     /// Select the default Array target for unqualified agent and session commands.
     Default(AgentDefaultArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentConfigArgs {
+    #[command(subcommand)]
+    pub(super) command: AgentConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentConfigCommand {
+    /// Inspect a native global config without returning any field values.
+    Inspect(AgentConfigInspectArgs),
+    /// Inspect and semantically replace the native global config.
+    Import(AgentConfigImportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentConfigInspectArgs {
+    pub(super) path: std::path::PathBuf,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    pub(super) admin_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentConfigImportArgs {
+    pub(super) path: std::path::PathBuf,
+    /// Import one compatible managed field id from the inspection. Repeatable.
+    #[arg(long = "managed-field", value_name = "ID")]
+    pub(super) managed_fields: Vec<String>,
+    /// Acknowledge unmanaged settings that can run commands or load code.
+    #[arg(long = "ack-executable-settings")]
+    pub(super) acknowledge_executable_settings: bool,
+    /// Admin API key. If omitted on a TTY, prompts without echo.
+    #[arg(long = "admin-key")]
+    pub(super) admin_key: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -230,6 +269,7 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
             output.reject_json("agent set")?;
             self::set::run_agent_set(args)
         }
+        AgentCommand::Config(args) => self::config::run_agent_config(args, output.effective()),
         AgentCommand::Switch(args) => {
             output.reject_json("agent switch")?;
             self::switch::run_agent_switch(args)

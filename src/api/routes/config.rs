@@ -82,6 +82,8 @@ pub(crate) async fn config_import_handler(
         })));
     }
 
+    let _mutation = state.lock_agent_config_mutation().await?;
+
     if let Some(parent) = target.parent() {
         crate::fs_util::create_dir_owner_only(parent)?;
     }

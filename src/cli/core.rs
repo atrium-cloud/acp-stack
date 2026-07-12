@@ -561,6 +561,14 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/agent/restart-blockers"
     } else if bare == "/v1/agent/switch" {
         "/v1/agent/switch"
+    } else if bare == "/v1/agent/config/native/inspect" {
+        "/v1/agent/config/native/inspect"
+    } else if bare == "/v1/agent/config/native/import" {
+        "/v1/agent/config/native/import"
+    } else if bare.starts_with("/v1/agent/config/native/import/") && bare.ends_with("/cancel") {
+        "/v1/agent/config/native/import/{operation_id}/cancel"
+    } else if bare.starts_with("/v1/agent/config/native/import/") {
+        "/v1/agent/config/native/import/{operation_id}"
     } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/capabilities") {
         "/v1/array/targets/{target_id}/capabilities"
     } else if bare.starts_with("/v1/array/targets/") && bare.ends_with("/install") {
@@ -1028,6 +1036,22 @@ mod tests {
             ),
             ("/v1/agent/restart", "/v1/agent/restart"),
             ("/v1/agent/restart-blockers", "/v1/agent/restart-blockers"),
+            (
+                "/v1/agent/config/native/inspect",
+                "/v1/agent/config/native/inspect",
+            ),
+            (
+                "/v1/agent/config/native/import",
+                "/v1/agent/config/native/import",
+            ),
+            (
+                "/v1/agent/config/native/import/nci_123",
+                "/v1/agent/config/native/import/{operation_id}",
+            ),
+            (
+                "/v1/agent/config/native/import/nci_123/cancel",
+                "/v1/agent/config/native/import/{operation_id}/cancel",
+            ),
         ];
         for (input, expected) in cases {
             assert_eq!(static_path_label(input), expected);
@@ -1055,6 +1079,25 @@ mod tests {
             .expect("array restart auto target parses");
         Cli::try_parse_from(["acps", "array", "restart", "--target", "codex", "auto"])
             .expect("array parent target restart auto parses");
+    }
+
+    #[test]
+    fn cli_parses_native_agent_config_commands() {
+        Cli::try_parse_from(["acps", "agent", "config", "inspect", "opencode.json"])
+            .expect("native config inspect parses");
+        Cli::try_parse_from([
+            "acps",
+            "agent",
+            "config",
+            "import",
+            "opencode.json",
+            "--managed-field",
+            "provider",
+            "--managed-field",
+            "model",
+            "--ack-executable-settings",
+        ])
+        .expect("native config import parses");
     }
 
     #[test]

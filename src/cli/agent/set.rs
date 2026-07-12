@@ -6,22 +6,23 @@ use crate::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
 use crate::error::{Result, StackError};
-use crate::fs_util::{atomic_write_owner_only, home_dir};
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::{
     AgentSessionConfigCategory, session_config_id_for_value, session_config_values,
     session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
 use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider, profile_for_provider_id,
+    CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
 };
 use crate::runtime::agent::model_discovery::{
-    fetch_session_config, resolve_advertised_model_value,
+    fetch_session_config, model_value_is_explicit_without_discovery, resolve_advertised_model_value,
 };
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
-    optional_env_refs_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
-    provider_uses_agent_native_auth, required_env_refs_for_agent_provider_id,
+    agent_provider_id_for_provider_id, apply_mapped_agent_provider, env_refs_for_agent_id,
+    env_var_for_agent_provider_id, optional_env_refs_for_agent_provider_id, provider_id_is_known,
+    provider_id_supports_agent, provider_uses_agent_native_auth,
+    required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
@@ -31,6 +32,7 @@ use super::install::operator_registry_override;
 pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let mut config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let entry = registry.lookup_required(&config.agent.id)?;
@@ -113,23 +115,8 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
         });
     }
 
-    let required_env_refs = required_env_refs_for_agent_provider_id(
-        &config.agent.id,
-        &provider_id,
-        api_key_ref.as_deref(),
-    );
-    for env_ref in &required_env_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
-            config.agent.env.push(env_ref.clone());
-        }
-    }
-    config.agent.model = None;
-    config.agent.provider = Some(AgentProviderConfig {
-        id: provider_id.clone(),
-        model: None,
-        api_key_ref: api_key_ref.clone(),
-        custom: None,
-    });
+    let required_env_refs =
+        apply_mapped_agent_provider(&mut config, &provider_id, api_key_ref.clone())?;
     let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, &provider_id)
     else {
         return Err(StackError::InvalidParam {
@@ -691,12 +678,7 @@ fn validate_agent_model_if_required(home: &Path, config: &Config, model_value: &
 }
 
 pub(in crate::cli) fn claude_code_provider_model_is_explicit(config: &Config) -> bool {
-    if config.agent.id != CLAUDE_CODE_AGENT_ID {
-        return false;
-    }
-    config.agent.provider.as_ref().is_some_and(|provider| {
-        provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
-    })
+    model_value_is_explicit_without_discovery(config)
 }
 
 pub(in crate::cli) fn model_values_for_cli_display(

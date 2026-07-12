@@ -5001,7 +5001,7 @@ creates = "opencode"
         .join(".config")
         .join("goose")
         .join("config.yaml");
-    let goose: serde_yaml::Value = serde_yaml::from_str(
+    let goose: serde_norway::Value = serde_norway::from_str(
         &fs::read_to_string(goose_path).expect("goose config should be readable"),
     )
     .expect("goose config should parse");

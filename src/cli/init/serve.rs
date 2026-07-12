@@ -14,19 +14,25 @@ use futures::{SinkExt, StreamExt};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Mutex as TokioMutex, Notify, broadcast};
 use tower_http::limit::RequestBodyLimitLayer;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::constant_time_eq;
 use crate::config;
 use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, home_dir};
+use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
+use crate::state::default_state_path;
 
 use super::prompt::{
     self, HostedPromptDriver, HostedPromptOutcome, HostedPromptRequest, HostedPromptStyle,
 };
-use super::{CloudflareModeArg, CloudflaredDeploymentArg, InitArgs, InitMode, run_hosted_init};
+use super::{
+    CloudflareModeArg, CloudflaredDeploymentArg, InitArgs, InitMode, InitNativeConfigUpload,
+    run_hosted_init,
+};
 
 const DEFAULT_INIT_TOKEN_ENV: &str = "ACP_STACK_INIT_TOKEN";
 const INIT_BOOTSTRAP_TOKEN_FIELD: &str = "bootstrap token";
@@ -75,6 +81,7 @@ pub(super) fn run_init_serve(args: InitServeArgs) -> Result<()> {
             token: Arc::new(token),
             allowed_origins: Arc::new(args.allowed_origin),
             manager: HostedInitManager::new(),
+            native_config_mutation: Arc::new(TokioMutex::new(())),
         };
         let manager = state.manager.clone();
         let shutdown_manager = state.manager.clone();
@@ -113,12 +120,21 @@ fn resolve_bootstrap_token(args: &InitServeArgs) -> Result<String> {
 
 fn build_bootstrap_router(state: BootstrapState, max_request_bytes: u64) -> Router {
     Router::new()
-        .route("/v1/init/sessions", post(create_session_handler))
+        .route(
+            "/v1/init/sessions",
+            post(create_session_handler).layer(RequestBodyLimitLayer::new(
+                config::IMPORT_REQUEST_SIZE_LIMIT,
+            )),
+        )
         .route("/v1/init/sessions/{id}", get(session_status_handler))
         .route("/v1/init/sessions/{id}/events", get(session_events_handler))
         .route(
             "/v1/init/sessions/{id}/cancel",
             post(session_cancel_handler),
+        )
+        .route(
+            "/v1/init/sessions/{id}/native-config/cancel",
+            post(session_native_config_cancel_handler),
         )
         .route("/v1/init/sessions/{id}/ws", get(session_ws_handler))
         .layer(RequestBodyLimitLayer::new(max_request_bytes as usize))
@@ -136,6 +152,7 @@ struct BootstrapState {
     token: Arc<String>,
     allowed_origins: Arc<Vec<String>>,
     manager: Arc<HostedInitManager>,
+    native_config_mutation: Arc<TokioMutex<()>>,
 }
 
 async fn require_bootstrap_auth(
@@ -313,6 +330,61 @@ async fn session_cancel_handler(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeConfigCancelRequest {
+    operation_id: String,
+    revision: String,
+}
+
+async fn session_native_config_cancel_handler(
+    State(state): State<BootstrapState>,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<NativeConfigCancelRequest>,
+) -> Response {
+    let Some(session) = state.manager.session(&id) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "init.session_not_found",
+            "init session not found",
+        );
+    };
+    if session.status() != "completed_awaiting_ack" {
+        return api_error(
+            StatusCode::CONFLICT,
+            "init.result_unavailable",
+            "init session has no result awaiting acknowledgement",
+        );
+    }
+    let _mutation = state.native_config_mutation.lock().await;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let home = home_dir()?;
+        let config_path = config::default_config_path()?;
+        let state_path = default_state_path(&home);
+        let _lock = acquire_agent_config_mutation_file_lock(&config_path)?;
+        super::native_config::cancel_applied_for_init(
+            &request.operation_id,
+            &request.revision,
+            &config_path,
+            &state_path,
+            &home,
+        )
+    })
+    .await;
+    match outcome {
+        Ok(Ok(operation)) => ApiSuccess::new(operation).into_response(),
+        Ok(Err(error)) => error.into_response(),
+        Err(error) => StackError::NativeAgentConfig {
+            code: if error.is_panic() {
+                "native_config_lock_task_panicked"
+            } else {
+                "native_config_lock_task_cancelled"
+            },
+        }
+        .into_response(),
+    }
+}
+
 async fn session_ws_handler(
     State(state): State<BootstrapState>,
     AxumPath(id): AxumPath<String>,
@@ -477,7 +549,7 @@ struct ClientFrame {
     reason: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartInitRequest {
     agent: Option<String>,
@@ -501,6 +573,14 @@ struct StartInitRequest {
     data_from: Vec<String>,
     skip_testflight: Option<bool>,
     testflight: Option<bool>,
+    native_config: Option<NativeConfigUploadRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeConfigUploadRequest {
+    filename: String,
+    content: String,
 }
 
 impl StartInitRequest {
@@ -525,6 +605,10 @@ impl StartInitRequest {
         args.data_from = self.data_from;
         args.skip_testflight = self.skip_testflight.unwrap_or(false);
         args.testflight = self.testflight.unwrap_or(false);
+        args.native_config_upload = self.native_config.map(|upload| InitNativeConfigUpload {
+            filename: upload.filename,
+            content: Zeroizing::new(upload.content),
+        });
         args
     }
 }
@@ -590,6 +674,8 @@ fn empty_init_args() -> InitArgs {
         #[cfg(feature = "dev-tools")]
         skip_workspace_init: false,
         testflight: false,
+        native_config_upload: None,
+        native_config_revision: None,
         skip_testflight: false,
         standard_agent_work_deps: false,
         browser_use_profile: false,
@@ -647,6 +733,8 @@ struct PublicInputRequest {
     required: bool,
     default: Option<bool>,
     options: Vec<PublicInputOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inspection: Option<NativeConfigInspection>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1085,6 +1173,35 @@ impl HostedPromptDriver for SessionPromptDriver {
         self.text(request)
     }
 
+    fn native_config_review(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<NativeConfigSelection>> {
+        let expected_revision = request
+            .inspection
+            .as_ref()
+            .map(|inspection| inspection.revision.clone())
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "native_config",
+                reason: "native config review omitted inspection".to_owned(),
+            })?;
+        let Some(value) = self.session.request_input(request)? else {
+            return Ok(HostedPromptOutcome::Unhandled);
+        };
+        let selection: NativeConfigSelection =
+            serde_json::from_value(value).map_err(|_| StackError::InvalidParam {
+                field: "native_config",
+                reason: "native config review response is invalid".to_owned(),
+            })?;
+        if selection.revision != expected_revision {
+            return Err(StackError::InvalidParam {
+                field: "native_config",
+                reason: "native config review revision does not match the inspection".to_owned(),
+            });
+        }
+        Ok(HostedPromptOutcome::Handled(selection))
+    }
+
     fn progress(&self, message: String) {
         self.session
             .push_event("progress", json!({ "message": message }));
@@ -1111,6 +1228,7 @@ fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool {
             "provider id" | "provider-name" | "base-url" | "api-key-ref" | "model"
         ),
         HostedPromptStyle::Password => true,
+        HostedPromptStyle::NativeConfigReview => request.inspection.is_some(),
     }
 }
 
@@ -1131,6 +1249,7 @@ fn public_input_request(request: HostedPromptRequest) -> PublicInputRequest {
                 hint: item.hint,
             })
             .collect(),
+        inspection: request.inspection,
     }
 }
 
@@ -1141,6 +1260,7 @@ fn prompt_style_label(style: HostedPromptStyle) -> &'static str {
         HostedPromptStyle::Confirm => "confirm",
         HostedPromptStyle::Text => "text",
         HostedPromptStyle::Password => "password",
+        HostedPromptStyle::NativeConfigReview => "native_config_review",
     }
 }
 
@@ -1282,6 +1402,7 @@ mod tests {
                 .into_iter()
                 .map(|(_, label, hint)| prompt::HostedPromptItem { label, hint })
                 .collect(),
+            inspection: None,
         }
     }
 
@@ -1343,6 +1464,7 @@ mod tests {
             required: true,
             default: None,
             items: Vec::new(),
+            inspection: None,
         };
         let handle = std::thread::spawn(move || driver.password(request));
         let pending = wait_for_pending_input(&session);
@@ -1370,6 +1492,7 @@ mod tests {
             required: true,
             default: Some(false),
             items: Vec::new(),
+            inspection: None,
         };
         let handle = std::thread::spawn(move || driver.confirm(request));
         let pending = wait_for_pending_input(&session);
@@ -1382,6 +1505,53 @@ mod tests {
     }
 
     #[test]
+    fn hosted_driver_streams_redacted_native_config_review() {
+        let inspected = crate::runtime::agent::native_config_import::inspect_native_config(
+            "opencode",
+            Some("opencode.json"),
+            r#"{"theme":"raw-secret-value","model":"openai/gpt-5"}"#,
+        )
+        .expect("inspect");
+        let inspection = inspected.inspection().clone();
+        let revision = inspection.revision.clone();
+        let session = test_session("init_driver_native_config");
+        let driver = SessionPromptDriver {
+            session: session.clone(),
+        };
+        let request = HostedPromptRequest {
+            style: HostedPromptStyle::NativeConfigReview,
+            prompt: "Review native Agent config".to_owned(),
+            required: true,
+            default: None,
+            items: Vec::new(),
+            inspection: Some(inspection),
+        };
+        let handle = std::thread::spawn(move || driver.native_config_review(request));
+        let pending = wait_for_pending_input(&session);
+        assert_eq!(pending.style, "native_config_review");
+        assert_eq!(
+            pending.inspection.as_ref().expect("inspection").revision,
+            revision
+        );
+        let serialized = serde_json::to_string(&pending).expect("serialize");
+        assert!(!serialized.contains("raw-secret-value"));
+        session
+            .submit_input(
+                &pending.request_id,
+                json!({
+                    "revision": revision,
+                    "selected_managed_field_ids": ["provider", "model"],
+                    "executable_settings_acknowledged": false
+                }),
+            )
+            .expect("submit review");
+        let selection = handle.join().expect("driver thread").expect("review");
+        assert!(matches!(selection, HostedPromptOutcome::Handled(_)));
+        let events = serde_json::to_string(&session.events_after(0)).expect("events");
+        assert!(!events.contains("raw-secret-value"));
+    }
+
+    #[test]
     fn hosted_driver_leaves_non_bootstrap_text_prompts_unhandled() {
         let session = test_session("init_driver_text");
         let driver = SessionPromptDriver { session };
@@ -1391,6 +1561,7 @@ mod tests {
             required: true,
             default: None,
             items: Vec::new(),
+            inspection: None,
         };
         let outcome = driver.text(request).expect("text");
         assert_eq!(outcome, HostedPromptOutcome::Unhandled);
@@ -1408,6 +1579,7 @@ mod tests {
             required: true,
             default: None,
             items: Vec::new(),
+            inspection: None,
         };
         let handle = std::thread::spawn(move || driver.password(request));
         let pending = wait_for_pending_input(&session);
@@ -1522,6 +1694,7 @@ mod tests {
                 token: Arc::new(TEST_TOKEN.to_owned()),
                 allowed_origins: Arc::new(vec!["https://backend.example".to_owned()]),
                 manager,
+                native_config_mutation: Arc::new(TokioMutex::new(())),
             },
             super::super::STARTER_MAX_REQUEST_BYTES,
         )
@@ -1681,5 +1854,36 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["ok"], false);
         assert!(body["error"]["code"].is_string());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_native_config_cancel_guards_session_state() {
+        const CANCEL_BODY: &str = r#"{"operation_id":"nci_init_deadbeefdeadbeefdeadbeef","revision":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+        let app = app_with_session(test_session("init_nc_cancel"));
+        let (status, body) = request_raw_json(
+            app,
+            Method::POST,
+            "/v1/init/sessions/unknown/native-config/cancel",
+            CANCEL_BODY,
+            Some(TEST_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "init.session_not_found");
+
+        // A running session has not published a result yet, so there is no
+        // applied import to roll back.
+        let app = app_with_session(test_session("init_nc_cancel"));
+        let (status, body) = request_raw_json(
+            app,
+            Method::POST,
+            "/v1/init/sessions/init_nc_cancel/native-config/cancel",
+            CANCEL_BODY,
+            Some(TEST_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "init.result_unavailable");
     }
 }

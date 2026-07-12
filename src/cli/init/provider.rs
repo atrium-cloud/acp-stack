@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::config::{
@@ -163,6 +164,50 @@ pub(super) fn configured_provider_refs_satisfied(
     required_refs.iter().all(|env_ref| {
         config.agent.env.iter().any(|name| name == env_ref) && secret_store.contains(env_ref)
     })
+}
+
+pub(super) fn collect_prepared_secret_refs_for_init(
+    args: &InitArgs,
+    registry: &RegistryCatalog,
+    config: &Config,
+    config_path: &Path,
+    secret_store: &mut SecretStore,
+) -> Result<()> {
+    validate_configured_provider_for_init(registry, config, config_path)?;
+    let mut required_refs = BTreeSet::new();
+    if let Some(provider) = config.agent.provider.as_ref() {
+        let provider_refs = required_env_refs_for_agent_provider_id(
+            &config.agent.id,
+            &provider.id,
+            provider.api_key_ref.as_deref(),
+        );
+        if provider_refs
+            .iter()
+            .any(|name| !config.agent.env.iter().any(|configured| configured == name))
+        {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: "prepared native config provider omitted a required secret reference"
+                    .to_owned(),
+            });
+        }
+        required_refs.extend(provider_refs);
+    }
+    for server in &config.mcp.servers {
+        match server {
+            crate::config::McpServerConfig::Stdio(server) => {
+                required_refs.extend(server.env.iter().cloned());
+            }
+            crate::config::McpServerConfig::Http(server) => {
+                required_refs.extend(server.headers.iter().map(|header| header.value_ref.clone()));
+            }
+        }
+    }
+    collect_missing_provider_refs(
+        prompts_enabled(args),
+        secret_store,
+        &required_refs.into_iter().collect::<Vec<_>>(),
+    )
 }
 
 fn ensure_configured_provider_refs_for_init(
@@ -429,7 +474,7 @@ fn provider_readiness_label(
     }
 }
 
-fn apply_provider_to_config(
+pub(super) fn apply_provider_to_config(
     args: &InitArgs,
     registry: &RegistryCatalog,
     config: &mut Config,

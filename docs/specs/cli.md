@@ -10,7 +10,7 @@
 | Auth           | `acps auth regenerate-session-key`                                          |
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
-| Agents         | `acps agent install`, `update`, `switch`, `start`, `stop`, `restart`, `status`, `check`, `test`, `default set` |
+| Agents         | `acps agent install`, `update`, `switch`, `config inspect/import`, `start`, `stop`, `restart`, `status`, `check`, `test`, `default set` |
 | Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
 | Array          | `acps array status/on/off/add/set/install/start/stop/restart`               |
 | Workspace      | `acps workspace status`, `code-source`, `data-source`, `sync`, `sandbox`    |
@@ -184,6 +184,17 @@ acps agent set --mode <mode>
 ```
 
 Mapped model and mode values are validated against the configured agent's ACP-advertised options. Custom-provider model ids are accepted as supplied. For provider-backed agents, `acps agent set --model <model>` uses the existing `[agent.provider]` when present. When a change requires the supervised process to reload agent-owned config, the CLI prints a restart hint.
+
+`acps agent config` inspects or imports the configured harness's user-global config through the running daemon:
+
+```sh
+acps agent config inspect <path> [--admin-key <key>]
+acps agent config import <path> [--managed-field <id>]... [--ack-executable-settings] [--admin-key <key>]
+```
+
+The path is only the upload source; the configured harness fixes the destination. `inspect` prints the redacted revision and field classifications. `import` repeats inspection, imports only the compatible managed ids selected with `--managed-field`, replaces the unmanaged residual, and regenerates managed native settings from canonical config. Omitting managed ids preserves the current canonical provider, model, and MCP values. `--ack-executable-settings` is required when the inspection reports unmanaged settings that can execute commands or load code. Inputs are limited to 1 MiB.
+
+Supported sources and destinations are Claude Code `settings.json` to `~/.claude/settings.json`, Codex CLI `config.toml` to `~/.codex/config.toml`, OpenCode `opencode.json` or `opencode.jsonc` to normalized JSON at `~/.config/opencode/opencode.json`, Amp Code `settings.json` to `~/.config/amp/settings.json`, Pi `settings.json` to `~/.pi/agent/settings.json`, and Goose `config.yaml` to `~/.config/goose/config.yaml`. Cursor CLI is not importable: it keeps its real settings outside a portable config file, and its `mcp.json` is a standalone MCP registry rather than an agent config. Amp is provider/model-opaque, so its import carries only MCP servers. Pi imports its `defaultProvider`/`defaultModel` selection and carries no MCP; only Pi's `settings.json` is accepted, since `models.json`/`auth.json` hold literal credentials with `!shell-command` exec and `trust.json`/`mcp.json` are out of scope. Goose imports its `GOOSE_PROVIDER`/`GOOSE_MODEL` selection plus `extensions` MCP servers; only `config.yaml` is accepted, since `secrets.yaml` and `permission.yaml` hold credentials and per-tool approvals. The command reports `applied` when the transaction completes, `queued` when restart blockers must clear first, and exits nonzero with the returned typed code when the operation fails.
 
 `acps subagent *` is OpenCode-only and manages the OpenCode small-model lane. `acps subagent match` makes `small_model` follow the main agent model.
 

@@ -46,6 +46,14 @@ Custom providers are accepted only for agents that support them. Custom model id
 
 Agent-owned config files are written before canonical config changes are committed. If provisioning fails, the canonical config is not advanced.
 
+## Native Agent-Config Import
+
+Supported Agent user-global configs are imported as configuration meaning rather than byte-preserving copies. Inspection removes every `acps`-managed or `acps`-controlled path from the native residual. Compatible selected provider, model, and MCP candidates pass through the canonical config validation and secret-reference paths; compatible candidates left unselected keep the current canonical value. Credentials, login state, permission and sandbox controls, and managed fields without a lossless mapping remain blocked. The unmanaged residual replaces the prior unmanaged settings, then the normal headless provisioner overlays canonical managed values.
+
+Existing-instance apply is serialized through the agent-config mutation file lock, held by native config import/cancel, `acps agent set`, agent lifecycle transitions, config import, and hosted-init apply; other config writers are not serialized. Apply checks restart blockers before touching live files. A blocked import stages the entire transaction in the owner-only operation journal. Immediate apply stops the running primary agent when needed, snapshots canonical and native files, writes them atomically, refreshes live state, and restores the prior files and process on failure. Pending apply and rollback phases are resumed from the journal after daemon restart.
+
+Terminal operations stay queryable for 24 hours, then journal and in-memory state are pruned. Cancel-of-applied rollback expires after 15 minutes; cancellation after expiry returns `native_config_rollback_expired`.
+
 ## Workspace And Files
 
 The workspace API is rooted at `[workspace].root`. All request paths are workspace-relative. The runtime rejects traversal, absolute paths, NUL bytes, and symlink escapes.

@@ -62,6 +62,7 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "deps_apply_yes": args.deps_apply_yes,
         "stack_update": args.stack_update,
         "stack_update_frequency": args.stack_update_frequency,
+        "native_config_revision": args.native_config_revision,
         "fresh": args.fresh,
         "resume": args.resume,
     })
@@ -132,6 +133,7 @@ pub(super) struct RecordedInitArgs {
     pub(super) deps_apply_yes: bool,
     pub(super) stack_update: Option<String>,
     pub(super) stack_update_frequency: Option<String>,
+    pub(super) native_config_revision: Option<String>,
 }
 
 pub(super) fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {

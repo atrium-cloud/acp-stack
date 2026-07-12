@@ -5,11 +5,73 @@
 //! tests on macOS dev machines honest.
 
 use crate::error::{Result, StackError};
+use std::fs::File;
 use std::fs::Permissions;
 use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+const AGENT_CONFIG_MUTATION_LOCK_FILE_NAME: &str = ".agent-config.lock";
+
+/// Process-wide advisory lock for read/modify/write operations that touch the
+/// canonical Agent config or a harness's generated global config. The lock
+/// file has a stable inode so atomic config replacements do not invalidate the
+/// lock held by another `acps` process.
+pub struct AgentConfigMutationFileLock {
+    _file: File,
+}
+
+pub fn acquire_agent_config_mutation_file_lock(
+    config_path: &Path,
+) -> Result<AgentConfigMutationFileLock> {
+    let parent = parent_dir(config_path)?;
+    create_dir_owner_only(parent)?;
+    let lock_path = parent.join(AGENT_CONFIG_MUTATION_LOCK_FILE_NAME);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(&lock_path)
+        .map_err(|source| StackError::FileCreate {
+            path: lock_path.clone(),
+            source,
+        })?;
+    let metadata = file.metadata().map_err(|source| StackError::FileCreate {
+        path: lock_path.clone(),
+        source,
+    })?;
+    if !metadata.is_file()
+        || !metadata_owned_by_current_user(&metadata)
+        || metadata_has_multiple_links(&metadata)
+        || !metadata_is_owner_only_file(&metadata)
+    {
+        return Err(StackError::FileCreate {
+            path: lock_path,
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Agent config mutation lock must be a current-user-owned, single-link regular file with mode 0600",
+            ),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(StackError::FileCreate {
+                path: lock_path,
+                source: std::io::Error::last_os_error(),
+            });
+        }
+    }
+    Ok(AgentConfigMutationFileLock { _file: file })
+}
 
 pub fn home_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
@@ -124,6 +186,137 @@ pub fn atomic_write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     })?;
     sync_file(path, &final_file)?;
     sync_parent_dir(path)
+}
+
+/// Validate and prepare an allowlisted file target below `home` without
+/// following symlinked path components. Existing targets must be regular,
+/// single-link files owned by the current user. Missing directories are
+/// created one component at a time with owner-only permissions.
+pub fn prepare_owner_managed_file_path(home: &Path, path: &Path) -> Result<()> {
+    let relative = path
+        .strip_prefix(home)
+        .map_err(|_| StackError::FileCreate {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "managed file target is outside the runtime home",
+            ),
+        })?;
+    let parent = parent_dir(relative)?;
+    let mut current = home.to_path_buf();
+    for component in parent.components() {
+        use std::path::Component;
+        let Component::Normal(component) = component else {
+            return Err(StackError::FileCreate {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "managed file target contains a non-normal path component",
+                ),
+            });
+        };
+        current.push(component);
+        if current.exists() {
+            let metadata = std::fs::symlink_metadata(&current).map_err(|source| {
+                StackError::DirectoryCreate {
+                    path: current.clone(),
+                    source,
+                }
+            })?;
+            if !metadata.is_dir() || !metadata_owned_by_current_user(&metadata) {
+                return Err(StackError::DirectoryCreate {
+                    path: current.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "managed directory is not a current-user-owned real directory",
+                    ),
+                });
+            }
+            set_owner_only_dir(&current)?;
+        } else {
+            create_dir_owner_only(&current)?;
+        }
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || !metadata_owned_by_current_user(&metadata)
+                || metadata_has_multiple_links(&metadata)
+            {
+                return Err(StackError::FileCreate {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "managed file target must be a current-user-owned regular file with one link",
+                    ),
+                });
+            }
+            set_owner_only_file(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StackError::FileCreate {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Validate an existing owner-only runtime file without changing its mode or
+/// following a symlink. Used by preflight paths that must remain read-only
+/// until a queued mutation is safe to apply.
+pub fn validate_owner_only_regular_file(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| StackError::FileCreate {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let valid = metadata.is_file()
+        && metadata_owned_by_current_user(&metadata)
+        && !metadata_has_multiple_links(&metadata)
+        && metadata_is_owner_only_file(&metadata);
+    if !valid {
+        return Err(StackError::FileCreate {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "runtime file must be a current-user-owned, single-link regular file with mode 0600",
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn metadata_owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.uid() == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn metadata_owned_by_current_user(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn metadata_has_multiple_links(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.nlink() > 1
+}
+
+#[cfg(unix)]
+fn metadata_is_owner_only_file(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.mode() & 0o777 == 0o600
+}
+
+#[cfg(not(unix))]
+fn metadata_is_owner_only_file(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn metadata_has_multiple_links(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 pub fn pre_create_owner_only(path: &Path) -> Result<()> {
@@ -256,5 +449,112 @@ mod tests {
 
         assert_eq!(created_mode, 0o600);
         assert_eq!(replaced_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_path_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside");
+        symlink(outside.path(), home.path().join(".codex")).expect("symlink");
+
+        let result = prepare_owner_managed_file_path(
+            home.path(),
+            &home.path().join(".codex").join("config.toml"),
+        );
+        assert!(result.is_err());
+        assert!(!outside.path().join("config.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_file_path_rejects_hard_linked_target() {
+        let home = tempfile::tempdir().expect("home");
+        let directory = home.path().join(".codex");
+        create_dir_owner_only(&directory).expect("directory");
+        let target = directory.join("config.toml");
+        write_new_file_owner_only(&target, b"model = 'one'\n").expect("target");
+        std::fs::hard_link(&target, directory.join("second-link.toml")).expect("hard link");
+
+        let result = prepare_owner_managed_file_path(home.path(), &target);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_validation_does_not_repair_permissive_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().expect("home");
+        let target = home.path().join("secret");
+        std::fs::write(&target, b"secret").expect("write");
+        std::fs::set_permissions(&target, Permissions::from_mode(0o644)).expect("chmod");
+
+        assert!(validate_owner_only_regular_file(&target).is_err());
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_config_mutation_lock_is_owner_only_and_serializes_process_handles() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("acps-config.toml");
+        let first = acquire_agent_config_mutation_file_lock(&config_path).expect("first lock");
+        let lock_path = tempdir.path().join(AGENT_CONFIG_MUTATION_LOCK_FILE_NAME);
+        assert_eq!(
+            std::fs::metadata(&lock_path)
+                .expect("lock metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let config_path_for_thread = config_path.clone();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).expect("started");
+            let second = acquire_agent_config_mutation_file_lock(&config_path_for_thread)
+                .expect("second lock");
+            acquired_tx.send(()).expect("acquired");
+            drop(second);
+        });
+        started_rx.recv().expect("waiter started");
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        drop(first);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second handle acquires after release");
+        waiter.join().expect("waiter joins");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_config_mutation_lock_rejects_hard_links() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("acps-config.toml");
+        drop(acquire_agent_config_mutation_file_lock(&config_path).expect("create lock"));
+        let lock_path = tempdir.path().join(AGENT_CONFIG_MUTATION_LOCK_FILE_NAME);
+        std::fs::hard_link(&lock_path, tempdir.path().join("second-lock-link")).expect("hard link");
+
+        assert!(acquire_agent_config_mutation_file_lock(&config_path).is_err());
     }
 }

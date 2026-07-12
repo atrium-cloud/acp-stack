@@ -1,6 +1,7 @@
 mod headless_snapshot;
 mod install;
 mod model_mode;
+mod native_config;
 mod prompt;
 mod provider;
 mod registry_apply;
@@ -14,14 +15,19 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
+use zeroize::Zeroizing;
 
 use crate::config::{self, AgentSubagentConfig, Config, DataSourceConfig};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only,
-    set_owner_only_file, write_new_file_owner_only,
+    acquire_agent_config_mutation_file_lock, atomic_write_owner_only, create_dir_owner_only,
+    home_dir, parent_dir, pre_create_owner_only, set_owner_only_file, write_new_file_owner_only,
 };
 use crate::runtime::agent::agent_headless_config::OPENCODE_AGENT_ID;
+use crate::runtime::agent::native_config_import::{
+    InspectedNativeConfig, NativeConfigSelection, inspect_native_config,
+    validate_native_config_selection,
+};
 use crate::runtime::dependencies::deps_apply::{
     DepApplyOutcome, apply_dependencies_with_progress, pending_candidates,
 };
@@ -33,7 +39,7 @@ use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::secrets::{SecretStore, age_key_path};
 use crate::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
-    StateStore, default_state_path,
+    INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED, StateStore, default_state_path,
 };
 
 use self::headless_snapshot::{
@@ -49,7 +55,8 @@ use self::model_mode::{
     verify_agent_acp_connection,
 };
 use self::provider::{
-    configure_provider_for_init, configured_provider_refs_satisfied, preflight_provider_for_init,
+    apply_provider_to_config, collect_prepared_secret_refs_for_init, configure_provider_for_init,
+    configured_provider_refs_satisfied, preflight_provider_for_init,
 };
 use self::registry_apply::{
     AgentSelection, CustomAgentSpec, apply_custom_agent_to_config, apply_edge_profile_to_config,
@@ -114,6 +121,28 @@ pub(super) struct InitMcpHttpServer {
 pub(super) struct InitMcpHttpHeader {
     pub(super) name: String,
     pub(super) value_ref: String,
+}
+
+#[derive(Clone)]
+pub(super) struct InitNativeConfigUpload {
+    pub(super) filename: String,
+    pub(super) content: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for InitNativeConfigUpload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitNativeConfigUpload")
+            .field("filename", &self.filename)
+            .field("size_bytes", &self.content.len())
+            .finish()
+    }
+}
+
+struct PendingInitNativeConfig {
+    inspected: InspectedNativeConfig,
+    selection: NativeConfigSelection,
+    prepared: Option<crate::runtime::agent::native_config_import::PreparedNativeConfigImport>,
 }
 
 #[derive(Debug, Args)]
@@ -402,6 +431,10 @@ pub struct InitArgs {
     pub(super) prompt_mcp_stdio: Vec<InitMcpStdioServer>,
     #[arg(skip)]
     pub(super) prompt_mcp_http: Vec<InitMcpHttpServer>,
+    #[arg(skip)]
+    pub(super) native_config_upload: Option<InitNativeConfigUpload>,
+    #[arg(skip)]
+    pub(super) native_config_revision: Option<String>,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
@@ -533,6 +566,61 @@ impl InitArgs {
             None
         }
     }
+}
+
+fn review_native_config_upload_for_init(
+    args: &mut InitArgs,
+    config_path: &Path,
+) -> Result<Option<PendingInitNativeConfig>> {
+    let Some(upload) = args.native_config_upload.take() else {
+        return Ok(None);
+    };
+    if config_path.exists()
+        || args.resume
+        || args.config_import_source_label().is_some()
+        || args.custom_agent_id.is_some()
+    {
+        return Err(StackError::InvalidParam {
+            field: "native_config",
+            reason: "hosted native config upload requires a fresh registry-agent init".to_owned(),
+        });
+    }
+    let harness = args
+        .agent
+        .as_deref()
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "agent",
+            reason: "hosted native config upload requires selecting the agent in the start request"
+                .to_owned(),
+        })?;
+    let inspected =
+        inspect_native_config(harness, Some(&upload.filename), upload.content.as_str())?;
+    let selection = prompt::native_config_review(inspected.inspection().clone())?;
+    validate_native_config_selection(&inspected, &selection)?;
+    args.native_config_revision = Some(selection.revision.clone());
+    Ok(Some(PendingInitNativeConfig {
+        inspected,
+        selection,
+        prepared: None,
+    }))
+}
+
+fn prepare_native_config_for_new_init(
+    args: &InitArgs,
+    registry: &RegistryCatalog,
+    pending: &mut PendingInitNativeConfig,
+    config: &mut Config,
+    config_path: &Path,
+    home: &Path,
+) -> Result<bool> {
+    let provider_preapplied = if let Some(provider_id) = args.provider.clone() {
+        apply_provider_to_config(args, registry, config, config_path, provider_id)?;
+        true
+    } else {
+        false
+    };
+    native_config::prepare_for_new_init(pending, config, home)?;
+    Ok(provider_preapplied)
 }
 
 pub(super) const STARTER_MAX_REQUEST_BYTES: u64 = 104_857_600;
@@ -750,6 +838,8 @@ struct InitHandoffContext {
     age_key_path: PathBuf,
     agent_id: String,
     agent_name: String,
+    native_config_import:
+        Option<crate::runtime::agent::native_config_import::NativeConfigOperation>,
 }
 
 /// Drop guard that performs the session/admin key handover as the very last
@@ -919,6 +1009,15 @@ fn init_handoff_payload(
         object.insert(
             "admin_key".to_owned(),
             serde_json::Value::String(keys.admin_value.as_str().to_owned()),
+        );
+    }
+    if let Some(operation) = context.native_config_import.as_ref() {
+        let object = payload
+            .as_object_mut()
+            .expect("init handoff payload is an object");
+        object.insert(
+            "native_config_import".to_owned(),
+            serde_json::json!(operation),
         );
     }
     payload
@@ -1113,10 +1212,13 @@ fn run_init_with_output(
 
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
+    let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
     let state_path = default_state_path(&home);
     let config_dir = parent_dir(&config_path)?;
     let state_dir = parent_dir(&state_path)?;
 
+    let mut pending_init_native_config =
+        review_native_config_upload_for_init(&mut args, &config_path)?;
     create_dir_owner_only(config_dir)?;
     create_dir_owner_only(state_dir)?;
     prompt_config_source_if_needed(&mut args, &config_path, &state_path)?;
@@ -1187,6 +1289,7 @@ fn run_init_with_output(
     }
 
     let mut legacy_auth = None;
+    let mut native_config_provider_preapplied = false;
     let config_status = if config_path.exists() {
         // Repair perms before validation so a failure to parse the file does not
         // leave a permissive config on disk; matches the behavior of `acps status`.
@@ -1212,6 +1315,16 @@ fn run_init_with_output(
             apply_registry_entry_to_config(&mut new_config, entry);
         }
         push_args_deps_to_config(&mut new_config, &args)?;
+        if let Some(pending) = pending_init_native_config.as_mut() {
+            native_config_provider_preapplied = prepare_native_config_for_new_init(
+                &args,
+                &registry,
+                pending,
+                &mut new_config,
+                &config_path,
+                &home,
+            )?;
+        }
         let canonical = new_config.to_canonical_toml()?;
         config::load_config_from_str(&canonical)?;
         write_new_file_owner_only(&config_path, canonical.as_bytes())?;
@@ -1336,12 +1449,48 @@ fn run_init_with_output(
         if args.stack_update_frequency.is_none() {
             args.stack_update_frequency = recorded.stack_update_frequency.clone();
         }
+        if args.native_config_revision.is_none() {
+            args.native_config_revision = recorded.native_config_revision.clone();
+        }
     }
     // On resume, re-collect the replayed `--agent-env-ref` names (flags only) so
     // they are re-verified against the now-open store rather than silently
     // dropped. Interactive values from the original run cannot be replayed.
     if resumed {
         agent_env_collection = collect_agent_env_refs_for_init(&args, false)?;
+    }
+
+    if resumed && let Some(recorded) = recorded_args.as_ref() {
+        if args.model.is_none() {
+            args.model = recorded.model.clone();
+        }
+        if args.provider.is_none() {
+            args.provider = recorded.provider.clone();
+        }
+        if args.provider.as_deref() == recorded.provider.as_deref() {
+            if args.api_key_ref.is_none() {
+                args.api_key_ref = recorded.api_key_ref.clone();
+            }
+            args.custom_provider = args.custom_provider || recorded.custom_provider;
+            if args.provider_name.is_none() {
+                args.provider_name = recorded.provider_name.clone();
+            }
+            if args.base_url.is_none() {
+                args.base_url = recorded.base_url.clone();
+            }
+            if args.provider_api.is_none() {
+                args.provider_api = recorded.provider_api.clone();
+            }
+            if args.model_name.is_none() {
+                args.model_name = recorded.model_name.clone();
+            }
+            if args.context.is_none() {
+                args.context = recorded.context.clone();
+            }
+            if args.output_max_tokens.is_none() {
+                args.output_max_tokens = recorded.output_max_tokens.clone();
+            }
+        }
     }
 
     let mut config = Config::load_from_path(&config_path)?;
@@ -1377,10 +1526,101 @@ fn run_init_with_output(
         }
         None => false,
     };
+    if agent_applied {
+        let canonical = config.to_canonical_toml()?;
+        config = config::load_config_from_str(&canonical)?;
+        atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+    }
+
+    let recorded_native_config_operation: Option<
+        crate::runtime::agent::native_config_import::NativeConfigOperation,
+    > = match prior_init_steps
+        .iter()
+        .find(|step| {
+            step.kind == step_kind::NATIVE_CONFIG_IMPORT
+                && matches!(
+                    step.status.as_str(),
+                    INIT_STEP_SUCCEEDED | INIT_STEP_SKIPPED
+                )
+        })
+        .map(|step| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&step.payload_json).map_err(|_| {
+                    StackError::InitRunCorrupted {
+                        reason: "native config import step payload is invalid".to_owned(),
+                    }
+                })?;
+            serde_json::from_value(payload.get("operation").cloned().ok_or_else(|| {
+                StackError::InitRunCorrupted {
+                    reason: "native config import step omitted its operation".to_owned(),
+                }
+            })?)
+            .map_err(|_| StackError::InitRunCorrupted {
+                reason: "native config import step operation is invalid".to_owned(),
+            })
+        })
+        .transpose()
+    {
+        Ok(operation) => operation,
+        Err(error) => return finalize_with_error(&store, &init_run, error),
+    };
+    if pending_init_native_config.is_some() || args.native_config_revision.is_some() {
+        if let Some(operation) = recorded_native_config_operation.as_ref() {
+            args.provider = None;
+            if operation.agent_config.model.is_some()
+                && args.model.as_deref() != operation.agent_config.model.as_deref()
+            {
+                args.model = None;
+            }
+        } else if let Some(provider_id) = args.provider.clone() {
+            if !native_config_provider_preapplied {
+                let preapply = (|| -> Result<()> {
+                    apply_provider_to_config(
+                        &args,
+                        &registry,
+                        &mut config,
+                        &config_path,
+                        provider_id,
+                    )?;
+                    let canonical = config.to_canonical_toml()?;
+                    config = config::load_config_from_str(&canonical)?;
+                    atomic_write_owner_only(&config_path, canonical.as_bytes())
+                })();
+                if let Err(error) = preapply {
+                    return finalize_with_error(&store, &init_run, error);
+                }
+            }
+            args.provider = None;
+        }
+    }
+    let mut init_native_config_record = match native_config::stage_for_init(
+        pending_init_native_config.as_ref(),
+        args.native_config_revision.as_deref(),
+        recorded_native_config_operation.as_ref(),
+        &init_run.id,
+        &config,
+        &config_path,
+        &state_path,
+        &home,
+    ) {
+        Ok(record) => record,
+        Err(error) => return finalize_with_error(&store, &init_run, error),
+    };
+    if init_native_config_record.as_ref().is_some_and(|record| {
+        record.prepared.as_ref().is_some_and(|prepared| {
+            prepared
+                .selected_managed_field_ids
+                .iter()
+                .any(|id| id == "model")
+        })
+    }) {
+        args.model = None;
+    }
+
     let edge_requested = apply_edge_profile_to_config(&args, &mut config)?;
     let supabase_configured = apply_supabase_to_config_for_init(&args, &mut config)?;
     prompt_init_skills_if_needed(&mut args, &config, &registry, &skill_catalog)?;
-    if agent_applied || edge_requested || supabase_configured {
+    if edge_requested || supabase_configured {
         let canonical = config.to_canonical_toml()?;
         config = config::load_config_from_str(&canonical)?;
         atomic_write_owner_only(&config_path, canonical.as_bytes())?;
@@ -1399,38 +1639,6 @@ fn run_init_with_output(
         args.plugins_source = recorded.plugins_source.clone();
         args.plugins = recorded.plugins.clone();
         args.no_skills = recorded.no_skills;
-    }
-    if resumed && let Some(recorded) = recorded_args.as_ref() {
-        if args.model.is_none() {
-            args.model = recorded.model.clone();
-        }
-        if args.provider.is_none() {
-            args.provider = recorded.provider.clone();
-        }
-        if args.provider.as_deref() == recorded.provider.as_deref() {
-            if args.api_key_ref.is_none() {
-                args.api_key_ref = recorded.api_key_ref.clone();
-            }
-            args.custom_provider = args.custom_provider || recorded.custom_provider;
-            if args.provider_name.is_none() {
-                args.provider_name = recorded.provider_name.clone();
-            }
-            if args.base_url.is_none() {
-                args.base_url = recorded.base_url.clone();
-            }
-            if args.provider_api.is_none() {
-                args.provider_api = recorded.provider_api.clone();
-            }
-            if args.model_name.is_none() {
-                args.model_name = recorded.model_name.clone();
-            }
-            if args.context.is_none() {
-                args.context = recorded.context.clone();
-            }
-            if args.output_max_tokens.is_none() {
-                args.output_max_tokens = recorded.output_max_tokens.clone();
-            }
-        }
     }
     if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE)
         && args.provider.is_none()
@@ -1491,13 +1699,14 @@ fn run_init_with_output(
     // Verifier: both verifier rows present in state.
     // -----------------------------------------------------------------
     let mut secret_store = SecretStore::open_or_create(&home)?;
-    let handoff_context = InitHandoffContext {
+    let mut handoff_context = InitHandoffContext {
         config_path: config_path.clone(),
         state_path: state_path.clone(),
         secret_store_path: secret_store.store_path().to_path_buf(),
         age_key_path: age_key_path(&home),
         agent_id: config.agent.id.clone(),
         agent_name: config.agent.name.clone(),
+        native_config_import: None,
     };
     key_handover.failure_context = Some(handoff_context.clone());
     init_println!(output_mode, "progress: initializing auth");
@@ -1595,6 +1804,31 @@ fn run_init_with_output(
         }
     }
 
+    if let Some(record) = init_native_config_record.as_mut()
+        && let Err(error) =
+            native_config::rebase_for_init(record, &config, &config_path, &state_path, &home)
+    {
+        return finalize_with_error(&store, &init_run, error);
+    }
+    if let Some(prepared) = init_native_config_record
+        .as_ref()
+        .and_then(|record| record.prepared.as_ref())
+        && let Err(error) = collect_prepared_secret_refs_for_init(
+            &args,
+            &registry,
+            &prepared.canonical_config,
+            &config_path,
+            &mut secret_store,
+        )
+        .and_then(|()| {
+            crate::runtime::agent::native_config_import::validate_native_config_secret_refs(
+                prepared, &home,
+            )
+        })
+    {
+        return finalize_with_error(&store, &init_run, error);
+    }
+
     // -----------------------------------------------------------------
     // Step 2: agent_install — install the configured agent if requested.
     // -----------------------------------------------------------------
@@ -1677,6 +1911,47 @@ fn run_init_with_output(
         );
         if let Err(error) = result {
             return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Step 11: native_config_import — apply the reviewed native global
+    // config after installation and before the first discovery launch.
+    // -----------------------------------------------------------------
+    if let Some(record) = init_native_config_record.as_mut() {
+        init_println!(output_mode, "progress: importing native Agent config");
+        let already_applied = record.phase
+            == crate::runtime::agent::native_config_import::NativeConfigOperationPhase::Applied;
+        let result = record_step(
+            &store,
+            &init_run,
+            11,
+            step_kind::NATIVE_CONFIG_IMPORT,
+            || Ok(already_applied),
+            || {
+                let (updated, operation) =
+                    native_config::apply_for_init(record, &config_path, &state_path, &home)?;
+                config = updated;
+                handoff_context.native_config_import = Some(operation.clone());
+                if let Some(context) = key_handover.failure_context.as_mut() {
+                    context.native_config_import = Some(operation.clone());
+                }
+                Ok(StepOutcome::with_payload(
+                    serde_json::json!({ "operation": operation }).to_string(),
+                ))
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+        if record.phase
+            == crate::runtime::agent::native_config_import::NativeConfigOperationPhase::Applied
+        {
+            handoff_context.native_config_import = Some(record.operation.clone());
+            if let Some(context) = key_handover.failure_context.as_mut() {
+                context.native_config_import = Some(record.operation.clone());
+            }
+            config = Config::load_from_path(&config_path)?;
         }
     }
 
@@ -2324,6 +2599,61 @@ mod tests {
             agent_install_progress_message(2),
             format!("installing agent (attempt 2/{MAX_INSTALL_ATTEMPTS})")
         );
+    }
+
+    #[test]
+    fn native_upload_rejects_incompatible_provider_before_starter_config_write() {
+        let home = tempfile::tempdir().expect("home");
+        let config_path = home
+            .path()
+            .join(".config")
+            .join("acp-stack")
+            .join("acps-config.toml");
+        let args = parse_init_args(&[
+            "--non-interactive",
+            "--agent",
+            "opencode",
+            "--provider",
+            "azure-openai-responses",
+        ]);
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("config");
+        let inspected =
+            inspect_native_config("opencode", Some("opencode.json"), r#"{"theme":"dark"}"#)
+                .expect("inspect");
+        let revision = inspected.revision().to_owned();
+        let mut pending = PendingInitNativeConfig {
+            inspected,
+            selection: NativeConfigSelection {
+                revision,
+                selected_managed_field_ids: Vec::new(),
+                executable_settings_acknowledged: false,
+            },
+            prepared: None,
+        };
+
+        let error = prepare_native_config_for_new_init(
+            &args,
+            &registry,
+            &mut pending,
+            &mut config,
+            &config_path,
+            home.path(),
+        )
+        .expect_err("unsupported provider");
+
+        assert!(matches!(
+            error,
+            StackError::InvalidParam {
+                field: "provider",
+                ..
+            }
+        ));
+        assert!(pending.prepared.is_none());
+        assert!(!config_path.exists());
     }
 
     #[test]

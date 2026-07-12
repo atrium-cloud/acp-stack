@@ -82,6 +82,9 @@ pub(crate) struct LoadedConfig {
 pub const SUPPORTED_CONFIG_VERSION: u64 = 1;
 
 pub const IMPORT_SIZE_LIMIT: usize = 1_048_576;
+/// JSON transport allowance for one 1 MiB config document plus worst-case
+/// `\u00xx` escaping and the small typed request envelope.
+pub const IMPORT_REQUEST_SIZE_LIMIT: usize = (IMPORT_SIZE_LIMIT * 6) + (16 * 1024);
 
 /// Default loopback API bind shared by starter config and deployment packaging.
 pub const DEFAULT_API_BIND: &str = "127.0.0.1:7700";

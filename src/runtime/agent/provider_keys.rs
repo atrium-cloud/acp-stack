@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
+use crate::config::{AgentProviderConfig, Config};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::claude_code_provider_profiles::{
     CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
@@ -404,6 +405,85 @@ pub fn agent_provider_id_for_provider_id(
     ProviderKeyMapping::load_embedded()
         .provider_mapping(provider_id)
         .and_then(|provider| provider.agent_native_provider_id(agent_id))
+}
+
+pub fn canonical_provider_id_for_agent_native_id(
+    agent_id: &str,
+    native_provider_id: &str,
+) -> Option<&'static str> {
+    if provider_id_supports_agent(native_provider_id, agent_id) {
+        return providers_for_agent(agent_id)
+            .into_iter()
+            .find(|provider| provider.id == native_provider_id)
+            .map(|provider| provider.id);
+    }
+    providers_for_agent(agent_id)
+        .into_iter()
+        .find(|provider| provider.agent_provider_id.unwrap_or(provider.id) == native_provider_id)
+        .map(|provider| provider.id)
+}
+
+/// Apply one mapped provider to canonical Agent config. CLI `agent set` and
+/// native-config import share this mutation so provider/env semantics cannot
+/// drift between the two surfaces.
+pub fn apply_mapped_agent_provider(
+    config: &mut Config,
+    provider_id: &str,
+    requested_api_key_ref: Option<String>,
+) -> Result<Vec<String>> {
+    if !provider_id_is_known(provider_id)
+        || !provider_id_supports_agent(provider_id, &config.agent.id)
+    {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "provider `{provider_id}` is not supported for agent `{}`",
+                config.agent.id
+            ),
+        });
+    }
+    let native_auth = provider_uses_agent_native_auth(&config.agent.id, provider_id);
+    if native_auth && requested_api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "api-key-ref",
+            reason: format!(
+                "provider `{provider_id}` uses agent-native auth and does not accept an API-key ref"
+            ),
+        });
+    }
+    let api_key_ref = requested_api_key_ref.or_else(|| {
+        (!native_auth)
+            .then(|| env_var_for_agent_provider_id(&config.agent.id, provider_id))
+            .flatten()
+            .map(str::to_owned)
+    });
+    if api_key_ref.is_none() && !native_auth {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "provider `{provider_id}` has no API-key env mapping for agent `{}`",
+                config.agent.id
+            ),
+        });
+    }
+    let required_env_refs = required_env_refs_for_agent_provider_id(
+        &config.agent.id,
+        provider_id,
+        api_key_ref.as_deref(),
+    );
+    for env_ref in &required_env_refs {
+        if !config.agent.env.iter().any(|name| name == env_ref) {
+            config.agent.env.push(env_ref.clone());
+        }
+    }
+    config.agent.model = None;
+    config.agent.provider = Some(AgentProviderConfig {
+        id: provider_id.to_owned(),
+        model: None,
+        api_key_ref,
+        custom: None,
+    });
+    Ok(required_env_refs)
 }
 
 pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
@@ -986,6 +1066,38 @@ mod tests {
             Some("kimi-for-coding")
         );
         assert_eq!(agent_provider_id_for_provider_id("cursor", "openai"), None);
+    }
+
+    #[test]
+    fn pi_native_config_provider_ids_resolve_to_canonical() {
+        // `inspect_pi` maps a `defaultProvider` value through
+        // `canonical_provider_id_for_agent_native_id("pi", ...)`. Pi's native
+        // ids match acps canonical ids for shared providers and differ only
+        // where the mapping declares an alias.
+        assert_eq!(
+            canonical_provider_id_for_agent_native_id("pi", "anthropic"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            canonical_provider_id_for_agent_native_id("pi", "openai"),
+            Some("openai")
+        );
+        // Pi's `vercel-ai-gateway`/`fireworks`/`together` native ids collapse
+        // to the same canonical id acps stores.
+        assert_eq!(
+            canonical_provider_id_for_agent_native_id("pi", "vercel-ai-gateway"),
+            Some("vercel-ai-gateway")
+        );
+        assert_eq!(
+            canonical_provider_id_for_agent_native_id("pi", "fireworks"),
+            Some("fireworks")
+        );
+        // A provider Pi lists but acps does not map for `pi` yields no
+        // canonical id, so the import surfaces an incompatible candidate.
+        assert_eq!(
+            canonical_provider_id_for_agent_native_id("pi", "totally-unknown-provider"),
+            None
+        );
     }
 
     #[test]
