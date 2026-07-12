@@ -21,6 +21,7 @@ use std::io;
 use std::sync::Arc;
 
 use crate::error::{Result, StackError};
+use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
 
 #[derive(Debug, Clone)]
 pub(super) struct HostedPromptItem {
@@ -35,6 +36,7 @@ pub(super) enum HostedPromptStyle {
     Confirm,
     Text,
     Password,
+    NativeConfigReview,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,7 @@ pub(super) struct HostedPromptRequest {
     pub(super) required: bool,
     pub(super) default: Option<bool>,
     pub(super) items: Vec<HostedPromptItem>,
+    pub(super) inspection: Option<NativeConfigInspection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +61,12 @@ pub(super) trait HostedPromptDriver: Send + Sync {
     fn text(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<String>>>;
     fn password(&self, request: HostedPromptRequest)
     -> Result<HostedPromptOutcome<Option<String>>>;
+    fn native_config_review(
+        &self,
+        _request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<NativeConfigSelection>> {
+        Ok(HostedPromptOutcome::Unhandled)
+    }
     fn progress(&self, message: String);
     fn result(&self, payload: serde_json::Value);
 }
@@ -98,6 +107,32 @@ pub(super) fn emit_progress(message: impl Into<String>) {
 pub(super) fn emit_result(payload: serde_json::Value) {
     if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
         driver.result(payload);
+    }
+}
+
+pub(super) fn native_config_review(
+    inspection: NativeConfigInspection,
+) -> Result<NativeConfigSelection> {
+    let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) else {
+        return Err(StackError::InvalidParam {
+            field: "native_config",
+            reason: "native config upload is supported only by hosted init".to_owned(),
+        });
+    };
+    let request = HostedPromptRequest {
+        style: HostedPromptStyle::NativeConfigReview,
+        prompt: "Review native Agent config".to_owned(),
+        required: true,
+        default: None,
+        items: Vec::new(),
+        inspection: Some(inspection),
+    };
+    match driver.native_config_review(request)? {
+        HostedPromptOutcome::Handled(selection) => Ok(selection),
+        HostedPromptOutcome::Unhandled => Err(StackError::InvalidParam {
+            field: "native_config",
+            reason: "hosted init client did not handle native config review".to_owned(),
+        }),
     }
 }
 
@@ -186,6 +221,7 @@ pub(super) fn confirm(interactive: bool, prompt: &str, default: bool) -> Result<
             required: true,
             default: Some(default),
             items: Vec::new(),
+            inspection: None,
         };
         return match driver.confirm(request)? {
             HostedPromptOutcome::Handled(value) => Ok(value),
@@ -213,6 +249,7 @@ pub(super) fn text(interactive: bool, prompt: &str, required: bool) -> Result<Op
             required,
             default: None,
             items: Vec::new(),
+            inspection: None,
         };
         return match driver.text(request)? {
             HostedPromptOutcome::Handled(value) => Ok(value),
@@ -261,6 +298,7 @@ pub(super) fn password(interactive: bool, prompt: &str) -> Result<Option<String>
             required: true,
             default: None,
             items: Vec::new(),
+            inspection: None,
         };
         return match driver.password(request)? {
             HostedPromptOutcome::Handled(value) => Ok(value),
@@ -296,6 +334,7 @@ fn hosted_request<T>(
                 hint: hint.clone(),
             })
             .collect(),
+        inspection: None,
     }
 }
 

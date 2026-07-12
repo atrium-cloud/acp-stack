@@ -60,6 +60,10 @@ use super::routes::logs::{
     logs_sessions_handler,
 };
 use super::routes::metrics::metrics_summary_handler;
+use super::routes::native_config::{
+    native_config_cancel_handler, native_config_import_handler, native_config_inspect_handler,
+    native_config_status_handler,
+};
 use super::routes::permissions::{
     permissions_approve_handler, permissions_deny_handler, permissions_get_handler,
     permissions_pending_handler,
@@ -89,9 +93,10 @@ use super::routes::ws::{
 };
 use super::ws::ws_handler;
 use crate::auth::{AuthVerifierSet, KeyKind};
-use crate::config::{AgentConfig, Config, LocalSessionAuth};
+use crate::config::{AgentConfig, Config, IMPORT_REQUEST_SIZE_LIMIT, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::events::EventHub;
+use crate::fs_util::{AgentConfigMutationFileLock, acquire_agent_config_mutation_file_lock};
 use crate::runtime::agent::model_catalog::AgentModelCatalogManager;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::runtime::agent::supervisor::AgentSupervisor;
@@ -122,6 +127,9 @@ pub struct AppState {
     pub model_catalog: Arc<AgentModelCatalogManager>,
     pub(crate) agent_targets: Arc<AgentTargetRegistry>,
     pub(crate) queued_agent_restarts: Arc<DashMap<String, ()>>,
+    pub(crate) native_config_imports:
+        Arc<TokioMutex<crate::runtime::agent::native_config_import::NativeConfigImportState>>,
+    pub(crate) native_config_mutation_lock: Arc<TokioMutex<()>>,
     pub(crate) session_changes: SessionChangesHandle,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
@@ -129,6 +137,11 @@ pub struct AppState {
     pub auth_failure_blocker: Arc<crate::http_hardening::AuthFailureBlocker>,
     pub rate_limiter: Arc<crate::http_hardening::RateLimiter>,
     pub ws_registry: Arc<super::ws_registry::WsRegistry>,
+}
+
+pub(crate) struct AgentConfigMutationGuard {
+    _local: tokio::sync::OwnedMutexGuard<()>,
+    _process: AgentConfigMutationFileLock,
 }
 
 #[derive(Clone)]
@@ -242,6 +255,26 @@ impl RuntimePaths {
 }
 
 impl AppState {
+    pub(crate) async fn lock_agent_config_mutation(&self) -> Result<AgentConfigMutationGuard> {
+        let local = self.native_config_mutation_lock.clone().lock_owned().await;
+        let config_path = self.runtime_paths.config_path.clone();
+        let process = tokio::task::spawn_blocking(move || {
+            acquire_agent_config_mutation_file_lock(&config_path)
+        })
+        .await
+        .map_err(|error| StackError::NativeAgentConfig {
+            code: if error.is_panic() {
+                "native_config_lock_task_panicked"
+            } else {
+                "native_config_lock_task_cancelled"
+            },
+        })??;
+        Ok(AgentConfigMutationGuard {
+            _local: local,
+            _process: process,
+        })
+    }
+
     /// Resolve the `events.source` label for a request based on the tier tag
     /// the auth pipeline (or the local UDS listener) attached to the request.
     /// `KeyKind::Local` is the only writer of `EVENT_SOURCE_LOCAL`; everything
@@ -444,6 +477,10 @@ impl AppState {
             model_catalog,
             agent_targets,
             queued_agent_restarts: Arc::new(DashMap::new()),
+            native_config_imports: Arc::new(TokioMutex::new(
+                crate::runtime::agent::native_config_import::NativeConfigImportState::default(),
+            )),
+            native_config_mutation_lock: Arc::new(TokioMutex::new(())),
             session_changes: SessionChangesHandle::new(),
             event_hub,
             commands,
@@ -637,6 +674,23 @@ pub fn build_router(state: AppState) -> Router {
             get(agent_restart_blockers_handler),
         )
         .route("/v1/agent/switch", post(agent_switch_handler))
+        .route(
+            "/v1/agent/config/native/inspect",
+            post(native_config_inspect_handler)
+                .layer(RequestBodyLimitLayer::new(IMPORT_REQUEST_SIZE_LIMIT)),
+        )
+        .route(
+            "/v1/agent/config/native/import",
+            post(native_config_import_handler),
+        )
+        .route(
+            "/v1/agent/config/native/import/{operation_id}",
+            get(native_config_status_handler),
+        )
+        .route(
+            "/v1/agent/config/native/import/{operation_id}/cancel",
+            post(native_config_cancel_handler),
+        )
         .route(
             "/v1/array/targets/{target_id}/install",
             post(array_agent_install_handler),
