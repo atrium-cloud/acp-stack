@@ -15,9 +15,6 @@ use crate::runtime::dependencies::deps_apply::{
     DepApplyCandidate, candidate_summary_line, summarize_candidates,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
-use crate::runtime::install::skill_installer::{
-    ANTHROPIC_SKILLS_SOURCE_ID, OPENAI_PLUGINS_SOURCE_ID, SOURCE_ANTHROPIC, SOURCE_OPENAI,
-};
 use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::secrets::SecretStore;
 
@@ -860,10 +857,9 @@ fn prompt_standard_setup(
     if agent_supports_skills(args, registry)
         && essential_agent_skills_available(skill_catalog)
         && !args.no_skills
+        && !args.essential_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
-        && args.plugins_source.is_none()
-        && args.plugins.is_empty()
         && prompt::confirm(interactive, "Add essential agent skills?", false)?
     {
         apply_essential_agent_skills(args, skill_catalog);
@@ -894,10 +890,9 @@ fn prompt_advanced_setup(
     }
     if agent_supports_skills(args, registry)
         && !args.no_skills
+        && !args.essential_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
-        && args.plugins_source.is_none()
-        && args.plugins.is_empty()
         && prompt::confirm(interactive, "Add agent skills?", false)?
     {
         args.prompt_skills = true;
@@ -968,26 +963,14 @@ fn agent_supports_skills(args: &InitArgs, registry: &RegistryCatalog) -> bool {
 }
 
 fn essential_agent_skills_available(skill_catalog: &SkillCatalog) -> bool {
-    !skill_catalog
-        .essential_skill_names(ANTHROPIC_SKILLS_SOURCE_ID)
-        .is_empty()
-        || !skill_catalog
-            .essential_plugin_names(OPENAI_PLUGINS_SOURCE_ID)
-            .is_empty()
+    skill_catalog
+        .sources()
+        .iter()
+        .any(|source| !source.essential_skills.is_empty())
 }
 
-fn apply_essential_agent_skills(args: &mut InitArgs, skill_catalog: &SkillCatalog) {
-    let skills = skill_catalog.essential_skill_names(ANTHROPIC_SKILLS_SOURCE_ID);
-    if !skills.is_empty() {
-        args.skills_source = Some(SOURCE_ANTHROPIC.to_owned());
-        args.skills = skills;
-    }
-
-    let plugins = skill_catalog.essential_plugin_names(OPENAI_PLUGINS_SOURCE_ID);
-    if !plugins.is_empty() {
-        args.plugins_source = Some(SOURCE_OPENAI.to_owned());
-        args.plugins = plugins;
-    }
+fn apply_essential_agent_skills(args: &mut InitArgs, _skill_catalog: &SkillCatalog) {
+    args.essential_skills = true;
 }
 
 fn prompt_data_sources(interactive: bool, args: &mut InitArgs) -> Result<()> {
@@ -2000,10 +1983,9 @@ mod tests {
 
         run_environment_configuration(driver, &mut args).expect("standard setup");
 
-        assert_eq!(args.skills_source.as_deref(), Some(SOURCE_ANTHROPIC));
-        assert_eq!(args.skills, ["docx", "pptx", "xlsx", "pdf"]);
-        assert_eq!(args.plugins_source.as_deref(), Some(SOURCE_OPENAI));
-        assert_eq!(args.plugins, ["github"]);
+        assert!(args.essential_skills);
+        assert!(args.skills_source.is_none());
+        assert!(args.skills.is_empty());
         assert!(!args.prompt_skills);
         assert!(args.prompt_data_sources.is_empty());
     }
@@ -2025,10 +2007,9 @@ mod tests {
 
         run_environment_configuration(driver, &mut args).expect("standard setup");
 
-        assert_eq!(args.skills_source.as_deref(), Some(SOURCE_ANTHROPIC));
+        assert_eq!(args.skills_source.as_deref(), Some("anthropic"));
         assert_eq!(args.skills, ["docx"]);
-        assert!(args.plugins_source.is_none());
-        assert!(args.plugins.is_empty());
+        assert!(!args.essential_skills);
     }
 
     // Advanced Setup (path index 1) with a non-skills agent: deps off, MCP off,

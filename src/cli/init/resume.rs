@@ -32,8 +32,7 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "output_max_tokens": args.output_max_tokens,
         "skills_source": args.skills_source,
         "skills": args.skills,
-        "plugins_source": args.plugins_source,
-        "plugins": args.plugins,
+        "essential_skills": args.essential_skills,
         "no_skills": args.no_skills,
         "edge": args.edge.map(|value| value.as_config_value()),
         "exposure": args.exposure.map(|value| value.as_config_value()),
@@ -101,9 +100,8 @@ pub(super) struct RecordedInitArgs {
     pub(super) skills_source: Option<String>,
     #[serde(default)]
     pub(super) skills: Vec<String>,
-    pub(super) plugins_source: Option<String>,
     #[serde(default)]
-    pub(super) plugins: Vec<String>,
+    pub(super) essential_skills: bool,
     #[serde(default)]
     pub(super) no_skills: bool,
     pub(super) edge: Option<String>,
@@ -136,8 +134,33 @@ pub(super) struct RecordedInitArgs {
     pub(super) native_config_revision: Option<String>,
 }
 
+// Arguments that existed in earlier releases but can no longer be replayed.
+// Unknown recorded keys are otherwise tolerated (several current keys are
+// intentionally absent from `RecordedInitArgs`), so removed requests must be
+// rejected explicitly instead of resuming without them.
+const REMOVED_RECORDED_ARGS: &[&str] = &["plugins", "plugins_source"];
+
 pub(super) fn recorded_init_args(run: &InitRunRecord) -> Result<RecordedInitArgs> {
-    serde_json::from_str(&run.args_json).map_err(|source| StackError::InitRunCorrupted {
+    let value: serde_json::Value =
+        serde_json::from_str(&run.args_json).map_err(|source| StackError::InitRunCorrupted {
+            reason: format!("init run {} has invalid args_json: {source}", run.id),
+        })?;
+    for key in REMOVED_RECORDED_ARGS {
+        let requested = match value.get(key) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Array(entries)) => !entries.is_empty(),
+            Some(_) => true,
+        };
+        if requested {
+            return Err(StackError::InitRunCorrupted {
+                reason: format!(
+                    "init run {} was recorded with the removed `{key}` argument and cannot be resumed; start a new run",
+                    run.id
+                ),
+            });
+        }
+    }
+    serde_json::from_value(value).map_err(|source| StackError::InitRunCorrupted {
         reason: format!("init run {} has invalid args_json: {source}", run.id),
     })
 }
@@ -326,6 +349,40 @@ mod tests {
 
         let failed_step = failed_step_for_report(steps).expect("failed step");
         assert_eq!(failed_step.kind, "current_failure");
+    }
+
+    fn run_with_args(args_json: &str) -> InitRunRecord {
+        InitRunRecord {
+            id: "run".to_owned(),
+            started_at: "2026-01-01T00:00:00.000000000Z".to_owned(),
+            finished_at: None,
+            status: INIT_RUN_FAILED.to_owned(),
+            runtime_user: None,
+            agent_id: None,
+            args_json: args_json.to_owned(),
+        }
+    }
+
+    #[test]
+    fn recorded_init_args_rejects_removed_plugin_request() {
+        let run = run_with_args(r#"{"plugins": ["yeet"], "skills": []}"#);
+
+        let err = match recorded_init_args(&run) {
+            Ok(_) => panic!("expected removed-argument rejection"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, StackError::InitRunCorrupted { .. }));
+        assert!(err.to_string().contains("`plugins`"));
+    }
+
+    #[test]
+    fn recorded_init_args_tolerates_unrequested_removed_keys() {
+        let run = run_with_args(r#"{"plugins": [], "plugins_source": null, "skills": ["docx"]}"#);
+
+        let recorded = recorded_init_args(&run).expect("recorded args");
+
+        assert_eq!(recorded.skills, vec!["docx".to_owned()]);
     }
 
     #[test]

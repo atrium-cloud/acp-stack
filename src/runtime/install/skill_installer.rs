@@ -9,17 +9,12 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{create_dir_owner_only, set_owner_only_dir, set_owner_only_file};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 use crate::runtime::install::skill_registry::{
-    PluginBundleDirectory, SkillCatalog, SkillDirectory, SkillSource,
+    CatalogSkill, SkillCatalog, SkillDirectory, SkillSource,
 };
 use crate::runtime::workspace_sources::safe_download::{DownloadOpts, download_to_file};
 use crate::runtime::workspace_sources::safe_extract::{ExtractOpts, extract_archive};
 
-pub const SOURCE_OPENAI: &str = "openai";
-pub const SOURCE_ANTHROPIC: &str = "anthropic";
 pub const SOURCE_CUSTOM_GITHUB_PREFIX: &str = "github:";
-pub const OPENAI_SKILLS_SOURCE_ID: &str = "openai-skills";
-pub const ANTHROPIC_SKILLS_SOURCE_ID: &str = "anthropic-skills";
-pub const OPENAI_PLUGINS_SOURCE_ID: &str = "openai-plugins";
 const CUSTOM_SKILLS_REPO: &str = "skills";
 const CUSTOM_SKILLS_BRANCH: &str = "main";
 const CUSTOM_SKILLS_DIRECTORY: &str = "skills";
@@ -33,11 +28,6 @@ pub enum SkillSourceSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PluginSourceSelection {
-    Official { id: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSkillSource {
     pub id: String,
     pub name: String,
@@ -48,22 +38,15 @@ pub struct ResolvedSkillSource {
     pub verified_commit: Option<String>,
     pub indexed_commit: Option<String>,
     pub descriptor: String,
+    pub catalog_managed: bool,
     pub directories: Vec<ResolvedSkillDirectory>,
-    pub plugin_bundles: Vec<ResolvedPluginBundleDirectory>,
+    pub indexed_skills: Vec<CatalogSkill>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSkillDirectory {
     pub path: String,
     pub installable: bool,
-    pub indexed_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedPluginBundleDirectory {
-    pub path: String,
-    pub installable_plugins: Vec<String>,
-    pub excluded_plugins: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -97,39 +80,22 @@ pub enum SkillPortStatus {
     NoneFound,
 }
 
-pub fn parse_skill_source(value: &str) -> Result<SkillSourceSelection> {
+pub fn parse_skill_source(value: &str, catalog: &SkillCatalog) -> Result<SkillSourceSelection> {
     let trimmed = value.trim();
-    match trimmed {
-        SOURCE_OPENAI => Ok(SkillSourceSelection::Official {
-            id: OPENAI_SKILLS_SOURCE_ID.to_owned(),
-        }),
-        SOURCE_ANTHROPIC => Ok(SkillSourceSelection::Official {
-            id: ANTHROPIC_SKILLS_SOURCE_ID.to_owned(),
-        }),
-        _ => {
-            let Some(owner) = trimmed.strip_prefix(SOURCE_CUSTOM_GITHUB_PREFIX) else {
-                return Err(StackError::SkillInstallInvalidSource {
-                    source_id: trimmed.to_owned(),
-                });
-            };
-            validate_github_owner(owner)?;
-            Ok(SkillSourceSelection::CustomGithubOwner {
-                owner: owner.to_owned(),
-            })
-        }
+    if let Some(source) = catalog.lookup_alias(trimmed) {
+        return Ok(SkillSourceSelection::Official {
+            id: source.id.clone(),
+        });
     }
-}
-
-pub fn parse_plugin_source(value: &str) -> Result<PluginSourceSelection> {
-    let trimmed = value.trim();
-    match trimmed {
-        SOURCE_OPENAI => Ok(PluginSourceSelection::Official {
-            id: OPENAI_PLUGINS_SOURCE_ID.to_owned(),
-        }),
-        _ => Err(StackError::PluginInstallInvalidSource {
+    let Some(owner) = trimmed.strip_prefix(SOURCE_CUSTOM_GITHUB_PREFIX) else {
+        return Err(StackError::SkillInstallInvalidSource {
             source_id: trimmed.to_owned(),
-        }),
-    }
+        });
+    };
+    validate_github_owner(owner)?;
+    Ok(SkillSourceSelection::CustomGithubOwner {
+        owner: owner.to_owned(),
+    })
 }
 
 pub fn parse_skill_names(values: &[String]) -> Result<Vec<String>> {
@@ -143,33 +109,10 @@ pub fn parse_skill_names(values: &[String]) -> Result<Vec<String>> {
                     name: raw.to_owned(),
                 });
             }
-            validate_skill_name(name)?;
+            validate_skill_selector(name)?;
             if !seen.insert(name.to_owned()) {
                 return Err(StackError::SkillInstallFailed {
                     reason: format!("duplicate skill `{name}`"),
-                });
-            }
-            parsed.push(name.to_owned());
-        }
-    }
-    Ok(parsed)
-}
-
-pub fn parse_plugin_names(values: &[String]) -> Result<Vec<String>> {
-    let mut parsed = Vec::new();
-    let mut seen = HashSet::new();
-    for value in values {
-        for raw in value.split(',') {
-            let name = raw.trim();
-            if name.is_empty() {
-                return Err(StackError::PluginInstallInvalidName {
-                    name: raw.to_owned(),
-                });
-            }
-            validate_plugin_name(name)?;
-            if !seen.insert(name.to_owned()) {
-                return Err(StackError::PluginInstallFailed {
-                    reason: format!("duplicate plugin `{name}`"),
                 });
             }
             parsed.push(name.to_owned());
@@ -204,36 +147,13 @@ pub fn resolve_source(
                 verified_commit: None,
                 indexed_commit: None,
                 descriptor: SKILL_DESCRIPTOR.to_owned(),
+                catalog_managed: false,
                 directories: vec![ResolvedSkillDirectory {
                     path: CUSTOM_SKILLS_DIRECTORY.to_owned(),
                     installable: true,
-                    indexed_names: Vec::new(),
                 }],
-                plugin_bundles: Vec::new(),
+                indexed_skills: Vec::new(),
             })
-        }
-    }
-}
-
-pub fn resolve_plugin_source(
-    selection: &PluginSourceSelection,
-    catalog: &SkillCatalog,
-) -> Result<ResolvedSkillSource> {
-    match selection {
-        PluginSourceSelection::Official { id } => {
-            let source =
-                catalog
-                    .lookup(id)
-                    .ok_or_else(|| StackError::PluginInstallSourceMissing {
-                        source_id: id.clone(),
-                    })?;
-            let resolved = resolve_official_source(source);
-            if resolved.plugin_bundles.is_empty() {
-                return Err(StackError::PluginInstallSourceMissing {
-                    source_id: id.clone(),
-                });
-            }
-            Ok(resolved)
         }
     }
 }
@@ -259,6 +179,7 @@ pub fn install_from_github(
     destination_root: &Path,
     skill_names: &[String],
 ) -> Result<SkillInstallReport> {
+    validate_requested_skills(source, skill_names)?;
     let tempdir = tempfile::tempdir().map_err(|source| StackError::SkillInstallFailed {
         reason: format!("create temporary skill install directory: {source}"),
     })?;
@@ -285,93 +206,12 @@ pub fn install_from_github(
     install_from_extracted_root(source, &archive_root, destination_root, skill_names)
 }
 
-pub fn install_plugins_from_github(
-    source: &ResolvedSkillSource,
-    destination_root: &Path,
-    plugin_names: &[String],
-) -> Result<SkillInstallReport> {
-    let names = parse_plugin_names(plugin_names)?;
-    validate_requested_plugins(source, &names)?;
-
-    let tempdir = tempfile::tempdir().map_err(|source| StackError::PluginInstallFailed {
-        reason: format!("create temporary plugin install directory: {source}"),
-    })?;
-    let archive_path = tempdir.path().join("plugins.tar.gz");
-    let extract_dir = tempdir.path().join("extract");
-    let reference = source_archive_reference(source);
-    let archive_url = format!("{}/archive/{reference}.tar.gz", source.url);
-    let download_opts = DownloadOpts {
-        max_bytes: GITHUB_ARCHIVE_MAX_BYTES,
-        ..DownloadOpts::default()
-    };
-    download_to_file(&archive_url, &archive_path, &download_opts)?;
-    let report = extract_archive(&archive_path, &extract_dir, &ExtractOpts::default())?;
-    let archive_root = report
-        .top_level_dir
-        .as_deref()
-        .map(|top| extract_dir.join(top))
-        .ok_or_else(|| StackError::PluginInstallFailed {
-            reason: format!(
-                "GitHub archive for plugin source `{}` did not contain a single top-level directory",
-                source.id
-            ),
-        })?;
-    install_plugins_from_extracted_root(source, &archive_root, destination_root, &names)
-}
-
 fn source_archive_reference(source: &ResolvedSkillSource) -> &str {
     source
         .verified_commit
         .as_deref()
         .or(source.indexed_commit.as_deref())
         .unwrap_or(source.branch.as_str())
-}
-
-pub fn install_plugins_from_extracted_root(
-    source: &ResolvedSkillSource,
-    archive_root: &Path,
-    destination_root: &Path,
-    plugin_names: &[String],
-) -> Result<SkillInstallReport> {
-    if source.descriptor != SKILL_DESCRIPTOR {
-        return Err(StackError::PluginInstallFailed {
-            reason: format!("plugin source `{}` descriptor is not SKILL.md", source.id),
-        });
-    }
-    let names = parse_plugin_names(plugin_names)?;
-    if names.is_empty() {
-        return Ok(SkillInstallReport {
-            source_id: source.id.clone(),
-            destination_root: destination_root.to_path_buf(),
-            installed: Vec::new(),
-            skipped: Vec::new(),
-        });
-    }
-    validate_requested_plugins(source, &names)?;
-
-    let mut resolved_skills = Vec::new();
-    let mut seen_skill_names = HashSet::new();
-    for plugin_name in names {
-        let skill_dirs = find_plugin_skill_dirs(source, archive_root, &plugin_name)?;
-        if skill_dirs.is_empty() {
-            return Err(StackError::PluginInstallNoSkills {
-                source_id: source.id.clone(),
-                plugin: plugin_name,
-            });
-        }
-        for (skill_name, source_dir) in skill_dirs {
-            if !seen_skill_names.insert(skill_name.clone()) {
-                return Err(StackError::PluginInstallFailed {
-                    reason: format!(
-                        "duplicate skill `{skill_name}` expanded from selected plugins"
-                    ),
-                });
-            }
-            resolved_skills.push((skill_name, source_dir));
-        }
-    }
-
-    install_resolved_skill_dirs(&source.id, destination_root, resolved_skills)
 }
 
 pub fn install_from_extracted_root(
@@ -385,7 +225,7 @@ pub fn install_from_extracted_root(
             reason: format!("skill source `{}` descriptor is not SKILL.md", source.id),
         });
     }
-    let names = parse_skill_names(skill_names)?;
+    let names = validate_requested_skills(source, skill_names)?;
     if names.is_empty() {
         return Ok(SkillInstallReport {
             source_id: source.id.clone(),
@@ -395,11 +235,58 @@ pub fn install_from_extracted_root(
         });
     }
     let mut resolved = Vec::with_capacity(names.len());
-    for name in names {
-        let source_dir = find_skill_dir(source, archive_root, &name)?;
+    for selector in names {
+        let (name, source_dir) = find_skill_dir(source, archive_root, &selector)?;
         resolved.push((name, source_dir));
     }
     install_resolved_skill_dirs(&source.id, destination_root, resolved)
+}
+
+fn validate_requested_skills(
+    source: &ResolvedSkillSource,
+    skill_names: &[String],
+) -> Result<Vec<String>> {
+    let selectors = parse_skill_names(skill_names)?;
+    let mut install_names = HashSet::<String>::new();
+    for selector in &selectors {
+        let name = if source.catalog_managed {
+            source
+                .indexed_skills
+                .iter()
+                .find(|skill| skill.selector == *selector)
+                .map(|skill| skill.name.as_str())
+                .ok_or_else(|| StackError::SkillInstallSkillMissing {
+                    source_id: source.id.clone(),
+                    skill: selector.clone(),
+                })?
+        } else {
+            validate_skill_name(selector)?;
+            selector
+        };
+        validate_install_target_name(name)?;
+        if let Some(existing) = install_names
+            .iter()
+            .find(|existing| install_target_names_overlap(existing, name))
+        {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!(
+                    "selected skills resolve to overlapping install paths `{existing}` and `{name}`"
+                ),
+            });
+        }
+        install_names.insert(name.to_owned());
+    }
+    Ok(selectors)
+}
+
+pub(crate) fn install_target_names_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn install_resolved_skill_dirs(
@@ -410,7 +297,15 @@ fn install_resolved_skill_dirs(
     ensure_directory_no_symlink_ancestors(destination_root, true)?;
     let mut resolved = Vec::with_capacity(resolved_skills.len());
     for (name, source_dir) in resolved_skills {
+        validate_install_target_name(&name)?;
+        ensure_no_installed_skill_ancestor(destination_root, &name)?;
         let target_dir = destination_root.join(&name);
+        let target_parent = target_dir
+            .parent()
+            .ok_or_else(|| StackError::SkillInstallFailed {
+                reason: format!("skill target `{}` has no parent", target_dir.display()),
+            })?;
+        ensure_directory_no_symlink_ancestors(target_parent, true)?;
         match existing_target_state(&target_dir)? {
             ExistingTargetState::AlreadyInstalled => {
                 resolved.push(ResolvedInstall {
@@ -474,12 +369,52 @@ fn install_resolved_skill_dirs(
     })
 }
 
-pub fn all_skills_installed(destination_root: &Path, skill_names: &[String]) -> bool {
+fn ensure_no_installed_skill_ancestor(destination_root: &Path, skill_name: &str) -> Result<()> {
+    let mut ancestor = destination_root.to_path_buf();
+    let mut components = skill_name.split('/').peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        ancestor.push(component);
+        let descriptor = ancestor.join(SKILL_DESCRIPTOR);
+        match std::fs::symlink_metadata(&descriptor) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                return Err(StackError::SkillInstallTargetConflict {
+                    path: ancestor,
+                    reason: "nested target would modify an already-installed skill".to_owned(),
+                });
+            }
+            Ok(_) => {
+                return Err(StackError::SkillInstallTargetConflict {
+                    path: descriptor,
+                    reason: "ancestor SKILL.md is not a regular file".to_owned(),
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!("stat skill ancestor `{}`: {source}", descriptor.display()),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn all_skills_installed(
+    source: &ResolvedSkillSource,
+    destination_root: &Path,
+    skill_names: &[String],
+) -> bool {
     if ensure_directory_no_symlink_ancestors(destination_root, false).is_err() {
         return false;
     }
     parse_skill_names(skill_names).is_ok_and(|names| {
-        names.iter().all(|name| {
+        names.iter().all(|selector| {
+            let Some(name) = install_name_for_selector(source, selector) else {
+                return false;
+            };
             matches!(
                 existing_target_state(&destination_root.join(name)),
                 Ok(ExistingTargetState::AlreadyInstalled)
@@ -547,66 +482,7 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
         });
     }
     let mut candidates = Vec::new();
-    for entry in
-        std::fs::read_dir(source_root).map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "read source skills directory `{}`: {source}",
-                source_root.display()
-            ),
-        })?
-    {
-        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
-            reason: format!(
-                "read source skills directory entry `{}`: {source}",
-                source_root.display()
-            ),
-        })?;
-        let entry_path = entry.path();
-        let entry_metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
-            StackError::SkillInstallFailed {
-                reason: format!(
-                    "stat source skill entry `{}`: {source}",
-                    entry_path.display()
-                ),
-            }
-        })?;
-        if entry_metadata.file_type().is_symlink() {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!("refusing to port symlink `{}`", entry_path.display()),
-            });
-        }
-        if entry_metadata.is_file() {
-            continue;
-        }
-        if !entry_metadata.is_dir() {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!("refusing to port special file `{}`", entry_path.display()),
-            });
-        }
-        let Some(skill_name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if validate_skill_name(&skill_name).is_err() {
-            continue;
-        }
-        let descriptor = entry_path.join(SKILL_DESCRIPTOR);
-        let descriptor_metadata = match std::fs::symlink_metadata(&descriptor) {
-            Ok(metadata) => metadata,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(StackError::SkillInstallFailed {
-                    reason: format!("stat skill descriptor `{}`: {source}", descriptor.display()),
-                });
-            }
-        };
-        if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!("skill `{skill_name}` descriptor must be a regular SKILL.md file"),
-            });
-        }
-        validate_skill_dir_for_port(&entry_path)?;
-        candidates.push((skill_name, entry_path));
-    }
+    collect_port_skill_directories(source_root, source_root, &mut candidates)?;
 
     if candidates.is_empty() {
         return Ok(SkillPortReport {
@@ -622,6 +498,12 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
     let mut installs = Vec::with_capacity(candidates.len());
     for (skill_name, entry_path) in candidates {
         let target_dir = target_root.join(&skill_name);
+        let target_parent = target_dir
+            .parent()
+            .ok_or_else(|| StackError::SkillInstallFailed {
+                reason: format!("skill target `{}` has no parent", target_dir.display()),
+            })?;
+        ensure_directory_no_symlink_ancestors(target_parent, true)?;
         let action = match existing_target_state(&target_dir)? {
             ExistingTargetState::Missing => PortAction::Copy,
             ExistingTargetState::AlreadyInstalled => PortAction::Overwrite,
@@ -669,6 +551,95 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
     })
 }
 
+fn collect_port_skill_directories(
+    source_root: &Path,
+    directory: &Path,
+    candidates: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    let descriptor = directory.join(SKILL_DESCRIPTOR);
+    match std::fs::symlink_metadata(&descriptor) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "skill descriptor `{}` must be a regular SKILL.md file",
+                        descriptor.display()
+                    ),
+                });
+            }
+            let relative = directory.strip_prefix(source_root).map_err(|source| {
+                StackError::SkillInstallFailed {
+                    reason: format!(
+                        "resolve source skill path `{}`: {source}",
+                        directory.display()
+                    ),
+                }
+            })?;
+            let skill_name = relative
+                .components()
+                .map(|component| match component {
+                    Component::Normal(value) => value.to_str().map(str::to_owned),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|components| components.join("/"))
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| StackError::SkillInstallFailed {
+                    reason: format!(
+                        "skill descriptor `{}` does not map to a portable skill directory",
+                        descriptor.display()
+                    ),
+                })?;
+            validate_install_target_name(&skill_name)?;
+            validate_skill_dir_for_port(directory)?;
+            candidates.push((skill_name, directory.to_path_buf()));
+            return Ok(());
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("stat skill descriptor `{}`: {source}", descriptor.display()),
+            });
+        }
+    }
+
+    for entry in std::fs::read_dir(directory).map_err(|source| StackError::SkillInstallFailed {
+        reason: format!(
+            "read source skills directory `{}`: {source}",
+            directory.display()
+        ),
+    })? {
+        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "read source skills directory entry `{}`: {source}",
+                directory.display()
+            ),
+        })?;
+        let entry_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
+            StackError::SkillInstallFailed {
+                reason: format!(
+                    "stat source skill entry `{}`: {source}",
+                    entry_path.display()
+                ),
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("refusing to port symlink `{}`", entry_path.display()),
+            });
+        }
+        if metadata.is_dir() {
+            collect_port_skill_directories(source_root, &entry_path, candidates)?;
+        } else if !metadata.is_file() {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("refusing to port special file `{}`", entry_path.display()),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn resolve_official_source(source: &SkillSource) -> ResolvedSkillSource {
     ResolvedSkillSource {
         id: source.id.clone(),
@@ -680,12 +651,9 @@ fn resolve_official_source(source: &SkillSource) -> ResolvedSkillSource {
         verified_commit: source.verified_commit.clone(),
         indexed_commit: source.indexed_commit.clone(),
         descriptor: source.descriptor.clone(),
+        catalog_managed: true,
         directories: source.directories.iter().map(resolve_directory).collect(),
-        plugin_bundles: source
-            .plugin_bundles
-            .iter()
-            .map(resolve_plugin_bundle)
-            .collect(),
+        indexed_skills: source.indexed_skills.clone(),
     }
 }
 
@@ -693,23 +661,39 @@ fn resolve_directory(directory: &SkillDirectory) -> ResolvedSkillDirectory {
     ResolvedSkillDirectory {
         path: directory.path.clone(),
         installable: directory.installable,
-        indexed_names: directory.indexed_names.clone(),
-    }
-}
-
-fn resolve_plugin_bundle(plugin_bundle: &PluginBundleDirectory) -> ResolvedPluginBundleDirectory {
-    ResolvedPluginBundleDirectory {
-        path: plugin_bundle.path.clone(),
-        installable_plugins: plugin_bundle.installable_plugins.clone(),
-        excluded_plugins: plugin_bundle.excluded_plugins.clone(),
     }
 }
 
 fn find_skill_dir(
     source: &ResolvedSkillSource,
     archive_root: &Path,
-    skill_name: &str,
-) -> Result<PathBuf> {
+    selector: &str,
+) -> Result<(String, PathBuf)> {
+    if source.catalog_managed {
+        let skill = source
+            .indexed_skills
+            .iter()
+            .find(|skill| skill.selector == selector)
+            .ok_or_else(|| StackError::SkillInstallSkillMissing {
+                source_id: source.id.clone(),
+                skill: selector.to_owned(),
+            })?;
+        validate_registry_relative_path(&skill.path)?;
+        let candidate = archive_root.join(&skill.path);
+        validate_skill_candidate(&candidate, selector)?;
+        let descriptor_name = skill_descriptor_name(&candidate.join(SKILL_DESCRIPTOR))?;
+        if descriptor_name != skill.name {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!(
+                    "skill selector `{selector}` expected frontmatter name `{}` but archive declared `{descriptor_name}`",
+                    skill.name
+                ),
+            });
+        }
+        return Ok((skill.name.clone(), candidate));
+    }
+
+    validate_skill_name(selector)?;
     for directory in source
         .directories
         .iter()
@@ -717,160 +701,105 @@ fn find_skill_dir(
     {
         validate_registry_relative_path(&directory.path)?;
         let base = archive_root.join(&directory.path);
-        let candidate = base.join(skill_name);
+        let candidate = base.join(selector);
         if !candidate.exists() {
             continue;
         }
-        let metadata = std::fs::symlink_metadata(&candidate).map_err(|source| {
-            StackError::SkillInstallFailed {
-                reason: format!("stat skill directory `{}`: {source}", candidate.display()),
-            }
-        })?;
-        if !metadata.is_dir() {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!("skill `{skill_name}` source path is not a directory"),
-            });
-        }
-        let descriptor = candidate.join(SKILL_DESCRIPTOR);
-        let descriptor_metadata = std::fs::symlink_metadata(&descriptor).map_err(|source| {
-            StackError::SkillInstallFailed {
-                reason: format!("stat skill descriptor `{}`: {source}", descriptor.display()),
-            }
-        })?;
-        if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
-            return Err(StackError::SkillInstallFailed {
-                reason: format!("skill `{skill_name}` descriptor must be a regular SKILL.md file"),
-            });
-        }
-        return Ok(candidate);
+        validate_skill_candidate(&candidate, selector)?;
+        return Ok((selector.to_owned(), candidate));
     }
     Err(StackError::SkillInstallSkillMissing {
         source_id: source.id.clone(),
-        skill: skill_name.to_owned(),
+        skill: selector.to_owned(),
     })
 }
 
-fn validate_requested_plugins(source: &ResolvedSkillSource, plugin_names: &[String]) -> Result<()> {
-    for plugin_name in plugin_names {
-        if plugin_is_installable(source, plugin_name) {
-            continue;
+fn validate_skill_candidate(candidate: &Path, selector: &str) -> Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(candidate).map_err(|source| StackError::SkillInstallFailed {
+            reason: format!("stat skill directory `{}`: {source}", candidate.display()),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(StackError::SkillInstallFailed {
+            reason: format!("skill `{selector}` source path is not a regular directory"),
+        });
+    }
+    let descriptor = candidate.join(SKILL_DESCRIPTOR);
+    let descriptor_metadata = std::fs::symlink_metadata(&descriptor).map_err(|source| {
+        StackError::SkillInstallFailed {
+            reason: format!("stat skill descriptor `{}`: {source}", descriptor.display()),
         }
-        if plugin_is_excluded(source, plugin_name) {
-            return Err(StackError::PluginInstallNoSkills {
-                source_id: source.id.clone(),
-                plugin: plugin_name.clone(),
-            });
-        }
-        return Err(StackError::PluginInstallPluginMissing {
-            source_id: source.id.clone(),
-            plugin: plugin_name.clone(),
+    })?;
+    if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
+        return Err(StackError::SkillInstallFailed {
+            reason: format!("skill `{selector}` descriptor must be a regular SKILL.md file"),
         });
     }
     Ok(())
 }
 
-fn plugin_is_installable(source: &ResolvedSkillSource, plugin_name: &str) -> bool {
-    source.plugin_bundles.iter().any(|plugin_bundle| {
-        plugin_bundle
-            .installable_plugins
+fn install_name_for_selector<'a>(
+    source: &'a ResolvedSkillSource,
+    selector: &'a str,
+) -> Option<&'a str> {
+    if source.catalog_managed {
+        source
+            .indexed_skills
             .iter()
-            .any(|candidate| candidate == plugin_name)
-    })
-}
-
-fn plugin_is_excluded(source: &ResolvedSkillSource, plugin_name: &str) -> bool {
-    source.plugin_bundles.iter().any(|plugin_bundle| {
-        plugin_bundle
-            .excluded_plugins
-            .iter()
-            .any(|candidate| candidate == plugin_name)
-    })
-}
-
-fn find_plugin_skill_dirs(
-    source: &ResolvedSkillSource,
-    archive_root: &Path,
-    plugin_name: &str,
-) -> Result<Vec<(String, PathBuf)>> {
-    let mut skills = Vec::new();
-    for plugin_bundle in &source.plugin_bundles {
-        validate_registry_relative_path(&plugin_bundle.path)?;
-        let skills_root = archive_root
-            .join(&plugin_bundle.path)
-            .join(plugin_name)
-            .join("skills");
-        let root_metadata = match std::fs::symlink_metadata(&skills_root) {
-            Ok(metadata) => metadata,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(StackError::PluginInstallFailed {
-                    reason: format!(
-                        "stat plugin skills root `{}`: {source}",
-                        skills_root.display()
-                    ),
-                });
-            }
-        };
-        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-            return Err(StackError::PluginInstallFailed {
-                reason: format!(
-                    "plugin `{plugin_name}` skills path `{}` is not a directory",
-                    skills_root.display()
-                ),
-            });
-        }
-        for entry in
-            std::fs::read_dir(&skills_root).map_err(|source| StackError::PluginInstallFailed {
-                reason: format!(
-                    "read plugin skills root `{}`: {source}",
-                    skills_root.display()
-                ),
-            })?
-        {
-            let entry = entry.map_err(|source| StackError::PluginInstallFailed {
-                reason: format!(
-                    "read plugin skills root entry `{}`: {source}",
-                    skills_root.display()
-                ),
-            })?;
-            let skill_name = entry.file_name().to_string_lossy().into_owned();
-            let entry_path = entry.path();
-            if validate_skill_name(&skill_name).is_err() {
-                continue;
-            }
-            let entry_metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
-                StackError::PluginInstallFailed {
-                    reason: format!("stat plugin skill `{}`: {source}", entry_path.display()),
-                }
-            })?;
-            if entry_metadata.file_type().is_symlink() || !entry_metadata.is_dir() {
-                continue;
-            }
-            let descriptor = entry_path.join(SKILL_DESCRIPTOR);
-            let descriptor_metadata = match std::fs::symlink_metadata(&descriptor) {
-                Ok(metadata) => metadata,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => {
-                    return Err(StackError::PluginInstallFailed {
-                        reason: format!(
-                            "stat plugin skill descriptor `{}`: {source}",
-                            descriptor.display()
-                        ),
-                    });
-                }
-            };
-            if descriptor_metadata.file_type().is_symlink() || !descriptor_metadata.is_file() {
-                return Err(StackError::PluginInstallFailed {
-                    reason: format!(
-                        "plugin skill `{skill_name}` descriptor must be a regular SKILL.md file"
-                    ),
-                });
-            }
-            skills.push((skill_name, entry_path));
-        }
+            .find(|skill| skill.selector == selector)
+            .map(|skill| skill.name.as_str())
+    } else if validate_skill_name(selector).is_ok() {
+        Some(selector)
+    } else {
+        None
     }
-    skills.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(skills)
+}
+
+fn skill_descriptor_name(descriptor: &Path) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Frontmatter {
+        name: String,
+    }
+
+    let body =
+        std::fs::read_to_string(descriptor).map_err(|source| StackError::SkillInstallFailed {
+            reason: format!("read skill descriptor `{}`: {source}", descriptor.display()),
+        })?;
+    let mut lines = body.lines();
+    if lines.next() != Some("---") {
+        return Err(StackError::SkillInstallFailed {
+            reason: format!(
+                "skill descriptor `{}` is missing YAML frontmatter",
+                descriptor.display()
+            ),
+        });
+    }
+    let mut yaml = String::new();
+    let mut closed = false;
+    for line in lines {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    if !closed {
+        return Err(StackError::SkillInstallFailed {
+            reason: format!(
+                "skill descriptor `{}` has unterminated YAML frontmatter",
+                descriptor.display()
+            ),
+        });
+    }
+    let frontmatter: Frontmatter =
+        serde_norway::from_str(&yaml).map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "parse skill descriptor frontmatter `{}`: {source}",
+                descriptor.display()
+            ),
+        })?;
+    Ok(frontmatter.name)
 }
 
 fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetState> {
@@ -925,7 +854,7 @@ fn copy_skill_dir_atomically(source_dir: &Path, target_dir: &Path, skill_name: &
             reason: format!("skill target `{}` has no parent", target_dir.display()),
         })?;
     let tempdir = tempfile::Builder::new()
-        .prefix(&format!(".{skill_name}."))
+        .prefix(&format!(".{}.", skill_temp_prefix(skill_name)))
         .tempdir_in(parent)
         .map_err(|source| StackError::SkillInstallFailed {
             reason: format!(
@@ -957,7 +886,7 @@ fn replace_skill_dir_atomically(
             reason: format!("skill target `{}` has no parent", target_dir.display()),
         })?;
     let tempdir = tempfile::Builder::new()
-        .prefix(&format!(".{skill_name}."))
+        .prefix(&format!(".{}.", skill_temp_prefix(skill_name)))
         .tempdir_in(parent)
         .map_err(|source| StackError::SkillInstallFailed {
             reason: format!(
@@ -968,7 +897,7 @@ fn replace_skill_dir_atomically(
     copy_dir_recursive(source_dir, tempdir.path())?;
 
     let backup = tempfile::Builder::new()
-        .prefix(&format!(".{skill_name}.backup."))
+        .prefix(&format!(".{}.backup.", skill_temp_prefix(skill_name)))
         .tempdir_in(parent)
         .map_err(|source| StackError::SkillInstallFailed {
             reason: format!(
@@ -1002,6 +931,10 @@ fn replace_skill_dir_atomically(
     }
     std::mem::forget(tempdir);
     Ok(())
+}
+
+fn skill_temp_prefix(skill_name: &str) -> &str {
+    skill_name.rsplit('/').next().unwrap_or("skill")
 }
 
 fn copy_dir_recursive(source_dir: &Path, target_dir: &Path) -> Result<()> {
@@ -1252,21 +1185,43 @@ fn validate_skill_name(name: &str) -> Result<()> {
     }
 }
 
-fn validate_plugin_name(name: &str) -> Result<()> {
+fn validate_skill_selector(selector: &str) -> Result<()> {
+    if !selector.is_empty()
+        && selector
+            .split('/')
+            .all(|segment| validate_skill_name(segment).is_ok())
+    {
+        return Ok(());
+    }
+    Err(StackError::SkillInstallInvalidName {
+        name: selector.to_owned(),
+    })
+}
+
+// Mirrors the catalog's install-name rules, including `:` for frontmatter
+// names such as `cocounsel-legal:deep-research`.
+fn validate_install_target_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
-        && name.split('-').all(|segment| {
+        && name.split('/').all(|segment| {
             !segment.is_empty()
                 && segment
                     .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':'))
+                && segment
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && segment
+                    .bytes()
+                    .next_back()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
         });
     if valid {
-        Ok(())
-    } else {
-        Err(StackError::PluginInstallInvalidName {
-            name: name.to_owned(),
-        })
+        return Ok(());
     }
+    Err(StackError::SkillInstallFailed {
+        reason: format!("skill install name `{name}` is not a safe relative path"),
+    })
 }
 
 fn validate_github_owner(owner: &str) -> Result<()> {
@@ -1358,25 +1313,24 @@ mod tests {
             verified_commit: None,
             indexed_commit: None,
             descriptor: SKILL_DESCRIPTOR.to_owned(),
+            catalog_managed: false,
             directories: vec![
                 ResolvedSkillDirectory {
                     path: "skills/.system".to_owned(),
                     installable: false,
-                    indexed_names: Vec::new(),
                 },
                 ResolvedSkillDirectory {
                     path: "skills/.curated".to_owned(),
                     installable: true,
-                    indexed_names: Vec::new(),
                 },
             ],
-            plugin_bundles: Vec::new(),
+            indexed_skills: Vec::new(),
         }
     }
 
-    fn plugin_source() -> ResolvedSkillSource {
+    fn catalog_source(skills: Vec<CatalogSkill>) -> ResolvedSkillSource {
         ResolvedSkillSource {
-            id: OPENAI_PLUGINS_SOURCE_ID.to_owned(),
+            id: "openai-plugins".to_owned(),
             name: "OpenAI Plugin Skills".to_owned(),
             owner: "openai".to_owned(),
             repo: "plugins".to_owned(),
@@ -1385,12 +1339,9 @@ mod tests {
             verified_commit: None,
             indexed_commit: None,
             descriptor: SKILL_DESCRIPTOR.to_owned(),
+            catalog_managed: true,
             directories: Vec::new(),
-            plugin_bundles: vec![ResolvedPluginBundleDirectory {
-                path: "plugins".to_owned(),
-                installable_plugins: vec!["cloudflare".to_owned(), "github".to_owned()],
-                excluded_plugins: vec!["empty-plugin".to_owned()],
-            }],
+            indexed_skills: skills,
         }
     }
 
@@ -1401,14 +1352,21 @@ mod tests {
         std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
     }
 
-    fn write_plugin_skill(root: &Path, plugin: &str, name: &str) {
-        write_skill(root, &format!("plugins/{plugin}/skills"), name);
-    }
-
     fn write_installed_skill(root: &Path, name: &str, descriptor: &str) {
         let skill_dir = root.join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), descriptor).expect("descriptor");
+        std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
+    }
+
+    fn write_catalog_skill(root: &Path, path: &str, name: &str) {
+        let skill_dir = root.join(path);
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join(SKILL_DESCRIPTOR),
+            format!("---\nname: {name}\ndescription: test\n---\n# Skill\n"),
+        )
+        .expect("descriptor");
         std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
     }
 
@@ -1418,20 +1376,21 @@ mod tests {
 
     #[test]
     fn parses_official_and_custom_sources() {
+        let catalog = SkillCatalog::load_embedded().expect("catalog");
         assert_eq!(
-            parse_skill_source("openai").expect("openai"),
+            parse_skill_source("openai", &catalog).expect("openai"),
             SkillSourceSelection::Official {
-                id: OPENAI_SKILLS_SOURCE_ID.to_owned()
+                id: "openai-skills".to_owned()
             }
         );
         assert_eq!(
-            parse_skill_source("anthropic").expect("anthropic"),
+            parse_skill_source("anthropic", &catalog).expect("anthropic"),
             SkillSourceSelection::Official {
-                id: ANTHROPIC_SKILLS_SOURCE_ID.to_owned()
+                id: "anthropic-skills".to_owned()
             }
         );
         assert_eq!(
-            parse_skill_source("github:my-org").expect("custom"),
+            parse_skill_source("github:my-org", &catalog).expect("custom"),
             SkillSourceSelection::CustomGithubOwner {
                 owner: "my-org".to_owned()
             }
@@ -1439,23 +1398,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_openai_plugin_source() {
-        assert_eq!(
-            parse_plugin_source("openai").expect("openai"),
-            PluginSourceSelection::Official {
-                id: OPENAI_PLUGINS_SOURCE_ID.to_owned()
-            }
-        );
-        let err = parse_plugin_source("anthropic").expect_err("unsupported");
-        assert!(matches!(err, StackError::PluginInstallInvalidSource { .. }));
-    }
-
-    #[test]
     fn rejects_invalid_skill_names() {
-        for name in ["", "Upper", "two--dash", "-bad", "bad_", "bad/name"] {
+        for name in ["", "Upper", "two--dash", "-bad", "bad_", "bad//name"] {
             let err = parse_skill_names(&[name.to_owned()]).expect_err("invalid");
             assert!(matches!(err, StackError::SkillInstallInvalidName { .. }));
         }
+    }
+
+    #[test]
+    fn accepts_path_qualified_skill_selectors() {
+        assert_eq!(
+            parse_skill_names(&["zoom-plugin/contact-center/android".to_owned()])
+                .expect("qualified selector"),
+            ["zoom-plugin/contact-center/android"]
+        );
+    }
+
+    #[test]
+    fn custom_sources_reject_qualified_selectors_during_preflight() {
+        let catalog = SkillCatalog::load_embedded().expect("catalog");
+        let source = resolve_source(
+            &SkillSourceSelection::CustomGithubOwner {
+                owner: "example-org".to_owned(),
+            },
+            &catalog,
+        )
+        .expect("custom source");
+
+        let error = validate_requested_skills(&source, &["nested/skill".to_owned()])
+            .expect_err("custom selector rejected");
+
+        assert!(matches!(error, StackError::SkillInstallInvalidName { .. }));
     }
 
     #[test]
@@ -1463,20 +1436,6 @@ mod tests {
         let err =
             parse_skill_names(&["repo-map,repo-map".to_owned()]).expect_err("duplicate rejected");
         assert!(matches!(err, StackError::SkillInstallFailed { .. }));
-    }
-
-    #[test]
-    fn rejects_invalid_plugin_names() {
-        for name in ["", "Upper", "two--dash", "-bad", "bad_", "bad/name"] {
-            let err = parse_plugin_names(&[name.to_owned()]).expect_err("invalid");
-            assert!(matches!(err, StackError::PluginInstallInvalidName { .. }));
-        }
-    }
-
-    #[test]
-    fn rejects_duplicate_plugin_names() {
-        let err = parse_plugin_names(&["cloudflare,cloudflare".to_owned()]).expect_err("duplicate");
-        assert!(matches!(err, StackError::PluginInstallFailed { .. }));
     }
 
     #[test]
@@ -1520,6 +1479,146 @@ mod tests {
                 .is_file()
         );
         assert!(destination.join("code-review").join("script.sh").is_file());
+    }
+
+    #[test]
+    fn catalog_install_uses_exact_path_and_frontmatter_install_name() {
+        let archive = tempfile::tempdir().expect("archive");
+        let home = tempfile::tempdir().expect("home");
+        let path = "plugins/zoom/skills/contact-center/android";
+        write_catalog_skill(archive.path(), path, "contact-center/android");
+        let source = catalog_source(vec![CatalogSkill {
+            selector: "zoom-plugin/contact-center/android".to_owned(),
+            name: "contact-center/android".to_owned(),
+            path: path.to_owned(),
+        }]);
+        let destination = canonical_temp_home(&home).join(".agents/skills");
+
+        let report = install_from_extracted_root(
+            &source,
+            archive.path(),
+            &destination,
+            &["zoom-plugin/contact-center/android".to_owned()],
+        )
+        .expect("install");
+
+        assert_eq!(report.installed[0].name, "contact-center/android");
+        assert!(
+            destination
+                .join("contact-center/android")
+                .join(SKILL_DESCRIPTOR)
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn catalog_install_rejects_changed_frontmatter_name() {
+        let archive = tempfile::tempdir().expect("archive");
+        let home = tempfile::tempdir().expect("home");
+        let path = "plugins/zoom/skills/general";
+        write_catalog_skill(archive.path(), path, "changed-name");
+        let source = catalog_source(vec![CatalogSkill {
+            selector: "zoom-general".to_owned(),
+            name: "zoom-general".to_owned(),
+            path: path.to_owned(),
+        }]);
+
+        let error = install_from_extracted_root(
+            &source,
+            archive.path(),
+            &canonical_temp_home(&home).join(".agents/skills"),
+            &["zoom-general".to_owned()],
+        )
+        .expect_err("frontmatter mismatch");
+
+        assert!(matches!(error, StackError::SkillInstallFailed { .. }));
+    }
+
+    #[test]
+    fn catalog_install_rejects_two_variants_with_same_target() {
+        let archive = tempfile::tempdir().expect("archive");
+        let home = tempfile::tempdir().expect("home");
+        for path in ["one/skills/customize", "two/skills/customize"] {
+            write_catalog_skill(archive.path(), path, "customize");
+        }
+        let source = catalog_source(vec![
+            CatalogSkill {
+                selector: "one/customize".to_owned(),
+                name: "customize".to_owned(),
+                path: "one/skills/customize".to_owned(),
+            },
+            CatalogSkill {
+                selector: "two/customize".to_owned(),
+                name: "customize".to_owned(),
+                path: "two/skills/customize".to_owned(),
+            },
+        ]);
+
+        let error = install_from_extracted_root(
+            &source,
+            archive.path(),
+            &canonical_temp_home(&home).join(".agents/skills"),
+            &["one/customize,two/customize".to_owned()],
+        )
+        .expect_err("duplicate target");
+
+        assert!(matches!(error, StackError::SkillInstallFailed { .. }));
+    }
+
+    #[test]
+    fn catalog_install_rejects_parent_and_nested_install_targets() {
+        let source = catalog_source(vec![
+            CatalogSkill {
+                selector: "zoom-mcp".to_owned(),
+                name: "zoom-mcp".to_owned(),
+                path: "zoom/skills/zoom-mcp".to_owned(),
+            },
+            CatalogSkill {
+                selector: "zoom-mcp/whiteboard".to_owned(),
+                name: "zoom-mcp/whiteboard".to_owned(),
+                path: "zoom/skills/zoom-mcp/whiteboard".to_owned(),
+            },
+        ]);
+
+        let error =
+            validate_requested_skills(&source, &["zoom-mcp,zoom-mcp/whiteboard".to_owned()])
+                .expect_err("overlapping targets");
+
+        assert!(matches!(error, StackError::SkillInstallFailed { .. }));
+    }
+
+    #[test]
+    fn catalog_install_rejects_nested_target_inside_installed_skill() {
+        let archive = tempfile::tempdir().expect("archive");
+        let home = tempfile::tempdir().expect("home");
+        let path = "plugins/example/skills/web";
+        write_catalog_skill(archive.path(), path, "ui-toolkit/web");
+        let source = catalog_source(vec![CatalogSkill {
+            selector: "ui-toolkit/web".to_owned(),
+            name: "ui-toolkit/web".to_owned(),
+            path: path.to_owned(),
+        }]);
+        let destination = canonical_temp_home(&home).join(".agents/skills");
+        std::fs::create_dir_all(destination.join("ui-toolkit")).expect("installed parent");
+        std::fs::write(
+            destination.join("ui-toolkit").join(SKILL_DESCRIPTOR),
+            "# Installed parent\n",
+        )
+        .expect("parent descriptor");
+
+        let error = install_from_extracted_root(
+            &source,
+            archive.path(),
+            &destination,
+            &["ui-toolkit/web".to_owned()],
+        )
+        .expect_err("installed ancestor rejected");
+
+        assert!(matches!(
+            error,
+            StackError::SkillInstallTargetConflict { path, .. }
+                if path == destination.join("ui-toolkit")
+        ));
     }
 
     #[test]
@@ -1625,137 +1724,6 @@ mod tests {
     }
 
     #[test]
-    fn install_plugins_from_extracted_root_installs_all_plugin_skills() {
-        let archive = tempfile::tempdir().expect("archive");
-        let home = tempfile::tempdir().expect("home");
-        write_plugin_skill(archive.path(), "cloudflare", "workers-best-practices");
-        write_plugin_skill(archive.path(), "cloudflare", "wrangler");
-        std::fs::write(
-            archive
-                .path()
-                .join("plugins/cloudflare/asset-outside-skills.txt"),
-            "ignored\n",
-        )
-        .expect("plugin asset");
-        let destination = canonical_temp_home(&home).join(".agents/skills");
-
-        let report = install_plugins_from_extracted_root(
-            &plugin_source(),
-            archive.path(),
-            &destination,
-            &["cloudflare".to_owned()],
-        )
-        .expect("install plugin");
-
-        assert_eq!(
-            report
-                .installed
-                .iter()
-                .map(|entry| entry.name.as_str())
-                .collect::<Vec<_>>(),
-            ["workers-best-practices", "wrangler"]
-        );
-        assert!(
-            destination
-                .join("workers-best-practices")
-                .join(SKILL_DESCRIPTOR)
-                .is_file()
-        );
-        assert!(!destination.join("asset-outside-skills.txt").exists());
-    }
-
-    #[test]
-    fn install_plugins_from_extracted_root_rejects_excluded_plugin() {
-        let archive = tempfile::tempdir().expect("archive");
-        let home = tempfile::tempdir().expect("home");
-
-        let err = install_plugins_from_extracted_root(
-            &plugin_source(),
-            archive.path(),
-            &canonical_temp_home(&home).join(".agents/skills"),
-            &["empty-plugin".to_owned()],
-        )
-        .expect_err("excluded plugin rejected");
-
-        assert!(matches!(err, StackError::PluginInstallNoSkills { .. }));
-    }
-
-    #[test]
-    fn install_plugins_from_extracted_root_rejects_unknown_plugin() {
-        let archive = tempfile::tempdir().expect("archive");
-        let home = tempfile::tempdir().expect("home");
-
-        let err = install_plugins_from_extracted_root(
-            &plugin_source(),
-            archive.path(),
-            &canonical_temp_home(&home).join(".agents/skills"),
-            &["missing-plugin".to_owned()],
-        )
-        .expect_err("unknown plugin rejected");
-
-        assert!(matches!(err, StackError::PluginInstallPluginMissing { .. }));
-    }
-
-    #[test]
-    fn install_plugins_from_extracted_root_rejects_plugin_without_valid_skills() {
-        let archive = tempfile::tempdir().expect("archive");
-        let home = tempfile::tempdir().expect("home");
-        let mut source = plugin_source();
-        source.plugin_bundles[0]
-            .installable_plugins
-            .push("declared-empty".to_owned());
-        std::fs::create_dir_all(archive.path().join("plugins/declared-empty/skills"))
-            .expect("empty skills dir");
-
-        let err = install_plugins_from_extracted_root(
-            &source,
-            archive.path(),
-            &canonical_temp_home(&home).join(".agents/skills"),
-            &["declared-empty".to_owned()],
-        )
-        .expect_err("empty plugin rejected");
-
-        assert!(matches!(err, StackError::PluginInstallNoSkills { .. }));
-    }
-
-    #[test]
-    fn install_plugins_from_extracted_root_rejects_duplicate_expanded_skill_names() {
-        let archive = tempfile::tempdir().expect("archive");
-        let home = tempfile::tempdir().expect("home");
-        write_plugin_skill(archive.path(), "cloudflare", "shared-skill");
-        write_plugin_skill(archive.path(), "github", "shared-skill");
-
-        let err = install_plugins_from_extracted_root(
-            &plugin_source(),
-            archive.path(),
-            &canonical_temp_home(&home).join(".agents/skills"),
-            &["cloudflare,github".to_owned()],
-        )
-        .expect_err("duplicate expanded skill rejected");
-
-        assert!(matches!(err, StackError::PluginInstallFailed { .. }));
-    }
-
-    #[test]
-    fn install_plugins_from_extracted_root_rejects_target_conflict() {
-        let archive = tempfile::tempdir().expect("archive");
-        let home = tempfile::tempdir().expect("home");
-        write_plugin_skill(archive.path(), "cloudflare", "wrangler");
-        let destination = canonical_temp_home(&home).join(".agents/skills");
-        std::fs::create_dir_all(destination.join("wrangler")).expect("target");
-
-        let err = install_plugins_from_extracted_root(
-            &plugin_source(),
-            archive.path(),
-            &destination,
-            &["cloudflare".to_owned()],
-        )
-        .expect_err("target conflict");
-
-        assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
-    }
-
-    #[test]
     #[cfg(unix)]
     fn all_skills_installed_rejects_symlinked_target() {
         let home = tempfile::tempdir().expect("home");
@@ -1766,6 +1734,7 @@ mod tests {
         std::os::unix::fs::symlink(external.path(), destination.join("repo-map")).expect("symlink");
 
         assert!(!all_skills_installed(
+            &source(),
             &destination,
             &["repo-map".to_owned()]
         ));
@@ -1829,6 +1798,29 @@ mod tests {
         assert_eq!(report.copied.len(), 2);
         assert!(target.join("repo-map").join(SKILL_DESCRIPTOR).is_file());
         assert!(target.join("code-review").join("script.sh").is_file());
+    }
+
+    #[test]
+    fn port_skill_directories_preserves_namespaced_skill_paths() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        write_installed_skill(
+            &source,
+            "contact-center/android",
+            "---\nname: contact-center/android\n---\n",
+        );
+
+        let report = port_skill_directories(&source, &target).expect("port");
+
+        assert_eq!(report.copied[0].name, "contact-center/android");
+        assert!(
+            target
+                .join("contact-center/android")
+                .join(SKILL_DESCRIPTOR)
+                .is_file()
+        );
     }
 
     #[test]
@@ -1911,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn port_skill_directories_skips_non_skills_and_invalid_names() {
+    fn port_skill_directories_skips_non_skill_directories() {
         let home = tempfile::tempdir().expect("home");
         let home = canonical_temp_home(&home);
         let source = home.join(".agents/skills");
@@ -1923,6 +1915,35 @@ mod tests {
         let report = port_skill_directories(&source, &target).expect("port");
 
         assert_eq!(report.status, SkillPortStatus::NoneFound);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn port_skill_directories_rejects_root_skill_descriptor() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        std::fs::create_dir_all(&source).expect("source root");
+        std::fs::write(source.join(SKILL_DESCRIPTOR), "# Root\n").expect("descriptor");
+
+        let err = port_skill_directories(&source, &target).expect_err("root descriptor");
+
+        assert!(matches!(err, StackError::SkillInstallFailed { .. }));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn port_skill_directories_rejects_unportable_skill_name() {
+        let home = tempfile::tempdir().expect("home");
+        let home = canonical_temp_home(&home);
+        let source = home.join(".agents/skills");
+        let target = home.join(".config/agents/skills");
+        write_installed_skill(&source, "_bad", "# Bad\n");
+
+        let err = port_skill_directories(&source, &target).expect_err("unportable name");
+
+        assert!(matches!(err, StackError::SkillInstallFailed { .. }));
         assert!(!target.exists());
     }
 

@@ -463,24 +463,6 @@ pub enum StackError {
     #[error("skill install failed: {reason}")]
     SkillInstallFailed { reason: String },
 
-    #[error("invalid plugin source `{source_id}`")]
-    PluginInstallInvalidSource { source_id: String },
-
-    #[error("plugin source `{source_id}` is not available")]
-    PluginInstallSourceMissing { source_id: String },
-
-    #[error("invalid plugin name `{name}`")]
-    PluginInstallInvalidName { name: String },
-
-    #[error("plugin `{plugin}` was not found in source `{source_id}`")]
-    PluginInstallPluginMissing { source_id: String, plugin: String },
-
-    #[error("plugin `{plugin}` in source `{source_id}` does not contain installable skills")]
-    PluginInstallNoSkills { source_id: String, plugin: String },
-
-    #[error("plugin install failed: {reason}")]
-    PluginInstallFailed { reason: String },
-
     #[error("failed to query GitHub Releases for {repo}: {source}")]
     GithubReleaseFetch {
         repo: String,
