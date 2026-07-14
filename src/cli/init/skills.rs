@@ -1,15 +1,13 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::runtime::init_runner::step_kind;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
-    ANTHROPIC_SKILLS_SOURCE_ID, OPENAI_PLUGINS_SOURCE_ID, OPENAI_SKILLS_SOURCE_ID,
-    ResolvedSkillSource, SOURCE_ANTHROPIC, SOURCE_CUSTOM_GITHUB_PREFIX, SOURCE_OPENAI,
-    SkillInstallReport, all_skills_installed, expand_agent_skills_install_dir, install_from_github,
-    install_plugins_from_github, parse_plugin_names, parse_plugin_source, parse_skill_names,
-    parse_skill_source, resolve_plugin_source, resolve_source,
+    ResolvedSkillSource, SOURCE_CUSTOM_GITHUB_PREFIX, SkillInstallReport, SkillSourceSelection,
+    all_skills_installed, expand_agent_skills_install_dir, install_from_github,
+    install_target_names_overlap, parse_skill_names, parse_skill_source, resolve_source,
 };
 use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::state::InitStepRecord;
@@ -19,20 +17,13 @@ use super::{InitArgs, prompt, prompts_enabled};
 #[derive(Debug, Clone)]
 pub(super) struct InitSkillInstallPlan {
     pub(super) destination_root: PathBuf,
-    pub(super) skills: Option<InitSkillSelectionPlan>,
-    pub(super) plugins: Option<InitPluginSelectionPlan>,
+    pub(super) selections: Vec<InitSkillSelectionPlan>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct InitSkillSelectionPlan {
     pub(super) source: ResolvedSkillSource,
     pub(super) skills: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct InitPluginSelectionPlan {
-    pub(super) source: ResolvedSkillSource,
-    pub(super) plugins: Vec<String>,
 }
 
 pub(super) fn prompt_init_skills_if_needed(
@@ -43,10 +34,9 @@ pub(super) fn prompt_init_skills_if_needed(
 ) -> Result<()> {
     if args.resume
         || args.no_skills
+        || args.essential_skills
         || args.skills_source.is_some()
         || !args.skills.is_empty()
-        || args.plugins_source.is_some()
-        || !args.plugins.is_empty()
     {
         return Ok(());
     }
@@ -57,67 +47,54 @@ pub(super) fn prompt_init_skills_if_needed(
 
     #[derive(Clone, PartialEq, Eq)]
     enum SkillSourceChoice {
-        OpenAiSkills,
-        AnthropicSkills,
-        OpenAiPlugins,
+        Catalog(String),
         CustomGithub,
         Skip,
     }
-    let choice = prompt::select(
-        interactive,
-        "Select Agent Skills source",
-        &[
+
+    let mut choices = skill_catalog
+        .sources()
+        .iter()
+        .filter(|source| !source.indexed_skills.is_empty())
+        .map(|source| {
             (
-                SkillSourceChoice::OpenAiSkills,
-                "OpenAI skills".to_owned(),
-                String::new(),
-            ),
-            (
-                SkillSourceChoice::AnthropicSkills,
-                "Anthropic skills".to_owned(),
-                String::new(),
-            ),
-            (
-                SkillSourceChoice::OpenAiPlugins,
-                "OpenAI plugin bundles".to_owned(),
-                "install bundled skills".to_owned(),
-            ),
-            (
-                SkillSourceChoice::CustomGithub,
-                "Custom GitHub owner/org".to_owned(),
-                String::new(),
-            ),
-            (SkillSourceChoice::Skip, "Skip".to_owned(), String::new()),
-        ],
-    )?;
-    match choice {
+                SkillSourceChoice::Catalog(source.id.clone()),
+                source.name.clone(),
+                format!("{}/{}", source.owner, source.repo),
+            )
+        })
+        .collect::<Vec<_>>();
+    choices.push((
+        SkillSourceChoice::CustomGithub,
+        "Custom GitHub owner/org".to_owned(),
+        String::new(),
+    ));
+    choices.push((SkillSourceChoice::Skip, "Skip".to_owned(), String::new()));
+
+    match prompt::select(interactive, "Select Agent Skills source", &choices)? {
         None | Some(SkillSourceChoice::Skip) => {
             args.no_skills = true;
             Ok(())
         }
-        Some(SkillSourceChoice::OpenAiSkills) => prompt_indexed_skills(
-            interactive,
-            args,
-            skill_catalog,
-            SOURCE_OPENAI,
-            OPENAI_SKILLS_SOURCE_ID,
-        ),
-        Some(SkillSourceChoice::AnthropicSkills) => prompt_indexed_skills(
-            interactive,
-            args,
-            skill_catalog,
-            SOURCE_ANTHROPIC,
-            ANTHROPIC_SKILLS_SOURCE_ID,
-        ),
-        Some(SkillSourceChoice::OpenAiPlugins) => {
-            let plugins = indexed_plugin_names(skill_catalog, OPENAI_PLUGINS_SOURCE_ID);
-            let selected = prompt_indexed_names(interactive, "Select plugin bundle", &plugins)?;
+        Some(SkillSourceChoice::Catalog(source_id)) => {
+            let source = skill_catalog.lookup(&source_id).ok_or_else(|| {
+                StackError::SkillInstallSourceMissing {
+                    source_id: source_id.clone(),
+                }
+            })?;
+            args.skills_source = Some(source.alias.clone());
+            let selectors = source
+                .indexed_skills
+                .iter()
+                .map(|skill| skill.selector.clone())
+                .collect::<Vec<_>>();
+            let selected = prompt_indexed_names(interactive, "Select skill", &selectors)?;
             if selected.is_empty() {
                 args.no_skills = true;
-                return Ok(());
+                args.skills_source = None;
+            } else {
+                args.skills = selected;
             }
-            args.plugins_source = Some(SOURCE_OPENAI.to_owned());
-            args.plugins = selected;
             Ok(())
         }
         Some(SkillSourceChoice::CustomGithub) => {
@@ -135,30 +112,6 @@ pub(super) fn prompt_init_skills_if_needed(
             prompt_manual_skill_names(interactive, args)
         }
     }
-}
-
-fn prompt_indexed_skills(
-    interactive: bool,
-    args: &mut InitArgs,
-    skill_catalog: &SkillCatalog,
-    source_flag: &str,
-    source_id: &str,
-) -> Result<()> {
-    args.skills_source = Some(source_flag.to_owned());
-    let skills = indexed_skill_names(skill_catalog, source_id);
-    let selected = if skills.is_empty() {
-        prompt_manual_skill_names(interactive, args)?;
-        return Ok(());
-    } else {
-        prompt_indexed_names(interactive, "Select skill", &skills)?
-    };
-    if selected.is_empty() {
-        args.no_skills = true;
-        args.skills_source = None;
-        return Ok(());
-    }
-    args.skills = selected;
-    Ok(())
 }
 
 fn prompt_manual_skill_names(interactive: bool, args: &mut InitArgs) -> Result<()> {
@@ -188,7 +141,7 @@ fn prompt_indexed_names(interactive: bool, label: &str, names: &[String]) -> Res
     let mut selected = Vec::new();
     let mut remaining = names.to_vec();
     loop {
-        let mut items: Vec<(IndexedNameChoice, String, String)> = remaining
+        let mut items = remaining
             .iter()
             .map(|name| {
                 (
@@ -197,7 +150,7 @@ fn prompt_indexed_names(interactive: bool, label: &str, names: &[String]) -> Res
                     String::new(),
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
         items.push((IndexedNameChoice::Done, "Done".to_owned(), String::new()));
         match prompt::searchable_select(interactive, label, &items)? {
             Some(IndexedNameChoice::Name(name)) => {
@@ -212,35 +165,6 @@ fn prompt_indexed_names(interactive: bool, label: &str, names: &[String]) -> Res
     }
 }
 
-fn indexed_skill_names(skill_catalog: &SkillCatalog, source_id: &str) -> Vec<String> {
-    let Some(source) = skill_catalog.lookup(source_id) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = source
-        .directories
-        .iter()
-        .filter(|directory| directory.installable)
-        .flat_map(|directory| directory.indexed_names.iter().cloned())
-        .collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn indexed_plugin_names(skill_catalog: &SkillCatalog, source_id: &str) -> Vec<String> {
-    let Some(source) = skill_catalog.lookup(source_id) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = source
-        .plugin_bundles
-        .iter()
-        .flat_map(|plugin_bundle| plugin_bundle.installable_plugins.iter().cloned())
-        .collect();
-    names.sort();
-    names.dedup();
-    names
-}
-
 pub(super) fn resolve_skill_install_plan(
     args: &InitArgs,
     home: &Path,
@@ -251,9 +175,8 @@ pub(super) fn resolve_skill_install_plan(
     if args.no_skills {
         return Ok(None);
     }
-    let skill_requested = args.skills_source.is_some() || !args.skills.is_empty();
-    let plugin_requested = args.plugins_source.is_some() || !args.plugins.is_empty();
-    if !skill_requested && !plugin_requested {
+    let explicit_requested = args.skills_source.is_some() || !args.skills.is_empty();
+    if !explicit_requested && !args.essential_skills {
         return Ok(None);
     }
 
@@ -266,8 +189,11 @@ pub(super) fn resolve_skill_install_plan(
         })?;
     let destination_root = expand_agent_skills_install_dir(home, install_dir)?;
 
-    let skills = if skill_requested {
-        let source_arg = args
+    let mut selections = Vec::new();
+    if args.essential_skills {
+        selections = essential_skill_selections(skill_catalog)?;
+    } else {
+        let source_argument = args
             .skills_source
             .as_deref()
             .ok_or(StackError::MissingField {
@@ -276,135 +202,88 @@ pub(super) fn resolve_skill_install_plan(
         if args.skills.is_empty() {
             return Err(StackError::MissingField { field: "--skills" });
         }
-        let selection = parse_skill_source(source_arg)?;
+        let selection = parse_skill_source(source_argument, skill_catalog)?;
         let source = resolve_source(&selection, skill_catalog)?;
         let skills = parse_skill_names(&args.skills)?;
-        Some(InitSkillSelectionPlan { source, skills })
-    } else {
-        None
-    };
-
-    let plugins = if plugin_requested {
-        let source_arg = args
-            .plugins_source
-            .as_deref()
-            .ok_or(StackError::MissingField {
-                field: "--plugins-source",
-            })?;
-        if args.plugins.is_empty() {
-            return Err(StackError::MissingField { field: "--plugins" });
-        }
-        let selection = parse_plugin_source(source_arg)?;
-        let source = resolve_plugin_source(&selection, skill_catalog)?;
-        let plugins = parse_plugin_names(&args.plugins)?;
-        Some(InitPluginSelectionPlan { source, plugins })
-    } else {
-        None
-    };
-
+        selections.push(InitSkillSelectionPlan { source, skills });
+    }
+    validate_unique_install_targets(&selections)?;
     Ok(Some(InitSkillInstallPlan {
         destination_root,
-        skills,
-        plugins,
+        selections,
     }))
+}
+
+fn essential_skill_selections(skill_catalog: &SkillCatalog) -> Result<Vec<InitSkillSelectionPlan>> {
+    skill_catalog
+        .sources()
+        .iter()
+        .filter(|source| !source.essential_skills.is_empty())
+        .map(|source| {
+            let resolved = resolve_source(
+                &SkillSourceSelection::Official {
+                    id: source.id.clone(),
+                },
+                skill_catalog,
+            )?;
+            Ok(InitSkillSelectionPlan {
+                source: resolved,
+                skills: source.essential_skills.clone(),
+            })
+        })
+        .collect()
+}
+
+fn validate_unique_install_targets(selections: &[InitSkillSelectionPlan]) -> Result<()> {
+    let mut targets = HashSet::<String>::new();
+    for selection in selections {
+        for selector in &selection.skills {
+            let name = if selection.source.catalog_managed {
+                selection
+                    .source
+                    .indexed_skills
+                    .iter()
+                    .find(|skill| skill.selector == *selector)
+                    .map(|skill| skill.name.as_str())
+                    .ok_or_else(|| StackError::SkillInstallSkillMissing {
+                        source_id: selection.source.id.clone(),
+                        skill: selector.clone(),
+                    })?
+            } else {
+                selector.as_str()
+            };
+            if let Some(existing) = targets
+                .iter()
+                .find(|existing| install_target_names_overlap(existing, name))
+            {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "selected skills resolve to overlapping install paths `{existing}` and `{name}`"
+                    ),
+                });
+            }
+            targets.insert(name.to_owned());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn skill_install_postcondition_holds(
     plan: &InitSkillInstallPlan,
-    prior_steps: &[InitStepRecord],
+    _prior_steps: &[InitStepRecord],
 ) -> bool {
-    let skills_installed = plan
-        .skills
-        .as_ref()
-        .is_none_or(|skills| all_skills_installed(&plan.destination_root, &skills.skills));
-    let plugins_installed = plan.plugins.as_ref().is_none_or(|plugins| {
-        plugin_skills_installed_from_prior_report(plan, plugins, prior_steps)
-    });
-    skills_installed && plugins_installed
+    plan.selections.iter().all(|selection| {
+        all_skills_installed(&selection.source, &plan.destination_root, &selection.skills)
+    })
 }
 
 pub(super) fn install_init_skills(plan: &InitSkillInstallPlan) -> Result<Vec<SkillInstallReport>> {
-    let mut reports = Vec::new();
-    if let Some(skills) = &plan.skills {
-        reports.push(install_from_github(
-            &skills.source,
-            &plan.destination_root,
-            &skills.skills,
-        )?);
-    }
-    if let Some(plugins) = &plan.plugins {
-        reports.push(install_plugins_from_github(
-            &plugins.source,
-            &plan.destination_root,
-            &plugins.plugins,
-        )?);
-    }
-    Ok(reports)
-}
-
-fn plugin_skills_installed_from_prior_report(
-    plan: &InitSkillInstallPlan,
-    plugins: &InitPluginSelectionPlan,
-    prior_steps: &[InitStepRecord],
-) -> bool {
-    let Some(payload) = prior_skill_install_payload(prior_steps) else {
-        return false;
-    };
-    if let Some(requested_plugins) = payload.requested_plugins
-        && requested_plugins != plugins.plugins
-    {
-        return false;
-    }
-    let Some(report) = payload
-        .reports
+    plan.selections
         .iter()
-        .find(|report| report.source_id == plugins.source.id)
-    else {
-        return false;
-    };
-    if report.destination_root != plan.destination_root {
-        return false;
-    }
-    let skill_names = report
-        .installed
-        .iter()
-        .chain(report.skipped.iter())
-        .map(|entry| entry.name.clone())
-        .collect::<Vec<_>>();
-    !skill_names.is_empty() && all_skills_installed(&plan.destination_root, &skill_names)
-}
-
-fn prior_skill_install_payload(prior_steps: &[InitStepRecord]) -> Option<SkillInstallPayload> {
-    let step = prior_steps
-        .iter()
-        .find(|step| step.kind == step_kind::AGENT_SKILLS_INSTALL)?;
-    parse_skill_install_payload(&step.payload_json).ok()
-}
-
-struct SkillInstallPayload {
-    reports: Vec<SkillInstallReport>,
-    requested_plugins: Option<Vec<String>>,
-}
-
-fn parse_skill_install_payload(payload: &str) -> serde_json::Result<SkillInstallPayload> {
-    let value: serde_json::Value = serde_json::from_str(payload)?;
-    if let serde_json::Value::Object(object) = &value
-        && let Some(reports) = object.get("reports")
-    {
-        let requested_plugins = object
-            .get("request")
-            .and_then(|request| request.get("plugins"))
-            .map(|plugins| serde_json::from_value(plugins.clone()))
-            .transpose()?;
-        return Ok(SkillInstallPayload {
-            reports: serde_json::from_value(reports.clone())?,
-            requested_plugins,
-        });
-    }
-    Ok(SkillInstallPayload {
-        reports: serde_json::from_value(value)?,
-        requested_plugins: None,
-    })
+        .map(|selection| {
+            install_from_github(&selection.source, &plan.destination_root, &selection.skills)
+        })
+        .collect()
 }
 
 fn agent_install_dir<'a>(config: &Config, registry: &'a RegistryCatalog) -> Option<&'a str> {
@@ -418,9 +297,9 @@ fn agent_install_dir<'a>(config: &Config, registry: &'a RegistryCatalog) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::install::skill_installer::SkillInstallEntry;
+    use crate::runtime::install::skill_registry::CatalogSkill;
 
-    fn resolved_source(id: &str) -> ResolvedSkillSource {
+    fn resolved_source(id: &str, selector: &str, name: &str) -> ResolvedSkillSource {
         ResolvedSkillSource {
             id: id.to_owned(),
             name: id.to_owned(),
@@ -431,163 +310,87 @@ mod tests {
             verified_commit: None,
             indexed_commit: None,
             descriptor: "SKILL.md".to_owned(),
+            catalog_managed: true,
             directories: Vec::new(),
-            plugin_bundles: Vec::new(),
+            indexed_skills: vec![CatalogSkill {
+                selector: selector.to_owned(),
+                name: name.to_owned(),
+                path: format!("plugins/test/skills/{name}"),
+            }],
         }
     }
 
-    fn plugin_plan(destination_root: std::path::PathBuf) -> InitSkillInstallPlan {
-        InitSkillInstallPlan {
-            destination_root,
-            skills: None,
-            plugins: Some(InitPluginSelectionPlan {
-                source: resolved_source(OPENAI_PLUGINS_SOURCE_ID),
-                plugins: vec!["github".to_owned()],
-            }),
-        }
-    }
-
-    fn direct_skill_plan(destination_root: std::path::PathBuf) -> InitSkillInstallPlan {
-        InitSkillInstallPlan {
-            destination_root,
-            skills: Some(InitSkillSelectionPlan {
-                source: resolved_source(ANTHROPIC_SKILLS_SOURCE_ID),
-                skills: vec!["docx".to_owned()],
-            }),
-            plugins: None,
-        }
-    }
-
-    fn prior_skill_step(payload_json: String) -> InitStepRecord {
-        InitStepRecord {
-            id: "step_1".to_owned(),
-            run_id: "run_1".to_owned(),
-            ordinal: 9,
-            kind: step_kind::AGENT_SKILLS_INSTALL.to_owned(),
-            status: "succeeded".to_owned(),
-            started_at: None,
-            finished_at: None,
-            log_dir: None,
-            error_kind: None,
-            error_detail: None,
-            payload_json,
-        }
-    }
-
-    fn install_skill_dir(root: &std::path::Path, name: &str) {
+    fn install_skill_dir(root: &Path, name: &str) {
         let skill_dir = root.join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").expect("descriptor");
     }
 
-    fn plugin_report(destination_root: &std::path::Path) -> SkillInstallReport {
-        SkillInstallReport {
-            source_id: OPENAI_PLUGINS_SOURCE_ID.to_owned(),
-            destination_root: destination_root.to_path_buf(),
-            installed: vec![SkillInstallEntry {
-                name: "github".to_owned(),
-                path: destination_root.join("github"),
+    #[test]
+    fn postcondition_resolves_qualified_selector_to_install_name() {
+        let home = tempfile::tempdir().expect("home");
+        let destination = home.path().canonicalize().expect("home").join("skills");
+        install_skill_dir(&destination, "android");
+        let plan = InitSkillInstallPlan {
+            destination_root: destination,
+            selections: vec![InitSkillSelectionPlan {
+                source: resolved_source("openai-plugins", "zoom/android", "android"),
+                skills: vec!["zoom/android".to_owned()],
             }],
-            skipped: Vec::new(),
-        }
+        };
+
+        assert!(skill_install_postcondition_holds(&plan, &[]));
     }
 
     #[test]
-    fn plugin_postcondition_uses_prior_report_object_payload() {
-        let home = tempfile::tempdir().expect("home");
-        let destination = home
-            .path()
-            .canonicalize()
-            .expect("canonical home")
-            .join("skills");
-        install_skill_dir(&destination, "github");
-        let payload = serde_json::json!({
-            "request": {
-                "skills": [],
-                "plugins": ["github"]
+    fn duplicate_install_targets_across_sources_are_rejected() {
+        let selections = vec![
+            InitSkillSelectionPlan {
+                source: resolved_source("one", "one/android", "android"),
+                skills: vec!["one/android".to_owned()],
             },
-            "reports": [plugin_report(&destination)],
-            "resume": { "verified": true }
-        })
-        .to_string();
-
-        assert!(skill_install_postcondition_holds(
-            &plugin_plan(destination),
-            &[prior_skill_step(payload)]
-        ));
-    }
-
-    #[test]
-    fn plugin_postcondition_accepts_legacy_report_array_payload() {
-        let home = tempfile::tempdir().expect("home");
-        let destination = home
-            .path()
-            .canonicalize()
-            .expect("canonical home")
-            .join("skills");
-        install_skill_dir(&destination, "github");
-        let payload =
-            serde_json::to_string(&vec![plugin_report(&destination)]).expect("legacy payload");
-
-        assert!(skill_install_postcondition_holds(
-            &plugin_plan(destination),
-            &[prior_skill_step(payload)]
-        ));
-    }
-
-    #[test]
-    fn plugin_postcondition_rejects_mismatched_plugin_request() {
-        let home = tempfile::tempdir().expect("home");
-        let destination = home
-            .path()
-            .canonicalize()
-            .expect("canonical home")
-            .join("skills");
-        install_skill_dir(&destination, "github");
-        let payload = serde_json::json!({
-            "request": {
-                "skills": [],
-                "plugins": ["cloudflare"]
+            InitSkillSelectionPlan {
+                source: resolved_source("two", "two/android", "android"),
+                skills: vec!["two/android".to_owned()],
             },
-            "reports": [plugin_report(&destination)]
-        })
-        .to_string();
+        ];
 
-        assert!(!skill_install_postcondition_holds(
-            &plugin_plan(destination),
-            &[prior_skill_step(payload)]
-        ));
+        let error = validate_unique_install_targets(&selections).expect_err("collision");
+
+        assert!(matches!(error, StackError::SkillInstallFailed { .. }));
     }
 
     #[test]
-    fn plugin_postcondition_rejects_missing_expanded_skill() {
-        let home = tempfile::tempdir().expect("home");
-        let destination = home
-            .path()
-            .canonicalize()
-            .expect("canonical home")
-            .join("skills");
-        let payload = serde_json::json!({ "reports": [plugin_report(&destination)] }).to_string();
+    fn nested_install_targets_across_sources_are_rejected() {
+        let selections = vec![
+            InitSkillSelectionPlan {
+                source: resolved_source("one", "zoom-mcp", "zoom-mcp"),
+                skills: vec!["zoom-mcp".to_owned()],
+            },
+            InitSkillSelectionPlan {
+                source: resolved_source("two", "zoom-mcp/whiteboard", "zoom-mcp/whiteboard"),
+                skills: vec!["zoom-mcp/whiteboard".to_owned()],
+            },
+        ];
 
-        assert!(!skill_install_postcondition_holds(
-            &plugin_plan(destination),
-            &[prior_skill_step(payload)]
-        ));
+        let error = validate_unique_install_targets(&selections).expect_err("nested collision");
+
+        assert!(matches!(error, StackError::SkillInstallFailed { .. }));
     }
 
     #[test]
-    fn direct_skill_postcondition_does_not_require_prior_payload() {
-        let home = tempfile::tempdir().expect("home");
-        let destination = home
-            .path()
-            .canonicalize()
-            .expect("canonical home")
-            .join("skills");
-        install_skill_dir(&destination, "docx");
+    fn standard_essentials_resolve_as_two_individual_skill_sources() {
+        let catalog = SkillCatalog::load_embedded().expect("catalog");
 
-        assert!(skill_install_postcondition_holds(
-            &direct_skill_plan(destination),
-            &[]
-        ));
+        let selections = essential_skill_selections(&catalog).expect("essential selections");
+
+        assert_eq!(selections.len(), 2);
+        assert_eq!(selections[0].source.id, "anthropic-skills");
+        assert_eq!(selections[0].skills, ["docx", "pptx", "xlsx", "pdf"]);
+        assert_eq!(selections[1].source.id, "openai-plugins");
+        assert_eq!(
+            selections[1].skills,
+            ["gh-address-comments", "gh-fix-ci", "github", "yeet"]
+        );
     }
 }

@@ -290,14 +290,14 @@ pub struct InitArgs {
     /// Maximum output tokens for a custom model.
     #[arg(long = "output-max-tokens", requires = "custom_provider")]
     pub(super) output_max_tokens: Option<String>,
-    /// Skills marketplace/source: openai, anthropic, or github:<owner>.
+    /// Reviewed skill source alias, or github:<owner> for <owner>/skills.
     #[arg(
         long = "skills-source",
         requires = "skills",
         conflicts_with = "no_skills"
     )]
     pub(super) skills_source: Option<String>,
-    /// Comma-separated dash-case Agent Skills to install during init.
+    /// Comma-separated Agent Skill selectors to install during init.
     #[arg(
         long = "skills",
         value_name = "NAME",
@@ -306,24 +306,10 @@ pub struct InitArgs {
         conflicts_with = "no_skills"
     )]
     pub(super) skills: Vec<String>,
-    /// Plugin bundle source: openai.
-    #[arg(
-        long = "plugins-source",
-        requires = "plugins",
-        conflicts_with = "no_skills"
-    )]
-    pub(super) plugins_source: Option<String>,
-    /// Comma-separated dash-case plugin bundles to install as Agent Skills.
-    #[arg(
-        long = "plugins",
-        value_name = "NAME",
-        value_delimiter = ',',
-        requires = "plugins_source",
-        conflicts_with = "no_skills"
-    )]
-    pub(super) plugins: Vec<String>,
+    #[arg(skip)]
+    pub(super) essential_skills: bool,
     /// Skip Agent Skills during init.
-    #[arg(long, conflicts_with_all = ["skills_source", "skills", "plugins_source", "plugins"])]
+    #[arg(long, conflicts_with_all = ["skills_source", "skills"])]
     pub(super) no_skills: bool,
     /// Configure a public edge profile during init.
     #[arg(long, value_enum)]
@@ -1628,16 +1614,14 @@ fn run_init_with_output(
 
     if resumed
         && !args.no_skills
+        && !args.essential_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
-        && args.plugins_source.is_none()
-        && args.plugins.is_empty()
         && let Some(recorded) = recorded_args.as_ref()
     {
         args.skills_source = recorded.skills_source.clone();
         args.skills = recorded.skills.clone();
-        args.plugins_source = recorded.plugins_source.clone();
-        args.plugins = recorded.plugins.clone();
+        args.essential_skills = recorded.essential_skills;
         args.no_skills = recorded.no_skills;
     }
     if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE)
@@ -1991,20 +1975,17 @@ fn run_init_with_output(
             || {
                 let reports = install_init_skills(&plan)?;
                 let requested_skills = plan
-                    .skills
-                    .as_ref()
-                    .map(|skills| skills.skills.clone())
-                    .unwrap_or_default();
-                let requested_plugins = plan
-                    .plugins
-                    .as_ref()
-                    .map(|plugins| plugins.plugins.clone())
-                    .unwrap_or_default();
+                    .selections
+                    .iter()
+                    .map(|selection| {
+                        serde_json::json!({
+                            "source_id": selection.source.id,
+                            "selectors": selection.skills,
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 let payload = serde_json::to_string(&serde_json::json!({
-                    "request": {
-                        "skills": requested_skills,
-                        "plugins": requested_plugins,
-                    },
+                    "request": { "skills": requested_skills },
                     "reports": &reports,
                 }))
                 .map_err(|source| StackError::SkillInstallFailed {
