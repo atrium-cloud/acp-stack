@@ -46,11 +46,11 @@ The operator-facing sequence, in order:
     a. Standard setup
         - Install essential dependencies including `nodejs`, `python` 3.14, `git` (yes/no)
         - Install `browser-use` (yes/no)
-        - Add essential agent skills (yes/no) -(if yes)-> add Anthropic `docx`, `pptx`, `xlsx`, and `pdf`, plus the OpenAI `github` plugin bundle
+        - Add essential agent skills (yes/no) -(if yes)-> add Anthropic `docx`, `pptx`, `xlsx`, and `pdf`, plus OpenAI plugin skills `gh-address-comments`, `gh-fix-ci`, `github`, and `yeet`
         - Add data sources (now/later) -(if now)-> add a local path, HTTPS archive/download, or S3 bucket
     b. Advanced setup
         - Install custom dependencies (add dependency/skip)
-        - Add agent skills (now/later) -(if now)-> search checked-in skill and plugin-bundle snapshots
+        - Add agent skills (now/later) -(if now)-> search the checked-in reviewed skill sources
         - Add MCP servers (add MCP/skip)
         - Add agent env (now/later)
         - Add data sources (now/later) -(if now)-> add a local path, HTTPS archive/download, or S3 bucket
@@ -62,9 +62,9 @@ The operator-facing sequence, in order:
         - Re-confirming the same agent preserves policy.
         - Switching agents resets to the supported-agent default.
 6. Agent Skills selection (interactive, when selected).
-    - Choose OpenAI skills, Anthropic skills, OpenAI plugin bundles, or `github:<owner>`.
-    - Choose skills or plugin bundles to install before testflight.
-    - `--skills-source`, `--skills`, `--plugins-source`, `--plugins`, and `--no-skills` drive this without prompts.
+    - Choose a reviewed catalog source or `github:<owner>`.
+    - Choose individual skill selectors to install before testflight.
+    - `--skills-source`, `--skills`, and `--no-skills` drive this without prompts.
 7. Secrets and auth.
     - Generate session and admin API keys when no auth verifier rows exist.
     - Preserve existing verifier rows on re-run.

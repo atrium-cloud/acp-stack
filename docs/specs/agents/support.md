@@ -29,7 +29,7 @@ Per-agent setup notes live under [../../agents](../../agents).
 
 ## Agent Skills
 
-The embedded skills catalog is documented in [skills.md](skills.md). It records official Agent Skills directories from Anthropic and OpenAI, plus OpenAI plugin bundles that install as contained skills.
+The embedded skills catalog is documented in [skills.md](skills.md). It records reviewed Agent Skills from Anthropic, OpenAI, and K-Dense, including individual skills contained in OpenAI plugins.
 
 Supported agents advertise MCP support, Agent Skills support, and the managed skills install directory in `data/agents.toml`. Goose Agent Skills support depends on the built-in Summon extension in supported Goose versions.
 

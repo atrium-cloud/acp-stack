@@ -238,22 +238,15 @@ fn check_skill_sources(
             .unwrap_or(&source.branch);
         for directory in &source.directories {
             let path = directory.path.trim_matches('/');
-            let _: Value = http.github_json(&format!(
-                "/repos/{repo}/contents/{path}?ref={directory_ref}"
-            ))?;
+            let endpoint = if path.is_empty() {
+                format!("/repos/{repo}/contents?ref={directory_ref}")
+            } else {
+                format!("/repos/{repo}/contents/{path}?ref={directory_ref}")
+            };
+            let _: Value = http.github_json(&endpoint)?;
             report.ok(format!(
                 "skill source `{}` directory `{}` exists at `{directory_ref}`",
                 source.id, directory.path
-            ));
-        }
-        for plugin_bundle in &source.plugin_bundles {
-            let path = plugin_bundle.path.trim_matches('/');
-            let _: Value = http.github_json(&format!(
-                "/repos/{repo}/contents/{path}?ref={directory_ref}"
-            ))?;
-            report.ok(format!(
-                "skill source `{}` plugin bundle `{}` exists at `{directory_ref}`",
-                source.id, plugin_bundle.path
             ));
         }
     }

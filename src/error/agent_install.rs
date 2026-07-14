@@ -30,12 +30,6 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SkillInstallSkillMissing { .. } => "agent.skill_install_missing_skill",
         SkillInstallTargetConflict { .. } => "agent.skill_install_target_conflict",
         SkillInstallFailed { .. } => "agent.skill_install_failed",
-        PluginInstallInvalidSource { .. } => "agent.plugin_install_invalid_source",
-        PluginInstallSourceMissing { .. } => "agent.plugin_install_source_missing",
-        PluginInstallInvalidName { .. } => "agent.plugin_install_invalid_name",
-        PluginInstallPluginMissing { .. } => "agent.plugin_install_missing_plugin",
-        PluginInstallNoSkills { .. } => "agent.plugin_install_no_skills",
-        PluginInstallFailed { .. } => "agent.plugin_install_failed",
         GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
         NpmRegistryFetch { .. } => "agent.npm_registry_fetch_failed",
         NpmRegistryEmptyVersion { .. } => "agent.npm_registry_empty_version",
@@ -105,18 +99,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("skill install target conflict at {}: {reason}", path.display())
         }
         SkillInstallFailed { reason } => format!("skill install failed: {reason}"),
-        PluginInstallInvalidSource { source_id } => format!("invalid plugin source `{source_id}`"),
-        PluginInstallSourceMissing { source_id } => {
-            format!("plugin source `{source_id}` is not available")
-        }
-        PluginInstallInvalidName { name } => format!("invalid plugin name `{name}`"),
-        PluginInstallPluginMissing { source_id, plugin } => {
-            format!("plugin `{plugin}` was not found in source `{source_id}`")
-        }
-        PluginInstallNoSkills { source_id, plugin } => {
-            format!("plugin `{plugin}` in source `{source_id}` does not contain installable skills")
-        }
-        PluginInstallFailed { reason } => format!("plugin install failed: {reason}"),
         GithubReleaseFetch { repo, .. } => format!("failed to query GitHub Releases for {repo}"),
         NpmRegistryFetch { package, .. } => {
             format!("failed to query npm registry for `{package}`")
