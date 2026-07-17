@@ -18,6 +18,9 @@ use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
     fetch_session_config_with_timeout,
 };
+use crate::runtime::agent::provider_keys::{
+    ResolvedAgentEnvironment, resolve_agent_environment, resolve_agent_environment_without_secrets,
+};
 use crate::runtime::agent::supervisor::{AgentSnapshot, AgentStartRequest};
 use crate::runtime::agent::switch::{
     AgentSwitchRequest as PlannedAgentSwitchRequest, AgentSwitchSecretMigration,
@@ -68,6 +71,12 @@ struct ArrayTargetStatusResponse {
     primary: bool,
     process_state: String,
     pid: Option<u32>,
+    configured_providers: Vec<super::status::ProviderStatusJson>,
+    loaded_providers: Option<Vec<super::status::ProviderStatusJson>>,
+    provider_restart_required: bool,
+    /// Set when this target's provider resolution fails; other targets keep
+    /// reporting so one broken credential never aborts the whole fleet status.
+    provider_error: Option<String>,
 }
 
 pub(crate) async fn array_status_handler(
@@ -79,6 +88,16 @@ pub(crate) async fn array_status_handler(
     for target_config in &config.array.targets {
         let target = state.agent_target(&target_config.id)?;
         let snapshot = target.supervisor.snapshot().await;
+        let mut resolved_config = config.clone();
+        resolved_config.agent = target_config.agent.clone();
+        let (configured_provider_snapshot, provider_error) =
+            super::status::configured_providers_or_error(open_agent_environment(&resolved_config));
+        let provider_restart_required = super::status::provider_restart_required_for_status(
+            provider_error.is_some(),
+            snapshot.state,
+            snapshot.loaded_providers.as_deref(),
+            &configured_provider_snapshot,
+        );
         targets.push(ArrayTargetStatusResponse {
             id: target_config.id.clone(),
             agent_id: target_config.agent.id.clone(),
@@ -86,6 +105,18 @@ pub(crate) async fn array_status_handler(
             primary: target_config.id == config.array.primary_target,
             process_state: snapshot.state.as_wire_str().to_owned(),
             pid: snapshot.pid,
+            configured_providers: configured_provider_snapshot
+                .iter()
+                .map(super::status::ProviderStatusJson::from)
+                .collect(),
+            loaded_providers: snapshot.loaded_providers.as_ref().map(|providers| {
+                providers
+                    .iter()
+                    .map(super::status::ProviderStatusJson::from)
+                    .collect()
+            }),
+            provider_restart_required,
+            provider_error,
         });
     }
     Ok(ApiSuccess::new(ArrayStatusResponse {
@@ -221,17 +252,16 @@ async fn install_agent_for_config(
 }
 
 pub(crate) fn open_agent_env(config: &Config) -> Result<std::collections::HashMap<String, String>> {
-    if config.agent.env.is_empty() {
-        return Ok(std::collections::HashMap::new());
+    Ok(open_agent_environment(config)?.env)
+}
+
+pub(crate) fn open_agent_environment(config: &Config) -> Result<ResolvedAgentEnvironment> {
+    if let Some(environment) = resolve_agent_environment_without_secrets(config) {
+        return Ok(environment);
     }
     let home = home_dir()?;
     let store = SecretStore::open(&home)?;
-    let mut env = std::collections::HashMap::with_capacity(config.agent.env.len());
-    for name in &config.agent.env {
-        let value = store.get(name)?;
-        env.insert(name.clone(), value.to_owned());
-    }
-    Ok(env)
+    resolve_agent_environment(config, &store)
 }
 
 async fn load_fresh_config_for_target(
@@ -300,14 +330,15 @@ async fn start_agent_target(
     // (security.md:91) regardless of caller.
     let (config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&config, target_id)?;
-    let env = open_agent_env(&config)?;
+    let environment = open_agent_environment(&config)?;
     let capabilities = target
         .supervisor
         .start(AgentStartRequest {
             target_id: &target.target_id,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
-            env,
+            env: environment.env,
+            providers: environment.providers,
             state: &state.state,
             session_changes: &state.session_changes,
             event_hub: state.event_hub.clone(),
@@ -557,7 +588,7 @@ async fn restart_agent_target(
     // returning an error with no agent running at all.
     let (fresh_config, target) = load_fresh_config_for_target(state, target_id).await?;
     ensure_array_process_start_allowed(&fresh_config, target_id)?;
-    let env = open_agent_env(&fresh_config)?;
+    let environment = open_agent_environment(&fresh_config)?;
 
     // Now safe to stop the prior process. `stop` returns
     // `Result<Option<i32>, _>`: outer `Err(AgentNotRunning)` means
@@ -621,7 +652,8 @@ async fn restart_agent_target(
             target_id: &target.target_id,
             agent: &fresh_config.agent,
             workspace_root: &fresh_config.workspace.root,
-            env,
+            env: environment.env,
+            providers: environment.providers,
             state: &state.state,
             session_changes: &state.session_changes,
             event_hub: state.event_hub.clone(),
@@ -1057,14 +1089,15 @@ async fn start_agent_with_config(
     target: &AgentTargetRuntime,
     config: &Config,
 ) -> Result<()> {
-    let env = open_agent_env(config)?;
+    let environment = open_agent_environment(config)?;
     target
         .supervisor
         .start(AgentStartRequest {
             target_id: &target.target_id,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
-            env,
+            env: environment.env,
+            providers: environment.providers,
             state: &state.state,
             session_changes: &state.session_changes,
             event_hub: state.event_hub.clone(),

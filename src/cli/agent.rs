@@ -2,6 +2,13 @@ mod check;
 mod config;
 mod default;
 mod install;
+mod provider;
+mod provider_credentials;
+mod provider_migration;
+mod provider_shared;
+mod provider_target;
+#[cfg(test)]
+mod provider_tests;
 mod set;
 mod status;
 mod switch;
@@ -15,6 +22,10 @@ use crate::error::Result;
 
 pub(in crate::cli) use self::install::operator_registry_override;
 pub(in crate::cli) use self::install::run_agent_restart;
+pub(in crate::cli) use self::provider_target::{
+    run_target_credential_select, run_target_provider_list_active, run_target_provider_set_active,
+    run_target_provider_use,
+};
 pub(in crate::cli) use self::set::{
     agent_model_is_explicit_without_discovery, default_api_key_ref_for_agent_provider,
     default_custom_provider_api, model_values_for_cli_display, parse_custom_provider_api,
@@ -47,8 +58,10 @@ pub enum AgentCommand {
     Update(AgentUpdateArgs),
     /// Start the configured agent and send a real ACP prompt.
     Test(AgentTestArgs),
-    /// Set the provider id, model, and API-key ref used by generated agent config.
+    /// Set the model or mode, or retain existing custom-provider behavior.
     Set(AgentSetArgs),
+    /// Manage mapped providers, active provider sets, and encrypted credentials.
+    Provider(AgentProviderArgs),
     /// Inspect or import the configured harness's native global config.
     Config(AgentConfigArgs),
     /// Switch to another supported agent harness.
@@ -195,7 +208,7 @@ pub struct AgentSetArgs {
     /// Configure a provider/model outside the embedded provider mapping.
     #[arg(long)]
     pub(super) custom_provider: bool,
-    /// Provider id, such as opencode-go, openai, or anthropic.
+    /// Custom provider id; mapped providers use `agent provider use`.
     #[arg(long)]
     pub(super) provider: Option<String>,
     /// Display name for a custom provider.
@@ -222,9 +235,99 @@ pub struct AgentSetArgs {
     /// Agent session mode for agents that expose mode as an ACP config option.
     #[arg(long)]
     pub(super) mode: Option<String>,
-    /// Secret ref to inject for this provider. Defaults from provider metadata.
+    /// Secret ref for a custom provider.
     #[arg(long)]
     pub(super) api_key_ref: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderArgs {
+    #[command(subcommand)]
+    pub(super) command: AgentProviderCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentProviderCommand {
+    /// Select the default mapped provider and optionally its model.
+    Use(AgentProviderUseArgs),
+    /// Replace the active mapped-provider set.
+    SetActive(AgentProviderSetActiveArgs),
+    /// Show configured and live-loaded provider state.
+    ListActive,
+    /// Manage provider credentials and backup-key aliases.
+    Credential(AgentProviderCredentialArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderUseArgs {
+    pub(super) provider: String,
+    #[arg(long)]
+    pub(super) model: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderSetActiveArgs {
+    pub(super) providers: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderCredentialArgs {
+    #[command(subcommand)]
+    pub(super) command: AgentProviderCredentialCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentProviderCredentialCommand {
+    /// Add the first credential or promote an existing one to aliases.
+    Add(AgentProviderCredentialAddArgs),
+    /// Rotate an aliasless credential or one named alias.
+    Update(AgentProviderCredentialUpdateArgs),
+    /// Select the alias a target emits for a provider.
+    Select(AgentProviderCredentialSelectArgs),
+    /// List credential metadata without values or revisions.
+    List(AgentProviderCredentialListArgs),
+    /// Delete an unused aliasless credential or alias.
+    Delete(AgentProviderCredentialDeleteArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderCredentialAddArgs {
+    pub(super) provider: String,
+    /// Alias for the new credential when promoting an existing provider.
+    #[arg(long)]
+    pub(super) alias: Option<String>,
+    /// Alias to assign the existing key during promotion.
+    #[arg(long = "existing-alias")]
+    pub(super) existing_alias: Option<String>,
+    /// Copy one encrypted secret into a provider env field. Repeatable.
+    #[arg(long = "from-secret", value_name = "ENV=REF")]
+    pub(super) from_secret: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderCredentialUpdateArgs {
+    pub(super) provider: String,
+    pub(super) alias: Option<String>,
+    /// Copy one encrypted secret into a provider env field. Repeatable.
+    #[arg(long = "from-secret", value_name = "ENV=REF")]
+    pub(super) from_secret: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderCredentialSelectArgs {
+    pub(super) provider: String,
+    pub(super) alias: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderCredentialListArgs {
+    pub(super) provider: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentProviderCredentialDeleteArgs {
+    pub(super) provider: String,
+    pub(super) alias: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -268,6 +371,9 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
         AgentCommand::Set(args) => {
             output.reject_json("agent set")?;
             self::set::run_agent_set(args)
+        }
+        AgentCommand::Provider(args) => {
+            self::provider::run_agent_provider(args, output.effective())
         }
         AgentCommand::Config(args) => self::config::run_agent_config(args, output.effective()),
         AgentCommand::Switch(args) => {

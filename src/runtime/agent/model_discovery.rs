@@ -30,6 +30,9 @@ use crate::runtime::agent::acp_bridge::{
 use crate::runtime::agent::claude_code_provider_profiles::{
     CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider,
 };
+use crate::runtime::agent::provider_keys::{
+    resolve_agent_environment, resolve_agent_environment_without_secrets,
+};
 use crate::secrets::SecretStore;
 
 /// Default cap for a single provisional model-discovery session.
@@ -229,16 +232,11 @@ fn advertised_model_provider_matches(value: &str, provider_id: &str) -> bool {
 }
 
 fn resolve_agent_env(home: &Path, config: &Config) -> Result<HashMap<String, String>> {
-    if config.agent.env.is_empty() {
-        return Ok(HashMap::new());
+    if let Some(environment) = resolve_agent_environment_without_secrets(config) {
+        return Ok(environment.env);
     }
     let store = SecretStore::open(home)?;
-    let mut env = HashMap::with_capacity(config.agent.env.len());
-    for name in &config.agent.env {
-        let value = store.get(name)?;
-        env.insert(name.clone(), value.to_owned());
-    }
-    Ok(env)
+    Ok(resolve_agent_environment(config, &store)?.env)
 }
 
 struct NoopSink;

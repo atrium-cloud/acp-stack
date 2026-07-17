@@ -311,6 +311,35 @@ fn parses_subagent_provider_config() {
 }
 
 #[test]
+fn parses_and_round_trips_active_provider_alias_config() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"opencode-go\"\n\n\
+         [agent.providers]\n\
+         active = [\"opencode-go\", \"openrouter\"]\n\n\
+         [agent.providers.selected_aliases]\n\
+         opencode-go = \"go_2\"\n"
+    );
+
+    let config = load_config_from_str(&config_text).expect("provider set config parses");
+    let providers = config.agent.providers.as_ref().expect("providers");
+    assert_eq!(providers.active, ["opencode-go", "openrouter"]);
+    assert_eq!(
+        providers
+            .selected_aliases
+            .get("opencode-go")
+            .map(String::as_str),
+        Some("go_2")
+    );
+
+    let canonical = config.to_canonical_toml().expect("canonical");
+    let round_trip = load_config_from_str(&canonical).expect("round trip");
+    assert_eq!(round_trip.agent.providers, config.agent.providers);
+    assert!(canonical.contains("[array.targets.agent.providers]"));
+}
+
+#[test]
 fn parses_subagent_custom_provider_config() {
     let config_text = format!(
         "{VALID_CONFIG}\n\

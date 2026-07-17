@@ -187,8 +187,16 @@ pub enum StackError {
     #[error("failed to serialize secret store plaintext: {0}")]
     SecretStorePlaintextSerialize(toml::ser::Error),
 
+    #[error("decrypted secret store plaintext is invalid: {reason}")]
+    SecretStorePlaintextInvalid { reason: String },
+
     #[error("secret `{name}` was not found in the secret store")]
     SecretNotFound { name: String },
+
+    #[error(
+        "provider credential change failed ({original}); credential catalog rollback also failed ({rollback})"
+    )]
+    ProviderCredentialRollbackFailed { original: String, rollback: String },
 
     #[error(
         "secret store is non-empty but does not contain the Supabase secret API key reference `{name}`"

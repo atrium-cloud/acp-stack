@@ -11,19 +11,18 @@ use crate::config::{
 use crate::error::{Result, StackError};
 use crate::fs_util::{atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
-use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, env_refs_for_agent_id, provider_id_is_known,
-    provider_id_supports_agent, provider_uses_agent_native_auth,
-    required_env_refs_for_agent_provider_id,
+    agent_provider_id_for_provider_id, env_refs_for_agent_id,
 };
 use crate::runtime::agent::switch::adapter_from_registry_entry;
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
 
 use super::agent::operator_registry_override;
 use super::agent::{
-    default_api_key_ref_for_agent_provider, default_custom_provider_api, parse_custom_provider_api,
-    parse_custom_token_limit, required_custom_arg, resolve_agent_model_value,
+    default_custom_provider_api, parse_custom_provider_api, parse_custom_token_limit,
+    required_custom_arg, resolve_agent_model_value, run_target_credential_select,
+    run_target_provider_list_active, run_target_provider_set_active, run_target_provider_use,
     validate_agent_session_config_value, validate_custom_provider_api_for_agent,
 };
 use super::core::{
@@ -75,6 +74,8 @@ pub enum ArrayCommand {
     Add(ArrayAddArgs),
     /// Configure provider, model, mode, or API-key ref for a target.
     Set(Box<ArraySetArgs>),
+    /// Manage mapped providers and target credential selection.
+    Provider(ArrayProviderArgs),
     /// Install one target or every configured target.
     Install(ArrayDaemonArgs),
     /// Start one target or every configured target.
@@ -99,7 +100,7 @@ pub struct ArraySetArgs {
     /// Configure a provider/model outside the embedded provider mapping.
     #[arg(long)]
     custom_provider: bool,
-    /// Provider id, such as opencode-go, openai, or anthropic.
+    /// Custom provider id; mapped providers use `array provider use`.
     #[arg(long)]
     provider: Option<String>,
     /// Display name for a custom provider.
@@ -126,9 +127,69 @@ pub struct ArraySetArgs {
     /// Agent session mode for agents that expose mode as an ACP config option.
     #[arg(long)]
     mode: Option<String>,
-    /// Secret ref to inject for this provider. Defaults from provider metadata.
+    /// Secret ref for a custom provider.
     #[arg(long)]
     api_key_ref: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayProviderArgs {
+    #[command(subcommand)]
+    command: ArrayProviderCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArrayProviderCommand {
+    /// Select a target's default mapped provider and optionally its model.
+    Use(ArrayProviderUseArgs),
+    /// Replace a target's active mapped-provider set.
+    SetActive(ArrayProviderSetActiveArgs),
+    /// Show configured and live-loaded provider state for one target.
+    ListActive(ArrayProviderTargetArgs),
+    /// Select a backup-key alias for one target.
+    Credential(ArrayProviderCredentialArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayProviderUseArgs {
+    #[arg(long)]
+    target: String,
+    provider: String,
+    #[arg(long)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayProviderSetActiveArgs {
+    #[arg(long)]
+    target: String,
+    providers: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayProviderTargetArgs {
+    #[arg(long)]
+    target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayProviderCredentialArgs {
+    #[command(subcommand)]
+    command: ArrayProviderCredentialCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArrayProviderCredentialCommand {
+    /// Select the alias emitted for a target/provider pair.
+    Select(ArrayProviderCredentialSelectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ArrayProviderCredentialSelectArgs {
+    #[arg(long)]
+    target: String,
+    provider: String,
+    alias: String,
 }
 
 #[derive(Debug, Args)]
@@ -176,6 +237,7 @@ pub(super) fn run_array_command(command: ArrayCommand, output: OutputFormat) -> 
         ArrayCommand::Off => run_array_toggle(false, output),
         ArrayCommand::Add(args) => run_array_add(args, output),
         ArrayCommand::Set(args) => run_array_set(*args, output),
+        ArrayCommand::Provider(args) => run_array_provider(args, output),
         ArrayCommand::Install(args) => run_array_daemon(args, ArrayDaemonAction::Install, output),
         ArrayCommand::Start(args) => run_array_daemon(args, ArrayDaemonAction::Start, output),
         ArrayCommand::Stop(args) => run_array_daemon(args, ArrayDaemonAction::Stop, output),
@@ -429,6 +491,7 @@ fn agent_config_from_registry_entry(config: &Config, entry: &RegistryEntry) -> R
     agent.harness_version = None;
     agent.adapter = adapter_from_registry_entry(entry);
     agent.provider = None;
+    agent.providers = None;
     agent.subagent = None;
     agent.auto_update = None;
     agent.install = None;
@@ -470,6 +533,20 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
             reason: "--mode cannot be combined with --custom-provider".to_owned(),
         });
     }
+    if !args.custom_provider && args.provider.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: "mapped providers are selected with `acps array provider use --target <target> <provider>`"
+                .to_owned(),
+        });
+    }
+    if !args.custom_provider && args.api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "api-key-ref",
+            reason: "mapped provider credentials are managed with `acps agent provider credential`"
+                .to_owned(),
+        });
+    }
     if args.provider.is_none()
         && args.model.is_none()
         && args.mode.is_none()
@@ -478,7 +555,7 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     {
         return Err(StackError::InvalidParam {
             field: "array set",
-            reason: "pass at least one of --provider, --model, --mode, or --api-key-ref".to_owned(),
+            reason: "pass --model, --mode, or --custom-provider".to_owned(),
         });
     }
     let home = home_dir()?;
@@ -497,39 +574,10 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     let entry = registry.lookup_required(&config.array.targets[target_index].agent.id)?;
     let mut target_config = config.clone();
     target_config.agent = config.array.targets[target_index].agent.clone();
+    let previous_target_config = target_config.clone();
 
     if args.custom_provider {
         apply_custom_provider(&mut target_config, entry, &args)?;
-    }
-
-    if !args.custom_provider
-        && let Some(provider_id) = args.provider.as_deref()
-    {
-        apply_provider(
-            &mut target_config,
-            entry,
-            provider_id,
-            args.api_key_ref.clone(),
-        )?;
-    } else if !args.custom_provider
-        && let Some(api_key_ref) = args.api_key_ref.clone()
-    {
-        let Some(provider) = target_config.agent.provider.as_mut() else {
-            return Err(StackError::InvalidParam {
-                field: "api-key-ref",
-                reason: "--api-key-ref requires --provider or an existing target provider"
-                    .to_owned(),
-            });
-        };
-        provider.api_key_ref = Some(api_key_ref.clone());
-        if !target_config
-            .agent
-            .env
-            .iter()
-            .any(|name| name == &api_key_ref)
-        {
-            target_config.agent.env.push(api_key_ref);
-        }
     }
 
     if let Some(mode) = args.mode.as_deref() {
@@ -588,7 +636,8 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
         })?;
     let mut target_config = validated.clone();
     target_config.agent = validated.array.targets[target_index].agent.clone();
-    let provisioned = provision_agent_headless_config(&target_config, &home)?;
+    let provisioned =
+        provision_agent_headless_config_transition(&previous_target_config, &target_config, &home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
     if output.is_json() {
         let target = &validated.array.targets[target_index];
@@ -628,6 +677,25 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_array_provider(args: ArrayProviderArgs, output: OutputFormat) -> Result<()> {
+    match args.command {
+        ArrayProviderCommand::Use(args) => {
+            run_target_provider_use(&args.target, &args.provider, args.model.as_deref(), output)
+        }
+        ArrayProviderCommand::SetActive(args) => {
+            run_target_provider_set_active(&args.target, &args.providers, output)
+        }
+        ArrayProviderCommand::ListActive(args) => {
+            run_target_provider_list_active(&args.target, true, output)
+        }
+        ArrayProviderCommand::Credential(args) => match args.command {
+            ArrayProviderCredentialCommand::Select(args) => {
+                run_target_credential_select(&args.target, &args.provider, &args.alias, output)
+            }
+        },
+    }
 }
 
 fn apply_custom_provider(
@@ -685,6 +753,7 @@ fn apply_custom_provider(
             output_max_tokens,
         }),
     });
+    config.agent.providers = None;
     Ok(())
 }
 
@@ -701,76 +770,6 @@ fn reject_custom_provider_args(args: &ArraySetArgs) -> Result<()> {
             reason: "custom provider flags require --custom-provider".to_owned(),
         });
     }
-    Ok(())
-}
-
-fn apply_provider(
-    config: &mut Config,
-    entry: &RegistryEntry,
-    provider_id: &str,
-    explicit_api_key_ref: Option<String>,
-) -> Result<()> {
-    if !entry.set_provider {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "{} does not support provider configuration through `acps array set`",
-                entry.name
-            ),
-        });
-    }
-    if !provider_id_is_known(provider_id) {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!("provider `{provider_id}` is not listed in provider/env mapping"),
-        });
-    }
-    if !provider_id_supports_agent(provider_id, &config.agent.id) {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "provider `{provider_id}` is not supported for agent `{}`",
-                config.agent.id
-            ),
-        });
-    }
-    let native_auth = provider_uses_agent_native_auth(&config.agent.id, provider_id);
-    if native_auth && explicit_api_key_ref.is_some() {
-        return Err(StackError::AgentConfigProvision {
-            path: config::default_config_path()?,
-            reason: format!(
-                "{} provider `{provider_id}` uses agent-native auth; do not pass --api-key-ref",
-                entry.name
-            ),
-        });
-    }
-    let api_key_ref = explicit_api_key_ref
-        .or_else(|| default_api_key_ref_for_agent_provider(&config.agent.id, provider_id));
-    if api_key_ref.is_none() && !native_auth {
-        return Err(StackError::AgentConfigProvision {
-            path: config::default_config_path()?,
-            reason: format!(
-                "provider `{provider_id}` has no default API-key env var; pass --api-key-ref"
-            ),
-        });
-    }
-    let required_env_refs = required_env_refs_for_agent_provider_id(
-        &config.agent.id,
-        provider_id,
-        api_key_ref.as_deref(),
-    );
-    for env_ref in &required_env_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
-            config.agent.env.push(env_ref.clone());
-        }
-    }
-    config.agent.provider = Some(AgentProviderConfig {
-        id: provider_id.to_owned(),
-        model: None,
-        api_key_ref,
-        custom: None,
-    });
-    config.agent.model = None;
     Ok(())
 }
 

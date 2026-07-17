@@ -1,10 +1,10 @@
 # Agent API Keys
 
-`acp-stack` stores provider credentials in the encrypted secret store and injects them into agents only through configured env refs.
+`acp-stack` stores provider credentials in the encrypted secret store. Mapped providers resolve from the provider credential catalog; custom providers and legacy configs continue to use configured flat refs.
 
 ## Secret Uptake
 
-How each harness reads provider credentials. `acp-stack` injects the listed env refs; the values are stored in the encrypted secret store.
+How each harness reads resolved provider credentials:
 
 | Agent       | Auth uptake                                                                            |
 | ----------- | -------------------------------------------------------------------------------------- |
@@ -25,13 +25,15 @@ Kimi Code does not read `KIMI_API_KEY` directly. `acp-stack` keeps that canonica
 
 ## Provider Concept
 
-Provider ids are `acps` metadata. They map an agent to the env refs it needs for a provider. The selected refs are added to `[agent].env` so the runtime can inject them when launching the agent.
+Provider ids are `acps` metadata. They map an agent to the env names it needs for a provider. The shared resolver combines generic `[agent].env` refs with the selected catalog bundles before launch.
 
 ## Rules
 
 - Config stores secret ref names only.
-- Secret values are set with `acps secrets set <name>`.
+- Mapped credentials are added, rotated, selected, listed, and deleted with `acps agent provider credential`.
+- Scripts may copy values already stored by `acps secrets set <name>` with repeatable `--from-secret ENV=REF`.
 - Mapped provider ids must have a valid env-ref mapping for the configured agent.
+- OpenCode and Pi may activate multiple mapped providers; a shared env name must resolve to the same value.
 - Custom providers must provide an explicit API-key ref.
 - Agent-owned config files may reference env names, but must not contain secret values.
 

@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
+use crate::runtime::agent::provider_keys::{
+    resolve_agent_environment, resolve_agent_environment_without_secrets,
+};
 use crate::runtime::install::agent_installer::{InstallerOutcome, install_resolved, run_installer};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -86,16 +89,11 @@ pub(super) fn install_configured_agent(
 }
 
 fn resolve_agent_env(home: &Path, config: &Config) -> Result<HashMap<String, String>> {
-    if config.agent.env.is_empty() {
-        return Ok(HashMap::new());
+    if let Some(environment) = resolve_agent_environment_without_secrets(config) {
+        return Ok(environment.env);
     }
     let store = SecretStore::open(home)?;
-    let mut env = HashMap::with_capacity(config.agent.env.len());
-    for name in &config.agent.env {
-        let value = store.get(name)?;
-        env.insert(name.clone(), value.to_owned());
-    }
-    Ok(env)
+    Ok(resolve_agent_environment(config, &store)?.env)
 }
 
 pub(super) fn operator_registry_override(home: &Path) -> PathBuf {

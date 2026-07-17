@@ -1,4 +1,3 @@
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::config::{
@@ -8,10 +7,9 @@ use crate::config::{
 use crate::error::{Result, StackError};
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::{
-    AgentSessionConfigCategory, session_config_id_for_value, session_config_values,
-    session_model_selection_for_value, session_model_values,
+    AgentSessionConfigCategory, session_config_id_for_value, session_model_selection_for_value,
 };
-use crate::runtime::agent::agent_headless_config::provision_agent_headless_config;
+use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
 use crate::runtime::agent::claude_code_provider_profiles::{
     CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
 };
@@ -19,9 +17,7 @@ use crate::runtime::agent::model_discovery::{
     fetch_session_config, model_value_is_explicit_without_discovery, resolve_advertised_model_value,
 };
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, apply_mapped_agent_provider, env_refs_for_agent_id,
-    env_var_for_agent_provider_id, optional_env_refs_for_agent_provider_id, provider_id_is_known,
-    provider_id_supports_agent, provider_uses_agent_native_auth,
+    agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
     required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
@@ -33,7 +29,7 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
     let _mutation = acquire_agent_config_mutation_file_lock(&config_path)?;
-    let mut config = Config::load_from_path(&config_path)?;
+    let config = Config::load_from_path(&config_path)?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
     let entry = registry.lookup_required(&config.agent.id)?;
     if let Some(mode) = args.mode.clone() {
@@ -45,244 +41,12 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     if args.custom_provider {
         return run_agent_custom_provider_set(config, config_path, &home, args, entry, provider_id);
     }
-    reject_custom_provider_args(&args)?;
-    if !entry.set_provider {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "{} does not support provider configuration through `acps agent set`",
-                entry.name
-            ),
-        });
-    }
-    if args.model.is_some() && !entry.set_model {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path,
-            reason: format!(
-                "{} does not support model configuration through `acps agent set`",
-                entry.name
-            ),
-        });
-    }
-    if !provider_id_is_known(&provider_id) {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!("provider `{provider_id}` is not listed in provider/env mapping"),
-        });
-    }
-    if !provider_id_supports_agent(&provider_id, &config.agent.id) {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "provider `{}` is not supported for agent `{}`",
-                provider_id, config.agent.id
-            ),
-        });
-    }
-    if config.agent.id == "codex" && provider_id == "openai" {
-        return run_codex_openai_set(&home, config, config_path, args, provider_id);
-    }
-
-    let default_api_key_ref =
-        default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id);
-    let native_auth = provider_uses_agent_native_auth(&config.agent.id, &provider_id);
-    if default_api_key_ref.is_none() && !native_auth {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path,
-            reason: format!(
-                "provider `{}` has no API-key env mapping for agent `{}`",
-                provider_id, config.agent.id
-            ),
-        });
-    }
-    if native_auth && args.api_key_ref.is_some() {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path,
-            reason: format!(
-                "{} provider `{provider_id}` uses agent-native auth; do not pass --api-key-ref",
-                entry.name
-            ),
-        });
-    }
-
-    let api_key_ref = args.api_key_ref.or(default_api_key_ref);
-    if api_key_ref.is_none() && !native_auth {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.clone(),
-            reason: format!(
-                "provider `{provider_id}` has no default API-key env var; pass --api-key-ref"
-            ),
-        });
-    }
-
-    let required_env_refs =
-        apply_mapped_agent_provider(&mut config, &provider_id, api_key_ref.clone())?;
-    let Some(agent_provider_id) = agent_provider_id_for_provider_id(&config.agent.id, &provider_id)
-    else {
-        return Err(StackError::InvalidParam {
-            field: "provider",
-            reason: format!(
-                "provider `{}` is not supported for agent `{}`",
-                provider_id, config.agent.id
-            ),
-        });
-    };
-    let model = match args.model {
-        Some(model) => Some(resolve_agent_model_value(
-            &home,
-            &config,
-            Some(agent_provider_id),
-            &model,
-        )?),
-        None if claude_code_provider_has_profile_default_model(&config) => None,
-        None => {
-            if !entry.set_model {
-                return Err(StackError::AgentConfigProvision {
-                    path: config_path,
-                    reason: format!(
-                        "{} does not support model configuration through `acps agent set`",
-                        entry.name
-                    ),
-                });
-            }
-            let Some(model) = select_agent_session_config_value(
-                &home,
-                &config,
-                AgentSessionConfigCategory::Model,
-            )?
-            else {
-                return Ok(());
-            };
-            Some(model)
-        }
-    };
-    if let Some(model) = model
-        && let Some(provider) = config.agent.provider.as_mut()
-    {
-        provider.model = Some(model);
-    }
-
-    let canonical = config.to_canonical_toml()?;
-    let config = config::load_config_from_str(&canonical)?;
-    if let Some(model) = config
-        .agent
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.model.as_deref())
-    {
-        validate_agent_model_if_required(&home, &config, model)?;
-    }
-    let provisioned = provision_agent_headless_config(&config, &home)?;
-    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
-
-    print_agent_set_agent(&config);
-    println!(
-        "provider: {}",
-        config.agent.provider.as_ref().expect("provider set").id
-    );
-    if let Some(model) = config
-        .agent
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.model.as_deref())
-    {
-        println!("model: {model}");
-    }
-    if let Some(api_key_ref) = api_key_ref.as_deref() {
-        println!("api_key_ref: {api_key_ref}");
-    }
-    if required_env_refs.len() > 1 {
-        println!("required_env_refs: {}", required_env_refs.join(", "));
-    }
-    let optional = optional_env_refs_for_agent_provider_id(
-        &config.agent.id,
-        &config.agent.provider.as_ref().expect("provider set").id,
-    );
-    if !optional.is_empty() {
-        println!("optional_env_refs: {}", optional.join(", "));
-    }
-    for item in provisioned {
-        println!("{}: {}", item.label, item.path.display());
-    }
-    print_agent_set_effective_notice_for(Some(&config.agent.id));
-    Ok(())
+    Err(StackError::InvalidParam {
+        field: "provider",
+        reason: "mapped providers are selected with `acps agent provider use <provider>`"
+            .to_owned(),
+    })
 }
-
-fn run_codex_openai_set(
-    home: &Path,
-    mut config: Config,
-    config_path: PathBuf,
-    args: AgentSetArgs,
-    provider_id: String,
-) -> Result<()> {
-    if args.api_key_ref.is_some() {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path,
-            reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
-        });
-    }
-    let Some(requested_model) = args.model else {
-        return Err(StackError::InvalidParam {
-            field: "model",
-            reason: "pass --model <model-id> when setting Codex OpenAI provider".to_owned(),
-        });
-    };
-    config.agent.model = None;
-    config.agent.provider = Some(AgentProviderConfig {
-        id: provider_id,
-        model: Some(requested_model),
-        api_key_ref: None,
-        custom: None,
-    });
-    let canonical = config.to_canonical_toml()?;
-    let mut config = config::load_config_from_str(&canonical)?;
-    provision_agent_headless_config(&config, home)?;
-    let requested_model = config
-        .agent
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.model.as_deref())
-        .expect("provider model set");
-    let model = resolve_agent_model_value(home, &config, Some("openai"), requested_model)?;
-    if let Some(provider) = config.agent.provider.as_mut() {
-        provider.model = Some(model);
-    }
-    let canonical = config.to_canonical_toml()?;
-    let config = config::load_config_from_str(&canonical)?;
-    validate_agent_session_config_value(
-        home,
-        &config,
-        AgentSessionConfigCategory::Model,
-        config
-            .agent
-            .provider
-            .as_ref()
-            .and_then(|provider| provider.model.as_deref())
-            .expect("provider model set"),
-    )?;
-    let provisioned = provision_agent_headless_config(&config, home)?;
-    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
-
-    print_agent_set_agent(&config);
-    println!(
-        "provider: {}",
-        config.agent.provider.as_ref().expect("provider set").id
-    );
-    if let Some(model) = config
-        .agent
-        .provider
-        .as_ref()
-        .and_then(|provider| provider.model.as_deref())
-    {
-        println!("model: {model}");
-    }
-    for item in provisioned {
-        println!("{}: {}", item.label, item.path.display());
-    }
-    print_agent_set_effective_notice_for(Some(&config.agent.id));
-    Ok(())
-}
-
 fn run_agent_custom_provider_set(
     mut config: Config,
     config_path: PathBuf,
@@ -291,6 +55,7 @@ fn run_agent_custom_provider_set(
     entry: &RegistryEntry,
     provider_id: String,
 ) -> Result<()> {
+    let previous_config = config.clone();
     if !entry.allow_custom_provider {
         return Err(StackError::InvalidParam {
             field: "custom-provider",
@@ -341,10 +106,11 @@ fn run_agent_custom_provider_set(
             output_max_tokens,
         }),
     });
+    config.agent.providers = None;
 
     let canonical = config.to_canonical_toml()?;
     let config = config::load_config_from_str(&canonical)?;
-    let provisioned = provision_agent_headless_config(&config, home)?;
+    let provisioned = provision_agent_headless_config_transition(&previous_config, &config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
     print_agent_set_agent(&config);
@@ -484,11 +250,12 @@ fn run_agent_model_set(
     args: AgentSetArgs,
     entry: &RegistryEntry,
 ) -> Result<()> {
+    let previous_config = config.clone();
     reject_custom_provider_args(&args)?;
     if args.api_key_ref.is_some() {
         return Err(StackError::InvalidParam {
             field: "api-key-ref",
-            reason: "--api-key-ref requires --provider".to_owned(),
+            reason: "--api-key-ref requires --custom-provider".to_owned(),
         });
     }
     if !entry.set_model {
@@ -504,7 +271,7 @@ fn run_agent_model_set(
         return Err(StackError::InvalidParam {
             field: "provider",
             reason: format!(
-                "pass --provider <provider-id> when setting a model for {}",
+                "select a mapped provider with `acps agent provider use` before setting a model for {}",
                 entry.name
             ),
         });
@@ -512,17 +279,22 @@ fn run_agent_model_set(
     let Some(model) = args.model else {
         return Err(StackError::InvalidParam {
             field: "model",
-            reason: "pass --model <model-id>, --provider <provider-id>, or --mode <mode>"
-                .to_owned(),
+            reason: "pass --model <model-id>, --mode <mode>, or --custom-provider".to_owned(),
         });
     };
 
     let required_env_refs = if let Some(provider) = config.agent.provider.as_ref() {
-        required_env_refs_for_agent_provider_id(
-            &config.agent.id,
-            &provider.id,
-            provider.api_key_ref.as_deref(),
-        )
+        provider
+            .api_key_ref
+            .as_deref()
+            .map(|api_key_ref| {
+                required_env_refs_for_agent_provider_id(
+                    &config.agent.id,
+                    &provider.id,
+                    Some(api_key_ref),
+                )
+            })
+            .unwrap_or_default()
     } else {
         env_refs_for_agent_id(&config.agent.id)
             .into_iter()
@@ -557,7 +329,7 @@ fn run_agent_model_set(
         .or(config.agent.model.as_deref())
         .expect("agent model set");
     validate_agent_model_if_required(home, &config, model_value)?;
-    let provisioned = provision_agent_headless_config(&config, home)?;
+    let provisioned = provision_agent_headless_config_transition(&previous_config, &config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
     print_agent_set_agent(&config);
@@ -624,6 +396,16 @@ fn print_agent_set_agent(config: &Config) {
 /// `agent_id` is provided we surface the correct guidance; passing
 /// `None` keeps the generic "new sessions" message for paths where the
 /// agent id is not known to the caller.
+/// Whether a provider/credential/model change needs a supervised-agent process
+/// restart to take effect. Goose reloads model changes live and applies other
+/// changes on the next ACP session via `session/set_config_option`, so no
+/// process restart is required; every other harness reads provider/model from
+/// disk at process start. Keeps the machine-readable `restart_required` JSON
+/// field consistent with the human-facing effective notice.
+pub(in crate::cli) fn provider_change_requires_restart(agent_id: &str) -> bool {
+    agent_id != "goose"
+}
+
 pub(in crate::cli) fn print_agent_set_effective_notice_for(agent_id: Option<&str>) {
     match agent_id {
         Some("goose") => {
@@ -723,59 +505,6 @@ fn is_claude_code_builtin_model_alias(value: &str) -> bool {
     )
 }
 
-fn claude_code_provider_has_profile_default_model(config: &Config) -> bool {
-    claude_code_profile_default_model(config).is_some()
-}
-
-fn select_agent_session_config_value(
-    home: &Path,
-    config: &Config,
-    category: AgentSessionConfigCategory,
-) -> Result<Option<String>> {
-    let values = agent_session_config_values(home, config, category)?;
-
-    if !io::stdin().is_terminal() {
-        println!("available {} values:", category.id());
-        for value in values {
-            println!("{value}");
-        }
-        println!(
-            "rerun with `--{} <{}>` to apply agent config",
-            category.id(),
-            category.id()
-        );
-        return Ok(None);
-    }
-
-    println!("available {} values:", category.id());
-    for (index, value) in values.iter().enumerate() {
-        println!("  {}. {value}", index + 1);
-    }
-    print!("Select {} number: ", category.id());
-    io::stdout()
-        .flush()
-        .map_err(|source| StackError::ServeIo { source })?;
-    let mut choice = String::new();
-    io::stdin()
-        .read_line(&mut choice)
-        .map_err(|source| StackError::ServeIo { source })?;
-    let index: usize = choice
-        .trim()
-        .parse()
-        .map_err(|_| StackError::AgentConfigProvision {
-            path: PathBuf::from("ACP session config options"),
-            reason: format!("{} selection must be a number", category.id()),
-        })?;
-    values
-        .get(index.saturating_sub(1))
-        .cloned()
-        .map(Some)
-        .ok_or_else(|| StackError::AgentConfigProvision {
-            path: PathBuf::from("ACP session config options"),
-            reason: format!("{} selection `{index}` is out of range", category.id()),
-        })
-}
-
 pub(in crate::cli) fn validate_agent_session_config_value(
     home: &Path,
     config: &Config,
@@ -790,21 +519,6 @@ pub(in crate::cli) fn validate_agent_session_config_value(
         AgentSessionConfigCategory::Mode => {
             session_config_id_for_value(response.config_options.as_deref(), category, value)
                 .map(|_| ())
-        }
-    }
-}
-
-fn agent_session_config_values(
-    home: &Path,
-    config: &Config,
-    category: AgentSessionConfigCategory,
-) -> Result<Vec<String>> {
-    let response = read_agent_new_session_response(home, config)?;
-    match category {
-        AgentSessionConfigCategory::Model => session_model_values(&response)
-            .map(|values| model_values_for_cli_display(config, values)),
-        AgentSessionConfigCategory::Mode => {
-            session_config_values(response.config_options.as_deref(), category)
         }
     }
 }

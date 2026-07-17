@@ -76,6 +76,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[agent]`          | configured ACP agent process and injected secret refs (legacy input; canonical config writes `[array]`) |
 | `[agent.auto_update]` | periodic managed agent update policy                             |
 | `[agent.provider]` | selected provider/model metadata for provider-backed agents          |
+| `[agent.providers]` | explicit active mapped-provider ids and target-scoped alias selections |
 | `[array]`          | Array mode flag, primary target, and configured agent targets        |
 | `[[array.targets]]` | one ACP agent target; canonical home of each agent block under `[array.targets.agent]` |
 | `[updates.acp_stack]` | acp-stack self-update policy                                     |
@@ -143,6 +144,8 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 | `restart` | process restart policy: `on-crash` or `never`             |
 
 Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
+
+`[agent.provider]` defines the default lane. Without `[agent.providers]`, the implicit active set is that default provider plus any enabled subagent provider; `[agent.providers].active` optionally replaces it, while `[agent.providers.selected_aliases]` chooses backup-key aliases for that target. Multiple active providers are valid only for harnesses that advertise the capability, initially OpenCode and Pi.
 
 `[agent.install]` is the operator escape hatch for a custom (non-registry) agent: `type = "shell"`, a `shell` snippet that installs the harness (and any adapter), and `creates` — the path that must resolve to an executable after the install runs. When present for an `id` the registry does not know, the runtime drives the agent from `[agent]`/`[agent.install]` directly and skips the registry-only support and provider/model auto-config. `acps init --custom-agent-*` writes this block; an adapter-backed custom agent uses the same shape with `command` pointing at the adapter binary. `[agent.adapter]` is runtime-populated from the registry and rejected if written by hand.
 

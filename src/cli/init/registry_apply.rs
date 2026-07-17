@@ -319,6 +319,7 @@ pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAge
         config.agent.mode = None;
         config.agent.model = None;
         config.agent.provider = None;
+        config.agent.providers = None;
         config.agent.auto_update = None;
     }
     config.agent.expected_sha256 = None;
@@ -349,6 +350,7 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         config.agent.mode = None;
         config.agent.model = None;
         config.agent.provider = None;
+        config.agent.providers = None;
         config.agent.auto_update = default_supported_agent_auto_update();
     } else if config.agent.auto_update.is_none() {
         config.agent.auto_update = default_supported_agent_auto_update();

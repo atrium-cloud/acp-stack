@@ -238,6 +238,8 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_provider: bool,
     #[serde(default)]
+    pub multiple_active_providers: bool,
+    #[serde(default)]
     pub set_model: bool,
     #[serde(default)]
     pub allow_custom_provider: bool,
@@ -728,6 +730,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         kind: RegistryKind::Native,
         headless_compatible: true,
         set_provider: false,
+        multiple_active_providers: false,
         set_model: false,
         allow_custom_provider: false,
         allow_custom_model: false,
@@ -795,6 +798,7 @@ mod tests {
         assert_eq!(opencode.kind, RegistryKind::Native);
         assert!(opencode.headless_compatible);
         assert!(opencode.set_provider);
+        assert!(opencode.multiple_active_providers);
         assert!(opencode.set_model);
         assert!(opencode.allow_custom_provider);
         assert!(opencode.allow_custom_model);
@@ -811,6 +815,19 @@ mod tests {
             opencode.support_doc.as_deref(),
             Some("docs/agents/opencode.md")
         );
+    }
+
+    #[test]
+    fn multiple_active_provider_capability_is_limited_to_opencode_and_pi() {
+        let catalog = RegistryCatalog::load_embedded().expect("registry");
+        let capable = catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.multiple_active_providers)
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(capable, ["opencode", "pi"]);
     }
 
     #[test]

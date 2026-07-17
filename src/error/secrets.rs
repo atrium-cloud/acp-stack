@@ -14,8 +14,10 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SecretStoreDecrypt(_) => "secrets.decrypt_failed",
         SecretStorePlaintextParse(_)
         | SecretStorePlaintextSerialize(_)
+        | SecretStorePlaintextInvalid { .. }
         | SecretStorePlaintextNotUtf8 { .. } => "secrets.plaintext_invalid",
         SecretNotFound { .. } => "secrets.not_found",
+        ProviderCredentialRollbackFailed { .. } => "secrets.rollback_failed",
         InvalidSecretRefName { .. } | DuplicateSecretRef { .. } => "config.invalid",
         _ => return None,
     })
@@ -33,8 +35,12 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         SecretStoreDecrypt(_) => "failed to decrypt secret store".to_owned(),
         SecretStorePlaintextParse(_)
         | SecretStorePlaintextSerialize(_)
+        | SecretStorePlaintextInvalid { .. }
         | SecretStorePlaintextNotUtf8 { .. } => "secret store plaintext is invalid".to_owned(),
         SecretNotFound { .. } => "secret was not found".to_owned(),
+        ProviderCredentialRollbackFailed { .. } => {
+            "provider credential change failed and could not be rolled back".to_owned()
+        }
         InvalidSecretRefName { name } => format!("secret ref name `{name}` is invalid"),
         DuplicateSecretRef { name } => {
             format!("secret ref `{name}` is declared more than once")
@@ -56,7 +62,9 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SecretStoreDecrypt(_)
         | SecretStorePlaintextParse(_)
         | SecretStorePlaintextSerialize(_)
-        | SecretStorePlaintextNotUtf8 { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        | SecretStorePlaintextInvalid { .. }
+        | SecretStorePlaintextNotUtf8 { .. }
+        | ProviderCredentialRollbackFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         InvalidSecretRefName { .. } | DuplicateSecretRef { .. } => StatusCode::BAD_REQUEST,
         _ => return None,
     })

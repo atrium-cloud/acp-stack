@@ -35,6 +35,7 @@ flowchart LR
 | ACP terminals    | client-side `terminal/*` handlers: per-terminal owning task, registry, capped output buffer, and command-log recording (`src/runtime/agent/acp_terminal.rs`, sharing spawn/kill/read primitives with the command gateway via `commands/exec.rs`) |
 | Model catalog    | cached `models.dev` model metadata for prompt modality gating     |
 | Agent switch     | harness migration planning and provider/API-key compatibility     |
+| Provider CLI     | target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation |
 | Native config import | redacted inspection and transactional semantic replacement of supported harness global config |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |
 | Workspace        | bounded file operations and workspace source materialization      |

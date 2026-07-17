@@ -31,9 +31,12 @@ Both keys are presented as `Authorization: Bearer <key>` and validated against s
 
 Secret values are stored in the encrypted local secret store. Config files carry secret reference names only.
 
+The same `secrets.age` ciphertext contains the instance-wide mapped-provider credential catalog. A provider has either one aliasless credential or a permanently promoted alias map. Each credential bundle contains its required and supplied env fields, retained source-ref names, and an opaque revision used only to detect whether a running process is stale.
+
 Rules:
 
 - API responses never return secret values.
+- Provider status and credential-list output never return credential values or revisions.
 - Config export returns refs only.
 - Agent and MCP secrets are injected only where explicitly referenced.
 - Secret-ref fields reject likely pasted secret values.

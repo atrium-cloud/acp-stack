@@ -70,6 +70,7 @@ use crate::runtime::agent::acp_bridge::{
     StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
     session_config_id_for_value, session_model_selection_for_value,
 };
+use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::secrets::SecretStore;
 use crate::state::{
@@ -192,6 +193,7 @@ pub struct AgentSnapshot {
     pub state: AgentStateLabel,
     pub latest_capabilities: Option<AgentCapabilitiesDto>,
     pub pid: Option<u32>,
+    pub loaded_providers: Option<Vec<ResolvedProviderSnapshot>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +240,7 @@ pub struct AgentSupervisor {
     state: Arc<TokioMutex<AgentState>>,
     capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
     last_pid: Arc<RwLock<Option<u32>>>,
+    loaded_providers: Arc<RwLock<Option<Vec<ResolvedProviderSnapshot>>>>,
     /// In-flight prompt registry. Each entry is a fire-and-forget background
     /// task plus its cancellation token. We never block on these from
     /// session-tier handlers — the durable `prompts` row is the source of
@@ -254,6 +257,7 @@ struct SupervisorShared {
     state: Arc<TokioMutex<AgentState>>,
     capabilities: Arc<RwLock<Option<AgentCapabilitiesDto>>>,
     last_pid: Arc<RwLock<Option<u32>>>,
+    loaded_providers: Arc<RwLock<Option<Vec<ResolvedProviderSnapshot>>>>,
 }
 
 #[derive(Clone)]
@@ -262,6 +266,7 @@ struct RestartContext {
     agent: AgentConfig,
     workspace_root: String,
     env: HashMap<String, String>,
+    providers: Vec<ResolvedProviderSnapshot>,
     state_store: Arc<TokioMutex<StateStore>>,
     session_changes: SessionChangesHandle,
     event_hub: EventHub,
@@ -274,6 +279,7 @@ pub struct AgentStartRequest<'a> {
     pub agent: &'a AgentConfig,
     pub workspace_root: &'a str,
     pub env: HashMap<String, String>,
+    pub providers: Vec<ResolvedProviderSnapshot>,
     pub state: &'a Arc<TokioMutex<StateStore>>,
     pub session_changes: &'a SessionChangesHandle,
     pub event_hub: EventHub,
@@ -293,6 +299,7 @@ impl AgentSupervisor {
             state: Arc::new(TokioMutex::new(AgentState::Stopped)),
             capabilities: Arc::new(RwLock::new(None)),
             last_pid: Arc::new(RwLock::new(None)),
+            loaded_providers: Arc::new(RwLock::new(None)),
             prompts: Arc::new(TokioMutex::new(HashMap::new())),
             dispatch_gate: Arc::new(TokioMutex::new(())),
         }
@@ -303,6 +310,7 @@ impl AgentSupervisor {
             state: Arc::clone(&self.state),
             capabilities: Arc::clone(&self.capabilities),
             last_pid: Arc::clone(&self.last_pid),
+            loaded_providers: Arc::clone(&self.loaded_providers),
         }
     }
 
@@ -344,11 +352,13 @@ impl AgentSupervisor {
             }
         }
 
+        let loaded_providers = request.providers.clone();
         let restart_context = RestartContext {
             target_id: request.target_id.to_owned(),
             agent: request.agent.clone(),
             workspace_root: request.workspace_root.to_owned(),
             env: request.env.clone(),
+            providers: request.providers.clone(),
             state_store: request.state.clone(),
             session_changes: request.session_changes.clone(),
             event_hub: request.event_hub.clone(),
@@ -365,6 +375,7 @@ impl AgentSupervisor {
                 }
                 *self.capabilities.write().await = Some(capabilities.clone());
                 *self.last_pid.write().await = pid;
+                *self.loaded_providers.write().await = Some(loaded_providers);
                 spawn_bridge_exit_monitor(self.shared(), bridge, restart_context);
                 Ok(capabilities)
             }
@@ -377,6 +388,7 @@ impl AgentSupervisor {
                     *guard = AgentState::Stopped;
                 }
                 *self.last_pid.write().await = None;
+                *self.loaded_providers.write().await = None;
                 Err(err)
             }
         }
@@ -475,6 +487,7 @@ impl AgentSupervisor {
             *guard = AgentState::Stopped;
         }
         *self.last_pid.write().await = None;
+        *self.loaded_providers.write().await = None;
 
         // Record the lifecycle row best-effort. A DB error is logged but
         // does not mask the original shutdown outcome — the supervisor is
@@ -532,10 +545,12 @@ impl AgentSupervisor {
         };
         let capabilities = self.capabilities.read().await.clone();
         let pid = *self.last_pid.read().await;
+        let loaded_providers = self.loaded_providers.read().await.clone();
         AgentSnapshot {
             state: state_label,
             latest_capabilities: capabilities,
             pid,
+            loaded_providers,
         }
     }
 
@@ -1398,6 +1413,7 @@ async fn monitor_bridge_exit(
         return Ok(());
     }
     *shared.last_pid.write().await = None;
+    *shared.loaded_providers.write().await = None;
 
     let exit_status = match bridge.shutdown().await {
         Ok(status) => status,
@@ -1496,6 +1512,7 @@ async fn monitor_bridge_exit(
             }
             *shared.capabilities.write().await = Some(capabilities);
             *shared.last_pid.write().await = pid;
+            *shared.loaded_providers.write().await = Some(restart_context.providers.clone());
             spawn_bridge_exit_monitor(shared, new_bridge, restart_context);
         }
         Err(err) => {
@@ -1504,6 +1521,7 @@ async fn monitor_bridge_exit(
                 *guard = AgentState::Stopped;
             }
             *shared.last_pid.write().await = None;
+            *shared.loaded_providers.write().await = None;
             append_and_publish_agent_lifecycle(
                 &restart_context.state_store,
                 &restart_context.event_hub,

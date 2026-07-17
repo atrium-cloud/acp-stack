@@ -387,6 +387,7 @@ mod tests {
         .expect("config");
         config.agent.env.clear();
         config.agent.provider = None;
+        config.agent.providers = None;
         config.agent.model = None;
         config
     }
@@ -795,9 +796,10 @@ mod tests {
             serde_json::from_slice(&std::fs::read(native_path).expect("native")).expect("json");
         // The benign residual key survives alongside the provisioned settings.
         assert_eq!(native["theme"], "dark");
-        // `defaultProvider`/`defaultModel` are managed and never land in the
-        // native residual.
-        assert!(native.get("defaultProvider").is_none());
+        // Provisioning reapplies the canonical provider selection after the
+        // imported residual is written.
+        assert_eq!(native["defaultProvider"], "anthropic");
+        assert!(native.get("defaultModel").is_none());
     }
 
     #[test]

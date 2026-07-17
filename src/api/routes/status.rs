@@ -11,7 +11,11 @@ use super::logs::default_logs_limit;
 use crate::config::AgentAdapterConfig;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
+use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
+use crate::runtime::agent::supervisor::AgentStateLabel;
 use crate::runtime::health::HealthReport;
+
+use super::agent::open_agent_environment;
 
 #[derive(Serialize)]
 pub(crate) struct StatusResponse {
@@ -49,6 +53,70 @@ pub(crate) struct StatusAgentResponse {
     pid: Option<u32>,
     latest_failure: Option<AgentFailureJson>,
     lifecycle_events: Vec<AgentLifecycleJson>,
+    configured_providers: Vec<ProviderStatusJson>,
+    loaded_providers: Option<Vec<ProviderStatusJson>>,
+    provider_restart_required: bool,
+    /// Populated when configured-provider resolution fails (missing/unselected
+    /// credential, corrupt secret). Carries a remote-safe message so the
+    /// monitoring endpoint stays reachable in exactly the broken state an
+    /// operator queries it to diagnose. `None` on the happy path.
+    provider_error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ProviderStatusJson {
+    provider_id: String,
+    alias: Option<String>,
+    env_names: Vec<String>,
+}
+
+impl From<&ResolvedProviderSnapshot> for ProviderStatusJson {
+    fn from(provider: &ResolvedProviderSnapshot) -> Self {
+        Self {
+            provider_id: provider.provider_id.clone(),
+            alias: provider.alias.clone(),
+            env_names: provider.env_names.clone(),
+        }
+    }
+}
+
+pub(crate) fn provider_snapshot_requires_restart(
+    state: AgentStateLabel,
+    loaded: Option<&[ResolvedProviderSnapshot]>,
+    configured: &[ResolvedProviderSnapshot],
+) -> bool {
+    state == AgentStateLabel::Running && loaded != Some(configured)
+}
+
+/// Map a provider-resolution result into the status view. On failure the
+/// monitoring endpoint degrades instead of erroring: `configured_providers`
+/// is emptied and a remote-safe `provider_error` is surfaced so operators can
+/// still read live state (and, for the array route, other targets) while a
+/// credential is broken.
+pub(crate) fn configured_providers_or_error(
+    environment: std::result::Result<
+        crate::runtime::agent::provider_keys::ResolvedAgentEnvironment,
+        StackError,
+    >,
+) -> (Vec<ResolvedProviderSnapshot>, Option<String>) {
+    match environment {
+        Ok(environment) => (environment.providers, None),
+        Err(error) => (Vec::new(), Some(error.public_message())),
+    }
+}
+
+/// Restart-required signal for the status view. When resolution failed
+/// (`resolution_failed`) the configured set is unknown, so a running agent
+/// would otherwise read as "restart required" against its still-loaded
+/// snapshot — report false instead, since the signal is unknowable until the
+/// credential is fixed.
+pub(crate) fn provider_restart_required_for_status(
+    resolution_failed: bool,
+    state: AgentStateLabel,
+    loaded: Option<&[ResolvedProviderSnapshot]>,
+    configured: &[ResolvedProviderSnapshot],
+) -> bool {
+    !resolution_failed && provider_snapshot_requires_restart(state, loaded, configured)
 }
 
 #[derive(Serialize)]
@@ -83,8 +151,28 @@ struct AgentFailureJson {
 pub(crate) async fn status_agent_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<StatusAgentResponse>, StackError> {
-    let (_, target) = state.default_agent_target().await?;
+    let config = state.refresh_array_runtime_from_disk().await?;
+    let target_id = config.array.primary_target.clone();
+    let target = state.agent_target(&target_id)?;
     let snapshot = target.supervisor.snapshot().await;
+    let mut target_config = config.clone();
+    target_config.agent = config
+        .array
+        .target(&target_id)
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "target",
+            reason: format!("unknown Array target `{target_id}`"),
+        })?
+        .agent
+        .clone();
+    let (configured_provider_snapshot, provider_error) =
+        configured_providers_or_error(open_agent_environment(&target_config));
+    let provider_restart_required = provider_restart_required_for_status(
+        provider_error.is_some(),
+        snapshot.state,
+        snapshot.loaded_providers.as_deref(),
+        &configured_provider_snapshot,
+    );
     let agent = target.live_agent_config.lock().await.clone();
     let store = state.state.lock().await;
     let lifecycle_events = store.query_agent_lifecycle(default_logs_limit())?;
@@ -120,6 +208,16 @@ pub(crate) async fn status_agent_handler(
                 payload_json: event.payload_json,
             })
             .collect(),
+        configured_providers: configured_provider_snapshot
+            .iter()
+            .map(ProviderStatusJson::from)
+            .collect(),
+        loaded_providers: snapshot
+            .loaded_providers
+            .as_ref()
+            .map(|providers| providers.iter().map(ProviderStatusJson::from).collect()),
+        provider_restart_required,
+        provider_error,
     }))
 }
 
@@ -177,4 +275,109 @@ pub(crate) async fn health_ready_handler(State(state): State<AppState>) -> Respo
         "data": report,
     });
     (status, Json(body)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(alias: Option<&str>, revision: &str) -> ResolvedProviderSnapshot {
+        ResolvedProviderSnapshot {
+            provider_id: "opencode-go".to_owned(),
+            alias: alias.map(str::to_owned),
+            revision: Some(revision.to_owned()),
+            env_names: vec!["OPENCODE_API_KEY".to_owned()],
+        }
+    }
+
+    #[test]
+    fn provider_restart_only_applies_to_changed_running_snapshots() {
+        let loaded = vec![provider(Some("go_1"), "revision-1")];
+        assert!(!provider_snapshot_requires_restart(
+            AgentStateLabel::Stopped,
+            None,
+            &loaded,
+        ));
+        assert!(!provider_snapshot_requires_restart(
+            AgentStateLabel::Running,
+            Some(&loaded),
+            &loaded,
+        ));
+        assert!(provider_snapshot_requires_restart(
+            AgentStateLabel::Running,
+            Some(&loaded),
+            &[provider(Some("go_2"), "revision-2")],
+        ));
+        assert!(provider_snapshot_requires_restart(
+            AgentStateLabel::Running,
+            Some(&loaded),
+            &[provider(Some("go_1"), "revision-2")],
+        ));
+        assert!(provider_snapshot_requires_restart(
+            AgentStateLabel::Running,
+            None,
+            &loaded,
+        ));
+    }
+
+    #[test]
+    fn provider_status_json_excludes_internal_revision() {
+        let serialized = serde_json::to_value(ProviderStatusJson::from(&provider(
+            Some("go_2"),
+            "private-revision",
+        )))
+        .expect("serialize");
+
+        assert_eq!(serialized["provider_id"], "opencode-go");
+        assert_eq!(serialized["alias"], "go_2");
+        assert!(serialized.get("revision").is_none());
+        assert!(!serialized.to_string().contains("private-revision"));
+    }
+
+    #[test]
+    fn configured_providers_pass_through_on_success() {
+        let environment = crate::runtime::agent::provider_keys::ResolvedAgentEnvironment {
+            env: std::collections::HashMap::new(),
+            providers: vec![provider(Some("go_1"), "revision-1")],
+        };
+        let (providers, error) = configured_providers_or_error(Ok(environment));
+        assert_eq!(providers.len(), 1);
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn broken_credential_degrades_to_error_marker_without_erroring() {
+        let (providers, error) = configured_providers_or_error(Err(StackError::InvalidParam {
+            field: "agent.providers.selected_aliases",
+            reason: "provider `openrouter` has backup aliases".to_owned(),
+        }));
+        assert!(providers.is_empty());
+        assert!(error.is_some());
+    }
+
+    #[test]
+    fn failed_resolution_never_reports_restart_required() {
+        // A running agent with a loaded snapshot but empty (failed) configured
+        // set must not read as needing a restart — the raw predicate says true,
+        // the guarded status helper must say false.
+        let loaded = vec![provider(Some("go_1"), "revision-1")];
+        assert!(provider_snapshot_requires_restart(
+            AgentStateLabel::Running,
+            Some(&loaded),
+            &[],
+        ));
+        assert!(!provider_restart_required_for_status(
+            true,
+            AgentStateLabel::Running,
+            Some(&loaded),
+            &[],
+        ));
+        // When resolution succeeds the guard defers to the raw predicate.
+        assert!(provider_restart_required_for_status(
+            false,
+            AgentStateLabel::Running,
+            Some(&loaded),
+            &[],
+        ));
+    }
 }

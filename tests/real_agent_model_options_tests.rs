@@ -46,6 +46,7 @@ fn real_agent_config(id: &str, name: &str, command: &str, args: &[&str]) -> Agen
         harness_version: None,
         adapter: None,
         provider: None,
+        providers: None,
         subagent: None,
         auto_update: None,
         install: None,
