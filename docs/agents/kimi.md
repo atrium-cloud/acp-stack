@@ -2,6 +2,10 @@
 
 Kimi Code is a native ACP target. `acp-stack` launches `kimi acp`.
 
+## Known limitation
+
+Kimi Code currently rejects API-key-backed ACP sessions at session creation, including sessions configured through the documented `KIMI_MODEL_*` environment contract. These sessions fail with `Authentication required`; follow [upstream issue #1330](https://github.com/MoonshotAI/kimi-code/issues/1330) and its [open fix](https://github.com/MoonshotAI/kimi-code/pull/1570). Until that fix is included in a Kimi Code release, the secure headless setup below cannot run native Kimi Code sessions. `acp-stack` does not automate Kimi's interactive OAuth flow.
+
 ## Setup
 
 ```sh
