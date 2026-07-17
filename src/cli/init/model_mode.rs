@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use crate::cli::agent::{claude_code_provider_model_is_explicit, model_values_for_cli_display};
+use crate::cli::agent::{agent_model_is_explicit_without_discovery, model_values_for_cli_display};
 use crate::config::Config;
 use crate::dev_gates::{
     FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, TEST_SKIP_AGENT_INSTALL_ENV,
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
+use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
 use crate::runtime::agent::model_discovery::{
     advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
     validate_advertised_value,
@@ -140,6 +141,25 @@ pub(super) fn configure_model_and_mode_for_init(
     if !entry.set_model {
         return Ok(ModelModeOutcome::default());
     }
+    // Kimi requires a model before its ACP process can initialize, so its
+    // model is an init input rather than a discovered value: without
+    // `--model`, pin the tier-universal default instead of spawning the
+    // agent for a picker. A model already present in config (from a prior
+    // init or `agent set`) is kept; the operator can re-select any time
+    // with `acps agent set --model`.
+    if config.agent.id == KIMI_CODE_AGENT_ID && args.model.is_none() {
+        if config.agent.model.is_some() {
+            return Ok(ModelModeOutcome::default());
+        }
+        write_model_into_config(
+            config,
+            KIMI_CODE_DEFAULT_MODEL.to_owned(),
+            entry.set_provider,
+        );
+        return Ok(ModelModeOutcome {
+            model_action: ModelModeAction::Set,
+        });
+    }
     // Custom-provider flow already wrote a literal model id into the
     // provider config and that id is not an ACP-advertised value, so
     // the model lane is skipped for custom-provider runs.
@@ -156,9 +176,9 @@ pub(super) fn configure_model_and_mode_for_init(
     // for these agents.
     let provider_present =
         provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
-    let claude_code_explicit_model = args.model.is_some()
+    let explicit_model_without_discovery = args.model.is_some()
         && !args.custom_provider
-        && claude_code_provider_model_is_explicit(config);
+        && agent_model_is_explicit_without_discovery(config);
     // Discovery runs when the model lane needs the advertised list — either to
     // validate an explicit value (L86), to drive an interactive picker (L84), or
     // to surface the L87 print-and-skip behavior after a provider was just set
@@ -170,7 +190,7 @@ pub(super) fn configure_model_and_mode_for_init(
     if !model_lane_active {
         return Ok(ModelModeOutcome::default());
     }
-    if claude_code_explicit_model && let Some(model) = args.model.as_deref() {
+    if explicit_model_without_discovery && let Some(model) = args.model.as_deref() {
         write_model_into_config(config, model.to_owned(), entry.set_provider);
         return Ok(ModelModeOutcome {
             model_action: ModelModeAction::Set,
@@ -390,7 +410,7 @@ fn configure_model_for_init(
     provider_backed: bool,
 ) -> Result<ModelModeAction> {
     if let Some(explicit) = args.model.as_deref() {
-        if claude_code_provider_model_is_explicit(config) {
+        if agent_model_is_explicit_without_discovery(config) {
             write_model_into_config(config, explicit.to_owned(), provider_backed);
             return Ok(ModelModeAction::Set);
         }
@@ -442,7 +462,7 @@ fn configure_model_for_init(
     else {
         return Ok(ModelModeAction::Skipped);
     };
-    if !claude_code_provider_model_is_explicit(config) {
+    if !agent_model_is_explicit_without_discovery(config) {
         validate_advertised_value(response, AgentSessionConfigCategory::Model, &selected)?;
     }
     write_model_into_config(config, selected, provider_backed);

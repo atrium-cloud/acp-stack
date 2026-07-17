@@ -658,7 +658,7 @@ pub(in crate::cli) fn resolve_agent_model_value(
     provider_id: Option<&str>,
     model_id: &str,
 ) -> Result<String> {
-    if claude_code_provider_model_is_explicit(config) {
+    if agent_model_is_explicit_without_discovery(config) {
         return Ok(model_id.to_owned());
     }
     let response = read_agent_new_session_response(home, config)?;
@@ -666,7 +666,7 @@ pub(in crate::cli) fn resolve_agent_model_value(
 }
 
 fn validate_agent_model_if_required(home: &Path, config: &Config, model_value: &str) -> Result<()> {
-    if claude_code_provider_model_is_explicit(config) {
+    if agent_model_is_explicit_without_discovery(config) {
         return Ok(());
     }
     validate_agent_session_config_value(
@@ -677,7 +677,7 @@ fn validate_agent_model_if_required(home: &Path, config: &Config, model_value: &
     )
 }
 
-pub(in crate::cli) fn claude_code_provider_model_is_explicit(config: &Config) -> bool {
+pub(in crate::cli) fn agent_model_is_explicit_without_discovery(config: &Config) -> bool {
     model_value_is_explicit_without_discovery(config)
 }
 

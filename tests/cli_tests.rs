@@ -3737,6 +3737,84 @@ fn init_claude_code_explicit_profile_model_skips_acp_discovery() {
 }
 
 #[test]
+fn init_kimi_explicit_model_skips_acp_discovery_and_persists_canonical_secret_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kimi",
+            "--model",
+            "k3",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Kimi Code (kimi)"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "kimi""#));
+    assert!(config.contains(r#"command = "kimi""#));
+    assert!(config.contains(r#"args = ["acp"]"#));
+    assert!(config.contains(r#"env = ["KIMI_API_KEY"]"#));
+    assert!(config.contains(r#"model = "k3""#));
+    assert!(!config.contains("KIMI_MODEL_"));
+    assert!(!config.contains("test-kimi-key"));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn init_kimi_without_model_pins_default_and_keeps_operator_selection_on_rerun() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
+
+    let init_args = [
+        "dev",
+        "init",
+        "--agent",
+        "kimi",
+        "--skip-workspace-init",
+        "--skip-testflight",
+    ];
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args(init_args)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Kimi Code (kimi)"));
+
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    let config = fs::read_to_string(&config_path).expect("config should be readable");
+    assert!(config.contains(r#"model = "kimi-for-coding""#));
+    assert!(!config.contains("KIMI_MODEL_"));
+
+    // A model the operator already picked survives a model-less re-init.
+    let selected = config.replace(
+        r#"model = "kimi-for-coding""#,
+        r#"model = "kimi-for-coding-highspeed""#,
+    );
+    fs::write(&config_path, selected).expect("config should be writable");
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args(init_args)
+        .assert()
+        .success();
+    let config = fs::read_to_string(&config_path).expect("config should be readable");
+    assert!(config.contains(r#"model = "kimi-for-coding-highspeed""#));
+}
+
+#[test]
 fn init_claude_code_profile_provider_filters_builtin_model_aliases() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     seed_init_secrets(tempdir.path(), &[("MOONSHOT_API_KEY", "test-moonshot-key")]);
@@ -5876,6 +5954,34 @@ creates = "opencode"
     assert!(!after.contains("[array.targets.agent.provider]"));
     assert!(after.contains(r#"model = "gpt-5.5[context=272k,reasoning=medium,fast=false]""#));
     assert!(!after.contains(r#"api_key_ref = "CURSOR_API_KEY""#));
+}
+
+#[test]
+fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), kimi_config())
+        .expect("config should be written");
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--model", "kimi-for-coding-highspeed"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: kimi"))
+        .stdout(predicates::str::contains(
+            "model: kimi-for-coding-highspeed",
+        ))
+        .stdout(predicates::str::contains("required_env_refs: KIMI_API_KEY"));
+
+    let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(config.contains(r#"env = ["KIMI_API_KEY"]"#));
+    assert!(config.contains(r#"model = "kimi-for-coding-highspeed""#));
+    assert!(!config.contains("KIMI_MODEL_"));
+    assert!(!config.contains("test-kimi-key"));
+    assert!(!config.contains("[agent.provider]"));
 }
 
 #[test]
@@ -9696,6 +9802,23 @@ fn claude_code_config() -> String {
         .replace(r#"command = "opencode""#, r#"command = "claude-agent-acp""#)
         .replace(r#"args = ["acp"]"#, r#"args = []"#)
         .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = []"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        )
+}
+
+fn kimi_config() -> String {
+    VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "kimi""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Kimi Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "kimi""#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["KIMI_API_KEY"]"#)
         .replace(
             r#"
 [agent.install]

@@ -5,8 +5,9 @@
 # [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
 # [Amp manual](https://ampcode.com/manual)
 # [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
+# [Kimi Code environment variables](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-05-22
+# Last updated on 2026-07-17
 
 # Provider env vars
 
@@ -119,6 +120,7 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "KIMI_API_KEY"
 provider_ids = ["kimi-coding", "kimi-for-coding"]
+agent_ids = ["kimi"]
 companion_env_vars = []
 optional_env_vars = []
 

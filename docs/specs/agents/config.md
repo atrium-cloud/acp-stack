@@ -58,7 +58,7 @@ api_key_ref = "<provider-api-key-ref>"
 - Model edits require the configured agent to support model selection.
 - Mode edits require the configured agent to advertise mode choices.
 - Root `agent.model` must be omitted when `[agent.provider].model` is set.
-- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile model ids are accepted as supplied and may come from the profile default when unset.
+- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile and Kimi Code model ids are accepted as supplied. Kimi requires its model before ACP discovery can start.
 - Custom-provider model ids are accepted as supplied.
 - Custom providers use `chat-completions` by default, `responses` for Codex, and `anthropic-messages` for Claude Code.
 - API-key refs must be valid secret-ref names and are added to `[agent].env`.
@@ -76,5 +76,6 @@ api_key_ref = "<provider-api-key-ref>"
 | Goose       | provider-native env vars; model applied through ACP session config                       |
 | Codex       | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY`                  |
 | Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
+| Kimi Code   | model-only setup; runtime derives Kimi's process environment from `KIMI_API_KEY`        |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

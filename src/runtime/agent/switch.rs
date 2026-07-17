@@ -168,7 +168,7 @@ fn configure_switch_provider(
         }
         return Ok((
             AgentSwitchProviderStatus::NotApplicable,
-            Vec::new(),
+            default_agent_env_refs(&entry.id),
             Vec::new(),
         ));
     }
@@ -509,6 +509,32 @@ mod tests {
 
         assert_eq!(plan.target_agent_id, "cursor");
         assert_eq!(plan.config.mcp, expected_mcp);
+        assert_eq!(plan.required_env_refs, ["CURSOR_API_KEY"]);
+    }
+
+    #[test]
+    fn switch_to_kimi_requires_canonical_agent_secret() {
+        let config = valid_config();
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "kimi".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect("switch planned");
+
+        assert_eq!(plan.target_agent_id, "kimi");
+        assert_eq!(
+            plan.provider_status,
+            AgentSwitchProviderStatus::NotApplicable
+        );
+        assert_eq!(plan.required_env_refs, ["KIMI_API_KEY"]);
+        assert_eq!(plan.config.agent.env, ["KIMI_API_KEY"]);
     }
 
     #[test]

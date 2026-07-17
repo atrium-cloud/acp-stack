@@ -765,7 +765,7 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
 fn is_supported_agent_id(agent_id: &str) -> bool {
     matches!(
         agent_id,
-        "amp" | "claude-code" | "codex" | "cursor" | "goose" | "opencode" | "pi"
+        "amp" | "claude-code" | "codex" | "cursor" | "goose" | "kimi" | "opencode" | "pi"
     )
 }
 
@@ -1104,6 +1104,7 @@ mod tests {
     fn direct_agent_env_refs_are_data_driven() {
         assert_eq!(env_refs_for_agent_id("amp"), ["AMP_API_KEY"]);
         assert_eq!(env_refs_for_agent_id("cursor"), ["CURSOR_API_KEY"]);
+        assert_eq!(env_refs_for_agent_id("kimi"), ["KIMI_API_KEY"]);
         assert!(env_refs_for_agent_id("opencode").is_empty());
     }
 

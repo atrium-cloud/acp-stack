@@ -301,6 +301,26 @@ fn add_codex_placebo_target(config: &mut Config) {
     });
 }
 
+fn add_kimi_placebo_target(config: &mut Config) {
+    let mut secondary = config.agent.clone();
+    secondary.id = "kimi".to_owned();
+    secondary.name = "Kimi Code".to_owned();
+    secondary.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
+    secondary.args = vec!["acp".into()];
+    secondary.env = vec!["KIMI_API_KEY".to_owned()];
+    secondary.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    secondary.expected_sha256 = None;
+    secondary.install = Some(acp_stack::config::AgentInstallConfig {
+        install_type: "shell".into(),
+        creates: "true".into(),
+        shell: Some("true".into()),
+    });
+    config.array.targets.push(ArrayTargetConfig {
+        id: "kimi".to_owned(),
+        agent: secondary,
+    });
+}
+
 async fn http() -> reqwest::Client {
     reqwest::Client::builder().build().expect("reqwest client")
 }
@@ -2068,6 +2088,38 @@ async fn agent_switch_selects_existing_array_target_config() {
             .iter()
             .any(|target| { target["id"] == "opencode" && target["process_state"] == "stopped" })
     );
+}
+
+#[tokio::test]
+async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("KIMI_API_KEY", "kimi-secret")])
+        .expect("kimi secret");
+
+    let mut config = test_config();
+    config.array.enabled = true;
+    add_kimi_placebo_target(&mut config);
+    let harness = AgentHarness::spawn_with_config(config).await;
+
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "kimi" }))
+        .send()
+        .await
+        .expect("switch target");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["agent_id"], "kimi");
+    assert_eq!(body["data"]["provider_status"], "selected");
+    assert_eq!(body["data"]["required_env_refs"], json!(["KIMI_API_KEY"]));
 }
 
 #[tokio::test]

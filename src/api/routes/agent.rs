@@ -935,6 +935,7 @@ async fn switch_to_existing_array_target(
     let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
     let _env = open_agent_env(&candidate_config)?;
+    let required_env_refs = candidate_config.agent.env.clone();
 
     let install = install_agent_for_config(state, &candidate_config).await?;
     let provisioned =
@@ -983,7 +984,7 @@ async fn switch_to_existing_array_target(
             .provider
             .as_ref()
             .and_then(|provider| provider.api_key_ref.clone()),
-        required_env_refs: Vec::new(),
+        required_env_refs,
         secret_migrations: Vec::new(),
         install,
         restarted: was_running,

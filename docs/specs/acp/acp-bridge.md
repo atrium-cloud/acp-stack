@@ -8,6 +8,8 @@ When the agent starts, the bridge initializes ACP and records the advertised cap
 
 Initialization failure prevents the agent from becoming ready and is reported in agent status.
 
+For Kimi Code, the bridge converts the encrypted `KIMI_API_KEY` ref into Kimi's process-only model API key, selected model, and first-party coding endpoint before launching `kimi acp`. Those derived values are never persisted to canonical config.
+
 ### Client capabilities
 
 The initialize request advertises the client capabilities `acp-stack` implements. Each flag is advertised only when its agent-to-client handlers exist, so the wire contract never claims support the runtime cannot serve.
@@ -87,6 +89,7 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 | Pi Agent   | discovered     | discovered     | discovered       | discovered     |
 | Goose      | discovered     | discovered     | discovered       | discovered     |
 | Codex      | discovered     | discovered     | discovered       | discovered     |
+| Kimi Code  | discovered     | discovered     | discovered       | discovered     |
 
 "Discovered" means the runtime trusts the value advertised by the agent's `initialize` response. When an agent reports `false` (or omits the flag), the matching `POST /v1/sessions/{id}/{load,resume,fork}` route returns HTTP 501 `agent.unsupported_capability` and the operator-facing alternative is to create a fresh session. The per-agent live behavior of these capabilities is captured in `docs/agents/{agent}.md`.
 
