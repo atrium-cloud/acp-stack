@@ -7,7 +7,7 @@ use acp_stack::config::{
     load_config_from_str,
 };
 use acp_stack::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV;
-use acp_stack::secrets::SecretStore;
+use acp_stack::secrets::{ProviderCredential, ProviderCredentialSet, SecretStore};
 use acp_stack::state::{
     EVENT_SOURCE_CLI, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NPM, INSTALLER_OPERATION_INSTALL,
     InstallerRunInput, StateStore, default_state_path,
@@ -21,6 +21,7 @@ use base64::Engine;
 use http::StatusCode;
 use predicates::prelude::PredicateBooleanExt as _;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -303,6 +304,44 @@ fn seed_init_secrets(home: &std::path::Path, extra: &[(&str, &str)]) {
     store
         .set_many(extra.iter().copied())
         .expect("secrets should be stored");
+}
+
+fn seed_provider_credential(home: &std::path::Path, provider_id: &str, env_names: &[&str]) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    let values = env_names
+        .iter()
+        .map(|name| ((*name).to_owned(), format!("test-{name}")))
+        .collect::<BTreeMap<_, _>>();
+    store
+        .set_many(
+            values
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )
+        .expect("flat test secrets should be stored");
+    let mut catalog = store.provider_credentials().clone();
+    catalog.insert(
+        provider_id.to_owned(),
+        ProviderCredentialSet::aliasless(ProviderCredential::new(values, BTreeMap::new())),
+    );
+    store
+        .replace_provider_credentials(catalog, &[])
+        .expect("provider credential should be stored");
+}
+
+fn seed_flat_secrets(home: &std::path::Path, env_names: &[&str]) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    let values = env_names
+        .iter()
+        .map(|name| ((*name).to_owned(), format!("test-{name}")))
+        .collect::<Vec<_>>();
+    store
+        .set_many(
+            values
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )
+        .expect("flat test secrets should be stored");
 }
 
 fn write_fake_agent_home(home: &std::path::Path, fake_args: &[&str]) {
@@ -4103,11 +4142,13 @@ creates = "opencode"
 }
 
 #[test]
-fn agent_set_updates_config_and_generated_opencode_provider() {
+fn agent_provider_use_updates_config_and_generated_opencode_provider() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
+    seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
     acps_command()
@@ -4115,30 +4156,24 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openai",
             "--model",
             "openai/gpt-5.5",
-            "--api-key-ref",
-            "OPENAI_API_KEY",
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: opencode"))
-        .stdout(predicates::str::contains("api_key_ref: OPENAI_API_KEY"))
-        .stdout(predicates::str::contains(
-            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
-        ));
+        .stdout(predicates::str::contains("target: opencode"))
+        .stdout(predicates::str::contains("provider: openai"))
+        .stdout(predicates::str::contains("restart the supervised agent"));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
     assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"model = "openai/gpt-5.5""#));
-    assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
-    assert!(config.contains(r#""OPENCODE_API_KEY""#));
-    assert!(config.contains(r#""OPENAI_API_KEY""#));
+    assert!(!config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
 
     let opencode_path = tempdir
         .path()
@@ -4157,11 +4192,13 @@ fn agent_set_updates_config_and_generated_opencode_provider() {
 }
 
 #[test]
-fn agent_set_uses_agent_native_provider_id_for_collapsed_provider() {
+fn agent_provider_use_uses_agent_native_provider_id_for_collapsed_provider() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    seed_provider_credential(tempdir.path(), "vercel-ai-gateway", &["AI_GATEWAY_API_KEY"]);
+    seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["vercel/test-model"], &[]);
 
     acps_command()
@@ -4169,15 +4206,15 @@ fn agent_set_uses_agent_native_provider_id_for_collapsed_provider() {
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "vercel-ai-gateway",
             "--model",
             "test-model",
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("api_key_ref: AI_GATEWAY_API_KEY"));
+        .stdout(predicates::str::contains("provider: vercel-ai-gateway"));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
@@ -4265,13 +4302,14 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n\n[agent.providers]\nactive = [\"openai\", \"opencode-go\"]\n",
         VALID_CONFIG.replace(
             r#"env = ["OPENCODE_API_KEY"]"#,
             r#"env = ["OPENCODE_API_KEY", "OPENAI_API_KEY"]"#,
         )
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    seed_provider_credential(tempdir.path(), "opencode-go", &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(
         tempdir.path(),
         &["openai/gpt-5.5", "opencode-go/deepseek-v4-flash"],
@@ -4293,7 +4331,7 @@ fn subagent_set_updates_config_and_generated_opencode_small_model() {
         .success()
         .stdout(predicates::str::contains("agent: opencode"))
         .stdout(predicates::str::contains("subagent: small_model"))
-        .stdout(predicates::str::contains("api_key_ref: OPENCODE_API_KEY"));
+        .stdout(predicates::str::contains("api_key_ref:").not());
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
@@ -4976,7 +5014,7 @@ fn agent_set_custom_provider_rejects_comma_token_limits() {
 }
 
 #[test]
-fn agent_set_goose_provider_updates_generated_config() {
+fn agent_provider_use_goose_provider_updates_generated_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -4998,6 +5036,7 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
     let options_path =
         write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
 
@@ -5006,22 +5045,17 @@ creates = "opencode"
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openrouter",
             "--model",
             "deepseek/deepseek-v4-flash",
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: goose"))
-        .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
-        .stdout(predicates::str::contains("Goose config:"))
-        // Goose-specific notice: model is switchable live via ACP
-        // session/set_config_option; other settings still apply on
-        // new sessions.
+        .stdout(predicates::str::contains("provider: openrouter"))
         .stdout(predicates::str::contains(
-            "model can be switched live via ACP session/set_config_option",
+            "switched live via ACP session/set_config_option",
         ));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
@@ -5029,7 +5063,7 @@ creates = "opencode"
     assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
     assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
-    assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
+    assert!(!config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
 
     let goose_path = tempdir
         .path()
@@ -5045,12 +5079,13 @@ creates = "opencode"
 }
 
 #[test]
-fn agent_set_codex_openrouter_writes_responses_provider_config() {
+fn agent_provider_use_codex_openrouter_writes_responses_provider_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
+    seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
     let options_path =
         write_acp_config_options(tempdir.path(), &["deepseek/deepseek-v4-flash"], &[]);
 
@@ -5059,28 +5094,23 @@ fn agent_set_codex_openrouter_writes_responses_provider_config() {
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openrouter",
             "--model",
             "deepseek/deepseek-v4-flash",
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: codex"))
-        .stdout(predicates::str::contains("api_key_ref: OPENROUTER_API_KEY"))
-        .stdout(predicates::str::contains("Codex config:"))
-        .stdout(predicates::str::contains(
-            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
-        ));
+        .stdout(predicates::str::contains("provider: openrouter"))
+        .stdout(predicates::str::contains("restart the supervised agent"));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
     assert!(config.contains("[array.targets.agent.provider]"));
     assert!(config.contains(r#"id = "openrouter""#));
     assert!(config.contains(r#"model = "deepseek/deepseek-v4-flash""#));
-    assert!(config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
-    assert!(config.contains(r#"env = ["OPENROUTER_API_KEY"]"#));
+    assert!(!config.contains(r#"api_key_ref = "OPENROUTER_API_KEY""#));
 
     let codex_path = tempdir.path().join(".codex").join("config.toml");
     let codex: toml::Value =
@@ -5107,12 +5137,13 @@ fn agent_set_codex_openrouter_writes_responses_provider_config() {
 }
 
 #[test]
-fn agent_set_codex_openai_model_removes_custom_provider_with_backup() {
+fn agent_provider_use_codex_openai_model_removes_custom_provider_with_backup() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
     let codex_dir = tempdir.path().join(".codex");
     fs::create_dir_all(&codex_dir).expect("codex config dir should be created");
     fs::write(
@@ -5136,16 +5167,12 @@ wire_api = "responses"
     acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
+        .args(["agent", "provider", "use", "openai", "--model", "gpt-5.5"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: codex"))
         .stdout(predicates::str::contains("provider: openai"))
         .stdout(predicates::str::contains("model: gpt-5.5"))
-        .stdout(predicates::str::contains("api_key_ref:").not())
-        .stdout(predicates::str::contains(
-            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
-        ));
+        .stdout(predicates::str::contains("restart the supervised agent"));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
@@ -5176,19 +5203,20 @@ wire_api = "responses"
 }
 
 #[test]
-fn agent_set_codex_openai_rejects_api_key_ref() {
+fn agent_provider_use_rejects_api_key_ref_argument() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openai",
             "--model",
             "gpt-5.5",
@@ -5198,7 +5226,7 @@ fn agent_set_codex_openai_rejects_api_key_ref() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref",
+            "unexpected argument '--api-key-ref'",
         ));
 
     let config =
@@ -5207,41 +5235,44 @@ fn agent_set_codex_openai_rejects_api_key_ref() {
 }
 
 #[test]
-fn agent_set_codex_openai_requires_model() {
+fn agent_provider_use_codex_openai_allows_omitting_model() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["agent", "set", "--provider", "openai"])
+        .args(["agent", "provider", "use", "openai"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "pass --model <model-id> when setting Codex OpenAI provider",
-        ));
+        .success()
+        .stdout(predicates::str::contains("provider: openai"));
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[array.targets.agent.provider]"));
+    let parsed: toml::Value = toml::from_str(&config).expect("config should parse");
+    let provider = &primary_array_agent_value(&parsed)["provider"];
+    assert_eq!(provider["id"].as_str(), Some("openai"));
+    assert!(provider.get("model").is_none());
 }
 
 #[test]
-fn agent_set_codex_rejects_unsupported_provider() {
+fn agent_provider_use_codex_rejects_unsupported_provider() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "anthropic",
             "--model",
             "anthropic/claude-sonnet-4-5",
@@ -5365,7 +5396,7 @@ fn agent_set_opencode_rejects_anthropic_messages_custom_provider() {
 }
 
 #[test]
-fn agent_set_claude_code_native_provider_presets_write_headless_config() {
+fn agent_provider_use_claude_code_native_provider_presets_write_headless_config() {
     struct Case {
         provider: &'static str,
         model: &'static str,
@@ -5411,13 +5442,25 @@ fn agent_set_claude_code_native_provider_presets_write_headless_config() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acps-config.toml"), claude_code_config())
             .expect("config should be written");
+        if case.api_key_ref.is_some() {
+            seed_provider_credential(tempdir.path(), case.provider, case.env_refs);
+        } else if case.env_refs.is_empty() {
+            SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
+        } else {
+            let values = case
+                .env_refs
+                .iter()
+                .map(|name| (*name, "test-native-value"))
+                .collect::<Vec<_>>();
+            seed_init_secrets(tempdir.path(), &values);
+        }
 
         let output = acps_command()
             .env("HOME", tempdir.path())
             .args([
                 "agent",
-                "set",
-                "--provider",
+                "provider",
+                "use",
                 case.provider,
                 "--model",
                 case.model,
@@ -5428,7 +5471,6 @@ fn agent_set_claude_code_native_provider_presets_write_headless_config() {
             .stdout
             .clone();
         let stdout = String::from_utf8(output).expect("stdout should be utf8");
-        assert!(stdout.contains("agent: claude-code"), "{stdout}");
         assert!(
             stdout.contains(&format!("provider: {}", case.provider)),
             "{stdout}"
@@ -5445,17 +5487,20 @@ fn agent_set_claude_code_native_provider_presets_write_headless_config() {
         let provider = &agent["provider"];
         assert_eq!(provider["id"].as_str(), Some(case.provider));
         assert_eq!(provider["model"].as_str(), Some(case.model));
-        let env_refs = agent["env"]
-            .as_array()
-            .expect("agent env should be an array");
-        for expected in case.env_refs {
-            assert!(
-                env_refs
-                    .iter()
-                    .any(|value| value.as_str() == Some(*expected)),
-                "{case_provider} missing env ref {expected}",
-                case_provider = case.provider,
-            );
+        assert!(provider.get("api_key_ref").is_none());
+        if case.api_key_ref.is_none() {
+            let env_refs = agent["env"]
+                .as_array()
+                .expect("agent env should be an array");
+            for expected in case.env_refs {
+                assert!(
+                    env_refs
+                        .iter()
+                        .any(|value| value.as_str() == Some(*expected)),
+                    "{case_provider} missing env ref {expected}",
+                    case_provider = case.provider,
+                );
+            }
         }
 
         let settings = claude_settings(tempdir.path());
@@ -5468,15 +5513,10 @@ fn agent_set_claude_code_native_provider_presets_write_headless_config() {
             assert_eq!(settings["env"][native_env_key].as_str(), Some("1"));
         }
         if let Some(api_key_ref) = case.api_key_ref {
-            assert_eq!(provider["api_key_ref"].as_str(), Some(api_key_ref));
             let helper = format!("printenv {api_key_ref}");
             assert_eq!(settings["apiKeyHelper"].as_str(), Some(helper.as_str()));
-            assert!(
-                stdout.contains(&format!("api_key_ref: {api_key_ref}")),
-                "{stdout}"
-            );
+            assert!(!stdout.contains("api_key_ref:"), "{stdout}");
         } else {
-            assert!(provider.get("api_key_ref").is_none());
             assert!(settings.get("apiKeyHelper").is_none());
             assert!(!stdout.contains("api_key_ref:"), "{stdout}");
         }
@@ -5484,7 +5524,7 @@ fn agent_set_claude_code_native_provider_presets_write_headless_config() {
 }
 
 #[test]
-fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
+fn agent_provider_use_claude_code_third_party_presets_write_profiled_endpoints() {
     struct Case {
         provider: &'static str,
         base_url: &'static str,
@@ -5560,13 +5600,14 @@ fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acps-config.toml"), claude_code_config())
             .expect("config should be written");
+        seed_provider_credential(tempdir.path(), case.provider, &[case.api_key_ref]);
 
         acps_command()
             .env("HOME", tempdir.path())
             .args([
                 "agent",
-                "set",
-                "--provider",
+                "provider",
+                "use",
                 case.provider,
                 "--model",
                 "provider-profile-model",
@@ -5577,9 +5618,10 @@ fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
         let config_text = fs::read_to_string(config_dir.join("acps-config.toml"))
             .expect("config should be readable");
         let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
-        assert_eq!(
-            primary_array_agent_value(&config)["provider"]["api_key_ref"].as_str(),
-            Some(case.api_key_ref)
+        assert!(
+            primary_array_agent_value(&config)["provider"]
+                .get("api_key_ref")
+                .is_none()
         );
 
         let settings = claude_settings(tempdir.path());
@@ -5613,7 +5655,7 @@ fn agent_set_claude_code_third_party_presets_write_profiled_endpoints() {
 }
 
 #[test]
-fn agent_set_claude_code_third_party_provider_without_model_uses_profile_default() {
+fn agent_provider_use_claude_code_third_party_provider_without_model_uses_profile_default() {
     struct Case {
         provider: &'static str,
         base_url: &'static str,
@@ -5754,10 +5796,11 @@ fn agent_set_claude_code_third_party_provider_without_model_uses_profile_default
         fs::create_dir_all(&config_dir).expect("config dir should be created");
         fs::write(config_dir.join("acps-config.toml"), claude_code_config())
             .expect("config should be written");
+        seed_provider_credential(tempdir.path(), case.provider, &[case.api_key_ref]);
 
         let output = acps_command()
             .env("HOME", tempdir.path())
-            .args(["agent", "set", "--provider", case.provider])
+            .args(["agent", "provider", "use", case.provider])
             .assert()
             .success()
             .get_output()
@@ -5772,7 +5815,7 @@ fn agent_set_claude_code_third_party_provider_without_model_uses_profile_default
         let config: toml::Value = toml::from_str(&config_text).expect("config should parse");
         let provider = &primary_array_agent_value(&config)["provider"];
         assert_eq!(provider["id"].as_str(), Some(case.provider));
-        assert_eq!(provider["api_key_ref"].as_str(), Some(case.api_key_ref));
+        assert!(provider.get("api_key_ref").is_none());
         assert!(provider.get("model").is_none());
 
         let settings = claude_settings(tempdir.path());
@@ -5985,7 +6028,7 @@ fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
 }
 
 #[test]
-fn agent_set_cursor_rejects_provider_argument() {
+fn agent_provider_use_cursor_rejects_provider_selection() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -6007,14 +6050,15 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acps-config.toml"), &config).expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["agent", "set", "--provider", "openai", "--model", "gpt-5.5"])
+        .args(["agent", "provider", "use", "openai", "--model", "gpt-5.5"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "Cursor CLI does not support provider configuration",
+            "Cursor CLI does not support mapped provider selection",
         ));
 
     let after =
@@ -6081,7 +6125,7 @@ fn agent_set_opencode_rejects_model_without_provider() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "pass --provider <provider-id> when setting a model for OpenCode",
+            "select a mapped provider with `acps agent provider use` before setting a model for OpenCode",
         ));
 }
 
@@ -6122,18 +6166,19 @@ api_key_ref = "OPENAI_API_KEY""#,
 }
 
 #[test]
-fn agent_set_rejects_provider_not_supported_by_agent() {
+fn agent_provider_use_rejects_provider_not_supported_by_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "azure-openai-responses",
             "--model",
             "azure-openai-responses/test-model",
@@ -6150,28 +6195,27 @@ fn agent_set_rejects_provider_not_supported_by_agent() {
 }
 
 #[test]
-fn agent_set_rejects_providers_without_api_key_mapping() {
+fn agent_provider_use_rejects_providers_without_api_key_mapping() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "google-vertex",
             "--model",
             "google-vertex/test-model",
-            "--api-key-ref",
-            "GOOGLE_APPLICATION_CREDENTIALS",
         ])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "provider `google-vertex` has no API-key env mapping for agent `opencode`",
+            "provider `google-vertex` does not use an acps-managed API key",
         ));
 
     let after =
@@ -6180,7 +6224,7 @@ fn agent_set_rejects_providers_without_api_key_mapping() {
 }
 
 #[test]
-fn agent_set_adds_cloudflare_companion_refs() {
+fn agent_provider_use_resolves_cloudflare_companion_fields() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -6199,6 +6243,16 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    seed_provider_credential(
+        tempdir.path(),
+        "cloudflare-ai-gateway",
+        &[
+            "CLOUDFLARE_API_KEY",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_GATEWAY_ID",
+        ],
+    );
+    seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(
         tempdir.path(),
         &["workers-ai/@cf/moonshotai/kimi-k2.6"],
@@ -6210,33 +6264,39 @@ creates = "opencode"
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "cloudflare-ai-gateway",
             "--model",
             "workers-ai/@cf/moonshotai/kimi-k2.6",
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "required_env_refs: CLOUDFLARE_API_KEY, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID",
-        ));
+        .stdout(predicates::str::contains("provider: cloudflare-ai-gateway"));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
     assert!(config.contains(r#"id = "cloudflare-ai-gateway""#));
     assert!(config.contains(r#"model = "workers-ai/@cf/moonshotai/kimi-k2.6""#));
-    assert!(config.contains(r#""CLOUDFLARE_API_KEY""#));
-    assert!(config.contains(r#""CLOUDFLARE_ACCOUNT_ID""#));
-    assert!(config.contains(r#""CLOUDFLARE_GATEWAY_ID""#));
+    assert!(!config.contains(r#"api_key_ref = "CLOUDFLARE_API_KEY""#));
 }
 
 #[test]
-fn agent_set_opencode_cloudflare_gateway_uses_token_ref() {
+fn agent_provider_use_opencode_cloudflare_gateway_uses_canonical_token_env() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    seed_provider_credential(
+        tempdir.path(),
+        "cloudflare-ai-gateway",
+        &[
+            "CLOUDFLARE_API_KEY",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_GATEWAY_ID",
+        ],
+    );
+    seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(
         tempdir.path(),
         &["cloudflare-ai-gateway/workers-ai/@cf/moonshotai/kimi-k2.6"],
@@ -6248,27 +6308,19 @@ fn agent_set_opencode_cloudflare_gateway_uses_token_ref() {
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "cloudflare-ai-gateway",
             "--model",
             "cloudflare-ai-gateway/workers-ai/@cf/moonshotai/kimi-k2.6",
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "api_key_ref: CLOUDFLARE_API_TOKEN",
-        ))
-        .stdout(predicates::str::contains(
-            "required_env_refs: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID",
-        ));
+        .stdout(predicates::str::contains("provider: cloudflare-ai-gateway"));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml"))
         .expect("updated config should be readable");
-    assert!(config.contains(r#"api_key_ref = "CLOUDFLARE_API_TOKEN""#));
-    assert!(config.contains(r#""CLOUDFLARE_API_TOKEN""#));
-    assert!(config.contains(r#""CLOUDFLARE_ACCOUNT_ID""#));
-    assert!(config.contains(r#""CLOUDFLARE_GATEWAY_ID""#));
+    assert!(!config.contains(r#"api_key_ref = "CLOUDFLARE_API_TOKEN""#));
     assert!(!config.contains(r#""CLOUDFLARE_API_KEY""#));
 
     let opencode_path = tempdir
@@ -6291,11 +6343,17 @@ fn agent_set_opencode_cloudflare_gateway_uses_token_ref() {
 }
 
 #[test]
-fn agent_set_without_model_lists_choices_without_mutating_config() {
+fn agent_provider_use_without_model_selects_provider_without_model() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    seed_provider_credential(
+        tempdir.path(),
+        "cloudflare-workers-ai",
+        &["CLOUDFLARE_API_KEY", "CLOUDFLARE_ACCOUNT_ID"],
+    );
+    seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(
         tempdir.path(),
         &["cloudflare-workers-ai/@cf/moonshotai/kimi-k2.6"],
@@ -6305,25 +6363,31 @@ fn agent_set_without_model_lists_choices_without_mutating_config() {
     acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["agent", "set", "--provider", "cloudflare-workers-ai"])
+        .args(["agent", "provider", "use", "cloudflare-workers-ai"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("available model values:"))
-        .stdout(predicates::str::contains(
-            "cloudflare-workers-ai/@cf/moonshotai/kimi-k2.6",
-        ));
+        .stdout(predicates::str::contains("provider: cloudflare-workers-ai"));
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!config.contains("[array.targets.agent.provider]"));
+    assert!(config.contains("[array.targets.agent.provider]"));
+    assert!(config.contains(r#"id = "cloudflare-workers-ai""#));
+    let parsed: toml::Value = toml::from_str(&config).expect("config should parse");
+    assert!(
+        primary_array_agent_value(&parsed)["provider"]
+            .get("model")
+            .is_none()
+    );
 }
 
 #[test]
-fn agent_set_does_not_partially_write_main_config_when_provisioning_fails() {
+fn agent_provider_use_does_not_partially_write_main_config_when_provisioning_fails() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
+    seed_flat_secrets(tempdir.path(), &["OPENCODE_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
     let opencode_dir = tempdir.path().join(".config").join("opencode");
     fs::create_dir_all(&opencode_dir).expect("opencode config dir should be created");
@@ -6335,8 +6399,8 @@ fn agent_set_does_not_partially_write_main_config_when_provisioning_fails() {
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openai",
             "--model",
             "openai/gpt-5.5",
@@ -6354,11 +6418,12 @@ fn agent_set_does_not_partially_write_main_config_when_provisioning_fails() {
 }
 
 #[test]
-fn agent_set_validates_model_against_acp_config_options() {
+fn agent_provider_use_validates_model_against_acp_config_options() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
     let options_path = write_acp_config_options(tempdir.path(), &["openai/gpt-5.5"], &[]);
 
     acps_command()
@@ -6366,8 +6431,8 @@ fn agent_set_validates_model_against_acp_config_options() {
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openai",
             "--model",
             "openai/not-advertised",
@@ -6381,6 +6446,13 @@ fn agent_set_validates_model_against_acp_config_options() {
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     assert!(!config.contains("[array.targets.agent.provider]"));
+    assert!(
+        !tempdir
+            .path()
+            .join(".config/opencode/opencode.json")
+            .exists(),
+        "failed discovery must restore the prior OpenCode config state"
+    );
 }
 
 #[test]
@@ -6553,7 +6625,7 @@ creates = "opencode"
 }
 
 #[test]
-fn agent_set_amp_rejects_provider_model_settings() {
+fn agent_provider_use_amp_rejects_provider_model_settings() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -6573,13 +6645,14 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
 
     acps_command()
         .env("HOME", tempdir.path())
         .args([
             "agent",
-            "set",
-            "--provider",
+            "provider",
+            "use",
             "openai",
             "--model",
             "openai/gpt-5.5",
@@ -6587,7 +6660,7 @@ creates = "opencode"
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "Amp Code does not support provider configuration",
+            "Amp Code does not support mapped provider selection",
         ));
 }
 
@@ -12249,4 +12322,238 @@ fn init_resume_without_prior_run_errors_clearly() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("no resumable init run"));
+}
+
+fn write_opencode_config(config_dir: &std::path::Path) {
+    fs::create_dir_all(config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+}
+
+fn seed_named_secret(home: &std::path::Path, name: &str, value: &str) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    store.set(name, value).expect("secret should be stored");
+}
+
+#[test]
+fn agent_provider_credential_add_and_list_never_expose_values() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    write_opencode_config(&config_dir);
+    seed_named_secret(tempdir.path(), "OPENCODE_API_KEY", "opencode-agent-key");
+    seed_named_secret(
+        tempdir.path(),
+        "OPENAI_SOURCE",
+        "sk-super-secret-openai-value",
+    );
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "add",
+            "openai",
+            "--from-secret",
+            "OPENAI_API_KEY=OPENAI_SOURCE",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("provider credential: added"));
+
+    // Human list surfaces env names but never the credential value.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "credential", "list", "openai"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OPENAI_API_KEY"))
+        .stdout(predicates::str::contains("sk-super-secret-openai-value").not());
+
+    // JSON list exposes source-ref names but neither values nor revisions.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "list",
+            "openai",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("OPENAI_SOURCE"))
+        .stdout(predicates::str::contains("sk-super-secret-openai-value").not())
+        .stdout(predicates::str::contains("revision").not());
+}
+
+#[test]
+fn agent_provider_credential_select_blocks_deleting_selected_alias() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    write_opencode_config(&config_dir);
+    seed_named_secret(tempdir.path(), "OPENCODE_API_KEY", "opencode-agent-key");
+    seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
+    seed_named_secret(tempdir.path(), "OR_BACKUP_SOURCE", "or-backup-secret");
+
+    // Select the aliasless provider as the primary lane, then promote it
+    // (auto-selecting `primary` for the target that uses it).
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "use", "openrouter"])
+        .assert()
+        .success();
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "add",
+            "openrouter",
+            "--existing-alias",
+            "primary",
+            "--alias",
+            "backup",
+            "--from-secret",
+            "OPENROUTER_API_KEY=OR_BACKUP_SOURCE",
+        ])
+        .assert()
+        .success();
+
+    // Switch the target's selection to `backup` via the select command.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "select",
+            "openrouter",
+            "backup",
+        ])
+        .assert()
+        .success();
+
+    // The selected alias cannot be deleted while a target still points at it.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "delete",
+            "openrouter",
+            "backup",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("selected by target"));
+}
+
+#[test]
+fn agent_provider_set_active_prunes_selected_alias_for_dropped_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    write_opencode_config(&config_dir);
+    seed_named_secret(tempdir.path(), "OPENCODE_API_KEY", "opencode-agent-key");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
+    seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
+    seed_named_secret(tempdir.path(), "OR_BACKUP_SOURCE", "or-backup-secret");
+
+    // Establish a primary provider, activate both, then promote openrouter so
+    // the target holds a selected alias for it.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "use", "openai"])
+        .assert()
+        .success();
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "set-active", "openai,openrouter"])
+        .assert()
+        .success();
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "add",
+            "openrouter",
+            "--existing-alias",
+            "primary",
+            "--alias",
+            "backup",
+            "--from-secret",
+            "OPENROUTER_API_KEY=OR_BACKUP_SOURCE",
+        ])
+        .assert()
+        .success();
+
+    // Drop openrouter from the active set; its stale alias selection must be pruned.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "set-active", "openai"])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(config_dir.join("acps-config.toml"))
+        .expect("updated config should be readable");
+    assert!(!config.contains("openrouter"));
+
+    // With the selection pruned, the previously blocked alias can now be deleted.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "delete",
+            "openrouter",
+            "primary",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn agent_provider_list_active_reports_configured_state_offline() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    write_opencode_config(&config_dir);
+    seed_named_secret(tempdir.path(), "OPENCODE_API_KEY", "opencode-agent-key");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "use", "openai"])
+        .assert()
+        .success();
+
+    // No daemon is running, so live state is unknown but configured state resolves.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "list-active"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("configured: provider=openai"))
+        .stdout(predicates::str::contains("loaded: unknown"));
+}
+
+#[test]
+fn agent_set_provider_for_mapped_provider_redirects_to_provider_use() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    write_opencode_config(&config_dir);
+    seed_named_secret(tempdir.path(), "OPENCODE_API_KEY", "opencode-agent-key");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--provider", "openai"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("acps agent provider use"));
 }

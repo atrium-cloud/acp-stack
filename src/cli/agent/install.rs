@@ -7,6 +7,9 @@ use crate::error::{Result, StackError};
 use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_file,
 };
+use crate::runtime::agent::provider_keys::{
+    resolve_agent_environment, resolve_agent_environment_without_secrets,
+};
 use crate::runtime::install::agent_installer::{install_resolved, run_installer};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
@@ -203,14 +206,9 @@ pub(super) fn resolve_agent_env_for_cli(
     home: &Path,
     config: &Config,
 ) -> Result<HashMap<String, String>> {
-    if config.agent.env.is_empty() {
-        return Ok(HashMap::new());
+    if let Some(environment) = resolve_agent_environment_without_secrets(config) {
+        return Ok(environment.env);
     }
     let store = SecretStore::open(home)?;
-    let mut env = HashMap::with_capacity(config.agent.env.len());
-    for name in &config.agent.env {
-        let value = store.get(name)?;
-        env.insert(name.clone(), value.to_owned());
-    }
-    Ok(env)
+    Ok(resolve_agent_environment(config, &store)?.env)
 }

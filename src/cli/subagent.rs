@@ -15,6 +15,7 @@ use crate::runtime::agent::provider_keys::{
     provider_id_supports_agent, required_env_refs_for_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, SubagentFreeModel};
+use crate::secrets::SecretStore;
 
 use super::agent::{
     default_api_key_ref_for_agent_provider, default_custom_provider_api,
@@ -241,13 +242,32 @@ fn run_subagent_free() -> Result<()> {
         .as_ref()
         .filter(|main| same_provider_family(&config.agent.id, &main.id, &provider_id))
         .and_then(|main| main.api_key_ref.clone());
-    let api_key_ref = inherited_main_api_key_ref
-        .or_else(|| default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id))
-        .ok_or_else(|| StackError::AgentConfigProvision {
-            path: config_path.clone(),
-            reason: format!("provider `{provider_id}` has no default API-key env var"),
-        })?;
-    let required_env_refs = required_env_refs_for_provider_id(&provider_id, &api_key_ref);
+    let configured_legacy_api_key_ref = inherited_main_api_key_ref.clone().or_else(|| {
+        default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id)
+            .filter(|name| config.agent.env.iter().any(|configured| configured == name))
+    });
+    require_explicit_active_subagent_provider(&config, &provider_id)?;
+    let structured = if configured_legacy_api_key_ref.is_some() {
+        false
+    } else {
+        structured_provider_credential_selected(&home, &config, &provider_id)?
+    };
+    let api_key_ref = if structured {
+        None
+    } else {
+        Some(
+            configured_legacy_api_key_ref
+                .or_else(|| default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id))
+                .ok_or_else(|| StackError::AgentConfigProvision {
+                    path: config_path.clone(),
+                    reason: format!("provider `{provider_id}` has no default API-key env var"),
+                })?,
+        )
+    };
+    let required_env_refs = api_key_ref
+        .as_deref()
+        .map(|api_key_ref| required_env_refs_for_provider_id(&provider_id, api_key_ref))
+        .unwrap_or_default();
     for env_ref in &required_env_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
@@ -258,7 +278,7 @@ fn run_subagent_free() -> Result<()> {
         provider: Some(AgentProviderConfig {
             id: provider_id.clone(),
             model: Some(model.clone()),
-            api_key_ref: Some(api_key_ref),
+            api_key_ref,
             custom: None,
         }),
     });
@@ -329,11 +349,10 @@ fn run_subagent_set(args: SubagentSetArgs) -> Result<()> {
     if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
         println!("api_key_ref: {api_key_ref}");
     }
-    if provider.custom.is_none() {
-        let required_env_refs = required_env_refs_for_provider_id(
-            &provider.id,
-            provider.api_key_ref.as_deref().unwrap_or(""),
-        );
+    if provider.custom.is_none()
+        && let Some(api_key_ref) = provider.api_key_ref.as_deref()
+    {
+        let required_env_refs = required_env_refs_for_provider_id(&provider.id, api_key_ref);
         if required_env_refs.len() > 1 {
             println!("required_env_refs: {}", required_env_refs.join(", "));
         }
@@ -408,18 +427,39 @@ fn configure_mapped_subagent(
         .as_ref()
         .filter(|main| main.id == provider)
         .and_then(|main| main.api_key_ref.clone());
-    let default_api_key_ref = default_api_key_ref_for_agent_provider(&config.agent.id, &provider);
-    let api_key_ref = args
-        .api_key_ref
-        .or(main_inherited_api_key_ref)
-        .or(default_api_key_ref)
-        .ok_or_else(|| StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
+    require_explicit_active_subagent_provider(config, &provider)?;
+    let structured = if main_inherited_api_key_ref.is_some() {
+        false
+    } else {
+        structured_provider_credential_selected(home, config, &provider)?
+    };
+    if structured && args.api_key_ref.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "api-key-ref",
             reason: format!(
-                "provider `{provider}` has no default API-key env var; pass --api-key-ref"
+                "provider `{provider}` uses the structured credential catalog; select an alias instead"
             ),
-        })?;
-    let required_env_refs = required_env_refs_for_provider_id(&provider, &api_key_ref);
+        });
+    }
+    let api_key_ref = if structured {
+        None
+    } else {
+        Some(
+            args.api_key_ref
+                .or(main_inherited_api_key_ref)
+                .or_else(|| default_api_key_ref_for_agent_provider(&config.agent.id, &provider))
+                .ok_or_else(|| StackError::AgentConfigProvision {
+                    path: config_path.to_path_buf(),
+                    reason: format!(
+                        "provider `{provider}` has no default API-key env var; pass --api-key-ref"
+                    ),
+                })?,
+        )
+    };
+    let required_env_refs = api_key_ref
+        .as_deref()
+        .map(|api_key_ref| required_env_refs_for_provider_id(&provider, api_key_ref))
+        .unwrap_or_default();
     for env_ref in &required_env_refs {
         if !config.agent.env.iter().any(|name| name == env_ref) {
             config.agent.env.push(env_ref.clone());
@@ -435,17 +475,82 @@ fn configure_mapped_subagent(
             ),
         });
     };
-    let model = resolve_agent_model_value(home, config, Some(agent_provider_id), &args.model)?;
+    // Register the subagent provider before model discovery. In the structured
+    // credential path the key is not pushed onto `[agent].env`; it is resolved
+    // only for providers returned by `effective_active_provider_ids`, which
+    // appends the subagent provider solely when `agent.subagent` is already
+    // set. Without this pre-step, discovery for a subagent provider that
+    // differs from the main provider and has no `[agent.providers]` active
+    // block would probe the model list unauthenticated. Model is filled in
+    // after discovery resolves it.
     config.agent.subagent = Some(AgentSubagentConfig {
         disabled: false,
         provider: Some(AgentProviderConfig {
             id: provider,
-            model: Some(model),
-            api_key_ref: Some(api_key_ref),
+            model: None,
+            api_key_ref,
             custom: None,
         }),
     });
+    let model = resolve_agent_model_value(home, config, Some(agent_provider_id), &args.model)?;
+    let subagent_provider = config
+        .agent
+        .subagent
+        .as_mut()
+        .and_then(|subagent| subagent.provider.as_mut())
+        .ok_or(StackError::MissingField {
+            field: "agent.subagent.provider",
+        })?;
+    subagent_provider.model = Some(model);
     Ok(())
+}
+
+fn require_explicit_active_subagent_provider(config: &Config, provider_id: &str) -> Result<()> {
+    if let Some(providers) = config.agent.providers.as_ref()
+        && !providers.active.iter().any(|active| active == provider_id)
+    {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "provider `{provider_id}` must be included with `acps agent provider set-active` before selecting it for the subagent"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn structured_provider_credential_selected(
+    home: &std::path::Path,
+    config: &Config,
+    provider_id: &str,
+) -> Result<bool> {
+    if config
+        .agent
+        .provider
+        .as_ref()
+        .is_some_and(|provider| provider.id == provider_id && provider.api_key_ref.is_some())
+    {
+        return Ok(false);
+    }
+    let secrets = SecretStore::open(home)?;
+    let Some(credentials) = secrets.provider_credential_set(provider_id) else {
+        return Ok(false);
+    };
+    let selected_alias = config
+        .agent
+        .providers
+        .as_ref()
+        .and_then(|providers| providers.selected_aliases.get(provider_id))
+        .map(String::as_str);
+    if credentials.selected(selected_alias).is_none() {
+        return Err(StackError::InvalidParam {
+            field: "alias",
+            reason: format!(
+                "provider `{provider_id}` requires a selected credential alias for this target"
+            ),
+        });
+    }
+    Ok(true)
 }
 
 fn configure_custom_subagent(

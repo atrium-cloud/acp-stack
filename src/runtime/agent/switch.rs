@@ -1,4 +1,6 @@
-use crate::config::{AgentAdapterConfig, AgentProviderConfig, Config};
+use std::collections::BTreeMap;
+
+use crate::config::{AgentAdapterConfig, AgentProviderConfig, AgentProvidersConfig, Config};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
     api_key_ref_can_migrate_for_provider, env_refs_for_agent_id, env_var_for_agent_provider_id,
@@ -128,6 +130,7 @@ fn apply_switch_registry_entry(config: &mut Config, entry: &RegistryEntry) {
     config.agent.mode = None;
     config.agent.model = None;
     config.agent.provider = None;
+    config.agent.providers = None;
     config.agent.subagent = None;
     config.agent.expected_sha256 = None;
     config.agent.restart = "on-crash".to_owned();
@@ -237,6 +240,46 @@ fn configure_switch_provider(
             reason: "custom provider migration is not supported; pass --provider and --api-key-ref"
                 .to_owned(),
         });
+    }
+    let uses_structured_credential = request.api_key_ref.is_none()
+        && current_provider.api_key_ref.is_none()
+        && !provider_uses_agent_native_auth(&current.agent.id, &current_provider.id)
+        && !provider_uses_agent_native_auth(&entry.id, &current_provider.id);
+    if uses_structured_credential {
+        if !provider_id_supports_agent(&current_provider.id, &entry.id) {
+            return Err(StackError::InvalidParam {
+                field: "provider",
+                reason: format!(
+                    "provider `{}` is not supported for agent `{}`",
+                    current_provider.id, entry.id
+                ),
+            });
+        }
+        config.agent.provider = Some(AgentProviderConfig {
+            id: current_provider.id.clone(),
+            model: None,
+            api_key_ref: None,
+            custom: None,
+        });
+        if let Some(alias) = current
+            .agent
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.selected_aliases.get(&current_provider.id))
+        {
+            config.agent.providers = Some(AgentProvidersConfig {
+                active: vec![current_provider.id.clone()],
+                selected_aliases: BTreeMap::from([(current_provider.id.clone(), alias.clone())]),
+            });
+        }
+        return Ok((
+            AgentSwitchProviderStatus::Reused {
+                provider_id: current_provider.id.clone(),
+                api_key_ref: None,
+            },
+            Vec::new(),
+            Vec::new(),
+        ));
     }
     let api_key_ref_was_explicit = request.api_key_ref.is_some();
     let explicit_api_key_ref = request.api_key_ref;
@@ -487,6 +530,59 @@ mod tests {
                 .and_then(|provider| provider.model.as_ref()),
             None
         );
+    }
+
+    #[test]
+    fn structured_provider_switch_preserves_default_alias_without_flat_ref() {
+        let mut config = valid_config();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "opencode-go".to_owned(),
+            model: Some("opencode-go/deepseek-v4-flash".to_owned()),
+            api_key_ref: None,
+            custom: None,
+        });
+        config.agent.providers = Some(AgentProvidersConfig {
+            active: vec!["opencode-go".to_owned(), "openrouter".to_owned()],
+            selected_aliases: BTreeMap::from([("opencode-go".to_owned(), "go_2".to_owned())]),
+        });
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "pi".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect("switch planned");
+
+        assert_eq!(
+            plan.provider_status,
+            AgentSwitchProviderStatus::Reused {
+                provider_id: "opencode-go".to_owned(),
+                api_key_ref: None,
+            }
+        );
+        assert_eq!(
+            plan.config
+                .agent
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.selected_aliases.get("opencode-go"))
+                .map(String::as_str),
+            Some("go_2")
+        );
+        assert_eq!(
+            plan.config
+                .agent
+                .providers
+                .as_ref()
+                .map(|providers| providers.active.clone()),
+            Some(vec!["opencode-go".to_owned()])
+        );
+        assert!(plan.required_env_refs.is_empty());
     }
 
     #[test]

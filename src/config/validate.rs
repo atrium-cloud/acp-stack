@@ -27,7 +27,7 @@ use crate::error::{Result, StackError};
 
 use self::agent::{
     validate_agent_auto_update, validate_agent_install, validate_agent_provider,
-    validate_agent_restart, validate_agent_subagent,
+    validate_agent_providers, validate_agent_restart, validate_agent_subagent,
 };
 use self::commands::validate_commands;
 use self::deps::validate_dependencies;
@@ -294,6 +294,14 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
     }
     if let Some(provider) = &agent.provider {
         validate_agent_provider(&agent.id, provider)?;
+    }
+    if let Some(providers) = &agent.providers {
+        validate_agent_providers(
+            &agent.id,
+            agent.provider.as_ref(),
+            agent.subagent.as_ref(),
+            providers,
+        )?;
     }
     if agent.model.is_some()
         && agent

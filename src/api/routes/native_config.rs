@@ -5,7 +5,8 @@ use axum::extract::{Path, State};
 use serde::Deserialize;
 
 use super::agent::{
-    cancel_pending_acp_permissions_for_target, ensure_array_process_start_allowed, open_agent_env,
+    cancel_pending_acp_permissions_for_target, ensure_array_process_start_allowed,
+    open_agent_environment,
 };
 use crate::api::core::AppState;
 use crate::config::Config;
@@ -564,7 +565,7 @@ async fn start_agent_for_config(state: &AppState, config: &Config) -> Result<()>
     let target_id = config.array.primary_target.clone();
     ensure_array_process_start_allowed(config, &target_id)?;
     let target = state.agent_target(&target_id)?;
-    let env = open_agent_env(config)?;
+    let environment = open_agent_environment(config)?;
     *target.live_agent_config.lock().await = config.agent.clone();
     target
         .supervisor
@@ -572,7 +573,8 @@ async fn start_agent_for_config(state: &AppState, config: &Config) -> Result<()>
             target_id: &target_id,
             agent: &config.agent,
             workspace_root: &config.workspace.root,
-            env,
+            env: environment.env,
+            providers: environment.providers,
             state: &state.state,
             session_changes: &state.session_changes,
             event_hub: state.event_hub.clone(),

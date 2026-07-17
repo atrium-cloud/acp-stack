@@ -3,7 +3,7 @@
 
 use crate::config::schema::{
     AgentAutoUpdateConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
-    AgentSubagentConfig, CustomProviderApi,
+    AgentProvidersConfig, AgentSubagentConfig, CustomProviderApi,
 };
 use crate::config::validate::primitives::{
     require_present, validate_duration_field, validate_non_empty_trimmed, validate_nonempty,
@@ -11,6 +11,10 @@ use crate::config::validate::primitives::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::claude_code_provider_profiles::CLAUDE_CODE_AGENT_ID;
+use crate::runtime::agent::provider_keys::{provider_id_is_known, provider_id_supports_agent};
+use crate::runtime::install::agent_registry::RegistryCatalog;
+
+use std::collections::HashSet;
 
 pub(crate) fn validate_agent_provider(
     agent_id: &str,
@@ -31,6 +35,104 @@ pub(crate) fn validate_agent_subagent(
     }
     if let Some(provider) = subagent.provider.as_ref() {
         validate_agent_provider_at(agent_id, provider, AGENT_SUBAGENT_PROVIDER_FIELDS)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agent_providers(
+    agent_id: &str,
+    default_provider: Option<&AgentProviderConfig>,
+    subagent: Option<&AgentSubagentConfig>,
+    providers: &AgentProvidersConfig,
+) -> Result<()> {
+    if providers.active.is_empty() {
+        return Err(StackError::InvalidParam {
+            field: "agent.providers.active",
+            reason: "must contain at least one mapped provider".to_owned(),
+        });
+    }
+    let mut active = HashSet::new();
+    for provider_id in &providers.active {
+        validate_mapped_provider_id(agent_id, provider_id, "agent.providers.active")?;
+        if !active.insert(provider_id.as_str()) {
+            return Err(StackError::InvalidParam {
+                field: "agent.providers.active",
+                reason: format!("duplicate provider `{provider_id}`"),
+            });
+        }
+    }
+
+    let default_provider = default_provider.ok_or(StackError::MissingField {
+        field: "agent.provider",
+    })?;
+    if default_provider.custom.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "agent.providers.active",
+            reason: "custom providers do not participate in active provider sets".to_owned(),
+        });
+    }
+    if !active.contains(default_provider.id.as_str()) {
+        return Err(StackError::InvalidParam {
+            field: "agent.providers.active",
+            reason: format!("must include default provider `{}`", default_provider.id),
+        });
+    }
+    if let Some(subagent_provider) = subagent
+        .filter(|subagent| !subagent.disabled)
+        .and_then(|subagent| subagent.provider.as_ref())
+    {
+        if subagent_provider.custom.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "agent.providers.active",
+                reason: "custom subagent providers do not participate in active provider sets"
+                    .to_owned(),
+            });
+        }
+        if !active.contains(subagent_provider.id.as_str()) {
+            return Err(StackError::InvalidParam {
+                field: "agent.providers.active",
+                reason: format!(
+                    "must include configured subagent provider `{}`",
+                    subagent_provider.id
+                ),
+            });
+        }
+    }
+
+    if providers.active.len() > 1 {
+        let registry = RegistryCatalog::load_embedded()?;
+        let entry = registry.lookup_required(agent_id)?;
+        if !entry.multiple_active_providers {
+            return Err(StackError::InvalidParam {
+                field: "agent.providers.active",
+                reason: format!("agent `{agent_id}` does not support multiple active providers"),
+            });
+        }
+    }
+
+    for (provider_id, alias) in &providers.selected_aliases {
+        validate_mapped_provider_id(agent_id, provider_id, "agent.providers.selected_aliases")?;
+        validate_secret_ref_name_value(alias)?;
+    }
+    Ok(())
+}
+
+fn validate_mapped_provider_id(
+    agent_id: &str,
+    provider_id: &str,
+    field: &'static str,
+) -> Result<()> {
+    if !provider_id_is_known(provider_id) {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!("provider `{provider_id}` is not listed in provider/env mapping"),
+        });
+    }
+    if !provider_id_supports_agent(provider_id, agent_id) {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!("provider `{provider_id}` is not supported for agent `{agent_id}`"),
+        });
     }
     Ok(())
 }
@@ -190,5 +292,144 @@ pub(crate) fn validate_agent_install(install: &AgentInstallConfig) -> Result<()>
             Ok(())
         }
         _ => Err(StackError::InvalidAgentInstallType),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{AgentCustomProviderConfig, AgentSubagentConfig};
+    use std::collections::BTreeMap;
+
+    fn mapped_provider(provider_id: &str) -> AgentProviderConfig {
+        AgentProviderConfig {
+            id: provider_id.to_owned(),
+            model: None,
+            api_key_ref: None,
+            custom: None,
+        }
+    }
+
+    #[test]
+    fn multiple_active_providers_are_limited_to_capable_harnesses() {
+        let providers = AgentProvidersConfig {
+            active: vec!["anthropic".to_owned(), "openrouter".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        };
+
+        validate_agent_providers("pi", Some(&mapped_provider("anthropic")), None, &providers)
+            .expect("Pi supports multiple providers");
+        let error = validate_agent_providers(
+            "goose",
+            Some(&mapped_provider("anthropic")),
+            None,
+            &providers,
+        )
+        .expect_err("Goose rejects multiple providers");
+        assert!(error.to_string().contains("does not support multiple"));
+    }
+
+    #[test]
+    fn active_providers_require_default_and_enabled_subagent() {
+        let default = mapped_provider("opencode-go");
+        let subagent = AgentSubagentConfig {
+            disabled: false,
+            provider: Some(mapped_provider("openrouter")),
+        };
+        let missing_default = AgentProvidersConfig {
+            active: vec!["openrouter".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        };
+        let error = validate_agent_providers(
+            "opencode",
+            Some(&default),
+            Some(&subagent),
+            &missing_default,
+        )
+        .expect_err("default required");
+        assert!(error.to_string().contains("default provider `opencode-go`"));
+
+        let missing_subagent = AgentProvidersConfig {
+            active: vec!["opencode-go".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        };
+        let error = validate_agent_providers(
+            "opencode",
+            Some(&default),
+            Some(&subagent),
+            &missing_subagent,
+        )
+        .expect_err("subagent required");
+        assert!(error.to_string().contains("subagent provider `openrouter`"));
+    }
+
+    #[test]
+    fn active_provider_sets_reject_duplicates_and_custom_defaults() {
+        let duplicate = AgentProvidersConfig {
+            active: vec!["openrouter".to_owned(), "openrouter".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        };
+        let error = validate_agent_providers(
+            "opencode",
+            Some(&mapped_provider("openrouter")),
+            None,
+            &duplicate,
+        )
+        .expect_err("duplicate rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate provider `openrouter`")
+        );
+
+        let custom = AgentProviderConfig {
+            id: "custom".to_owned(),
+            model: None,
+            api_key_ref: Some("CUSTOM_API_KEY".to_owned()),
+            custom: Some(AgentCustomProviderConfig {
+                name: "Custom".to_owned(),
+                base_url: "https://example.com/v1".to_owned(),
+                api: CustomProviderApi::ChatCompletions,
+                model_name: None,
+                context: 1,
+                output_max_tokens: 1,
+            }),
+        };
+        let providers = AgentProvidersConfig {
+            active: vec!["openrouter".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        };
+        let error = validate_agent_providers("opencode", Some(&custom), None, &providers)
+            .expect_err("custom default rejected");
+        assert!(error.to_string().contains("custom providers"));
+    }
+
+    #[test]
+    fn selected_aliases_are_case_sensitive_identifiers() {
+        let providers = AgentProvidersConfig {
+            active: vec!["opencode-go".to_owned()],
+            selected_aliases: BTreeMap::from([("opencode-go".to_owned(), "go_2".to_owned())]),
+        };
+        validate_agent_providers(
+            "opencode",
+            Some(&mapped_provider("opencode-go")),
+            None,
+            &providers,
+        )
+        .expect("valid alias");
+
+        let mut invalid = providers;
+        invalid
+            .selected_aliases
+            .insert("opencode-go".to_owned(), "go two".to_owned());
+        assert!(
+            validate_agent_providers(
+                "opencode",
+                Some(&mapped_provider("opencode-go")),
+                None,
+                &invalid,
+            )
+            .is_err()
+        );
     }
 }

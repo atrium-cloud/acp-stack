@@ -6,6 +6,8 @@
 //! functions used by `#[serde(default = "...")]` annotations are co-located
 //! with the struct they belong to so the schema is self-contained.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 // CONSTANTS
@@ -477,11 +479,22 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<AgentProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<AgentProvidersConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<AgentSubagentConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<AgentAutoUpdateConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<AgentInstallConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProvidersConfig {
+    #[serde(default)]
+    pub active: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selected_aliases: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

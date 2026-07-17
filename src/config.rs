@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 
 pub use self::schema::{
     AgentAdapterConfig, AgentAutoUpdateConfig, AgentConfig, AgentCustomProviderConfig,
-    AgentInstallConfig, AgentProviderConfig, AgentSubagentConfig, ApiConfig, ArrayConfig,
-    ArrayTargetConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig, CustomProviderApi,
-    DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
+    AgentInstallConfig, AgentProviderConfig, AgentProvidersConfig, AgentSubagentConfig, ApiConfig,
+    ArrayConfig, ArrayTargetConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig,
+    CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
     DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL,

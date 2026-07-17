@@ -6,7 +6,8 @@
 //!   produced by `age::x25519::Identity::to_string()`. One identity per
 //!   instance. Owner-only (0600).
 //! - `~/.local/share/acp-stack/secrets.age` — the age-encrypted ciphertext.
-//!   Plaintext is a TOML document of the form `[secrets]\nNAME = "value"`.
+//!   Plaintext is TOML containing flat `[secrets]` and the structured mapped-
+//!   provider credential catalog.
 //!   The store is encrypted to its own public key (single-recipient).
 //!
 //! Inner format is TOML rather than JSON for consistency with the rest of
@@ -21,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use age::secrecy::ExposeSecret;
+use base64::Engine;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StackError};
@@ -63,6 +66,7 @@ pub fn secret_store_path(home: &Path) -> PathBuf {
 pub struct SecretStore {
     identity: age::x25519::Identity,
     secrets: BTreeMap<String, String>,
+    provider_credentials: BTreeMap<String, ProviderCredentialSet>,
     store_path: PathBuf,
 }
 
@@ -74,7 +78,122 @@ impl fmt::Debug for SecretStore {
             .field("identity", &"<redacted>")
             .field("store_path", &self.store_path)
             .field("secret_names", &self.list_names())
+            .field(
+                "provider_credential_ids",
+                &self.provider_credentials.keys().collect::<Vec<_>>(),
+            )
             .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCredential {
+    pub revision: String,
+    pub values: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_refs: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub migrated: bool,
+}
+
+impl fmt::Debug for ProviderCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderCredential")
+            .field("revision", &"<redacted>")
+            .field("env_names", &self.values.keys().collect::<Vec<_>>())
+            .field("source_refs", &self.source_refs)
+            .finish()
+    }
+}
+
+impl ProviderCredential {
+    pub fn new(values: BTreeMap<String, String>, source_refs: BTreeMap<String, String>) -> Self {
+        Self {
+            revision: new_provider_credential_revision(),
+            values,
+            source_refs,
+            migrated: false,
+        }
+    }
+
+    pub fn rotate(
+        &mut self,
+        values: BTreeMap<String, String>,
+        source_refs: BTreeMap<String, String>,
+    ) {
+        self.revision = new_provider_credential_revision();
+        self.values = values;
+        self.source_refs = source_refs;
+        self.migrated = false;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCredentialSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sole: Option<ProviderCredential>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, ProviderCredential>,
+}
+
+impl ProviderCredentialSet {
+    pub fn aliasless(credential: ProviderCredential) -> Self {
+        Self {
+            sole: Some(credential),
+            aliases: BTreeMap::new(),
+        }
+    }
+
+    pub fn promoted(aliases: BTreeMap<String, ProviderCredential>) -> Self {
+        Self {
+            sole: None,
+            aliases,
+        }
+    }
+
+    pub fn is_promoted(&self) -> bool {
+        self.sole.is_none()
+    }
+
+    pub fn selected(&self, alias: Option<&str>) -> Option<(&ProviderCredential, Option<&str>)> {
+        match (&self.sole, alias) {
+            (Some(credential), None) => Some((credential, None)),
+            (None, Some(alias)) => self
+                .aliases
+                .get_key_value(alias)
+                .map(|(stored_alias, credential)| (credential, Some(stored_alias.as_str()))),
+            _ => None,
+        }
+    }
+
+    fn validate(&self, provider_id: &str) -> Result<()> {
+        match (&self.sole, self.aliases.is_empty()) {
+            (Some(_), true) => {}
+            (None, false) => {}
+            _ => {
+                return Err(StackError::SecretStorePlaintextInvalid {
+                    reason: format!(
+                        "provider credential `{provider_id}` must be aliasless or contain aliases"
+                    ),
+                });
+            }
+        }
+        for (alias, credential) in &self.aliases {
+            if !crate::config::is_valid_secret_ref_name(alias) {
+                return Err(StackError::SecretStorePlaintextInvalid {
+                    reason: format!(
+                        "provider credential `{provider_id}` has invalid alias `{alias}`"
+                    ),
+                });
+            }
+            validate_provider_credential(provider_id, credential)?;
+        }
+        if let Some(credential) = &self.sole {
+            validate_provider_credential(provider_id, credential)?;
+        }
+        Ok(())
     }
 }
 
@@ -82,6 +201,17 @@ impl fmt::Debug for SecretStore {
 struct StorePlaintext {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+}
+
+impl StorePlaintext {
+    fn validate(&self) -> Result<()> {
+        for (provider_id, credentials) in &self.provider_credentials {
+            credentials.validate(provider_id)?;
+        }
+        Ok(())
+    }
 }
 
 impl SecretStore {
@@ -128,19 +258,20 @@ impl SecretStore {
             generate_identity(key_path)?
         };
 
-        let secrets = if store_path.exists() {
+        let plaintext = if store_path.exists() {
             set_owner_only_file(store_path)?;
             decrypt_store(&identity, store_path)?
         } else {
             let plaintext = StorePlaintext::default();
             let ciphertext = encrypt_plaintext(&identity.to_public(), &plaintext)?;
             atomic_write_owner_only(store_path, &ciphertext)?;
-            plaintext.secrets
+            plaintext
         };
 
         Ok(Self {
             identity,
-            secrets,
+            secrets: plaintext.secrets,
+            provider_credentials: plaintext.provider_credentials,
             store_path: store_path.to_path_buf(),
         })
     }
@@ -162,10 +293,11 @@ impl SecretStore {
         validate_owner_only_regular_file(&key_path)?;
         validate_owner_only_regular_file(&store_path)?;
         let identity = load_identity(&key_path)?;
-        let secrets = decrypt_store(&identity, &store_path)?;
+        let plaintext = decrypt_store(&identity, &store_path)?;
         Ok(Self {
             identity,
-            secrets,
+            secrets: plaintext.secrets,
+            provider_credentials: plaintext.provider_credentials,
             store_path,
         })
     }
@@ -182,11 +314,12 @@ impl SecretStore {
         if store_path.exists() {
             set_owner_only_file(store_path)?;
         }
-        let secrets = decrypt_store(&identity, store_path)?;
+        let plaintext = decrypt_store(&identity, store_path)?;
 
         Ok(Self {
             identity,
-            secrets,
+            secrets: plaintext.secrets,
+            provider_credentials: plaintext.provider_credentials,
             store_path: store_path.to_path_buf(),
         })
     }
@@ -210,6 +343,48 @@ impl SecretStore {
 
     pub fn list_names(&self) -> Vec<&str> {
         self.secrets.keys().map(String::as_str).collect()
+    }
+
+    pub fn provider_credentials(&self) -> &BTreeMap<String, ProviderCredentialSet> {
+        &self.provider_credentials
+    }
+
+    pub fn provider_credential_set(&self, provider_id: &str) -> Option<&ProviderCredentialSet> {
+        self.provider_credentials.get(provider_id)
+    }
+
+    pub(crate) fn stage_provider_credentials(
+        &mut self,
+        provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+    ) -> Result<()> {
+        StorePlaintext {
+            secrets: self.secrets.clone(),
+            provider_credentials: provider_credentials.clone(),
+        }
+        .validate()?;
+        self.provider_credentials = provider_credentials;
+        Ok(())
+    }
+
+    pub fn replace_provider_credentials(
+        &mut self,
+        provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+        remove_flat_secrets: &[String],
+    ) -> Result<()> {
+        let mut secrets = self.secrets.clone();
+        for name in remove_flat_secrets {
+            secrets.remove(name);
+        }
+        let plaintext = StorePlaintext {
+            secrets: secrets.clone(),
+            provider_credentials: provider_credentials.clone(),
+        };
+        plaintext.validate()?;
+        let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
+        atomic_write_owner_only(&self.store_path, &ciphertext)?;
+        self.secrets = secrets;
+        self.provider_credentials = provider_credentials;
+        Ok(())
     }
 
     pub fn set(&mut self, name: &str, value: &str) -> Result<()> {
@@ -242,7 +417,9 @@ impl SecretStore {
     fn persist(&self) -> Result<()> {
         let plaintext = StorePlaintext {
             secrets: self.secrets.clone(),
+            provider_credentials: self.provider_credentials.clone(),
         };
+        plaintext.validate()?;
         let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
         atomic_write_owner_only(&self.store_path, &ciphertext)
     }
@@ -278,10 +455,7 @@ fn load_identity(path: &Path) -> Result<age::x25519::Identity> {
     })
 }
 
-fn decrypt_store(
-    identity: &age::x25519::Identity,
-    path: &Path,
-) -> Result<BTreeMap<String, String>> {
+fn decrypt_store(identity: &age::x25519::Identity, path: &Path) -> Result<StorePlaintext> {
     let ciphertext = std::fs::read(path).map_err(|source| StackError::SecretStoreRead {
         path: path.to_path_buf(),
         source,
@@ -291,7 +465,54 @@ fn decrypt_store(
         .map_err(|source| StackError::SecretStorePlaintextNotUtf8 { source })?;
     let plaintext: StorePlaintext =
         toml::from_str(plaintext_str).map_err(StackError::SecretStorePlaintextParse)?;
-    Ok(plaintext.secrets)
+    plaintext.validate()?;
+    Ok(plaintext)
+}
+
+fn validate_provider_credential(provider_id: &str, credential: &ProviderCredential) -> Result<()> {
+    if credential.revision.trim().is_empty() || credential.values.is_empty() {
+        return Err(StackError::SecretStorePlaintextInvalid {
+            reason: format!(
+                "provider credential `{provider_id}` must have a revision and at least one value"
+            ),
+        });
+    }
+    for name in credential
+        .values
+        .keys()
+        .chain(credential.source_refs.keys())
+        .chain(credential.source_refs.values())
+    {
+        if !crate::config::is_valid_secret_ref_name(name) {
+            return Err(StackError::SecretStorePlaintextInvalid {
+                reason: format!(
+                    "provider credential `{provider_id}` contains invalid env or secret ref `{name}`"
+                ),
+            });
+        }
+    }
+    if let Some(name) = credential
+        .source_refs
+        .keys()
+        .find(|name| !credential.values.contains_key(*name))
+    {
+        return Err(StackError::SecretStorePlaintextInvalid {
+            reason: format!(
+                "provider credential `{provider_id}` has source ref without value field `{name}`"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn new_provider_credential_revision() -> String {
+    let mut bytes = [0_u8; 16];
+    rand::rng().fill(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn encrypt_plaintext(
@@ -361,6 +582,117 @@ mod tests {
         assert_eq!(store.get("BETA").unwrap(), "2");
         let names = store.list_names();
         assert_eq!(names, vec!["ALPHA", "BETA"]);
+    }
+
+    #[test]
+    fn legacy_plaintext_defaults_provider_catalog_to_empty() {
+        let plaintext: StorePlaintext =
+            toml::from_str("[secrets]\nALPHA = \"1\"\n").expect("legacy plaintext");
+
+        assert_eq!(
+            plaintext.secrets.get("ALPHA").map(String::as_str),
+            Some("1")
+        );
+        assert!(plaintext.provider_credentials.is_empty());
+    }
+
+    #[test]
+    fn provider_credentials_round_trip_without_exposing_values_in_debug() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        let credential = ProviderCredential::new(
+            BTreeMap::from([("OPENCODE_API_KEY".to_owned(), "private-value".to_owned())]),
+            BTreeMap::from([("OPENCODE_API_KEY".to_owned(), "SOURCE_KEY".to_owned())]),
+        );
+        let revision = credential.revision.clone();
+        store
+            .replace_provider_credentials(
+                BTreeMap::from([(
+                    "opencode-go".to_owned(),
+                    ProviderCredentialSet::aliasless(credential),
+                )]),
+                &[],
+            )
+            .expect("persist catalog");
+
+        let reopened = SecretStore::open(home.path()).expect("reopen");
+        let credential = reopened
+            .provider_credential_set("opencode-go")
+            .and_then(|set| set.sole.as_ref())
+            .expect("credential");
+        assert_eq!(credential.revision, revision);
+        assert_eq!(credential.values["OPENCODE_API_KEY"], "private-value");
+        let debug = format!("{credential:?}");
+        assert!(!debug.contains("private-value"));
+        assert!(!debug.contains(&revision));
+    }
+
+    #[test]
+    fn staged_provider_credentials_are_not_persisted_until_replaced() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        let persisted = ProviderCredential::new(
+            BTreeMap::from([("OPENCODE_API_KEY".to_owned(), "persisted".to_owned())]),
+            BTreeMap::new(),
+        );
+        store
+            .replace_provider_credentials(
+                BTreeMap::from([(
+                    "opencode-go".to_owned(),
+                    ProviderCredentialSet::aliasless(persisted),
+                )]),
+                &[],
+            )
+            .expect("persist catalog");
+
+        let staged = ProviderCredential::new(
+            BTreeMap::from([("OPENCODE_API_KEY".to_owned(), "staged".to_owned())]),
+            BTreeMap::new(),
+        );
+        store
+            .stage_provider_credentials(BTreeMap::from([(
+                "opencode-go".to_owned(),
+                ProviderCredentialSet::aliasless(staged),
+            )]))
+            .expect("stage catalog");
+        assert_eq!(
+            store
+                .provider_credential_set("opencode-go")
+                .and_then(|set| set.sole.as_ref())
+                .expect("staged credential")
+                .values["OPENCODE_API_KEY"],
+            "staged"
+        );
+
+        let reopened = SecretStore::open(home.path()).expect("reopen");
+        assert_eq!(
+            reopened
+                .provider_credential_set("opencode-go")
+                .and_then(|set| set.sole.as_ref())
+                .expect("persisted credential")
+                .values["OPENCODE_API_KEY"],
+            "persisted"
+        );
+    }
+
+    #[test]
+    fn rotating_provider_credential_changes_revision_and_keeps_alias_mode() {
+        let mut credential = ProviderCredential::new(
+            BTreeMap::from([("OPENROUTER_API_KEY".to_owned(), "first".to_owned())]),
+            BTreeMap::new(),
+        );
+        let previous_revision = credential.revision.clone();
+        credential.rotate(
+            BTreeMap::from([("OPENROUTER_API_KEY".to_owned(), "second".to_owned())]),
+            BTreeMap::new(),
+        );
+        let set =
+            ProviderCredentialSet::promoted(BTreeMap::from([("backup".to_owned(), credential)]));
+
+        assert!(set.is_promoted());
+        let selected = set.selected(Some("backup")).expect("selected alias").0;
+        assert_ne!(selected.revision, previous_revision);
+        assert_eq!(selected.values["OPENROUTER_API_KEY"], "second");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp_stack::api::{self, AppState, RuntimePaths};
-use acp_stack::config::{AgentProviderConfig, ArrayTargetConfig, Config, load_config_from_str};
+use acp_stack::config::{ArrayTargetConfig, Config, load_config_from_str};
 use acp_stack::state::{
     NewPermissionRequest, NewPromptRecord, NewSessionRecord, PromptStatus, StateStore,
 };
@@ -266,12 +266,7 @@ async fn create_session_applies_model_with_custom_config_option_id() {
             "--expect-model-config".to_owned(),
             "deepseek/deepseek-v4-flash".to_owned(),
         ]);
-        config.agent.provider = Some(AgentProviderConfig {
-            id: "openrouter".to_owned(),
-            model: Some("deepseek/deepseek-v4-flash".to_owned()),
-            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
-            custom: None,
-        });
+        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
     })
     .await;
     let session_id = create_session(&harness).await;

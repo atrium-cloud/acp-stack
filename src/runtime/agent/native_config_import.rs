@@ -34,9 +34,10 @@ use crate::runtime::agent::agent_headless_config::{
 };
 use crate::runtime::agent::mcp::resolve_mcp_servers;
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, apply_mapped_agent_provider,
-    canonical_provider_id_for_agent_native_id,
+    agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
+    apply_mapped_agent_provider, canonical_provider_id_for_agent_native_id,
 };
+use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 
 pub const INSPECTION_TTL_SECONDS: u64 = 15 * 60;
@@ -945,9 +946,10 @@ fn validate_native_config_secret_refs_with_store(
     prepared: &PreparedNativeConfigImport,
     secrets: &SecretStore,
 ) -> Result<()> {
-    for name in &prepared.canonical_config.agent.env {
-        secrets.get(name)?;
-    }
+    crate::runtime::agent::provider_keys::resolve_agent_environment(
+        &prepared.canonical_config,
+        secrets,
+    )?;
     resolve_mcp_servers(&prepared.canonical_config.mcp, secrets)?;
     Ok(())
 }
@@ -1230,8 +1232,19 @@ pub fn prepare_native_config_import(
     let mut candidate = current.clone();
     for id in &selection.selected_managed_field_ids {
         if let Some(CandidateValue::Provider(provider)) = inspected.candidates.get(id) {
-            apply_mapped_agent_provider(&mut candidate, provider, None)
+            if candidate.agent.providers.is_some() {
+                let registry = RegistryCatalog::load_embedded()?;
+                let entry = registry.lookup_required(&candidate.agent.id)?;
+                apply_catalog_mapped_agent_provider(
+                    &mut candidate.agent,
+                    provider,
+                    entry.multiple_active_providers,
+                )
                 .map_err(|_| native_error("native_config_provider_unsupported"))?;
+            } else {
+                apply_mapped_agent_provider(&mut candidate, provider, None)
+                    .map_err(|_| native_error("native_config_provider_unsupported"))?;
+            }
         }
     }
     let mut imported_model = false;
@@ -1304,6 +1317,7 @@ pub fn rebase_prepared_native_config_import(
         .any(|id| id == "provider")
     {
         candidate.agent.provider = imported.agent.provider.clone();
+        candidate.agent.providers = imported.agent.providers.clone();
         candidate.agent.model = None;
         for name in &imported.agent.env {
             if !candidate.agent.env.iter().any(|existing| existing == name) {
@@ -4174,6 +4188,103 @@ extensions:
         .err()
         .expect("model/provider mismatch");
         assert_eq!(error.error_code(), "native_config_model_provider_mismatch");
+    }
+
+    #[test]
+    fn provider_import_preserves_structured_catalog_credentials_through_rebase() {
+        let home = tempfile::tempdir().expect("home");
+        let mut current = opencode_config("openrouter", "openrouter/old-model");
+        current.agent.env.clear();
+        current
+            .agent
+            .provider
+            .as_mut()
+            .expect("provider")
+            .api_key_ref = None;
+        current.agent.providers = Some(crate::config::AgentProvidersConfig {
+            active: vec!["openrouter".to_owned()],
+            selected_aliases: BTreeMap::new(),
+        });
+        let inspected = inspect_native_config(
+            "opencode",
+            Some("opencode.json"),
+            r#"{"model":"openai/gpt-5.5"}"#,
+        )
+        .expect("inspect");
+
+        let mut prepared = prepare_native_config_import(
+            &inspected,
+            &NativeConfigSelection {
+                revision: inspected.revision().to_owned(),
+                selected_managed_field_ids: vec!["provider".to_owned(), "model".to_owned()],
+                executable_settings_acknowledged: false,
+            },
+            &current,
+            home.path(),
+        )
+        .expect("prepare");
+
+        let provider = prepared
+            .canonical_config
+            .agent
+            .provider
+            .as_ref()
+            .expect("provider");
+        assert_eq!(provider.id, "openai");
+        assert!(provider.api_key_ref.is_none());
+        assert!(
+            !prepared
+                .canonical_config
+                .agent
+                .env
+                .iter()
+                .any(|name| name == "OPENAI_API_KEY")
+        );
+        assert_eq!(
+            prepared
+                .canonical_config
+                .agent
+                .providers
+                .as_ref()
+                .expect("provider settings")
+                .active,
+            ["openrouter", "openai"]
+        );
+
+        let mut later = current.clone();
+        later.logging.level = "debug".to_owned();
+        rebase_prepared_native_config_import(&mut prepared, &later).expect("rebase");
+        assert_eq!(prepared.canonical_config.logging.level, "debug");
+        assert_eq!(
+            prepared
+                .canonical_config
+                .agent
+                .providers
+                .as_ref()
+                .expect("provider settings")
+                .active,
+            ["openrouter", "openai"]
+        );
+
+        let credential = |name: &str| {
+            crate::secrets::ProviderCredentialSet::aliasless(
+                crate::secrets::ProviderCredential::new(
+                    BTreeMap::from([(name.to_owned(), "secret".to_owned())]),
+                    BTreeMap::new(),
+                ),
+            )
+        };
+        let mut secrets = SecretStore::open_or_create(home.path()).expect("secret store");
+        secrets
+            .replace_provider_credentials(
+                BTreeMap::from([
+                    ("openrouter".to_owned(), credential("OPENROUTER_API_KEY")),
+                    ("openai".to_owned(), credential("OPENAI_API_KEY")),
+                ]),
+                &[],
+            )
+            .expect("catalog");
+        validate_native_config_secret_refs(&prepared, home.path()).expect("validate catalog");
     }
 
     #[test]

@@ -61,7 +61,9 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 | `acps array status` | session | Array config plus, when the daemon is reachable, per-target process state and pid, and local-delegation readiness |
 | `acps array on` / `off` | local | flip `array.enabled`; `off` keeps configured targets |
 | `acps array add <agent>` | local | add a target for a registry agent; rejects an already-configured harness |
-| `acps array set --target <id> ...` | local | configure provider, model, mode, or custom provider for one target (same flags as `acps agent set`) |
+| `acps array set --target <id> ...` | local | configure model, mode, or a custom provider for one target |
+| `acps array provider use\|set-active\|list-active --target <id> ...` | local | select the default mapped provider or inspect/replace its active set |
+| `acps array provider credential select --target <id> <provider> <alias>` | local | select one catalog alias for a target; catalog mutations use `acps agent provider credential` |
 | `acps array install\|start\|stop\|restart [--target <id>] [--admin-key <key>]` | admin | drive one target, or every configured target when `--target` is omitted |
 | `acps array restart auto [--target <id>] [--admin-key <key>]` | admin | queue guarded restarts when selected targets become idle |
 | `acps agent default set <target>` | local | repoint `primary_target` at an existing target |
@@ -72,7 +74,7 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 
 | Route | Tier | Contract |
 | ----- | ---- | -------- |
-| `GET /v1/array/status` | session | enabled flag, primary target, local-delegation readiness, and per-target id/agent/name/state/pid |
+| `GET /v1/array/status` | session | enabled flag, primary target, readiness, and per-target process/configured/loaded provider state |
 | `GET /v1/array/targets/{target_id}/capabilities` | session | latest ACP capability snapshot for one target |
 | `POST /v1/array/targets/{target_id}/install` | admin | install one target's harness |
 | `POST /v1/array/targets/{target_id}/start` | admin | start one target's process |

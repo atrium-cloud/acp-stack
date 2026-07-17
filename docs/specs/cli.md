@@ -11,7 +11,7 @@
 | Config         | `acps config validate`, `export`, `import`                                  |
 | Secrets        | `acps secrets list`, `set`, `delete`                                        |
 | Agents         | `acps agent install`, `update`, `switch`, `config inspect/import`, `start`, `stop`, `restart`, `status`, `check`, `test`, `default set` |
-| Provider/model | `acps agent set`, `acps subagent status/set/match/free/disable`             |
+| Provider/model | `acps agent provider`, `acps agent set`, `acps subagent status/set/match/free/disable` |
 | Array          | `acps array status/on/off/add/set/install/start/stop/restart`               |
 | Workspace      | `acps workspace status`, `code-source`, `data-source`, `sync`, `sandbox`    |
 | Sessions       | `acps sessions list/status/new/load/resume/fork/prompt/cancel/close`        |
@@ -171,14 +171,28 @@ acps logging supabase set-db-url [--db-url-ref <ref>]
 acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <ref>] [--admin-key <key>]
 ```
 
-The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider secret refs that will be copied if missing, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses the current provider/API-key ref only when compatible, copies installed Agent Skills into the target skills directory when needed, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
+The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider credentials, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses a compatible flat ref or the current structured provider/alias selection, copies installed Agent Skills into the target skills directory when needed, clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
 
 Switch preserves runtime-scoped config, including workspace, MCP declarations, permissions, secrets config, and sessions. By default, it also preserves source agent-owned config, secrets, and installed harnesses/adapters so switching back is fast. `--drop` removes only source agent-owned config after the target switch succeeds. It does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
 
-`acps agent set` updates provider, model, mode, and custom-provider metadata:
+`acps agent provider` manages mapped providers and their encrypted credential catalog:
 
 ```sh
-acps agent set --provider <provider-id> [--model <model>] [--api-key-ref <ref>]
+acps agent provider use <provider-id> [--model <model>]
+acps agent provider set-active <provider-id,provider-id,...>
+acps agent provider list-active
+acps agent provider credential add <provider-id>
+acps agent provider credential update <provider-id> [alias]
+acps agent provider credential select <provider-id> <alias>
+acps agent provider credential list [provider-id]
+acps agent provider credential delete <provider-id> [alias]
+```
+
+The first credential is aliasless. Adding a second prompts for names for both keys and preserves every affected target's existing selection. Scripts copy encrypted values with repeatable `--from-secret ENV=REF`. `set-active` is limited to OpenCode and Pi; it does not change the default provider or selected aliases. `list-active` reports the environment acps configured and the last successfully loaded snapshot, or marks loaded state unknown when the daemon is unavailable.
+
+`acps agent set` updates model, mode, and custom-provider metadata:
+
+```sh
 acps agent set --custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>
 acps agent set --model <model>
 acps agent set --mode <mode>
@@ -211,7 +225,7 @@ acps agent update set --frequency 3d
 
 `--frequency` accepts duration suffixes such as `12h`, `1d`, `3d`, and `4w`.
 
-`acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps restart` is the preferred top-level alias for `acps agent restart`; both accept `--admin-key <key>`. `acps restart auto` and `acps agent restart auto` queue a supervised-agent restart that runs once the target has no pending/running prompts and no pending ACP permission requests. Active sessions with no in-flight prompt are safe; terminal latest prompts are safe. `acps agent status` prints configured identity, process state, capability summary, and recent lifecycle information through the local read-only route. `acps agent check` reports whether managed install steps are present and current.
+`acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps restart` is the preferred top-level alias for `acps agent restart`; both accept `--admin-key <key>`. `acps restart auto` and `acps agent restart auto` queue a supervised-agent restart that runs once the target has no pending/running prompts and no pending ACP permission requests. Active sessions with no in-flight prompt are safe; terminal latest prompts are safe. `acps agent status` prints configured identity, capability summary, and recent lifecycle information. Use `acps agent provider list-active` for sanitized configured/loaded provider state. `acps agent check` reports whether managed install steps are present and current.
 
 `acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional.
 
@@ -225,7 +239,7 @@ A daemon restart is required for daemon startup-cached settings: workspace root 
 
 ## Array
 
-`acps array *` manages multi-target Array mode. `acps array status` prints the Array config and, when the daemon is reachable, per-target process state and pid through the local read-only route. `acps array on` and `off` toggle Array mode without deleting configured targets. `acps array add <agent>` adds a registry agent as a new target and rejects an already-configured harness. `acps array set --target <id> ...` configures provider, model, mode, or a custom provider for one target with the same flags as `acps agent set`. `acps array install|start|stop|restart [--target <id>] [--admin-key <key>]` drives one target, or every configured target when `--target` is omitted — it attempts each target, prints a per-target result line, and exits non-zero if any failed. `acps array restart auto [--target <id>]` queues guarded restarts for the selected targets. With Array off, `start` and `restart` are limited to the primary target; `install` and `stop` are unrestricted. See [array.md](array.md) for the full model, validation, and API.
+`acps array *` manages multi-target Array mode. `acps array status` prints the Array config and, when the daemon is reachable, per-target process state through the local read-only route; its JSON response also carries sanitized provider state. `acps array on` and `off` toggle Array mode without deleting configured targets. `acps array add <agent>` adds a registry agent as a new target and rejects an already-configured harness. `acps array set --target <id> ...` configures model, mode, or a custom provider. `acps array provider use|set-active|list-active --target <id> ...` and `acps array provider credential select --target <id> ...` are the target-scoped mapped-provider equivalents; catalog add/update/list/delete remains instance-wide under `acps agent provider credential`. `acps array install|start|stop|restart [--target <id>] [--admin-key <key>]` drives one target, or every configured target when `--target` is omitted — it attempts each target, prints a per-target result line, and exits non-zero if any failed. `acps array restart auto [--target <id>]` queues guarded restarts for the selected targets. With Array off, `start` and `restart` are limited to the primary target; `install` and `stop` are unrestricted. See [array.md](array.md) for the full model, validation, and API.
 
 ## Sessions
 

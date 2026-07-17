@@ -1337,6 +1337,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
         harness_version: None,
         adapter: None,
         provider: None,
+        providers: None,
         subagent: None,
         auto_update: None,
         install: Some(AgentInstallConfig {

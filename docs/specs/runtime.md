@@ -8,7 +8,7 @@ The supervisor owns the configured agent process. It starts the agent with:
 
 - the configured command, args, cwd, and restart policy
 - a scrubbed environment with managed `PATH` and the runtime user's `HOME`; `[agent].env` cannot override these reserved keys
-- secret values listed in `[agent].env`
+- secret values listed in `[agent].env` and each selected active-provider credential bundle
 
 When `[workspace.sandbox]` is enabled, the agent process and mediated shells are launched inside an isolation backend that masks the daemon's secrets, config, state, and control socket from the workload. The backend is the same user as the daemon, so the managed `HOME`, `PATH`, and workspace are unchanged; only the runtime's own sensitive paths are hidden. See [security.md#sandbox](security.md#sandbox).
 
@@ -24,7 +24,7 @@ With `[workspace.sandbox.network] mode = "isolated"` (unshare backend only), eac
 
 The supervisor's diagnostics (and provider stderr in `daemon` mode) are written to a daemon-stderr fd the spawn sites install at fd 3, so they never enter a mediated command's captured output. Namespace lifetime is strictly per wrapped spawn; there is no session- or workspace-scoped namespace registry. Provider contract and configuration are specified in [security.md#network-isolation-unshare-only](security.md#network-isolation-unshare-only).
 
-Lifecycle transitions are recorded in durable state and published to live subscribers. Agent start, stop, and restart are admin operations. With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start. `restart = "never"` leaves the process stopped. Planned stop, restart, and daemon shutdown do not trigger crash recovery.
+Lifecycle transitions are recorded in durable state and published to live subscribers. After a successful spawn, the supervisor retains a sanitized provider/alias/revision snapshot for restart detection and clears it on stop or exit. Agent start, stop, and restart are admin operations. With `restart = "on-crash"`, an unexpected ACP subprocess or connection exit records `agent.exited`, schedules a bounded restart, and relaunches with the same resolved config and environment used for the prior successful start. `restart = "never"` leaves the process stopped. Planned stop, restart, and daemon shutdown do not trigger crash recovery.
 
 Readiness scans recent `agent.started` lifecycle rows for live Unix process groups whose PID is not the currently supervised process. A match is reported as an orphaned agent or adapter process group and degrades `/v1/health/ready`.
 
@@ -52,7 +52,7 @@ Init is resumable. A resumed run skips completed work whose result still exists 
 
 ## Provider And Model Resolution
 
-Provider ids are resolved through the provider metadata for the configured agent. Mapped models and modes are validated against ACP-advertised session config options where the agent exposes them.
+Provider ids are resolved through the provider metadata for the configured agent. Starts, restarts, installs, model discovery, and agent tests share one environment resolver for generic refs and provider bundles. Equal values for a shared env name are deduplicated; different values fail without exposing them. Mapped models and modes are validated against ACP-advertised session config options where the agent exposes them.
 
 Custom providers are accepted only for agents that support them. Custom model ids are operator-supplied and are not certified by `acp-stack`.
 

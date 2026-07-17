@@ -1131,6 +1131,77 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_provider_catalog_and_active_set_commands() {
+        for args in [
+            vec!["acps", "agent", "provider", "use", "opencode-go"],
+            vec![
+                "acps",
+                "agent",
+                "provider",
+                "set-active",
+                "opencode-go,openrouter",
+            ],
+            vec!["acps", "agent", "provider", "list-active"],
+            vec![
+                "acps",
+                "agent",
+                "provider",
+                "credential",
+                "add",
+                "opencode-go",
+                "--existing-alias",
+                "go_1",
+                "--alias",
+                "go_2",
+                "--from-secret",
+                "OPENCODE_API_KEY=GO_KEY_2",
+            ],
+            vec![
+                "acps",
+                "agent",
+                "provider",
+                "credential",
+                "update",
+                "opencode-go",
+                "go_2",
+                "--from-secret",
+                "OPENCODE_API_KEY=GO_KEY_3",
+            ],
+            vec![
+                "acps",
+                "agent",
+                "provider",
+                "credential",
+                "select",
+                "opencode-go",
+                "go_2",
+            ],
+            vec![
+                "acps",
+                "array",
+                "provider",
+                "use",
+                "--target",
+                "worker",
+                "openrouter",
+            ],
+            vec![
+                "acps",
+                "array",
+                "provider",
+                "credential",
+                "select",
+                "--target",
+                "worker",
+                "opencode-go",
+                "go_2",
+            ],
+        ] {
+            Cli::try_parse_from(args).expect("provider command parses");
+        }
+    }
+
+    #[test]
     fn cli_parses_workspace_commands() {
         for args in [
             vec!["acps", "workspace", "status"],
