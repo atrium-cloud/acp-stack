@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal, Write};
 
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{ArrayTargetConfig, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::agent::switch::{
@@ -21,8 +21,8 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    if config.array.target(&args.agent).is_some() {
-        print_existing_target_switch_plan(&config, &args.agent)?;
+    if let Some(target) = config.array.target(&args.agent) {
+        print_existing_target_switch_plan(&config, target)?;
     } else {
         let plan = plan_agent_switch(
             &config,
@@ -122,19 +122,24 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_existing_target_switch_plan(config: &Config, agent: &str) -> Result<()> {
-    if config.array.primary_target == agent {
+fn print_existing_target_switch_plan(config: &Config, target: &ArrayTargetConfig) -> Result<()> {
+    let agent = &target.id;
+    if config.array.primary_target == *agent {
         return Err(StackError::InvalidParam {
             field: "agent",
             reason: format!("agent `{agent}` is already the default target"),
         });
     }
+    let required_env_refs = &target.agent.env;
     println!(
         "agent switch plan: {} -> {agent}",
         config.array.primary_target
     );
     println!("will select existing Array target config");
     println!("migrated as-is: workspace, MCP, permissions, auth, and secrets config");
+    if !required_env_refs.is_empty() {
+        println!("required_env_refs: {}", required_env_refs.join(", "));
+    }
     println!("requires input: none");
     Ok(())
 }
@@ -168,6 +173,9 @@ fn print_switch_plan(
             "will copy secret ref if missing: {} -> {}",
             migration.from_ref, migration.to_ref
         );
+    }
+    if !plan.required_env_refs.is_empty() {
+        println!("required_env_refs: {}", plan.required_env_refs.join(", "));
     }
     match provider_status {
         AgentSwitchProviderStatus::NotApplicable => {

@@ -24,6 +24,7 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | Goose       | native  |                    | yes | yes          |
 | Codex CLI   | adapter | `codex-acp`        | yes | yes          |
 | Claude Code | adapter | `claude-agent-acp` | yes | no           |
+| Kimi Code   | native  |                    | yes | yes          |
 
 Per-agent setup notes live under [../../agents](../../agents).
 

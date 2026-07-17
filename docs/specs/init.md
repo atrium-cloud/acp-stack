@@ -91,6 +91,7 @@ The operator-facing sequence, in order:
         - Select or validate provider and required secret refs.
         - Discover ACP-advertised model options with one provisional session.
         - Apply `--provider`, `--api-key-ref`, `--model`, and custom-provider flags.
+        - Kimi Code skips model discovery: `--model` is accepted as supplied, and without it init pins `kimi-for-coding` unless config already has a model.
     - Custom agents:
         - Skip provider/model discovery.
         - Run one ACP connection gate when the launch command and cwd are present.

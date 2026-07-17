@@ -23,8 +23,9 @@ use crate::dev_gates::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_id_for_value,
-    session_config_values, session_model_selection_for_value, session_model_values,
+    AcpBridge, AgentSessionConfigCategory, KIMI_CODE_AGENT_ID, SessionEventSink,
+    session_config_id_for_value, session_config_values, session_model_selection_for_value,
+    session_model_values,
 };
 use crate::runtime::agent::claude_code_provider_profiles::{
     CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider,
@@ -38,10 +39,11 @@ use crate::secrets::SecretStore;
 pub const DEFAULT_MODELS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn model_value_is_explicit_without_discovery(config: &Config) -> bool {
-    config.agent.id == CLAUDE_CODE_AGENT_ID
-        && config.agent.provider.as_ref().is_some_and(|provider| {
-            provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
-        })
+    config.agent.id == KIMI_CODE_AGENT_ID
+        || (config.agent.id == CLAUDE_CODE_AGENT_ID
+            && config.agent.provider.as_ref().is_some_and(|provider| {
+                provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
+            }))
 }
 
 /// Spawn the configured agent, open one provisional ACP session, and

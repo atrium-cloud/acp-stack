@@ -3,9 +3,9 @@
 //! The embedded `data/agents.toml` is the runtime source of truth for
 //! `acps agent install`. It supersedes the upstream
 //! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
-//! runtime can make conservative support claims. The embedded catalog starts
-//! with Goose, OpenCode, Cursor CLI, Amp, Pi, and Codex as verified headless
-//! targets.
+//! runtime can make conservative support claims. The embedded catalog includes
+//! Goose, OpenCode, Cursor CLI, Amp, Pi, Codex, Claude Code, and Kimi Code as
+//! curated headless targets.
 //! The schema supports entries that need both an ACP adapter and the upstream
 //! harness it wraps.
 //!
@@ -846,7 +846,8 @@ mod tests {
                 "pi",
                 "goose",
                 "codex",
-                "claude-code"
+                "claude-code",
+                "kimi"
             ]
         );
         for entry in catalog
@@ -915,7 +916,8 @@ mod tests {
                 "pi",
                 "goose",
                 "codex",
-                "claude-code"
+                "claude-code",
+                "kimi"
             ]
         );
         let cursor = catalog.lookup("cursor").expect("cursor entry exists");
@@ -1047,6 +1049,42 @@ mod tests {
             claude_code.support_doc.as_deref(),
             Some("docs/agents/claude-code.md")
         );
+        let kimi = catalog.lookup("kimi").expect("Kimi Code entry exists");
+        assert_eq!(kimi.name, "Kimi Code");
+        assert_eq!(kimi.kind, RegistryKind::Native);
+        assert!(kimi.headless_compatible);
+        assert!(!kimi.set_provider);
+        assert!(kimi.set_model);
+        assert!(!kimi.allow_custom_provider);
+        assert!(!kimi.allow_custom_model);
+        assert!(kimi.set_mode);
+        assert!(kimi.supports_mcp);
+        assert!(kimi.supports_agent_skills);
+        assert_eq!(
+            kimi.agent_skills_install_dir.as_deref(),
+            Some("~/.agents/skills")
+        );
+        assert!(!kimi.subagents);
+        assert_eq!(kimi.github.as_deref(), Some("MoonshotAI/kimi-code"));
+        assert_eq!(kimi.support_doc.as_deref(), Some("docs/agents/kimi.md"));
+        let kimi_harness = kimi.harness.as_ref().expect("Kimi Code harness");
+        assert_eq!(kimi_harness.id, "kimi");
+        assert!(
+            kimi_harness.install.npm.is_none(),
+            "shell installer is Kimi Code's only official channel"
+        );
+        let kimi_shell = kimi_harness
+            .install
+            .shell
+            .as_ref()
+            .expect("Kimi Code shell install");
+        assert!(
+            kimi_shell
+                .script
+                .contains("https://code.kimi.com/kimi-code/install.sh")
+        );
+        assert!(kimi_shell.script.contains("KIMI_INSTALL_DIR"));
+        assert!(kimi_shell.script.contains("KIMI_NO_MODIFY_PATH=1"));
     }
 
     #[test]

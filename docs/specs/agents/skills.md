@@ -52,5 +52,6 @@ name fails the switch. Switches among agents that share
 | Amp Code   | `~/.config/agents/skills`      |
 | Pi Agent   | `~/.agents/skills`             |
 | Goose      | `~/.agents/skills`             |
+| Kimi Code  | `~/.agents/skills`             |
 
 Claude Code is not a managed Agent Skills install target in this version.

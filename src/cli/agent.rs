@@ -16,7 +16,7 @@ use crate::error::Result;
 pub(in crate::cli) use self::install::operator_registry_override;
 pub(in crate::cli) use self::install::run_agent_restart;
 pub(in crate::cli) use self::set::{
-    claude_code_provider_model_is_explicit, default_api_key_ref_for_agent_provider,
+    agent_model_is_explicit_without_discovery, default_api_key_ref_for_agent_provider,
     default_custom_provider_api, model_values_for_cli_display, parse_custom_provider_api,
     parse_custom_token_limit, print_agent_set_effective_notice_for, required_custom_arg,
     resolve_agent_model_value, validate_agent_session_config_value,
@@ -229,7 +229,7 @@ pub struct AgentSetArgs {
 
 #[derive(Debug, Args)]
 pub struct AgentSwitchArgs {
-    /// Target agent id, such as opencode, pi, goose, codex, cursor, or amp.
+    /// Target agent id, such as opencode, pi, goose, codex, cursor, amp, or kimi.
     pub(super) agent: String,
     /// Drop source agent-owned config after a successful switch.
     #[arg(long = "drop")]

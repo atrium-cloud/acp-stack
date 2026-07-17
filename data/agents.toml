@@ -339,3 +339,43 @@ id = "claude-agent-sdk"
 
 [agents.harness.install]
 provided_by = "adapter"
+
+# Kimi Code
+
+[[agents]]
+id = "kimi"
+name = "Kimi Code"
+kind = "native"
+headless_compatible = true
+set_provider = false
+set_model = true
+allow_custom_provider = false
+allow_custom_model = false
+set_mode = true
+supports_mcp = true
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+stdio_framing = "json-lines"
+website = "https://www.kimi.com/code/docs/en/"
+github = "MoonshotAI/kimi-code"
+support_doc = "docs/agents/kimi.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
+
+[agents.harness]
+id = "kimi"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_root="${HOME}/.local"
+managed_kimi="${managed_root}/bin/kimi"
+mkdir -p "${managed_root}"
+KIMI_INSTALL_DIR="${managed_root}"
+KIMI_NO_MODIFY_PATH=1
+export KIMI_INSTALL_DIR KIMI_NO_MODIFY_PATH
+curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+test -x "${managed_kimi}"
+'''
+creates = "kimi"
+required_tools = ["curl", "bash"]
