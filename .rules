@@ -65,17 +65,8 @@ References:
 - Programmatic code checks
     - Run these after a logical set of changes are complete, or before commit:
         - Rust checks: when a Rust workspace exists, use the repository's own Cargo commands for build, test, formatting, and linting.
-        - Codex audit:
-            - If you are not Codex, run `bash scripts/codex-audit.sh` to check for issues and address findings accordingly.
-            - If you are Codex, 
-                - Dispatch a subagent for the same review purpose instead of running `scripts/codex-audit.sh` yourself.
-                - Codex subagent use: always launch subagents with GPT-5.5 medium.
-            - If `scripts/codex-audit.sh` is run, make sure changes are staged first, then run it to check for issues.
-            - The script can run for a while especially if the diff is large. Wait until its completion.
-            - Once an agent reads the output from Codex, validate every issue found, then plan appropriate fixes.
-            - Run this script outside sandbox.
-            - Once this script is running, let it run until finished. Do not kill an in-progress audit that has not produced output because it has already incurred cost. Killing it prematurely is wasteful.
-            - The rule of thumb is run this script 3 times, address all concrete problems, until only circumstantial P2s remain. The loop can end earlier if P0/P1s are addressed sufficiently already.
+        - Pre-commit review: after a logical set of changes, dispatch a subagent to review the staged diff for correctness and issues (classify P0/P1/P2). Validate every finding before acting on it.
+            - If you are Codex, launch the review subagent with GPT-5.5 medium.
         - Pre-commit hook at `.git/hooks/pre-commit`, if present. It may stage changes, auto-fix format issues, and run relevant checks.
             - Run this script outside sandbox if it requires internet.
 - Tests
