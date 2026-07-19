@@ -2037,6 +2037,8 @@ async fn health_ready_follows_default_target_changed_on_disk() {
 
 #[tokio::test]
 async fn agent_switch_selects_existing_array_target_config() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
     let mut config = test_config();
     config.array.enabled = true;
     add_codex_placebo_target(&mut config);
@@ -2124,6 +2126,8 @@ async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
 
 #[tokio::test]
 async fn agent_switch_to_existing_running_target_keeps_it_running() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
     let mut config = test_config();
     config.array.enabled = true;
     add_codex_placebo_target(&mut config);
