@@ -1493,8 +1493,21 @@ mod apply_e2e_tests {
     use std::net::TcpListener;
     use std::thread;
 
-    const TARGET_VERSION: &str = "0.1.2";
-    const TARGET_TAG: &str = "v0.1.2";
+    // The fixture must advertise a version strictly newer than the running crate,
+    // otherwise the updater correctly reports `Skipped`. Deriving patch+1 from the
+    // crate version keeps the test valid across release version bumps.
+    fn target_version() -> String {
+        let current = env!("CARGO_PKG_VERSION");
+        let (rest, patch) = current
+            .rsplit_once('.')
+            .expect("crate version has major.minor.patch");
+        let patch: u64 = patch.parse().expect("crate patch version is numeric");
+        format!("{rest}.{}", patch + 1)
+    }
+
+    fn target_tag() -> String {
+        format!("v{}", target_version())
+    }
 
     const CONFIG: &str = r#"
 [api]
@@ -1636,7 +1649,9 @@ frequency = "1d"
         // Mirror the real release artifact name (`acp-stack-<version>-<target>.tar.gz`,
         // built by scripts/build-release.sh) so the fixture exercises the
         // production naming contract rather than a stand-in.
-        let tarball_name = format!("acp-stack-{TARGET_VERSION}-{target}.tar.gz");
+        let target_version = target_version();
+        let target_tag = target_tag();
+        let tarball_name = format!("acp-stack-{target_version}-{target}.tar.gz");
 
         // Build the release artifacts the fixture serves.
         let tarball = make_targz(&[("acps", b"new-acps-binary")]);
@@ -1649,8 +1664,8 @@ frequency = "1d"
         let manifest = serde_json::json!({
             "schema_version": 1,
             "repository": REPOSITORY,
-            "tag": TARGET_TAG,
-            "version": TARGET_VERSION,
+            "tag": target_tag,
+            "version": target_version,
             "classification": "regular",
             "breaking": false,
             "artifacts": [{ "target": target, "archive": tarball_name, "sha256": tar_sha }],
@@ -1660,7 +1675,7 @@ frequency = "1d"
         let checksums = format!("{manifest_sha}  {MANIFEST_ASSET}\n").into_bytes();
 
         let release = serde_json::json!({
-            "tag_name": TARGET_TAG,
+            "tag_name": target_tag,
             "prerelease": false,
             "assets": [
                 { "name": MANIFEST_ASSET, "browser_download_url": format!("{base}/dl/{MANIFEST_ASSET}") },
@@ -1725,8 +1740,11 @@ frequency = "1d"
 
         let report = result.expect("install should succeed");
         assert_eq!(report.status, StackUpdateStatus::Installed);
-        assert_eq!(report.target_version.as_deref(), Some(TARGET_VERSION));
-        assert_eq!(report.target_tag.as_deref(), Some(TARGET_TAG));
+        assert_eq!(
+            report.target_version.as_deref(),
+            Some(target_version.as_str())
+        );
+        assert_eq!(report.target_tag.as_deref(), Some(target_tag.as_str()));
 
         assert_eq!(
             std::fs::read(bin_dir.join("acps")).expect("read acps"),
