@@ -139,6 +139,7 @@ pub struct WsConnectionMetrics {
 pub struct UsageMetrics {
     pub tokens_input: Option<i64>,
     pub tokens_output: Option<i64>,
+    pub context_window_used_max: Option<i64>,
     pub context_window_max: Option<i64>,
 }
 
@@ -657,16 +658,16 @@ impl StateStore {
     }
 
     fn usage_metrics(&self, window: &MetricsWindow) -> Result<UsageMetrics> {
-        // Sum across all `usage.reported` events. Agents that don't emit these
-        // leave every field None. The `MAX(context_window_max)` keeps the
-        // largest context size seen in the window — most agents emit this as
-        // a static capability per session.
+        // Sum token counters across all `usage.reported` events. Agents that
+        // don't emit these leave every field None. Context fields use MAX
+        // because standard ACP usage updates report snapshots, not deltas.
         let row = self
             .connection()
             .query_row(
                 "SELECT \
                     SUM(CAST(json_extract(payload_json, '$.input_tokens') AS INTEGER)), \
                     SUM(CAST(json_extract(payload_json, '$.output_tokens') AS INTEGER)), \
+                    MAX(CAST(json_extract(payload_json, '$.context_window_used') AS INTEGER)), \
                     MAX(CAST(json_extract(payload_json, '$.context_window_max') AS INTEGER)) \
                  FROM events \
                  WHERE kind = 'usage.reported' AND created_at >= ?1 AND created_at < ?2",
@@ -675,7 +676,8 @@ impl StateStore {
                     Ok(UsageMetrics {
                         tokens_input: row.get(0)?,
                         tokens_output: row.get(1)?,
-                        context_window_max: row.get(2)?,
+                        context_window_used_max: row.get(2)?,
+                        context_window_max: row.get(3)?,
                     })
                 },
             )

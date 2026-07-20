@@ -1148,6 +1148,40 @@ async fn metrics_summary_exposes_prompt_failure_breakdowns() {
 }
 
 #[tokio::test]
+async fn metrics_summary_exposes_maximum_context_window_usage() {
+    let harness = ServerHarness::spawn().await;
+    {
+        let guard = harness.state.lock().await;
+        for used in [1024, 4096, 2048] {
+            guard
+                .append_event_with_source(
+                    "info",
+                    "usage.reported",
+                    acp_stack::state::EVENT_SOURCE_ACP,
+                    "agent usage reported",
+                    &serde_json::json!({
+                        "context_window_used": used,
+                        "context_window_max": 32768
+                    })
+                    .to_string(),
+                )
+                .expect("append usage event");
+        }
+    }
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/metrics/summary?since=1h", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["data"]["usage"]["context_window_used_max"], 4096);
+    assert_eq!(body["data"]["usage"]["context_window_max"], 32768);
+}
+
+#[tokio::test]
 async fn metrics_summary_exposes_api_request_breakdowns() {
     let harness = ServerHarness::spawn().await;
     {

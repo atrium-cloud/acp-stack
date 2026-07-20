@@ -133,6 +133,7 @@ pub(crate) struct MetricsWsConnectionsJson {
 pub(crate) struct MetricsUsageJson {
     tokens_input: Option<i64>,
     tokens_output: Option<i64>,
+    context_window_used_max: Option<i64>,
     context_window_max: Option<i64>,
 }
 
@@ -272,6 +273,7 @@ impl From<crate::state::MetricsSummary> for MetricsSummaryResponse {
             usage: MetricsUsageJson {
                 tokens_input: summary.usage.tokens_input,
                 tokens_output: summary.usage.tokens_output,
+                context_window_used_max: summary.usage.context_window_used_max,
                 context_window_max: summary.usage.context_window_max,
             },
         }

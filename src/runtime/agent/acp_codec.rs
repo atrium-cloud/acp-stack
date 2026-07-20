@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agent_client_protocol::RequestCancellation;
 use agent_client_protocol::schema::v1::{
     Meta, NewSessionResponse, PermissionOptionId, ReadTextFileRequest, ReadTextFileResponse,
     RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
@@ -23,6 +24,10 @@ use crate::runtime::agent::session_sink::SessionEventSink;
 use crate::runtime::mediation::permissions::{
     NewPermission, PermissionOutcome, PermissionService, PermissionSource,
 };
+
+/// Stable audit reason shared by the durable permission decision and its
+/// published cancellation event when ACP `$/cancel_request` wins the race.
+const ACP_REQUEST_CANCELLED_REASON: &str = "acp-request-cancelled";
 use crate::state::StateStore;
 
 use super::acp_bridge::{NotificationDrain, NotificationGuard};
@@ -214,13 +219,14 @@ fn session_config_option_values(option: &SessionConfigOption) -> Vec<String> {
 
 /// Forward a `session/request_permission` request through the durable
 /// PermissionService, await the decision, and translate the result back to
-/// the ACP `RequestPermissionOutcome`. Falls back to `Cancelled` on every
-/// failure so the agent's prompt turn always settles deterministically.
+/// the ACP `RequestPermissionOutcome`. ACP request cancellation atomically
+/// settles the durable permission before returning JSON-RPC `-32800`.
 pub(crate) async fn resolve_acp_permission(
     service: &PermissionService,
     sink: &Arc<dyn SessionEventSink>,
     request: RequestPermissionRequest,
-) -> RequestPermissionOutcome {
+    cancellation: Option<RequestCancellation>,
+) -> std::result::Result<RequestPermissionOutcome, agent_client_protocol::Error> {
     // Serialize the full request for the durable detail record. The schema
     // type is JSON-friendly; failure here only happens for non-JSON-safe
     // values, which the schema does not contain.
@@ -228,19 +234,19 @@ pub(crate) async fn resolve_acp_permission(
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(error = %err, "failed to serialize permission request");
-            return RequestPermissionOutcome::Cancelled;
+            return Err(agent_client_protocol::Error::internal_error());
         }
     };
     let agent_session_id = request.session_id.0.to_string();
     let Some(session_id) = sink.local_session_id(&agent_session_id).await else {
-        return RequestPermissionOutcome::Cancelled;
+        return Ok(RequestPermissionOutcome::Cancelled);
     };
     let first_option_id = request
         .options
         .first()
         .map(|opt| opt.option_id.0.to_string());
 
-    let (_record, rx) = match service
+    let (record, mut rx) = match service
         .request(NewPermission {
             source: PermissionSource::Acp,
             requester: Some(format!("session:{session_id}")),
@@ -252,21 +258,49 @@ pub(crate) async fn resolve_acp_permission(
         Ok(pair) => pair,
         Err(err) => {
             tracing::warn!(error = %err, "permission service rejected ACP passthrough");
-            return RequestPermissionOutcome::Cancelled;
+            return Err(agent_client_protocol::Error::internal_error());
         }
     };
 
-    match rx.await {
+    let outcome = tokio::select! {
+        outcome = &mut rx => outcome,
+        () = wait_for_request_cancellation(cancellation) => {
+            match service
+                .cancel_if_pending(&record.id, ACP_REQUEST_CANCELLED_REASON)
+                .await
+            {
+                Ok(true) => return Err(agent_client_protocol::Error::request_cancelled()),
+                Ok(false) => rx.await,
+                Err(error) => {
+                    tracing::warn!(error = %error, permission_id = %record.id, "failed to persist ACP permission cancellation");
+                    return Err(agent_client_protocol::Error::internal_error());
+                }
+            }
+        }
+    };
+
+    match outcome {
         Ok(PermissionOutcome::Approved { option_id, .. }) => {
             let chosen = option_id.or(first_option_id);
-            match chosen {
+            Ok(match chosen {
                 Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                     PermissionOptionId::new(id),
                 )),
                 None => RequestPermissionOutcome::Cancelled,
-            }
+            })
         }
-        _ => RequestPermissionOutcome::Cancelled,
+        Ok(_) => Ok(RequestPermissionOutcome::Cancelled),
+        Err(error) => {
+            tracing::warn!(error = %error, permission_id = %record.id, "ACP permission waiter closed before a decision");
+            Err(agent_client_protocol::Error::internal_error())
+        }
+    }
+}
+
+async fn wait_for_request_cancellation(cancellation: Option<RequestCancellation>) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancelled().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -574,10 +608,9 @@ mod tests {
         let request = fake_request("sess_test");
         let service_for_task = service.clone();
         let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
-        let outcome_task =
-            tokio::spawn(
-                async move { resolve_acp_permission(&service_for_task, &sink, request).await },
-            );
+        let outcome_task = tokio::spawn(async move {
+            resolve_acp_permission(&service_for_task, &sink, request, None).await
+        });
 
         // Drain the new permission row + approve it.
         let mut id = None;
@@ -595,7 +628,10 @@ mod tests {
             .await
             .expect("approve");
 
-        let outcome = outcome_task.await.expect("task joins");
+        let outcome = outcome_task
+            .await
+            .expect("task joins")
+            .expect("permission response");
         match outcome {
             RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
                 assert_eq!(option_id.0.as_ref(), "allow");
@@ -610,10 +646,9 @@ mod tests {
         let request = fake_request("sess_test");
         let service_for_task = service.clone();
         let sink: Arc<dyn SessionEventSink> = Arc::new(RecordingSink::default());
-        let outcome_task =
-            tokio::spawn(
-                async move { resolve_acp_permission(&service_for_task, &sink, request).await },
-            );
+        let outcome_task = tokio::spawn(async move {
+            resolve_acp_permission(&service_for_task, &sink, request, None).await
+        });
 
         let mut id = None;
         for _ in 0..50 {
@@ -630,7 +665,10 @@ mod tests {
             .await
             .expect("deny");
 
-        let outcome = outcome_task.await.expect("task joins");
+        let outcome = outcome_task
+            .await
+            .expect("task joins")
+            .expect("permission response");
         assert!(matches!(outcome, RequestPermissionOutcome::Cancelled));
     }
 

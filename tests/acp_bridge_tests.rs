@@ -94,6 +94,86 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
 }
 
 #[tokio::test]
+async fn spawn_sends_client_identity() {
+    let mut config = fake_agent_config();
+    config.args.push("--require-client-info".into());
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+        None,
+    )
+    .await
+    .expect("placebo accepted clientInfo");
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn spawn_rejects_an_incompatible_protocol_version() {
+    let mut config = fake_agent_config();
+    config.args.push("--initialize-protocol-v0".into());
+    let error = match AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+        None,
+    )
+    .await
+    {
+        Ok(bridge) => {
+            bridge.shutdown().await.expect("shutdown ok");
+            panic!("protocol v0 must be rejected");
+        }
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        acp_stack::error::StackError::AgentInitializeFailed { .. }
+    ));
+    assert!(error.to_string().contains("agent returned 0"), "{error}");
+}
+
+#[tokio::test]
+async fn new_session_rejects_unadvertised_http_mcp_transport() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
+
+    let bridge = AcpBridge::spawn(
+        &fake_agent_config(),
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+        None,
+    )
+    .await
+    .expect("spawn");
+    let error = bridge
+        .new_session(
+            std::env::temp_dir(),
+            vec![McpServer::Http(McpServerHttp::new(
+                "test-http",
+                "https://example.invalid/mcp",
+            ))],
+        )
+        .await
+        .expect_err("HTTP MCP requires an advertised capability");
+    assert!(matches!(
+        error,
+        acp_stack::error::StackError::AgentUnsupportedCapability {
+            name: "mcpCapabilities.http"
+        }
+    ));
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
 async fn shutdown_terminates_the_child() {
     let bridge = AcpBridge::spawn(
         &fake_agent_config(),
@@ -252,6 +332,102 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
     let payload = sink.events.lock().unwrap()[0].payload.clone();
     assert!(payload.contains("chunk-1"));
 
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn prompt_rejects_unadvertised_image_content() {
+    use agent_client_protocol::schema::v1::{ContentBlock, ImageContent, PromptRequest, SessionId};
+
+    let bridge = AcpBridge::spawn(
+        &fake_agent_config(),
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        None,
+        &Default::default(),
+        None,
+    )
+    .await
+    .expect("spawn");
+    let error = bridge
+        .prompt_session(PromptRequest::new(
+            SessionId::new("sess_prompt_capability"),
+            vec![ContentBlock::Image(ImageContent::new(
+                "aW1hZ2U=",
+                "image/png",
+            ))],
+        ))
+        .await
+        .expect_err("image content requires an advertised capability");
+    assert!(matches!(
+        error,
+        acp_stack::error::StackError::AgentUnsupportedCapability {
+            name: "promptCapabilities.image"
+        }
+    ));
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
+    use std::time::Duration;
+
+    use acp_stack::config::PermissionTimeoutAction;
+    use acp_stack::events::EventHub;
+    use acp_stack::runtime::mediation::permissions::PermissionService;
+    use acp_stack::state::StateStore;
+    use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, SessionId, TextContent};
+    use tokio::sync::Mutex as TokioMutex;
+
+    let state_dir = tempfile::tempdir().expect("state tempdir");
+    let store = StateStore::open(state_dir.path().join("state.sqlite")).expect("open state");
+    store.migrate().expect("migrate state");
+    let state = Arc::new(TokioMutex::new(store));
+    let events = EventHub::new();
+    let mut event_rx = events.subscribe();
+    let permissions = PermissionService::new(
+        state,
+        events,
+        Duration::from_secs(60),
+        PermissionTimeoutAction::Deny,
+    );
+    let mut config = fake_agent_config();
+    config.args.push("--request-permission-then-cancel".into());
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        Some(permissions),
+        &Default::default(),
+        None,
+    )
+    .await
+    .expect("spawn");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        bridge.prompt_session(PromptRequest::new(
+            SessionId::new("sess_permission_cancel"),
+            vec![ContentBlock::Text(TextContent::new("cancel permission"))],
+        )),
+    )
+    .await
+    .expect("permission did not block prompt dispatch")
+    .expect("prompt response");
+
+    let canceled = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = event_rx.recv().await.expect("permission event");
+            if event.topic == "permissions" && event.payload["kind"] == "permission.canceled" {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("durable permission cancellation event");
+    assert_eq!(canceled.payload["data"]["reason"], "acp-request-cancelled");
     bridge.shutdown().await.expect("shutdown ok");
 }
 
@@ -1147,6 +1323,27 @@ async fn terminal_kill_terminates_but_output_remains_readable() {
     );
     // Output was read AFTER the kill and is still the buffered content.
     assert_eq!(report["output"], "started");
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn terminal_wait_cancellation_preserves_the_terminal() {
+    let (report, bridge, _sink) = run_terminal_probe(
+        &[
+            "--terminal-command",
+            "sh",
+            "--terminal-arg=-c",
+            "--terminal-arg=printf started; sleep 30",
+            "--terminal-cancel-wait",
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(report["cancelled_wait_error_code"], -32800);
+    assert_eq!(report["output_after_cancel_ok"], true);
+    assert_eq!(report["output"], "started");
+    assert!(report["signal"].is_string());
+    assert_eq!(report["post_release_error_code"], RESOURCE_NOT_FOUND_CODE);
     bridge.shutdown().await.expect("shutdown ok");
 }
 

@@ -268,6 +268,16 @@ impl PermissionService {
             .map(|_| ())
     }
 
+    /// Cancel only while the durable request is still pending. Returns false
+    /// when another decider won the atomic state transition first.
+    pub async fn cancel_if_pending(&self, id: &str, reason: &str) -> Result<bool> {
+        match self.cancel(id, reason).await {
+            Ok(()) => Ok(true),
+            Err(StackError::InvalidPermissionTransition { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn pending(&self, limit: u32) -> Result<Vec<PermissionRequestView>> {
         let state = self.state.lock().await;
         let rows = state.query_pending_permissions(limit)?;
@@ -664,5 +674,34 @@ mod tests {
             .expect("cancel");
         let outcome = rx.await.expect("recv");
         assert!(matches!(outcome, PermissionOutcome::Canceled { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancel_if_pending_reports_a_lost_decision_race() {
+        let (_dir, service) = fresh_service(PermissionTimeoutAction::Deny);
+        let (record, rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Acp,
+                requester: None,
+                subject_id: None,
+                detail: json!({}),
+            })
+            .await
+            .expect("request");
+        service
+            .approve(&record.id, Some("allow".to_owned()), None, "session-key")
+            .await
+            .expect("approve");
+
+        assert!(
+            !service
+                .cancel_if_pending(&record.id, "acp-request-cancelled")
+                .await
+                .expect("race result")
+        );
+        assert!(matches!(
+            rx.await.expect("recv"),
+            PermissionOutcome::Approved { .. }
+        ));
     }
 }
