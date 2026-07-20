@@ -330,6 +330,67 @@ pub(super) fn row_to_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<PromptR
 }
 
 impl StateStore {
+    /// Apply a partial ACP `session_info_update` to an existing local session.
+    /// The outer `Option` distinguishes an omitted field from an explicit
+    /// `null`; all unrelated metadata keys are preserved.
+    pub fn update_session_info(
+        &self,
+        id: &str,
+        title: Option<Option<&str>>,
+        agent_updated_at: Option<Option<&str>>,
+        agent_meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<()> {
+        let record = self
+            .get_session(id)?
+            .ok_or_else(|| StackError::SessionNotFound { id: id.to_owned() })?;
+        let mut metadata = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
+            .map_err(|err| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: err.to_string(),
+            })?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: "expected a JSON object".to_owned(),
+            })?;
+
+        if let Some(agent_updated_at) = agent_updated_at {
+            metadata.insert(
+                "agent_updated_at".to_owned(),
+                agent_updated_at
+                    .map(|value| serde_json::Value::String(value.to_owned()))
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if let Some(agent_meta) = agent_meta {
+            metadata.insert(
+                "agent_meta".to_owned(),
+                serde_json::Value::Object(agent_meta.clone()),
+            );
+        }
+
+        let title = title
+            .map(|value| value.map(str::to_owned))
+            .unwrap_or(record.title);
+        let metadata_json = serde_json::Value::Object(metadata).to_string();
+        let now = current_timestamp();
+        self.persist_with_outbox("sessions", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE sessions
+                SET title = ?1, metadata_json = ?2, updated_at = ?3
+                WHERE id = ?4
+                "#,
+                params![title, metadata_json, now, id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::SessionNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })
+    }
+
     pub fn query_sessions(&self, filter: SessionFilter<'_>) -> Result<Vec<SessionRecord>> {
         let mut sql = String::from(
             "SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json \

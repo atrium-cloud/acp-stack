@@ -27,19 +27,17 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentNotification, CancelNotification, ClientCapabilities, ClientSessionCapabilities,
-    CloseSessionRequest, CreateTerminalRequest, FileSystemCapabilities, ForkSessionResponse,
-    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigOptionsCapabilities,
-    SessionConfigValueId, SessionId, SessionInfo, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
-    WriteTextFileRequest,
+    CloseSessionRequest, ContentBlock, CreateTerminalRequest, FileSystemCapabilities,
+    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, SessionConfigOptionCategory,
+    SessionConfigOptionsCapabilities, SessionConfigValueId, SessionId, SessionInfo,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TerminalOutputRequest,
+    WaitForTerminalExitRequest, WriteTextFileRequest,
 };
-use agent_client_protocol::{
-    Agent, Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest, UntypedMessage,
-};
+use agent_client_protocol::{Agent, Client, ConnectionTo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::{Child, Command};
@@ -191,20 +189,75 @@ impl AgentCapabilitiesDto {
             .and_then(Value::as_object)
             .and_then(|caps| caps.get("fork"))
             .and_then(Value::as_object);
-        fork.and_then(|fork| fork.get("messageId"))
+        fork.and_then(|fork| fork.get("_meta"))
+            .and_then(Value::as_object)
+            .and_then(|meta| meta.get("acpStack"))
+            .and_then(Value::as_object)
+            .and_then(|stack| stack.get("messageId"))
             .is_some_and(Value::is_object)
-            || fork
-                .and_then(|fork| fork.get("_meta"))
-                .and_then(Value::as_object)
-                .and_then(|meta| meta.get("acpStack"))
-                .and_then(Value::as_object)
-                .and_then(|stack| stack.get("messageId"))
-                .is_some_and(Value::is_object)
-            || fork
-                .and_then(|fork| fork.get("_meta"))
-                .and_then(Value::as_object)
-                .and_then(|fork| fork.get("messageId"))
-                .is_some_and(Value::is_object)
+    }
+
+    fn supports_prompt_capability(&self, name: &str) -> bool {
+        self.capabilities
+            .get("promptCapabilities")
+            .and_then(Value::as_object)
+            .and_then(|capabilities| capabilities.get(name))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn supports_mcp_capability(&self, name: &str) -> bool {
+        self.capabilities
+            .get("mcpCapabilities")
+            .and_then(Value::as_object)
+            .and_then(|capabilities| capabilities.get(name))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn validate_prompt(&self, prompt: &[ContentBlock]) -> Result<()> {
+        for block in prompt {
+            let required = match block {
+                ContentBlock::Text(_) | ContentBlock::ResourceLink(_) => None,
+                ContentBlock::Image(_) => Some(("image", "promptCapabilities.image")),
+                ContentBlock::Audio(_) => Some(("audio", "promptCapabilities.audio")),
+                ContentBlock::Resource(_) => {
+                    Some(("embeddedContext", "promptCapabilities.embeddedContext"))
+                }
+                _ => {
+                    return Err(StackError::AgentUnsupportedCapability {
+                        name: "promptCapabilities.unknown",
+                    });
+                }
+            };
+            if let Some((capability, error_name)) = required
+                && !self.supports_prompt_capability(capability)
+            {
+                return Err(StackError::AgentUnsupportedCapability { name: error_name });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_mcp_servers(&self, servers: &[McpServer]) -> Result<()> {
+        for server in servers {
+            let required = match server {
+                McpServer::Stdio(_) => None,
+                McpServer::Http(_) => Some(("http", "mcpCapabilities.http")),
+                McpServer::Sse(_) => Some(("sse", "mcpCapabilities.sse")),
+                _ => {
+                    return Err(StackError::AgentUnsupportedCapability {
+                        name: "mcpCapabilities.unknown",
+                    });
+                }
+            };
+            if let Some((capability, error_name)) = required
+                && !self.supports_mcp_capability(capability)
+            {
+                return Err(StackError::AgentUnsupportedCapability { name: error_name });
+            }
+        }
+        Ok(())
     }
 
     fn supports_session_capability(&self, name: &str) -> bool {
@@ -224,11 +277,7 @@ impl AgentCapabilitiesDto {
                 reason: format!("failed to serialize agent capabilities: {err}"),
             }
         })?;
-        let protocol_version = serde_json::to_value(response.protocol_version)
-            .ok()
-            .and_then(|v| v.as_u64())
-            .and_then(|v| u16::try_from(v).ok())
-            .unwrap_or(1);
+        let protocol_version = response.protocol_version.as_u16();
         let (agent_name, agent_title, agent_version) = match serde_json::to_value(response) {
             Ok(Value::Object(map)) => {
                 let info = map.get("agentInfo").cloned().unwrap_or(Value::Null);
@@ -557,18 +606,30 @@ impl AcpBridge {
             let run = Client
                 .builder()
                 .on_receive_request(
-                    async move |request: RequestPermissionRequest, responder, _cx| {
-                        let outcome = match permissions_for_task.as_ref() {
-                            Some(service) => {
-                                resolve_acp_permission(service, &permission_sink, request).await
+                    async move |request: RequestPermissionRequest, responder, cx| {
+                        let permissions = permissions_for_task.clone();
+                        let sink = permission_sink.clone();
+                        let cancellation = responder.cancellation();
+                        cx.spawn(async move {
+                            let outcome = match permissions.as_ref() {
+                                Some(service) => {
+                                    resolve_acp_permission(
+                                        service,
+                                        &sink,
+                                        request,
+                                        Some(cancellation),
+                                    )
+                                    .await
+                                }
+                                None => Ok(RequestPermissionOutcome::Cancelled),
+                            };
+                            match outcome {
+                                Ok(outcome) => {
+                                    responder.respond(RequestPermissionResponse::new(outcome))
+                                }
+                                Err(error) => responder.respond_with_error(error),
                             }
-                            None => {
-                                // No permission service attached — tests that
-                                // never decide must not block the agent.
-                                RequestPermissionOutcome::Cancelled
-                            }
-                        };
-                        responder.respond(RequestPermissionResponse::new(outcome))
+                        })
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -604,10 +665,18 @@ impl AcpBridge {
                 .on_receive_request(
                     async move |request: WaitForTerminalExitRequest, responder, cx| {
                         let context = Arc::clone(&wait_context);
+                        let cancellation = responder.cancellation();
                         cx.spawn(async move {
-                            match handle_wait_for_terminal_exit(&context.registry, request).await {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
+                            tokio::select! {
+                                result = handle_wait_for_terminal_exit(&context.registry, request) => {
+                                    match result {
+                                        Ok(response) => responder.respond(response),
+                                        Err(error) => responder.respond_with_error(error),
+                                    }
+                                }
+                                () = cancellation.cancelled() => {
+                                    responder.respond_with_error(agent_client_protocol::Error::request_cancelled())
+                                }
                             }
                         })
                     },
@@ -700,7 +769,11 @@ impl AcpBridge {
                     let response = cx
                         .send_request(
                             InitializeRequest::new(ProtocolVersion::V1)
-                                .client_capabilities(client_capabilities()),
+                                .client_capabilities(client_capabilities())
+                                .client_info(Implementation::new(
+                                    "acp-stack",
+                                    env!("CARGO_PKG_VERSION"),
+                                )),
                         )
                         .block_task()
                         .await
@@ -782,7 +855,23 @@ impl AcpBridge {
             }
         };
 
-        let capabilities = AgentCapabilitiesDto::from_initialize_response(&init_response)?;
+        if init_response.protocol_version != ProtocolVersion::V1 {
+            let returned = init_response.protocol_version.as_u16();
+            fail_spawn(&mut child, connection_task).await;
+            return Err(StackError::AgentInitializeFailed {
+                reason: format!(
+                    "requested ACP protocol version {} but agent returned {returned}",
+                    ProtocolVersion::V1.as_u16()
+                ),
+            });
+        }
+        let capabilities = match AgentCapabilitiesDto::from_initialize_response(&init_response) {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                fail_spawn(&mut child, connection_task).await;
+                return Err(error);
+            }
+        };
         let child = Arc::new(TokioMutex::new(Some(child)));
         spawn_child_exit_watcher(
             Arc::clone(&child),
@@ -851,6 +940,7 @@ impl AcpBridge {
         cwd: PathBuf,
         mcp_servers: Vec<McpServer>,
     ) -> Result<NewSessionResponse> {
+        self.capabilities.validate_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let mut request = NewSessionRequest::new(cwd);
         request.mcp_servers = mcp_servers;
@@ -882,13 +972,12 @@ impl AcpBridge {
                 name: "session/fork.messageId",
             });
         }
+        self.capabilities.validate_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
-        let request = StackForkSessionRequest {
-            session_id,
-            cwd,
-            mcp_servers,
-            message_id,
-        };
+        let mut request = ForkSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
+        if let Some(message_id) = message_id {
+            request = request.meta(prompt_message_id_meta(&message_id));
+        }
         connection
             .send_request(request)
             .block_task()
@@ -968,6 +1057,7 @@ impl AcpBridge {
                 name: "session/load",
             });
         }
+        self.capabilities.validate_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         connection
@@ -995,6 +1085,7 @@ impl AcpBridge {
                 name: "session/resume",
             });
         }
+        self.capabilities.validate_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         connection
@@ -1038,6 +1129,7 @@ impl AcpBridge {
     /// vetted reason label, and the generic fallback uses a sanitized message
     /// to avoid leaking URLs / headers / bodies / secrets into the state row.
     pub async fn prompt_session(&self, request: PromptRequest) -> Result<PromptResponse> {
+        self.capabilities.validate_prompt(&request.prompt)?;
         let connection = self.connection().await?;
         match connection.send_request(request).block_task().await {
             Ok(response) => Ok(response),
@@ -1170,47 +1262,6 @@ impl AcpBridge {
         // enqueueing its row. Only then is it safe to close the sink.
         self.sink.flush().await;
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StackForkSessionRequest {
-    session_id: SessionId,
-    cwd: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    mcp_servers: Vec<McpServer>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_id: Option<String>,
-}
-
-impl JsonRpcMessage for StackForkSessionRequest {
-    fn matches_method(method: &str) -> bool {
-        method == "session/fork"
-    }
-
-    fn method(&self) -> &str {
-        "session/fork"
-    }
-
-    fn to_untyped_message(
-        &self,
-    ) -> std::result::Result<UntypedMessage, agent_client_protocol::Error> {
-        UntypedMessage::new("session/fork", self)
-    }
-
-    fn parse_message(
-        method: &str,
-        params: &impl Serialize,
-    ) -> std::result::Result<Self, agent_client_protocol::Error> {
-        if method != "session/fork" {
-            return Err(agent_client_protocol::Error::method_not_found());
-        }
-        agent_client_protocol::util::json_cast_params(params)
-    }
-}
-
-impl JsonRpcRequest for StackForkSessionRequest {
-    type Response = ForkSessionResponse;
 }
 
 /// Capabilities advertised to every agent at initialize. Each flag flips only

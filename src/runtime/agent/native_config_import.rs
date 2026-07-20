@@ -32,7 +32,7 @@ use crate::runtime::agent::agent_headless_config::{
     OPENCODE_PERMISSION_ROOTS, OPENCODE_POLICY_ROOTS, PI_EXECUTABLE_COMMAND_ROOTS,
     PI_EXECUTABLE_PLUGIN_ROOTS, PI_PERMISSION_ROOTS,
 };
-use crate::runtime::agent::mcp::resolve_mcp_servers;
+use crate::runtime::agent::mcp::validate_mcp_secret_refs;
 use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
     apply_mapped_agent_provider, canonical_provider_id_for_agent_native_id,
@@ -950,7 +950,7 @@ fn validate_native_config_secret_refs_with_store(
         &prepared.canonical_config,
         secrets,
     )?;
-    resolve_mcp_servers(&prepared.canonical_config.mcp, secrets)?;
+    validate_mcp_secret_refs(&prepared.canonical_config.mcp, secrets)?;
     Ok(())
 }
 

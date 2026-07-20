@@ -4,7 +4,7 @@
 
 ## Initialization
 
-When the agent starts, the bridge initializes ACP and records the advertised capabilities. Capability snapshots are exposed through the API and used to decide which session operations are available.
+When the agent starts, the bridge initializes ACP v1 with `clientInfo.name = "acp-stack"` and the running package version, then records the advertised capabilities. The agent must return protocol version 1; any other version closes the provisional connection before the agent becomes ready. Capability snapshots are exposed through the API and used to decide which session operations are available.
 
 Initialization failure prevents the agent from becoming ready and is reported in agent status.
 
@@ -59,7 +59,7 @@ If an agent does not advertise an optional capability, the corresponding runtime
 - `session/resume` requires `supports_resume_session`
 - `session/fork` requires `supports_fork_session`
 
-Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Forking at a prompt breakpoint also requires explicit `sessionCapabilities.fork.messageId` support, advertised either as a `messageId` object on the fork capability or under its `_meta` (`_meta.acpStack.messageId` or `_meta.messageId`); otherwise only current-head fork is allowed. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio is the ACP baseline. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
 ### Prompt Message IDs (local extension)
 
@@ -67,7 +67,7 @@ ACP v1 assigns message ids on agent-emitted update chunks but has no client-prop
 
 - `session/prompt` requests carry `_meta.acpStack.messageId` with a runtime-generated id.
 - An agent that recorded the id acknowledges it by echoing the same `_meta.acpStack.messageId` shape on the `session/prompt` response. Only acknowledged ids are accepted as fork breakpoints.
-- `session/fork` requests carry the breakpoint as a top-level `messageId` param.
+- `session/fork` requests carry the breakpoint as `_meta.acpStack.messageId`.
 
 Before ACP 1.0 this extension used the SDK's unstable top-level `messageId`/`userMessageId` prompt fields; agents still speaking that pre-1.0 shape are not acknowledged and therefore cannot be forked at a breakpoint.
 
@@ -97,11 +97,11 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 
 ACP `session/update` notifications are persisted as durable events and published to WebSocket subscribers. Explicit `type: "diff"` tool-call content is also reduced into the bounded process-local snapshot returned by `GET /v1/sessions/{id}/changes`; no diff is inferred from tool kind, locations, filesystem calls, or Git. Prompt submission returns quickly with a prompt id; clients can follow live updates or poll durable prompt state.
 
-Two derived events are lifted out of the verbatim `session.update` stream when the payload shape is recognized: `usage.reported` (normalized token/context usage) and `tool.execute` (a `tool_call`/`tool_call_update` block whose kind is `execute` — the shell runs an agent performs through its own built-in tools rather than client terminals, with the command line extracted from `rawInput.command` when present). `tool.execute` fires on every update that states the execute kind; ACP only requires `kind` on the initial `tool_call`, so completion transitions typically remain visible only in the verbatim rows.
+Two derived events are lifted out of the verbatim `session.update` stream when the payload shape is recognized: `usage.reported` (standard ACP context-window/cost snapshots plus recognized legacy token usage) and `tool.execute` (a `tool_call`/`tool_call_update` block whose kind is `execute` — the shell runs an agent performs through its own built-in tools rather than client terminals, with the command line extracted from `rawInput.command` when present). Standard `session_info_update` notifications also patch the local session title and preserve agent timestamps and metadata in the session record. `tool.execute` fires on every update that states the execute kind; ACP only requires `kind` on the initial `tool_call`, so completion transitions typically remain visible only in the verbatim rows.
 
 ## Permissions
 
-ACP permission requests flow into the same permission system used by mediated commands. Decisions are recorded and returned to the agent through ACP.
+ACP permission requests flow into the same permission system used by mediated commands. The durable wait runs outside the ACP dispatch loop so other updates and requests continue while a decision is pending. Protocol cancellation atomically cancels a still-pending permission and returns the standard request-cancelled error; an operator or timeout decision that wins the race is returned normally.
 
 ## MCP Servers
 

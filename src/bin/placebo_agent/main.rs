@@ -6,24 +6,22 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
-    CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest, ForkSessionResponse,
-    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-    ReadTextFileRequest, ReleaseTerminalRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
-    SessionForkCapabilities, SessionId, SessionInfo, SessionListCapabilities, SessionNotification,
-    SessionResumeCapabilities, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, TerminalId, TerminalOutputRequest, TextContent,
+    CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest, ForkSessionRequest,
+    ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
+    PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionRequest,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionInfo,
+    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TerminalId,
+    TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WriteTextFileRequest,
 };
-use agent_client_protocol::{
-    Agent, Client, ConnectionTo, Dispatch, Error, Handled, JsonRpcMessage, JsonRpcRequest,
-    Responder, UntypedMessage,
-};
+use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Error, Handled, Responder};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -118,6 +116,10 @@ struct AcpArgs {
     #[arg(long)]
     initialize_error: bool,
     #[arg(long)]
+    initialize_protocol_v0: bool,
+    #[arg(long)]
+    require_client_info: bool,
+    #[arg(long)]
     session_new_error: bool,
     #[arg(long)]
     session_new_stall: bool,
@@ -131,6 +133,8 @@ struct AcpArgs {
     prompt_response_delay_ms: Option<u64>,
     #[arg(long)]
     prompt_stall_after_update: bool,
+    #[arg(long)]
+    request_permission_then_cancel: bool,
     #[arg(long)]
     session_list_paginated: bool,
     #[arg(long)]
@@ -161,6 +165,10 @@ struct AcpArgs {
     /// exit.
     #[arg(long)]
     terminal_kill: bool,
+    /// Cancel the first wait request, verify the terminal remains usable,
+    /// then kill and complete the normal wait/release lifecycle.
+    #[arg(long)]
+    terminal_cancel_wait: bool,
     /// Create the terminal and leave it running: no wait, kill, or release.
     /// Exercises the client's shutdown kill-and-release path.
     #[arg(long)]
@@ -397,6 +405,14 @@ async fn handle_initialize(
     if state.args.initialize_error {
         return responder.respond_with_error(Error::new(-32000, "fake initialize failure"));
     }
+    if state.args.require_client_info {
+        let Some(client_info) = request.client_info.as_ref() else {
+            return responder.respond_with_error(Error::new(-32000, "missing clientInfo"));
+        };
+        if client_info.name != "acp-stack" || client_info.version != env!("CARGO_PKG_VERSION") {
+            return responder.respond_with_error(Error::new(-32000, "unexpected clientInfo"));
+        }
+    }
     state.client_capabilities = Some(request.client_capabilities.clone());
     let mut session_capabilities = SessionCapabilities::new();
     if !state.args.no_cap_list_session {
@@ -424,9 +440,10 @@ async fn handle_initialize(
         .prompt_capabilities(PromptCapabilities::new())
         .session_capabilities(session_capabilities);
     responder.respond(
-        InitializeResponse::new(match request.protocol_version {
-            ProtocolVersion::V1 => ProtocolVersion::V1,
-            _ => ProtocolVersion::V1,
+        InitializeResponse::new(if state.args.initialize_protocol_v0 {
+            ProtocolVersion::V0
+        } else {
+            ProtocolVersion::V1
         })
         .agent_capabilities(capabilities)
         .agent_info(
@@ -571,19 +588,26 @@ async fn handle_close_session(
 
 async fn handle_fork_session(
     state: SharedState,
-    request: PlaceboForkSessionRequest,
+    request: ForkSessionRequest,
     responder: Responder<ForkSessionResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
-    let PlaceboForkSessionRequest {
+    let ForkSessionRequest {
         session_id: _parent_session_id,
         cwd,
+        additional_directories: _additional_directories,
         mcp_servers: _mcp_servers,
-        message_id: _message_id,
+        meta,
+        ..
     } = request;
+    let message_id = meta
+        .as_ref()
+        .and_then(|meta| meta.get("acpStack"))
+        .and_then(|stack| stack.get("messageId"))
+        .and_then(serde_json::Value::as_str);
     let mut state = state.lock().await;
     if let Some(expected) = state.args.expect_fork_message_id.as_deref()
-        && _message_id.as_deref() != Some(expected)
+        && message_id != Some(expected)
     {
         return responder.respond_with_error(Error::new(
             -32000,
@@ -614,6 +638,35 @@ async fn handle_prompt(
     }
     if let Some(message) = args.prompt_inference_error {
         return responder.respond_with_error(Error::new(-32000, message));
+    }
+    if args.request_permission_then_cancel {
+        let permission_request = RequestPermissionRequest::new(
+            request.session_id.clone(),
+            ToolCallUpdate::new("tool_permission_cancel", ToolCallUpdateFields::new()),
+            vec![PermissionOption::new(
+                "allow",
+                "Allow",
+                PermissionOptionKind::AllowOnce,
+            )],
+        );
+        let permission = connection.send_request(permission_request);
+        permission.cancel()?;
+        let state_for_task = Arc::clone(&state);
+        return connection.spawn(async move {
+            let Some(error) = permission.block_task().await.err() else {
+                return responder.respond_with_error(Error::new(
+                    -32000,
+                    "cancelled permission returned a successful response",
+                ));
+            };
+            if error.code != agent_client_protocol::ErrorCode::RequestCancelled {
+                return responder.respond_with_error(Error::new(
+                    -32000,
+                    format!("cancelled permission returned error {}", error.code),
+                ));
+            }
+            finish_prompt(state_for_task, request, responder).await
+        });
     }
     {
         let state = state.lock().await;
@@ -824,7 +877,30 @@ async fn run_terminal_probe(
         report.insert("orphaned".to_owned(), serde_json::json!(true));
         return Ok(report);
     }
-    if args.terminal_kill {
+    if args.terminal_cancel_wait {
+        let wait = connection.send_request(WaitForTerminalExitRequest::new(
+            session_id.clone(),
+            terminal_id.clone(),
+        ));
+        wait.cancel()?;
+        let error = wait.block_task().await.err();
+        report.insert(
+            "cancelled_wait_error_code".to_owned(),
+            serde_json::json!(error.map(|error| error.code)),
+        );
+        let output = connection
+            .send_request(TerminalOutputRequest::new(
+                session_id.clone(),
+                terminal_id.clone(),
+            ))
+            .block_task()
+            .await?;
+        report.insert(
+            "output_after_cancel_ok".to_owned(),
+            serde_json::json!(!output.truncated),
+        );
+    }
+    if args.terminal_kill || args.terminal_cancel_wait {
         // Poll until the child has produced output before killing, so the
         // output-stays-readable-after-kill assertion is deterministic.
         for _ in 0..100 {
@@ -931,42 +1007,6 @@ async fn finish_prompt(
         response = response.meta(meta);
     }
     responder.respond(response)
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PlaceboForkSessionRequest {
-    session_id: SessionId,
-    cwd: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_id: Option<String>,
-}
-
-impl JsonRpcMessage for PlaceboForkSessionRequest {
-    fn matches_method(method: &str) -> bool {
-        method == "session/fork"
-    }
-
-    fn method(&self) -> &str {
-        "session/fork"
-    }
-
-    fn to_untyped_message(&self) -> std::result::Result<UntypedMessage, Error> {
-        UntypedMessage::new("session/fork", self)
-    }
-
-    fn parse_message(method: &str, params: &impl Serialize) -> std::result::Result<Self, Error> {
-        if method != "session/fork" {
-            return Err(Error::method_not_found());
-        }
-        agent_client_protocol::util::json_cast_params(params)
-    }
-}
-
-impl JsonRpcRequest for PlaceboForkSessionRequest {
-    type Response = ForkSessionResponse;
 }
 
 async fn handle_cancel(

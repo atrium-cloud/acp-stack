@@ -2502,6 +2502,15 @@ fn metrics_summary_exposes_usage_and_websocket_metrics() {
         )
         .unwrap();
     store
+        .append_event_with_source(
+            "info",
+            "usage.reported",
+            "acp",
+            "",
+            r#"{"context_window_used":4096,"context_window_max":16384,"cost_amount":1.25,"cost_currency":"USD"}"#,
+        )
+        .unwrap();
+    store
         .append_event_with_source("info", "ws.client_connected", "api", "", "{}")
         .unwrap();
     store
@@ -2534,6 +2543,7 @@ fn metrics_summary_exposes_usage_and_websocket_metrics() {
 
     assert_eq!(summary.usage.tokens_input, Some(130));
     assert_eq!(summary.usage.tokens_output, Some(50));
+    assert_eq!(summary.usage.context_window_used_max, Some(4096));
     assert_eq!(summary.usage.context_window_max, Some(32768));
     assert_eq!(summary.ws_connections.connections_opened, Some(1));
     assert_eq!(summary.ws_connections.connections_closed, Some(2));

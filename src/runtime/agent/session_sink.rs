@@ -9,7 +9,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::SessionUpdate;
+use agent_client_protocol::schema::{MaybeUndefined, v1::SessionUpdate};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
@@ -94,17 +94,48 @@ struct SessionEventRow {
     payload_json: String,
 }
 
-/// Normalize the agent's reported token/context usage if the inbound
-/// `session/update` payload carries it. ACP itself has no standard shape, so
-/// we recognize the conventions used by Claude and other agents: a `usage`
-/// object reachable at the top level, under `update.usage`, or under
-/// `prompt_response.usage`. Fields outside `input_tokens`, `output_tokens`,
-/// and `context_window_max` (also accepting the legacy `context_window`
-/// alias) are ignored. Returns `None` if none of those fields parse as a
-/// positive integer — callers must not emit a `usage.reported` event in that
-/// case because every aggregate would still be null.
+/// Normalize standard ACP `usage_update` notifications and the legacy usage
+/// objects emitted by older agents. Returns `None` when no recognized,
+/// non-negative usage fields are present.
 fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    if let Some(update) = value.get("update")
+        && update
+            .get("sessionUpdate")
+            .and_then(serde_json::Value::as_str)
+            == Some("usage_update")
+    {
+        let context_window_used = read_token_field(update, "used")?;
+        let context_window_max = read_token_field(update, "size")?;
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "session_id".to_owned(),
+            serde_json::Value::String(session_id.to_owned()),
+        );
+        out.insert(
+            "context_window_used".to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(context_window_used)),
+        );
+        out.insert(
+            "context_window_max".to_owned(),
+            serde_json::Value::Number(serde_json::Number::from(context_window_max)),
+        );
+        if let Some(cost) = update.get("cost") {
+            if let Some(amount) = cost.get("amount").and_then(serde_json::Value::as_f64)
+                && let Some(amount) = serde_json::Number::from_f64(amount)
+            {
+                out.insert("cost_amount".to_owned(), serde_json::Value::Number(amount));
+            }
+            if let Some(currency) = cost.get("currency").and_then(serde_json::Value::as_str) {
+                out.insert(
+                    "cost_currency".to_owned(),
+                    serde_json::Value::String(currency.to_owned()),
+                );
+            }
+        }
+        return Some(serde_json::Value::Object(out));
+    }
+
     let usage = locate_usage_object(&value)?;
     let input_tokens = read_token_field(usage, "input_tokens");
     let output_tokens = read_token_field(usage, "output_tokens");
@@ -137,6 +168,52 @@ fn extract_usage_payload(session_id: &str, payload_json: &str) -> Option<serde_j
         );
     }
     Some(serde_json::Value::Object(out))
+}
+
+/// Apply the local projection of a standard ACP `session_info_update` after
+/// its verbatim `session.update` event is durable. The raw event is the source
+/// of truth; projection failure is logged by the writer and never removes it.
+fn project_session_info_update(
+    store: &StateStore,
+    session_id: &str,
+    payload_json: &str,
+) -> crate::error::Result<()> {
+    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "session.update",
+            reason: err.to_string(),
+        }
+    })?;
+    let Some(update) = payload.get("update") else {
+        return Ok(());
+    };
+    if update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+        != Some("session_info_update")
+    {
+        return Ok(());
+    }
+    let update = serde_json::from_value::<SessionUpdate>(update.clone()).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "session.update.update",
+            reason: err.to_string(),
+        }
+    })?;
+    let SessionUpdate::SessionInfoUpdate(info) = update else {
+        return Ok(());
+    };
+    let title = match &info.title {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(None),
+        MaybeUndefined::Value(value) => Some(Some(value.as_str())),
+    };
+    let agent_updated_at = match &info.updated_at {
+        MaybeUndefined::Undefined => None,
+        MaybeUndefined::Null => Some(None),
+        MaybeUndefined::Value(value) => Some(Some(value.as_str())),
+    };
+    store.update_session_info(session_id, title, agent_updated_at, info.meta.as_ref())
 }
 
 /// Derive a `tool.execute` event when the inbound `session/update` is a
@@ -277,6 +354,15 @@ impl StateStoreSessionSink {
                     &row.payload_json,
                 ) {
                     Ok(_event) => {
+                        if let Err(err) =
+                            project_session_info_update(&guard, &row.session_id, &row.payload_json)
+                        {
+                            tracing::warn!(
+                                error = %err,
+                                session_id = %row.session_id,
+                                "failed to apply ACP session info update"
+                            );
+                        }
                         // Re-touch the in-flight prompt's `updated_at` so the
                         // stale-prompt sweeper does not flip an actively
                         // streaming prompt to `Stalled`. ACP notifications
@@ -295,11 +381,8 @@ impl StateStoreSessionSink {
                         // `append_session_event_with_source` now fans the
                         // persisted event out to both the `logs` topic and
                         // `sessions.{id}` itself; no explicit republish here.
-                        // Best-effort token / context usage capture. ACP does
-                        // not standardize a usage shape, but Claude (and
-                        // others) emit it on `update.usage.*` or on prompt
-                        // completion. Persist a normalized `usage.reported`
-                        // event when we recognize the shape; ignore otherwise.
+                        // Persist normalized standard ACP context usage and
+                        // recognized legacy token usage; ignore unknown shapes.
                         if let Some(usage) =
                             extract_usage_payload(&row.session_id, &row.payload_json)
                             && let Ok(usage_text) = serde_json::to_string(&usage)
@@ -523,6 +606,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_usage_payload_normalizes_standard_usage_update() {
+        let payload = r#"{"sessionId":"agent_sess","update":{"sessionUpdate":"usage_update","used":4096,"size":32768,"cost":{"amount":1.25,"currency":"USD"}}}"#;
+        let usage =
+            super::extract_usage_payload("sess_local", payload).expect("standard usage extracted");
+        assert_eq!(usage["session_id"], "sess_local");
+        assert_eq!(usage["context_window_used"], 4096);
+        assert_eq!(usage["context_window_max"], 32768);
+        assert_eq!(usage["cost_amount"], 1.25);
+        assert_eq!(usage["cost_currency"], "USD");
+        assert!(usage.get("input_tokens").is_none());
+    }
+
+    #[test]
     fn extract_usage_payload_returns_none_when_shape_unknown() {
         assert!(super::extract_usage_payload("sess_z", "{}").is_none());
         assert!(super::extract_usage_payload("sess_z", r#"{"update":{"foo":"bar"}}"#).is_none());
@@ -700,6 +796,184 @@ mod tests {
             })
             .expect("query verbatim events");
         assert_eq!(verbatim.len(), 1, "expected the verbatim session.update");
+    }
+
+    #[tokio::test]
+    async fn writer_persists_normalized_standard_usage_event() {
+        use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session_for_target(
+                "target_a",
+                "agent_sess_1".to_owned(),
+                NewSessionRecord {
+                    id: "sess_local".to_owned(),
+                    agent_id: "target_a".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    title: None,
+                    metadata_json: "{}".to_owned(),
+                },
+            )
+            .expect("session inserted");
+        let state = Arc::new(TokioMutex::new(store));
+        let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+        let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"usage_update","used":2048,"size":8192,"cost":{"amount":0.75,"currency":"EUR"}}}"#;
+        sink.append("agent_sess_1", "session.update", payload).await;
+        sink.flush().await;
+
+        let guard = state.lock().await;
+        let events = guard
+            .query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("usage.reported"),
+                source: Some("acp"),
+                ..Default::default()
+            })
+            .expect("query usage events");
+        assert_eq!(events.len(), 1);
+        let usage: serde_json::Value =
+            serde_json::from_str(&events[0].payload_json).expect("usage JSON");
+        assert_eq!(usage["context_window_used"], 2048);
+        assert_eq!(usage["context_window_max"], 8192);
+        assert_eq!(usage["cost_amount"], 0.75);
+        assert_eq!(usage["cost_currency"], "EUR");
+    }
+
+    #[test]
+    fn session_info_updates_patch_title_and_agent_metadata() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session_for_target(
+                "target_a",
+                "agent_sess_1".to_owned(),
+                NewSessionRecord {
+                    id: "sess_local".to_owned(),
+                    agent_id: "target_a".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    title: Some("original".to_owned()),
+                    metadata_json: r#"{"preserved":true,"agent_meta":{"old":true}}"#.to_owned(),
+                },
+            )
+            .expect("session inserted");
+        let metadata_update = serde_json::json!({
+            "sessionId": "agent_sess_1",
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "updatedAt": "2026-07-20T01:02:03Z",
+                "_meta": {"origin": "agent"}
+            }
+        });
+        super::project_session_info_update(&store, "sess_local", &metadata_update.to_string())
+            .expect("metadata projection");
+        {
+            let session = store
+                .get_session("sess_local")
+                .expect("session lookup")
+                .expect("session exists");
+            assert_eq!(session.title.as_deref(), Some("original"));
+            assert_ne!(session.updated_at, "2026-07-20T01:02:03Z");
+            let metadata: serde_json::Value =
+                serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+            assert_eq!(metadata["preserved"], true);
+            assert_eq!(metadata["agent_updated_at"], "2026-07-20T01:02:03Z");
+            assert_eq!(metadata["agent_meta"]["origin"], "agent");
+        }
+
+        let clear_update = serde_json::json!({
+            "sessionId": "agent_sess_1",
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "title": null,
+                "updatedAt": null
+            }
+        });
+        super::project_session_info_update(&store, "sess_local", &clear_update.to_string())
+            .expect("clear projection");
+        {
+            let session = store
+                .get_session("sess_local")
+                .expect("session lookup")
+                .expect("session exists");
+            assert_eq!(session.title, None);
+            let metadata: serde_json::Value =
+                serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+            assert!(metadata["agent_updated_at"].is_null());
+            assert_eq!(metadata["agent_meta"]["origin"], "agent");
+            assert_eq!(metadata["preserved"], true);
+        }
+
+        let title_update = serde_json::json!({
+            "sessionId": "agent_sess_1",
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "title": "renamed"
+            }
+        });
+        super::project_session_info_update(&store, "sess_local", &title_update.to_string())
+            .expect("title projection");
+        let session = store
+            .get_session("sess_local")
+            .expect("session lookup")
+            .expect("session exists");
+        assert_eq!(session.title.as_deref(), Some("renamed"));
+        let metadata: serde_json::Value =
+            serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+        assert!(metadata["agent_updated_at"].is_null());
+        assert_eq!(metadata["agent_meta"]["origin"], "agent");
+        assert_eq!(metadata["preserved"], true);
+    }
+
+    #[tokio::test]
+    async fn writer_keeps_raw_session_info_when_projection_fails() {
+        use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+        use std::sync::Arc;
+        use tokio::sync::Mutex as TokioMutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session_for_target(
+                "target_a",
+                "agent_sess_1".to_owned(),
+                NewSessionRecord {
+                    id: "sess_local".to_owned(),
+                    agent_id: "target_a".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    title: Some("original".to_owned()),
+                    metadata_json: "[]".to_owned(),
+                },
+            )
+            .expect("session inserted");
+        let state = Arc::new(TokioMutex::new(store));
+        let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+        let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"session_info_update","title":"renamed"}}"#;
+
+        sink.append("agent_sess_1", "session.update", payload).await;
+        sink.flush().await;
+
+        let guard = state.lock().await;
+        let events = guard
+            .query_events(crate::state::LogFilter {
+                limit: 10,
+                kind: Some("session.update"),
+                source: Some("acp"),
+                ..Default::default()
+            })
+            .expect("query raw events");
+        assert_eq!(events.len(), 1);
+        let session = guard
+            .get_session("sess_local")
+            .expect("session lookup")
+            .expect("session exists");
+        assert_eq!(session.title.as_deref(), Some("original"));
     }
 
     #[tokio::test]

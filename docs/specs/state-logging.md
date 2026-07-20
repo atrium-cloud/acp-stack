@@ -136,12 +136,12 @@ Unknown category labels are rejected with a 4xx `invalid_param`.
 - `security.auth_failures`, `security.by_reason`, `security.events_by_kind`
 - `api_connections.request_count`, average duration, and count maps by status bucket, method, route template, key kind, event source, origin kind, country code, and region code
 - `ws_connections.connections_opened`, `connections_closed`, `average_duration_ms`
-- `usage.tokens_input`, `usage.tokens_output`, `usage.context_window_max`
+- `usage.tokens_input`, `usage.tokens_output`, `usage.context_window_used_max`, `usage.context_window_max`
 - `prompt_failures.total`, explicit `failure_class` counters, `by_class`, `by_status_code`, and `by_reason_category`
 
 `prompt_failures` counts terminal `errored` and `stalled` prompt rows by `failure_class` using `prompts.updated_at` for the metrics window. The inference breakdowns are derived from sanitized `prompt.inference_failed` events.
 
-Usage fields stay `null` when the configured agent does not report them. The shape is additive: existing keys remain stable as new dimensions are added.
+Usage fields stay `null` when the configured agent does not report them. Standard ACP `usage_update` notifications provide context-window snapshots; `context_window_used_max` is the largest reported usage in the requested metrics window. Cumulative cost remains in the durable usage event rather than being aggregated across sessions or currencies. The shape is additive: existing keys remain stable as new dimensions are added.
 
 ## External Logging
 

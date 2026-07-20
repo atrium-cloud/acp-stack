@@ -36,7 +36,10 @@ const EVENTS_PAYLOAD_KEEP: &[&str] = &[
     "exit_code",
     "input_tokens",
     "output_tokens",
+    "context_window_used",
     "context_window_max",
+    "cost_amount",
+    "cost_currency",
     "agent_id",
     "command_id",
     "request_id",
@@ -297,6 +300,28 @@ mod tests {
         assert!(payload.get("Authorization").is_none());
         let serialized = serde_json::to_string(&row).expect("serialize");
         assert!(!serialized.contains("sk-nested"));
+    }
+
+    #[test]
+    fn events_payload_preserves_normalized_acp_usage_fields() {
+        let mut row = obj(json!({
+            "id": "evt_usage",
+            "kind": "usage.reported",
+            "payload_json": {
+                "context_window_used": 4096,
+                "context_window_max": 32768,
+                "cost_amount": 1.25,
+                "cost_currency": "USD",
+                "untrusted_detail": "drop me"
+            }
+        }));
+        redact_row("events", &mut row).expect("redact events");
+        let payload = row.get("payload_json").and_then(Value::as_object).unwrap();
+        assert_eq!(payload.get("context_window_used"), Some(&json!(4096)));
+        assert_eq!(payload.get("context_window_max"), Some(&json!(32768)));
+        assert_eq!(payload.get("cost_amount"), Some(&json!(1.25)));
+        assert_eq!(payload.get("cost_currency"), Some(&json!("USD")));
+        assert!(payload.get("untrusted_detail").is_none());
     }
 
     #[test]

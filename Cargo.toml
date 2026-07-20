@@ -77,7 +77,7 @@ rustls = "0.23.40"
 tokio-postgres = { version = "0.7.15", features = ["with-serde_json-1"] }
 tokio-postgres-rustls = "0.13.0"
 webpki-roots = "1.0.7"
-agent-client-protocol = { version = "1.1.0", features = ["unstable_session_fork"] }
+agent-client-protocol = { version = "1.2.0", features = ["unstable_session_fork"] }
 sha2 = "0.10"
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 futures = "0.3"

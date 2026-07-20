@@ -1,6 +1,6 @@
 # MCP Compatibility
 
-`acp-stack` attaches configured MCP servers to ACP sessions. MCP declarations live in config, use secret refs for credentials, and are resolved when a session is created, loaded, or resumed.
+`acp-stack` attaches configured MCP servers to ACP sessions. MCP declarations live in config, use secret refs for credentials, and are resolved when a session is created, loaded, resumed, or forked. Portable stdio command names are resolved to absolute executable paths before they cross the ACP boundary.
 
 ## Declaration Scope
 
@@ -50,6 +50,8 @@ acps secrets set LINEAR_API_KEY
 ## Validation And Health
 
 Config validation rejects duplicate server names, unsupported URL schemes, empty stdio commands, empty HTTP header names, and invalid secret-ref names.
+
+Native-config import validates secret references without requiring stdio executables to be installed yet. Session attachment resolves each stdio command and fails with `config.invalid` before dispatch when it is missing or not executable. HTTP attachment additionally requires the agent to advertise `mcpCapabilities.http`.
 
 `GET /v1/health/ready` reports MCP declaration health:
 
