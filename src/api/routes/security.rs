@@ -119,8 +119,9 @@ pub(crate) async fn security_check_handler(
         dependency_failures.len(),
     );
     let sandbox = &state.config.workspace.sandbox;
+    let network_provider = crate::extensions::resolve_network_provider(&state.config);
     let sandbox_unavailable_reason = if sandbox.mode != crate::config::SandboxMode::Off {
-        crate::runtime::sandbox::preflight(sandbox).err()
+        crate::runtime::sandbox::preflight(sandbox, network_provider.as_ref()).err()
     } else {
         None
     };

@@ -102,7 +102,10 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     // host, refuse to serve rather than start a daemon that silently fails the
     // security posture at the first agent spawn.
     if config.workspace.sandbox.mode != config::SandboxMode::Off
-        && let Err(reason) = crate::runtime::sandbox::preflight(&config.workspace.sandbox)
+        && let Err(reason) = crate::runtime::sandbox::preflight(
+            &config.workspace.sandbox,
+            crate::extensions::resolve_network_provider(&config).as_ref(),
+        )
     {
         return Err(crate::error::StackError::SandboxFailed { reason });
     }

@@ -1132,6 +1132,61 @@ pub fn env_ref_allows_provider(env_var: &str, provider_id: &str) -> bool {
         })
 }
 
+/// Validate env-keyed credential values against a provider's canonical env-var
+/// contract. `field` attributes rejections to the caller's input field.
+///
+/// The supplied keys must include the canonical API-key env var and every
+/// required companion, and may include the provider's optional env vars;
+/// anything else is rejected rather than guessed at, because a guessed mapping
+/// would surface later as a spawn-time env resolution failure instead of a
+/// clear rejection here.
+pub fn validate_env_keyed_credential_values(
+    provider_id: &str,
+    values: &BTreeMap<String, String>,
+    field: &'static str,
+) -> Result<()> {
+    let Some(primary_env) = env_var_for_provider_id(provider_id) else {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!(
+                "provider `{provider_id}` has no canonical API-key env var; env-keyed credential values cannot be applied to it"
+            ),
+        });
+    };
+    let companions = companion_env_refs_for_provider_id(provider_id);
+    let optional = optional_env_refs_for_provider_id(provider_id);
+    for required in std::iter::once(primary_env).chain(companions.iter().copied()) {
+        if !values.contains_key(required) {
+            return Err(StackError::InvalidParam {
+                field,
+                reason: format!(
+                    "provider `{provider_id}` requires env var `{required}`; it is missing from the supplied values"
+                ),
+            });
+        }
+    }
+    for (name, value) in values {
+        let allowed = name == primary_env
+            || companions.iter().any(|companion| companion == name)
+            || optional.iter().any(|optional_ref| optional_ref == name);
+        if !allowed {
+            return Err(StackError::InvalidParam {
+                field,
+                reason: format!(
+                    "env var `{name}` is not part of provider `{provider_id}`'s credential contract"
+                ),
+            });
+        }
+        if value.is_empty() {
+            return Err(StackError::InvalidParam {
+                field,
+                reason: format!("value for env var `{name}` must not be empty"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn dedupe_refs(refs: Vec<&'static str>) -> Vec<&'static str> {
     let mut seen = HashSet::new();
     refs.into_iter().filter(|name| seen.insert(*name)).collect()
@@ -1974,5 +2029,93 @@ agents = ["pi"]
         assert_eq!(snapshot.env_names, vec!["CUSTOM_KEY".to_owned()]);
         assert!(snapshot.revision.is_none());
         assert!(snapshot.alias.is_none());
+    }
+
+    fn invalid_param_reason(error: StackError) -> String {
+        match error {
+            StackError::InvalidParam { reason, .. } => reason,
+            other => panic!("expected InvalidParam, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_keyed_values_accept_canonical_single_key() {
+        let values = BTreeMap::from([("OPENAI_API_KEY".to_owned(), "sk-value".to_owned())]);
+        validate_env_keyed_credential_values("openai", &values, "test.values")
+            .expect("canonical single-key credential is valid");
+    }
+
+    #[test]
+    fn env_keyed_values_reject_unknown_provider() {
+        let values = BTreeMap::from([("SOME_KEY".to_owned(), "value".to_owned())]);
+        let error =
+            validate_env_keyed_credential_values("no-such-provider", &values, "test.values")
+                .expect_err("unknown provider must be rejected");
+        assert!(invalid_param_reason(error).contains("no canonical API-key env var"));
+    }
+
+    #[test]
+    fn env_keyed_values_reject_missing_required_companion() {
+        let primary = env_var_for_provider_id("cloudflare-ai-gateway")
+            .expect("cloudflare-ai-gateway has a canonical env var");
+        let companions = companion_env_refs_for_provider_id("cloudflare-ai-gateway");
+        assert!(
+            !companions.is_empty(),
+            "fixture provider must require companions"
+        );
+        let values = BTreeMap::from([(primary.to_owned(), "cf-key".to_owned())]);
+        let error =
+            validate_env_keyed_credential_values("cloudflare-ai-gateway", &values, "test.values")
+                .expect_err("missing companion must be rejected");
+        assert!(invalid_param_reason(error).contains(companions[0]));
+    }
+
+    #[test]
+    fn env_keyed_values_accept_full_companion_set() {
+        let primary = env_var_for_provider_id("cloudflare-ai-gateway")
+            .expect("cloudflare-ai-gateway has a canonical env var");
+        let mut values = BTreeMap::from([(primary.to_owned(), "cf-key".to_owned())]);
+        for companion in companion_env_refs_for_provider_id("cloudflare-ai-gateway") {
+            values.insert(companion.to_owned(), "companion-value".to_owned());
+        }
+        validate_env_keyed_credential_values("cloudflare-ai-gateway", &values, "test.values")
+            .expect("full companion set is valid");
+    }
+
+    #[test]
+    fn env_keyed_values_reject_key_outside_contract() {
+        let values = BTreeMap::from([
+            ("OPENAI_API_KEY".to_owned(), "sk-value".to_owned()),
+            ("UNRELATED_ENV".to_owned(), "value".to_owned()),
+        ]);
+        let error = validate_env_keyed_credential_values("openai", &values, "test.values")
+            .expect_err("key outside the provider contract must be rejected");
+        assert!(invalid_param_reason(error).contains("UNRELATED_ENV"));
+    }
+
+    #[test]
+    fn env_keyed_values_allow_optional_env_vars() {
+        let optional = optional_env_refs_for_provider_id("azure-openai-responses");
+        assert!(
+            !optional.is_empty(),
+            "fixture provider must have optional env vars"
+        );
+        let primary = env_var_for_provider_id("azure-openai-responses")
+            .expect("azure-openai-responses has a canonical env var");
+        let mut values = BTreeMap::from([(primary.to_owned(), "az-key".to_owned())]);
+        for companion in companion_env_refs_for_provider_id("azure-openai-responses") {
+            values.insert(companion.to_owned(), "companion-value".to_owned());
+        }
+        values.insert(optional[0].to_owned(), "optional-value".to_owned());
+        validate_env_keyed_credential_values("azure-openai-responses", &values, "test.values")
+            .expect("optional env vars are allowed");
+    }
+
+    #[test]
+    fn env_keyed_values_reject_empty_value() {
+        let values = BTreeMap::from([("OPENAI_API_KEY".to_owned(), String::new())]);
+        let error = validate_env_keyed_credential_values("openai", &values, "test.values")
+            .expect_err("empty value must be rejected");
+        assert!(invalid_param_reason(error).contains("must not be empty"));
     }
 }

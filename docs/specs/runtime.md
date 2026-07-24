@@ -14,7 +14,7 @@ When `[workspace.sandbox]` is enabled, the agent process and mediated shells are
 
 ### Network-isolated spawns
 
-With `[workspace.sandbox.network] mode = "isolated"` (unshare backend only), each wrapped spawn is supervised by the hidden `acps __sandbox-supervise` process, which the daemon spawns in place of the direct `unshare` chain. Host networking keeps the direct chain unchanged. The supervisor:
+With a `network-provider` extension declared (unshare backend only; see [extensions.md](extensions.md)), each wrapped spawn is supervised by the hidden `acps __sandbox-supervise` process, which the daemon spawns in place of the direct `unshare` chain. With no declared instance, host networking keeps the direct chain unchanged. The supervisor:
 
 1. Creates a private sync socketpair and spawns the existing `unshare` chain with `--net` added, injecting the runtime-only `--sync-fd` into the in-namespace `__sandbox-exec` helper.
 2. Waits for the helper's readiness byte (sent after tmpfs masking, before privilege drop), which proves the namespaces exist, then opens `/proc/<unshare-pid>/ns/net` and holds the fd for the whole spawn — this keeps the namespace alive without bind mounts and stays valid through teardown. It also opens and revalidates a pidfd for the blocked helper; later direct workload signals use that stable handle rather than a reusable numeric PID.

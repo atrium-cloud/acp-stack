@@ -1983,22 +1983,56 @@ fn rejects_duration_field_exceeding_epoch_floor() {
 }
 
 #[test]
-fn rejects_network_isolation_outside_unshare() {
+fn removed_sandbox_network_block_gets_migration_error() {
+    // The former `[workspace.sandbox.network]` block moved to the extensions
+    // framework; any occurrence must fail fast with a pointer at the new form.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [workspace.sandbox.network]\n\
+         mode = \"isolated\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("the removed network block must fail with a migration error");
+    assert!(err.to_string().contains("network-provider"), "got: {err}");
+    assert!(
+        err.to_string().contains("[extensions.<name>]"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_network_provider_extension_outside_unshare() {
     for mode in ["off", "bwrap"] {
         let config_text = format!(
             "{VALID_CONFIG}\n\
              [workspace.sandbox]\n\
              mode = \"{mode}\"\n\
-             [workspace.sandbox.network]\n\
-             mode = \"isolated\"\n"
+             [extensions.egress]\n\
+             type = \"network-provider\"\n"
         );
         let err = load_config_from_str(&config_text)
-            .expect_err("network isolation must require the unshare backend");
-        assert!(
-            err.to_string().contains("workspace.sandbox.network"),
-            "got: {err}"
-        );
+            .expect_err("a network-provider extension must require the unshare backend");
+        assert!(err.to_string().contains("unshare"), "got: {err}");
+        assert!(err.to_string().contains("egress"), "got: {err}");
     }
+}
+
+#[test]
+fn rejects_multiple_network_provider_extensions() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [extensions.egress-a]\n\
+         type = \"network-provider\"\n\
+         [extensions.egress-b]\n\
+         type = \"network-provider\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("more than one network-provider extension must be rejected");
+    assert!(err.to_string().contains("at most one"), "got: {err}");
 }
 
 #[test]
@@ -2007,17 +2041,13 @@ fn rejects_empty_network_provider_argv_entries() {
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"isolated\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
          provider = [\"/usr/local/libexec/provider\", \" \"]\n"
     );
     let err = load_config_from_str(&config_text)
         .expect_err("whitespace provider argv entries must be rejected");
-    assert!(
-        err.to_string()
-            .contains("workspace.sandbox.network.provider"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("non-empty"), "got: {err}");
 }
 
 #[test]
@@ -2026,8 +2056,8 @@ fn rejects_relative_network_provider_executable() {
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"isolated\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
          provider = [\"acps-network-provider\"]\n"
     );
     let err = load_config_from_str(&config_text)
@@ -2036,23 +2066,83 @@ fn rejects_relative_network_provider_executable() {
 }
 
 #[test]
-fn rejects_host_network_mode_with_provider_settings() {
-    // A host-mode block carrying provider fields would print as configured
-    // isolation while enforcing nothing.
+fn rejects_capability_on_network_provider_extension() {
+    // A managed-state field on a network-provider instance would look
+    // configured while enforcing nothing.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"host\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         capability = \"provider-credential\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("capability on a network-provider extension must be rejected");
+    assert!(
+        err.to_string().contains("managed-state field"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_provider_fields_on_managed_state_extension() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n\
+         capability = \"provider-credential\"\n\
          provider = [\"/usr/local/libexec/provider\"]\n"
     );
     let err = load_config_from_str(&config_text)
-        .expect_err("host networking with provider settings must be rejected");
+        .expect_err("provider argv on a managed-state extension must be rejected");
     assert!(
-        err.to_string().contains("workspace.sandbox.network"),
+        err.to_string().contains("network-provider field"),
         "got: {err}"
     );
+}
+
+#[test]
+fn managed_state_extension_requires_known_capability() {
+    let missing = format!(
+        "{VALID_CONFIG}\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n"
+    );
+    let err = load_config_from_str(&missing)
+        .expect_err("managed-state without a capability must be rejected");
+    assert!(err.to_string().contains("capability"), "got: {err}");
+
+    let unknown = format!(
+        "{VALID_CONFIG}\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n\
+         capability = \"telemetry\"\n"
+    );
+    let err = load_config_from_str(&unknown)
+        .expect_err("an unknown managed-state capability must be rejected");
+    assert!(
+        err.to_string().contains("unknown managed-state capability"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_invalid_extension_names() {
+    for name in ["\"UPPER\"", "\"has_underscore\"", "\"trailing-\""] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [extensions.{name}]\n\
+             type = \"managed-state\"\n\
+             capability = \"provider-credential\"\n"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("extension names outside the conservative charset must be rejected");
+        assert!(
+            err.to_string().contains("lowercase alphanumeric"),
+            "name {name} got: {err}"
+        );
+    }
 }
 
 #[test]
@@ -2061,17 +2151,13 @@ fn rejects_zero_network_provider_timeout() {
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"isolated\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
          provider_timeout = \"0s\"\n"
     );
     let err =
         load_config_from_str(&config_text).expect_err("zero provider_timeout must be rejected");
-    assert!(
-        err.to_string()
-            .contains("workspace.sandbox.network.provider_timeout"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("greater than zero"), "got: {err}");
 }
 
 #[test]
@@ -2080,55 +2166,74 @@ fn rejects_invalid_network_provider_timeout() {
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"isolated\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
          provider_timeout = \"soon\"\n"
     );
     let err =
         load_config_from_str(&config_text).expect_err("garbage provider_timeout must be rejected");
     assert!(
-        err.to_string()
-            .contains("workspace.sandbox.network.provider_timeout"),
+        err.to_string().contains("extensions.provider_timeout"),
         "got: {err}"
     );
 }
 
 #[test]
-fn isolated_network_config_round_trips_and_defaults() {
+fn network_provider_extension_round_trips_and_defaults() {
     // Empty provider is legal (deny-all networking); timeout falls back to 30s.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"isolated\"\n"
+         [extensions.egress]\n\
+         type = \"network-provider\"\n"
     );
-    let config = load_config_from_str(&config_text).expect("isolated network config parses");
-    assert!(config.workspace.sandbox.network.is_isolated());
-    assert!(config.workspace.sandbox.network.provider.is_empty());
-    assert_eq!(
-        config.workspace.sandbox.network.provider_timeout_raw(),
-        "30s"
-    );
+    let config = load_config_from_str(&config_text).expect("network-provider extension parses");
+    let network = acp_stack::extensions::resolve_network_provider(&config)
+        .expect("declared network-provider resolves");
+    assert_eq!(network.name, "egress");
+    assert!(network.provider.is_empty());
+    assert_eq!(network.provider_timeout_raw(), "30s");
 
     let canonical = config.to_canonical_toml().expect("canonical export");
-    let reparsed = load_config_from_str(&canonical).expect("canonical network config parses");
-    assert_eq!(reparsed.workspace.sandbox, config.workspace.sandbox);
+    assert!(
+        canonical.contains("[extensions.egress]"),
+        "extensions must round-trip through canonical TOML, got:\n{canonical}"
+    );
+    let reparsed = load_config_from_str(&canonical).expect("canonical extension config parses");
+    assert_eq!(reparsed.extensions, config.extensions);
 }
 
 #[test]
-fn host_network_serializes_to_absent_block() {
+fn network_provider_and_managed_state_extensions_coexist() {
+    // `resolve_network_provider` filters by type; a managed-state sibling
+    // must not affect resolution and both must survive the round-trip.
     let config_text = format!(
         "{VALID_CONFIG}\n\
          [workspace.sandbox]\n\
          mode = \"unshare\"\n\
-         [workspace.sandbox.network]\n\
-         mode = \"host\"\n"
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n\
+         capability = \"provider-credential\"\n"
     );
-    let config = load_config_from_str(&config_text).expect("host network config parses");
+    let config = load_config_from_str(&config_text).expect("both extension types parse");
+    let network = acp_stack::extensions::resolve_network_provider(&config)
+        .expect("network-provider resolves next to a managed-state sibling");
+    assert_eq!(network.name, "egress");
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical config parses");
+    assert_eq!(reparsed.extensions.len(), 2);
+}
+
+#[test]
+fn absent_extensions_serialize_to_absent_table() {
+    let config = load_config_from_str(VALID_CONFIG).expect("base config parses");
+    assert!(config.extensions.is_empty());
     let canonical = config.to_canonical_toml().expect("canonical export");
     assert!(
-        !canonical.contains("[workspace.sandbox.network]"),
-        "host networking must round-trip to an absent block, got:\n{canonical}"
+        !canonical.contains("[extensions"),
+        "an empty extensions table must round-trip to an absent table, got:\n{canonical}"
     );
 }

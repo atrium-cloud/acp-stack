@@ -16,6 +16,7 @@ use super::array::ArrayCommand;
 use super::auth::AuthCommand;
 use super::config::ConfigCommand;
 use super::deps::DepsCommand;
+use super::extensions::ExtensionsCommand;
 #[cfg(feature = "dev-tools")]
 use super::init::InitArgs;
 use super::init::{InitCommand, InitMode};
@@ -164,6 +165,14 @@ enum Command {
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
+    },
+    /// Inspect declared extension instances.
+    #[command(after_help = "Examples:
+  acps extensions status
+  acps extensions status --format json")]
+    Extensions {
+        #[command(subcommand)]
+        command: ExtensionsCommand,
     },
     /// Manage multi-agent Array targets.
     #[command(after_help = "Examples:
@@ -338,6 +347,9 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Restart(args) => super::agent::run_agent_restart(args, output.effective()),
         Command::Workspace { command } => {
             super::workspace::run_workspace_command(command, output.effective())
+        }
+        Command::Extensions { command } => {
+            super::extensions::run_extensions_command(command, output.effective())
         }
         Command::Array { command } => super::array::run_array_command(command, output.effective()),
         Command::Subagent { command } => {

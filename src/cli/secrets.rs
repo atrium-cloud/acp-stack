@@ -1,5 +1,5 @@
 use crate::error::{Result, StackError};
-use crate::fs_util::home_dir;
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, home_dir};
 use crate::secrets::{SecretStore, reject_auth_ref_mutation};
 use clap::{Args, Subcommand};
 use std::io::BufRead as _;
@@ -63,6 +63,11 @@ pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat)
             validate_local_admin_key(&admin_key)?;
             reject_auth_ref_mutation(&name)?;
             let value = resolve_secret_value(args.value, &name, stdin_is_terminal)?;
+            // The store is a whole-file read-modify-write; serialize with the
+            // daemon and other acps processes so concurrent writers cannot
+            // silently drop each other's entries.
+            let _mutation =
+                acquire_agent_config_mutation_file_lock(&crate::config::default_config_path()?)?;
             let mut store = SecretStore::open(&home)?;
             store.set(&name, &value)?;
             if output.is_json() {
@@ -76,6 +81,8 @@ pub(super) fn run_secrets_command(command: SecretsCommand, output: OutputFormat)
             let admin_key = resolve_admin_key(args.admin_key, std::io::stdin().is_terminal())?;
             validate_local_admin_key(&admin_key)?;
             reject_auth_ref_mutation(&args.name)?;
+            let _mutation =
+                acquire_agent_config_mutation_file_lock(&crate::config::default_config_path()?)?;
             let mut store = SecretStore::open(&home)?;
             store.delete(&args.name)?;
             if output.is_json() {

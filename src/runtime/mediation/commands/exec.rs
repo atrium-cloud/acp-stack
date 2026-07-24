@@ -26,6 +26,7 @@ pub(crate) fn sandboxed_program(
     program: &Path,
     args: &[String],
     sandbox: &crate::config::SandboxConfig,
+    network: Option<&crate::extensions::NetworkProviderExtension>,
     workspace_root: &Path,
 ) -> std::io::Result<(PathBuf, Vec<String>)> {
     if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
@@ -34,6 +35,7 @@ pub(crate) fn sandboxed_program(
     let home = crate::fs_util::home_dir().map_err(std::io::Error::other)?;
     let wrapped = crate::runtime::sandbox::wrap(
         sandbox,
+        network,
         program,
         args,
         &home,
@@ -51,6 +53,7 @@ pub(crate) fn spawn_child(
     cwd: &ResolvedCommandCwd,
     env: Option<&HashMap<String, String>>,
     sandbox: &crate::config::SandboxConfig,
+    network: Option<&crate::extensions::NetworkProviderExtension>,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -76,7 +79,8 @@ pub(crate) fn spawn_child(
     // diagnostic fd; stdout/stderr below are captured pipes, not a channel the
     // supervisor may write to.
     #[cfg(unix)]
-    let diag_handle = crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, &mut cmd, args)?;
+    let diag_handle =
+        crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, network, &mut cmd, args)?;
     cmd.env_clear();
     if let Some(env) = env {
         for (key, value) in env {

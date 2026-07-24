@@ -67,6 +67,7 @@ pub struct SecretStore {
     identity: age::x25519::Identity,
     secrets: BTreeMap<String, String>,
     provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+    managed_state: BTreeMap<String, ManagedStateRecord>,
     store_path: PathBuf,
 }
 
@@ -86,6 +87,25 @@ impl fmt::Debug for SecretStore {
     }
 }
 
+/// Provenance of a stored provider credential. `Operator` entries are written
+/// by the CLI/import flows; `External` entries are owned by the named
+/// managed-state extension namespace and applied through the admin apply
+/// endpoint. Overwrite protection across the two owners is enforced by the
+/// store itself, not by any one endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialSource {
+    #[default]
+    Operator,
+    External(String),
+}
+
+impl CredentialSource {
+    pub fn is_operator(&self) -> bool {
+        *self == CredentialSource::Operator
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderCredential {
@@ -95,6 +115,10 @@ pub struct ProviderCredential {
     pub source_refs: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub migrated: bool,
+    /// Absent on disk for operator entries, so pre-provenance stores load
+    /// unchanged and operator entries serialize byte-identically.
+    #[serde(default, skip_serializing_if = "CredentialSource::is_operator")]
+    pub source: CredentialSource,
 }
 
 impl fmt::Debug for ProviderCredential {
@@ -103,6 +127,7 @@ impl fmt::Debug for ProviderCredential {
             .field("revision", &"<redacted>")
             .field("env_names", &self.values.keys().collect::<Vec<_>>())
             .field("source_refs", &self.source_refs)
+            .field("source", &self.source)
             .finish()
     }
 }
@@ -114,6 +139,7 @@ impl ProviderCredential {
             values,
             source_refs,
             migrated: false,
+            source: CredentialSource::Operator,
         }
     }
 
@@ -197,18 +223,82 @@ impl ProviderCredentialSet {
     }
 }
 
+/// Durable per-namespace record of the last applied managed-state registry.
+/// Written atomically together with the credential catalog so the applied
+/// revision survives restarts and idempotent replays can be recognized.
+/// `provider_id` is `None` after a clear so the revision watermark is retained
+/// even with no credential stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedStateRecord {
+    pub revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// The managed-state selection the store applies: env-keyed values (plus
+/// optional secret refs) for one provider, exactly the shape
+/// [`ProviderCredential`] already models.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ManagedCredentialSelection {
+    pub provider_id: String,
+    pub values: BTreeMap<String, String>,
+    pub source_refs: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for ManagedCredentialSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never leak values via Debug; env names are not secret.
+        f.debug_struct("ManagedCredentialSelection")
+            .field("provider_id", &self.provider_id)
+            .field("env_names", &self.values.keys().collect::<Vec<_>>())
+            .field("source_refs", &self.source_refs)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedApplyOutcome {
+    Applied,
+    Cleared,
+    Noop,
+}
+
+impl ManagedApplyOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Cleared => "cleared",
+            Self::Noop => "noop",
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StorePlaintext {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_credentials: BTreeMap<String, ProviderCredentialSet>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    managed_state: BTreeMap<String, ManagedStateRecord>,
 }
 
 impl StorePlaintext {
     fn validate(&self) -> Result<()> {
         for (provider_id, credentials) in &self.provider_credentials {
             credentials.validate(provider_id)?;
+        }
+        for (namespace, record) in &self.managed_state {
+            if record.revision <= 0 {
+                return Err(StackError::SecretStorePlaintextInvalid {
+                    reason: format!(
+                        "managed-state record `{namespace}` must have a positive revision"
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -272,6 +362,7 @@ impl SecretStore {
             identity,
             secrets: plaintext.secrets,
             provider_credentials: plaintext.provider_credentials,
+            managed_state: plaintext.managed_state,
             store_path: store_path.to_path_buf(),
         })
     }
@@ -298,6 +389,7 @@ impl SecretStore {
             identity,
             secrets: plaintext.secrets,
             provider_credentials: plaintext.provider_credentials,
+            managed_state: plaintext.managed_state,
             store_path,
         })
     }
@@ -320,6 +412,7 @@ impl SecretStore {
             identity,
             secrets: plaintext.secrets,
             provider_credentials: plaintext.provider_credentials,
+            managed_state: plaintext.managed_state,
             store_path: store_path.to_path_buf(),
         })
     }
@@ -357,9 +450,11 @@ impl SecretStore {
         &mut self,
         provider_credentials: BTreeMap<String, ProviderCredentialSet>,
     ) -> Result<()> {
+        self.ensure_external_entries_untouched(&provider_credentials)?;
         StorePlaintext {
             secrets: self.secrets.clone(),
             provider_credentials: provider_credentials.clone(),
+            managed_state: self.managed_state.clone(),
         }
         .validate()?;
         self.provider_credentials = provider_credentials;
@@ -371,6 +466,7 @@ impl SecretStore {
         provider_credentials: BTreeMap<String, ProviderCredentialSet>,
         remove_flat_secrets: &[String],
     ) -> Result<()> {
+        self.ensure_external_entries_untouched(&provider_credentials)?;
         let mut secrets = self.secrets.clone();
         for name in remove_flat_secrets {
             secrets.remove(name);
@@ -378,6 +474,7 @@ impl SecretStore {
         let plaintext = StorePlaintext {
             secrets: secrets.clone(),
             provider_credentials: provider_credentials.clone(),
+            managed_state: self.managed_state.clone(),
         };
         plaintext.validate()?;
         let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
@@ -385,6 +482,195 @@ impl SecretStore {
         self.secrets = secrets;
         self.provider_credentials = provider_credentials;
         Ok(())
+    }
+
+    /// Operator-path mutations must not clobber externally-owned entries: an
+    /// external orchestrator applied them under its own revision watermark,
+    /// and a silent operator overwrite would diverge the watermark from the
+    /// stored credential. External entries can only change through
+    /// [`Self::apply_managed_state_credential`].
+    ///
+    /// Ownership checks here and in the apply path inspect `sole` only, which
+    /// is sound because an external credential is always stored aliasless and
+    /// this very guard blocks the one flow (alias promotion) that could
+    /// relocate it into `aliases`. Any future path that stores an External
+    /// credential under an alias would bypass ownership and must not exist.
+    fn ensure_external_entries_untouched(
+        &self,
+        replacement: &BTreeMap<String, ProviderCredentialSet>,
+    ) -> Result<()> {
+        for (provider_id, existing) in &self.provider_credentials {
+            let Some(CredentialSource::External(namespace)) =
+                existing.sole.as_ref().map(|credential| &credential.source)
+            else {
+                continue;
+            };
+            if replacement.get(provider_id) != Some(existing) {
+                return Err(StackError::ExtensionStateOwnership {
+                    namespace: namespace.clone(),
+                    provider_id: provider_id.clone(),
+                    reason: "the credential is owned by a managed-state extension; apply a new \
+                             registry revision through the extension instead"
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn managed_state_record(&self, namespace: &str) -> Option<&ManagedStateRecord> {
+        self.managed_state.get(namespace)
+    }
+
+    pub fn managed_state(&self) -> &BTreeMap<String, ManagedStateRecord> {
+        &self.managed_state
+    }
+
+    /// Apply one managed-state registry revision for `namespace`: idempotent
+    /// replay at the applied revision, stale-revision rejection, and an atomic
+    /// catalog-swap + watermark persist. `selection: None` clears the
+    /// namespace's credential while retaining the watermark. Ownership is
+    /// enforced here: the namespace may only create entries or replace its own.
+    pub fn apply_managed_state_credential(
+        &mut self,
+        namespace: &str,
+        kind: &str,
+        revision: i64,
+        selection: Option<ManagedCredentialSelection>,
+    ) -> Result<ManagedApplyOutcome> {
+        if revision <= 0 {
+            return Err(StackError::InvalidParam {
+                field: "revision",
+                reason: "revision must be a positive integer".to_owned(),
+            });
+        }
+        let record = self.managed_state.get(namespace);
+        match record {
+            Some(record) if revision == record.revision => {
+                self.ensure_identical_replay(namespace, kind, record, selection.as_ref())?;
+                return Ok(ManagedApplyOutcome::Noop);
+            }
+            Some(record) if revision < record.revision => {
+                return Err(StackError::ExtensionRevisionConflict {
+                    namespace: namespace.to_owned(),
+                    reason: format!(
+                        "revision {revision} is stale; revision {} is already applied",
+                        record.revision
+                    ),
+                });
+            }
+            _ => {}
+        }
+
+        let mut catalog = self.provider_credentials.clone();
+        if let Some(previous_provider) = record.and_then(|record| record.provider_id.as_deref()) {
+            catalog.remove(previous_provider);
+        }
+        let (new_record, outcome) = match selection {
+            None => (
+                ManagedStateRecord {
+                    revision,
+                    provider_id: None,
+                    kind: Some(kind.to_owned()),
+                },
+                ManagedApplyOutcome::Cleared,
+            ),
+            Some(selection) => {
+                if let Some(existing) = catalog.get(&selection.provider_id) {
+                    let owned_by_namespace = existing.sole.as_ref().is_some_and(|credential| {
+                        credential.source == CredentialSource::External(namespace.to_owned())
+                    });
+                    if !owned_by_namespace {
+                        return Err(StackError::ExtensionStateOwnership {
+                            namespace: namespace.to_owned(),
+                            provider_id: selection.provider_id.clone(),
+                            reason: "the provider already has a credential not owned by this \
+                                     namespace; refusing to overwrite it"
+                                .to_owned(),
+                        });
+                    }
+                }
+                let credential = ProviderCredential {
+                    revision: format!("managed:{namespace}:{revision}"),
+                    values: selection.values,
+                    source_refs: selection.source_refs,
+                    migrated: false,
+                    source: CredentialSource::External(namespace.to_owned()),
+                };
+                catalog.insert(
+                    selection.provider_id.clone(),
+                    ProviderCredentialSet::aliasless(credential),
+                );
+                (
+                    ManagedStateRecord {
+                        revision,
+                        provider_id: Some(selection.provider_id),
+                        kind: Some(kind.to_owned()),
+                    },
+                    ManagedApplyOutcome::Applied,
+                )
+            }
+        };
+
+        let mut managed_state = self.managed_state.clone();
+        managed_state.insert(namespace.to_owned(), new_record);
+        let plaintext = StorePlaintext {
+            secrets: self.secrets.clone(),
+            provider_credentials: catalog.clone(),
+            managed_state: managed_state.clone(),
+        };
+        plaintext.validate()?;
+        let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
+        atomic_write_owner_only(&self.store_path, &ciphertext)?;
+        self.provider_credentials = catalog;
+        self.managed_state = managed_state;
+        Ok(outcome)
+    }
+
+    /// A replay at the already-applied revision must be an exact no-op: the
+    /// orchestrator retries on any failure, so the retried body is expected to
+    /// be identical in meaning. Anything else at that revision is a conflict.
+    fn ensure_identical_replay(
+        &self,
+        namespace: &str,
+        kind: &str,
+        record: &ManagedStateRecord,
+        selection: Option<&ManagedCredentialSelection>,
+    ) -> Result<()> {
+        let conflict = |reason: String| StackError::ExtensionRevisionConflict {
+            namespace: namespace.to_owned(),
+            reason: format!(
+                "revision {} is already applied with different content: {reason}",
+                record.revision
+            ),
+        };
+        if record.kind.as_deref() != Some(kind) {
+            return Err(conflict("desired kind differs".to_owned()));
+        }
+        match (selection, record.provider_id.as_deref()) {
+            (None, None) => Ok(()),
+            (Some(selection), Some(provider_id)) if provider_id == selection.provider_id => {
+                let credential = self
+                    .provider_credentials
+                    .get(provider_id)
+                    .and_then(|set| set.sole.as_ref())
+                    .ok_or_else(|| {
+                        conflict("stored credential for the applied provider is missing".to_owned())
+                    })?;
+                if credential.source != CredentialSource::External(namespace.to_owned()) {
+                    return Err(conflict(
+                        "stored credential is not owned by this namespace".to_owned(),
+                    ));
+                }
+                if credential.values != selection.values
+                    || credential.source_refs != selection.source_refs
+                {
+                    return Err(conflict("stored credential fields differ".to_owned()));
+                }
+                Ok(())
+            }
+            _ => Err(conflict("selected credential differs".to_owned())),
+        }
     }
 
     pub fn set(&mut self, name: &str, value: &str) -> Result<()> {
@@ -418,6 +704,7 @@ impl SecretStore {
         let plaintext = StorePlaintext {
             secrets: self.secrets.clone(),
             provider_credentials: self.provider_credentials.clone(),
+            managed_state: self.managed_state.clone(),
         };
         plaintext.validate()?;
         let ciphertext = encrypt_plaintext(&self.identity.to_public(), &plaintext)?;
@@ -718,5 +1005,237 @@ mod tests {
         std::fs::write(&key_path, "not-an-age-key").unwrap();
         let error = SecretStore::open(home.path()).expect_err("must fail");
         assert!(matches!(error, StackError::AgeKeyParse { .. }));
+    }
+
+    fn selection(provider_id: &str, env_name: &str, value: &str) -> ManagedCredentialSelection {
+        ManagedCredentialSelection {
+            provider_id: provider_id.to_owned(),
+            values: BTreeMap::from([(env_name.to_owned(), value.to_owned())]),
+            source_refs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_plaintext_defaults_source_to_operator_and_managed_state_to_empty() {
+        let plaintext: StorePlaintext = toml::from_str(
+            "[secrets]\nALPHA = \"1\"\n\
+             [provider_credentials.openai.sole]\n\
+             revision = \"r1\"\n\
+             [provider_credentials.openai.sole.values]\n\
+             OPENAI_API_KEY = \"sk\"\n",
+        )
+        .expect("legacy plaintext");
+        let credential = plaintext.provider_credentials["openai"]
+            .sole
+            .as_ref()
+            .expect("sole credential");
+        assert_eq!(credential.source, CredentialSource::Operator);
+        assert!(plaintext.managed_state.is_empty());
+    }
+
+    #[test]
+    fn operator_entries_serialize_without_source_field() {
+        let plaintext = StorePlaintext {
+            secrets: BTreeMap::new(),
+            provider_credentials: BTreeMap::from([(
+                "openai".to_owned(),
+                ProviderCredentialSet::aliasless(ProviderCredential::new(
+                    BTreeMap::from([("OPENAI_API_KEY".to_owned(), "sk".to_owned())]),
+                    BTreeMap::new(),
+                )),
+            )]),
+            managed_state: BTreeMap::new(),
+        };
+        let serialized = toml::to_string(&plaintext).expect("serialize");
+        assert!(
+            !serialized.contains("source"),
+            "operator entries must stay byte-identical on disk, got:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn managed_apply_persists_credential_and_watermark_atomically() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        let outcome = store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+            )
+            .expect("apply");
+        assert_eq!(outcome, ManagedApplyOutcome::Applied);
+
+        let reopened = SecretStore::open(home.path()).expect("reopen");
+        let record = reopened
+            .managed_state_record("platform-state")
+            .expect("watermark record");
+        assert_eq!(record.revision, 7);
+        assert_eq!(record.provider_id.as_deref(), Some("openai"));
+        assert_eq!(record.kind.as_deref(), Some("provider-credential"));
+        let credential = reopened
+            .provider_credential_set("openai")
+            .and_then(|set| set.sole.as_ref())
+            .expect("stored credential");
+        assert_eq!(credential.values["OPENAI_API_KEY"], "sk-managed");
+        assert_eq!(
+            credential.source,
+            CredentialSource::External("platform-state".to_owned())
+        );
+        let debug = format!("{credential:?}");
+        assert!(!debug.contains("sk-managed"));
+    }
+
+    #[test]
+    fn managed_apply_replay_is_noop_and_divergent_replay_conflicts() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+            )
+            .expect("apply");
+
+        let replay = store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+            )
+            .expect("identical replay");
+        assert_eq!(replay, ManagedApplyOutcome::Noop);
+
+        let divergent = store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-other")),
+            )
+            .expect_err("divergent replay must conflict");
+        assert!(matches!(
+            divergent,
+            StackError::ExtensionRevisionConflict { .. }
+        ));
+
+        let stale = store
+            .apply_managed_state_credential("platform-state", "provider-credential", 6, None)
+            .expect_err("stale revision must conflict");
+        assert!(matches!(
+            stale,
+            StackError::ExtensionRevisionConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn managed_clear_removes_credential_but_retains_watermark() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+            )
+            .expect("apply");
+        let outcome = store
+            .apply_managed_state_credential("platform-state", "provider-credential", 8, None)
+            .expect("clear");
+        assert_eq!(outcome, ManagedApplyOutcome::Cleared);
+
+        let reopened = SecretStore::open(home.path()).expect("reopen");
+        assert!(reopened.provider_credential_set("openai").is_none());
+        let record = reopened
+            .managed_state_record("platform-state")
+            .expect("watermark survives clear");
+        assert_eq!(record.revision, 8);
+        assert!(record.provider_id.is_none());
+    }
+
+    #[test]
+    fn managed_apply_refuses_operator_and_foreign_namespace_entries() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        store
+            .replace_provider_credentials(
+                BTreeMap::from([(
+                    "openai".to_owned(),
+                    ProviderCredentialSet::aliasless(ProviderCredential::new(
+                        BTreeMap::from([("OPENAI_API_KEY".to_owned(), "operator".to_owned())]),
+                        BTreeMap::new(),
+                    )),
+                )]),
+                &[],
+            )
+            .expect("seed operator credential");
+
+        let operator_owned = store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+            )
+            .expect_err("operator entry must be protected");
+        assert!(matches!(
+            operator_owned,
+            StackError::ExtensionStateOwnership { .. }
+        ));
+
+        store
+            .apply_managed_state_credential(
+                "namespace-a",
+                "provider-credential",
+                1,
+                Some(selection("groq", "GROQ_API_KEY", "gk-managed")),
+            )
+            .expect("namespace-a takes groq");
+        let foreign = store
+            .apply_managed_state_credential(
+                "namespace-b",
+                "provider-credential",
+                1,
+                Some(selection("groq", "GROQ_API_KEY", "gk-other")),
+            )
+            .expect_err("foreign namespace entry must be protected");
+        assert!(matches!(
+            foreign,
+            StackError::ExtensionStateOwnership { .. }
+        ));
+    }
+
+    #[test]
+    fn operator_replace_refuses_to_clobber_external_entries() {
+        let home = fresh_home();
+        let mut store = SecretStore::open_or_create(home.path()).expect("open or create");
+        store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(selection("openai", "OPENAI_API_KEY", "sk-managed")),
+            )
+            .expect("apply");
+
+        let clobber = store
+            .replace_provider_credentials(BTreeMap::new(), &[])
+            .expect_err("operator replace must not drop an external entry");
+        assert!(matches!(
+            clobber,
+            StackError::ExtensionStateOwnership { .. }
+        ));
+
+        // An operator replace that carries the external entry through
+        // unchanged is fine.
+        let carried = store.provider_credentials().clone();
+        store
+            .replace_provider_credentials(carried, &[])
+            .expect("carry-through replace succeeds");
     }
 }

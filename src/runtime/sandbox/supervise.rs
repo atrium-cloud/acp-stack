@@ -1,8 +1,8 @@
 //! Supervisor for network-isolated sandbox spawns (`acps __sandbox-supervise`).
 //!
-//! With `[workspace.sandbox.network] mode = "isolated"`, each wrapped spawn gets
-//! a fresh network namespace. The supervisor sits between the daemon and the
-//! `unshare --net` chain and owns the namespace lifecycle:
+//! With a `network-provider` extension declared (`[extensions.<name>]`), each
+//! wrapped spawn gets a fresh network namespace. The supervisor sits between
+//! the daemon and the `unshare --net` chain and owns the namespace lifecycle:
 //!
 //! 1. Spawn the chain with a private sync socketpair; [`super::run_exec`] inside
 //!    the namespaces signals readiness and then pauses before privilege drop.

@@ -146,8 +146,19 @@ fn run_agent_test_with(
         .build()
         .map_err(|source| StackError::ServeIo { source })?;
     let sandbox = config.workspace.sandbox.clone();
+    let network_provider = crate::extensions::resolve_network_provider(config);
     let report = runtime.block_on(async move {
-        run_agent_test_inner(agent, env, cwd, prompt, timeout, progress_timeout, sandbox).await
+        run_agent_test_inner(
+            agent,
+            env,
+            cwd,
+            prompt,
+            timeout,
+            progress_timeout,
+            sandbox,
+            network_provider,
+        )
+        .await
     })?;
 
     let fs_outcome = match expect_fs.as_deref() {
@@ -373,6 +384,7 @@ fn parse_agent_test_duration(field: &'static str, value: &str) -> Result<Duratio
     Ok(duration)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_test_inner(
     agent: crate::config::AgentConfig,
     env: HashMap<String, String>,
@@ -381,11 +393,21 @@ async fn run_agent_test_inner(
     prompt_timeout: Duration,
     progress_timeout: Duration,
     sandbox: crate::config::SandboxConfig,
+    network_provider: Option<crate::extensions::NetworkProviderExtension>,
 ) -> Result<AgentTestReport> {
     let sink = Arc::new(AgentTestSessionEventSink::new());
-    let bridge = AcpBridge::spawn(&agent, env, cwd.clone(), sink.clone(), None, &sandbox, None)
-        .await
-        .map_err(agent_test_spawn_error)?;
+    let bridge = AcpBridge::spawn(
+        &agent,
+        env,
+        cwd.clone(),
+        sink.clone(),
+        None,
+        &sandbox,
+        network_provider.as_ref(),
+        None,
+    )
+    .await
+    .map_err(agent_test_spawn_error)?;
 
     let result = async {
         let session = bridge

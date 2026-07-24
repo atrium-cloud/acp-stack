@@ -10,6 +10,7 @@ pub mod agent;
 pub mod commands;
 pub mod deps;
 pub mod edge;
+pub mod extensions;
 pub mod mcp;
 pub mod permissions;
 pub mod primitives;
@@ -128,58 +129,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
             });
         }
     }
-    // Network isolation only exists for the unshare backend; any other backend
-    // carrying a network block would imply an unenforced guarantee.
-    if !sandbox.network.is_host() && sandbox.mode != crate::config::SandboxMode::Unshare {
-        return Err(StackError::InvalidParam {
-            field: "workspace.sandbox.network",
-            reason: "network isolation is only valid with mode = \"unshare\"; remove or change the [workspace.sandbox.network] block first".to_owned(),
-        });
-    }
-    // Host networking with provider settings would look configured while
-    // enforcing nothing; reject the skew instead of silently ignoring fields.
-    if !sandbox.network.is_host() && !sandbox.network.is_isolated() {
-        return Err(StackError::InvalidParam {
-            field: "workspace.sandbox.network",
-            reason: "mode = \"host\" does not accept provider settings; remove them or set mode = \"isolated\"".to_owned(),
-        });
-    }
-    if sandbox.network.is_isolated() {
-        if sandbox
-            .network
-            .provider
-            .iter()
-            .any(|arg| arg.trim().is_empty())
-        {
-            return Err(StackError::InvalidParam {
-                field: "workspace.sandbox.network.provider",
-                reason: "provider argv entries must be non-empty".to_owned(),
-            });
-        }
-        // Mediated spawns can run without PATH in their environment, so a
-        // bare-name provider would resolve for agent spawns but fail closed
-        // for mediated ones. Require an absolute path for determinism.
-        if let Some(provider) = sandbox.network.provider.first()
-            && !Path::new(provider).is_absolute()
-        {
-            return Err(StackError::InvalidParam {
-                field: "workspace.sandbox.network.provider",
-                reason: format!("provider executable `{provider}` must be an absolute path"),
-            });
-        }
-        let provider_timeout = self::primitives::validate_duration_field(
-            "workspace.sandbox.network.provider_timeout",
-            sandbox.network.provider_timeout_raw(),
-        )?;
-        // A zero deadline makes every provider run race an already-expired
-        // timer, succeeding or SIGKILLed depending on scheduling.
-        if provider_timeout.is_zero() {
-            return Err(StackError::InvalidParam {
-                field: "workspace.sandbox.network.provider_timeout",
-                reason: "provider timeout must be greater than zero".to_owned(),
-            });
-        }
-    }
+    self::extensions::validate_extensions(config)?;
     if let Some(socket_path) = &config.local.socket_path {
         validate_optional_config_path("local.socket_path", socket_path)?;
     }

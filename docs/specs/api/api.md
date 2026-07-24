@@ -72,8 +72,11 @@ After `result`, the session remains `completed_awaiting_ack`. If the WebSocket d
 | `DELETE /v1/secrets/{name}`          | admin   | deletes a secret                                             |
 | `POST /v1/auth/session-key/regenerate` | admin | replaces the session verifier and returns the new plaintext key once |
 | `PUT /v1/auth/local-session-access`  | admin   | sets `[local].session_auth` and applies it to the running daemon |
+| `POST /v1/admin/extensions/{name}/apply` | admin | applies one managed-state registry revision to the named extension namespace |
 
 Secret values are never returned by the API. Auth keys are not secret-store entries.
+
+`POST /v1/admin/extensions/{name}/apply` is the managed-state extension seam: `{name}` must resolve to a declared `type = "managed-state"` instance (else `404 extensions.not_found`), the body is `{schema_version, revision, desired}` with responses in the standard envelope, revision-ordering conflicts are `409 extensions.revision_conflict`, and provenance refusals are `400 extensions.state_ownership`. Full contract in [extensions.md](../extensions.md).
 
 ## Agent And Providers
 

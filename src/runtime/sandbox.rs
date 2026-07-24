@@ -37,6 +37,7 @@ use std::process::Command;
 
 use crate::config::{SandboxConfig, SandboxMode};
 use crate::error::{Result, StackError};
+use crate::extensions::NetworkProviderExtension;
 
 pub mod supervise;
 
@@ -126,10 +127,14 @@ pub fn sensitive_mask_paths(home: &Path, sandbox: &SandboxConfig) -> Vec<PathBuf
 }
 
 /// Wrap `program`/`args` according to `sandbox`. With `mode = off` the command is
-/// returned unchanged. The caller still sets cwd/env (secrets via `Command::env`,
-/// which every backend forwards to the harness) and stdio.
+/// returned unchanged. `network` is the declared network-provider extension, if
+/// any (`unshare` only): its presence switches each wrapped spawn into an
+/// isolated network namespace. The caller still sets cwd/env (secrets via
+/// `Command::env`, which every backend forwards to the harness) and stdio.
+#[allow(clippy::too_many_arguments)]
 pub fn wrap(
     sandbox: &SandboxConfig,
+    network: Option<&NetworkProviderExtension>,
     program: &Path,
     args: &[String],
     home: &Path,
@@ -142,7 +147,7 @@ pub fn wrap(
             program: program.to_path_buf(),
             args: args.to_vec(),
         }),
-        SandboxMode::Unshare => wrap_unshare(sandbox, program, args, home, uid, gid),
+        SandboxMode::Unshare => wrap_unshare(sandbox, network, program, args, home, uid, gid),
         SandboxMode::Bwrap => Ok(wrap_bwrap(sandbox, program, args, home, workspace_root)),
         SandboxMode::Custom => wrap_custom(sandbox, program, args),
     }
@@ -150,6 +155,7 @@ pub fn wrap(
 
 fn wrap_unshare(
     sandbox: &SandboxConfig,
+    network: Option<&NetworkProviderExtension>,
     program: &Path,
     args: &[String],
     home: &Path,
@@ -159,27 +165,19 @@ fn wrap_unshare(
     let self_exe = std::env::current_exe().map_err(|source| StackError::SandboxFailed {
         reason: format!("cannot resolve the acps executable for the sandbox helper: {source}"),
     })?;
-    if !sandbox.network.is_isolated() {
+    let Some(network) = network else {
         // Host networking: the pre-network wrapper, byte for byte.
         return Ok(WrappedCommand {
             program: resolve_bin("unshare"),
             args: unshare_chain_args(sandbox, program, args, home, uid, gid, &self_exe, false),
         });
-    }
-    let network = &sandbox.network;
+    };
     let mut out: Vec<String> = vec![
         SANDBOX_SUPERVISE_SUBCOMMAND.to_owned(),
         "--diag-fd".to_owned(),
         SANDBOX_DIAG_FD.to_string(),
-        "--provider-timeout".to_owned(),
-        network.provider_timeout_raw().to_owned(),
-        "--provider-stderr".to_owned(),
-        network.provider_stderr.as_str().to_owned(),
     ];
-    for provider_arg in &network.provider {
-        out.push("--provider-arg".to_owned());
-        out.push(provider_arg.clone());
-    }
+    out.extend(network.supervise_argv_fragment());
     out.push("--".to_owned());
     out.push(resolve_bin("unshare").to_string_lossy().into_owned());
     out.extend(unshare_chain_args(
@@ -291,11 +289,12 @@ fn wrap_custom(sandbox: &SandboxConfig, program: &Path, args: &[String]) -> Resu
 #[cfg(unix)]
 pub fn wire_supervise_diag_fd(
     sandbox: &SandboxConfig,
+    network: Option<&NetworkProviderExtension>,
     command: &mut tokio::process::Command,
     args: &[String],
 ) -> std::io::Result<Option<std::os::fd::OwnedFd>> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    if sandbox.mode != SandboxMode::Unshare || !sandbox.network.is_isolated() {
+    if sandbox.mode != SandboxMode::Unshare || network.is_none() {
         return Ok(None);
     }
     if args.first().map(String::as_str) != Some(SANDBOX_SUPERVISE_SUBCOMMAND) {
@@ -358,7 +357,10 @@ fn resolve_bin(name: &str) -> PathBuf {
 /// configured backend is unusable) and the security self-check (which surfaces
 /// the reason as a finding), instead of letting the first agent spawn fail
 /// indirectly.
-pub fn preflight(sandbox: &SandboxConfig) -> std::result::Result<(), String> {
+pub fn preflight(
+    sandbox: &SandboxConfig,
+    network: Option<&NetworkProviderExtension>,
+) -> std::result::Result<(), String> {
     match sandbox.mode {
         SandboxMode::Off => Ok(()),
         SandboxMode::Unshare => {
@@ -371,21 +373,22 @@ pub fn preflight(sandbox: &SandboxConfig) -> std::result::Result<(), String> {
                         .to_owned(),
                 );
             }
-            if sandbox.network.is_isolated() {
+            if let Some(network) = network {
                 supervise::preflight_pidfd_support()?;
-            }
-            // A configured provider that cannot be found would otherwise fail
-            // closed only at the first spawn. Config validation already
-            // requires an absolute path. Nothing else is required for
-            // isolated networking: `--net` is covered by CAP_SYS_ADMIN, and
-            // tools like `ip`/`nsenter` are the provider's own dependencies.
-            if sandbox.network.is_isolated()
-                && let Some(provider) = sandbox.network.provider.first()
-                && !Path::new(provider).is_file()
-            {
-                return Err(format!(
-                    "sandbox network provider `{provider}` was not found"
-                ));
+                // A configured provider that cannot be found would otherwise
+                // fail closed only at the first spawn. Config validation
+                // already requires an absolute path. Nothing else is required
+                // for isolated networking: `--net` is covered by
+                // CAP_SYS_ADMIN, and tools like `ip`/`nsenter` are the
+                // provider's own dependencies.
+                if let Some(provider) = network.provider.first()
+                    && !Path::new(provider).is_file()
+                {
+                    return Err(format!(
+                        "network-provider extension `{}` executable `{provider}` was not found",
+                        network.name
+                    ));
+                }
             }
             Ok(())
         }
@@ -567,6 +570,18 @@ mod tests {
         }
     }
 
+    fn network_extension(
+        provider: Vec<String>,
+        provider_timeout: Option<&str>,
+    ) -> NetworkProviderExtension {
+        NetworkProviderExtension {
+            name: "egress".to_owned(),
+            provider,
+            provider_timeout: provider_timeout.map(str::to_owned),
+            provider_stderr: crate::config::SandboxProviderStderr::default(),
+        }
+    }
+
     fn run(c: &WrappedCommand) -> String {
         let mut parts = vec![c.program.to_string_lossy().into_owned()];
         parts.extend(c.args.clone());
@@ -577,6 +592,7 @@ mod tests {
     fn off_is_passthrough() {
         let w = wrap(
             &cfg(SandboxMode::Off),
+            None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
@@ -593,6 +609,7 @@ mod tests {
     fn unshare_masks_sensitive_dirs_and_drops_privs() {
         let w = wrap(
             &cfg(SandboxMode::Unshare),
+            None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
@@ -618,6 +635,7 @@ mod tests {
     fn bwrap_masks_with_tmpfs_and_binds_workspace() {
         let w = wrap(
             &cfg(SandboxMode::Bwrap),
+            None,
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
@@ -640,6 +658,7 @@ mod tests {
         c.wrapper = vec!["systemd-run".to_owned(), "--scope".to_owned()];
         let w = wrap(
             &c,
+            None,
             Path::new("/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
@@ -654,6 +673,7 @@ mod tests {
         // Empty wrapper is rejected fail-fast.
         let err = wrap(
             &cfg(SandboxMode::Custom),
+            None,
             Path::new("/bin/claude"),
             &[],
             Path::new("/home/u"),
@@ -667,59 +687,59 @@ mod tests {
     #[test]
     fn host_network_wrapper_is_byte_identical_to_legacy() {
         // The pre-network wrapper, frozen: any drift here is a regression for
-        // every existing unshare deployment. `mode = "host"` (explicit or via an
-        // absent network block) must not change a single token.
-        let mut explicit_host = cfg(SandboxMode::Unshare);
-        explicit_host.network.mode = crate::config::SandboxNetworkMode::Host;
-        for sandbox in [cfg(SandboxMode::Unshare), explicit_host] {
-            let w = wrap(
-                &sandbox,
-                Path::new("/home/u/.local/bin/claude"),
-                &["acp".to_owned()],
-                Path::new("/home/u"),
-                Path::new("/home/u/ws"),
-                1001,
-                1001,
-            )
-            .unwrap();
-            let self_exe = std::env::current_exe().unwrap();
-            let mut expected: Vec<String> = UNSHARE_FLAGS.iter().map(|s| s.to_string()).collect();
-            expected.extend(
-                [
-                    "--",
-                    &self_exe.to_string_lossy(),
-                    SANDBOX_EXEC_SUBCOMMAND,
-                    "--mask",
-                    "/home/u/.config/acp-stack",
-                    "--mask",
-                    "/home/u/.local/share/acp-stack",
-                    "--",
-                    &resolve_bin("setpriv").to_string_lossy(),
-                    "--reuid=1001",
-                    "--regid=1001",
-                ]
-                .map(str::to_owned),
-            );
-            expected.extend(SETPRIV_DROP_FLAGS.iter().map(|s| s.to_string()));
-            expected.extend(["--", "/home/u/.local/bin/claude", "acp"].map(str::to_owned));
-            assert_eq!(w.program, resolve_bin("unshare"));
-            assert_eq!(w.args, expected);
-            assert!(!run(&w).contains("--net"));
-        }
+        // every existing unshare deployment. No declared network-provider
+        // extension means host networking and must not change a single token.
+        let sandbox = cfg(SandboxMode::Unshare);
+        let w = wrap(
+            &sandbox,
+            None,
+            Path::new("/home/u/.local/bin/claude"),
+            &["acp".to_owned()],
+            Path::new("/home/u"),
+            Path::new("/home/u/ws"),
+            1001,
+            1001,
+        )
+        .unwrap();
+        let self_exe = std::env::current_exe().unwrap();
+        let mut expected: Vec<String> = UNSHARE_FLAGS.iter().map(|s| s.to_string()).collect();
+        expected.extend(
+            [
+                "--",
+                &self_exe.to_string_lossy(),
+                SANDBOX_EXEC_SUBCOMMAND,
+                "--mask",
+                "/home/u/.config/acp-stack",
+                "--mask",
+                "/home/u/.local/share/acp-stack",
+                "--",
+                &resolve_bin("setpriv").to_string_lossy(),
+                "--reuid=1001",
+                "--regid=1001",
+            ]
+            .map(str::to_owned),
+        );
+        expected.extend(SETPRIV_DROP_FLAGS.iter().map(|s| s.to_string()));
+        expected.extend(["--", "/home/u/.local/bin/claude", "acp"].map(str::to_owned));
+        assert_eq!(w.program, resolve_bin("unshare"));
+        assert_eq!(w.args, expected);
+        assert!(!run(&w).contains("--net"));
     }
 
     #[test]
     fn isolated_network_wraps_with_supervisor_and_net() {
-        let mut sandbox = cfg(SandboxMode::Unshare);
-        sandbox.network.mode = crate::config::SandboxNetworkMode::Isolated;
-        sandbox.network.provider = vec![
-            "/usr/local/libexec/provider".to_owned(),
-            "--config".to_owned(),
-            "/etc/provider.toml".to_owned(),
-        ];
-        sandbox.network.provider_timeout = Some("45s".to_owned());
+        let sandbox = cfg(SandboxMode::Unshare);
+        let network = network_extension(
+            vec![
+                "/usr/local/libexec/provider".to_owned(),
+                "--config".to_owned(),
+                "/etc/provider.toml".to_owned(),
+            ],
+            Some("45s"),
+        );
         let w = wrap(
             &sandbox,
+            Some(&network),
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
@@ -752,10 +772,11 @@ mod tests {
 
     #[test]
     fn isolated_network_without_provider_is_deny_all() {
-        let mut sandbox = cfg(SandboxMode::Unshare);
-        sandbox.network.mode = crate::config::SandboxNetworkMode::Isolated;
+        let sandbox = cfg(SandboxMode::Unshare);
+        let network = network_extension(Vec::new(), None);
         let w = wrap(
             &sandbox,
+            Some(&network),
             Path::new("/home/u/.local/bin/claude"),
             &["acp".to_owned()],
             Path::new("/home/u"),
@@ -790,8 +811,8 @@ mod tests {
 
     #[test]
     fn preflight_off_is_ok_custom_requires_wrapper() {
-        assert!(preflight(&cfg(SandboxMode::Off)).is_ok());
+        assert!(preflight(&cfg(SandboxMode::Off), None).is_ok());
         // Custom with an empty wrapper is unusable regardless of host.
-        assert!(preflight(&cfg(SandboxMode::Custom)).is_err());
+        assert!(preflight(&cfg(SandboxMode::Custom), None).is_err());
     }
 }

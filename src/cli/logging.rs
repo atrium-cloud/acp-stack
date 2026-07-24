@@ -11,7 +11,7 @@ use crate::config::{
     self, Config, SupabaseLoggingBackend, SupabaseLoggingConfig, is_valid_secret_ref_name,
 };
 use crate::error::{Result, StackError};
-use crate::fs_util::{atomic_write_owner_only, home_dir};
+use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::logging::supabase_mirror::{
     MIRRORED_TABLES, SUPABASE_DEFAULT_DB_URL_REF,
     SUPABASE_DEFAULT_SCHEMA as SUPABASE_POSTGRES_DEFAULT_SCHEMA, SUPABASE_DEFAULT_TABLE_PREFIX,
@@ -333,6 +333,10 @@ fn run_supabase_setup(args: SupabaseSetupArgs, output: OutputFormat) -> Result<(
     // password is generated only on first setup or when the stored URL does
     // not round-trip the runtime shape (e.g. a manually set custom URL).
     let home = home_dir()?;
+    // The store is a whole-file read-modify-write; serialize with the daemon
+    // and other acps processes so concurrent writers cannot silently drop
+    // each other's entries. Also covers the config write later in setup.
+    let _mutation = acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
     let mut store = SecretStore::open(&home)?;
     let stored_password = store
         .contains(SUPABASE_DEFAULT_DB_URL_REF)
@@ -554,6 +558,7 @@ fn run_supabase_set_secret(args: SupabaseSetSecretArgs, output: OutputFormat) ->
             reason: "must not be empty".to_owned(),
         });
     }
+    let _mutation = acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
     let mut store = SecretStore::open(&home)?;
     store.set(&api_key_ref, &value)?;
 
@@ -590,6 +595,7 @@ fn run_supabase_set_db_url(args: SupabaseSetDbUrlArgs, output: OutputFormat) -> 
             reason: "must not be empty".to_owned(),
         });
     }
+    let _mutation = acquire_agent_config_mutation_file_lock(&config::default_config_path()?)?;
     let mut store = SecretStore::open(&home)?;
     store.set(&db_url_ref, &value)?;
 

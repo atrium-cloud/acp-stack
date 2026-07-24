@@ -9,6 +9,7 @@ mod command;
 mod config;
 mod download;
 mod edge;
+mod extensions;
 mod permission;
 mod secrets;
 mod security;
@@ -60,6 +61,22 @@ pub enum StackError {
 
     #[error("sandbox setup failed: {reason}")]
     SandboxFailed { reason: String },
+
+    // === extensions ===
+    #[error("no managed-state extension named `{name}` is declared")]
+    ExtensionNamespaceUnknown { name: String },
+
+    #[error("managed-state apply for `{namespace}` conflicts: {reason}")]
+    ExtensionRevisionConflict { namespace: String, reason: String },
+
+    #[error(
+        "managed-state namespace `{namespace}` cannot take ownership of provider `{provider_id}`: {reason}"
+    )]
+    ExtensionStateOwnership {
+        namespace: String,
+        provider_id: String,
+        reason: String,
+    },
 
     #[error("failed to set owner-only permissions on {path}: {source}")]
     PermissionSet {
@@ -786,6 +803,7 @@ impl StackError {
             .or_else(|| secrets::error_code(self))
             .or_else(|| supabase::error_code(self))
             .or_else(|| edge::error_code(self))
+            .or_else(|| extensions::error_code(self))
             .or_else(|| workspace_source::error_code(self))
             .or_else(|| download::error_code(self))
             .or_else(|| archive::error_code(self))
@@ -811,6 +829,7 @@ impl StackError {
             .or_else(|| secrets::public_message(self))
             .or_else(|| supabase::public_message(self))
             .or_else(|| edge::public_message(self))
+            .or_else(|| extensions::public_message(self))
             .or_else(|| workspace_source::public_message(self))
             .or_else(|| download::public_message(self))
             .or_else(|| archive::public_message(self))
@@ -882,6 +901,7 @@ impl StackError {
             .or_else(|| secrets::http_status(self))
             .or_else(|| supabase::http_status(self))
             .or_else(|| edge::http_status(self))
+            .or_else(|| extensions::http_status(self))
             .or_else(|| workspace_source::http_status(self))
             .or_else(|| download::http_status(self))
             .or_else(|| archive::http_status(self))

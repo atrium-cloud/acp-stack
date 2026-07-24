@@ -3024,6 +3024,125 @@ async fn config_import_oversized_body_returns_413() {
     assert_eq!(body["error"]["code"], "import.too_large");
 }
 
+/// Serializes HOME mutations across the parallel-by-default `#[tokio::test]`
+/// functions in this file. The secrets handlers resolve the store through
+/// `home_dir()`, so tests exercising them must pin HOME for their full body;
+/// without this lock two such tests would step on each other's HOME and
+/// observe random subsets of the other's tempdir state.
+///
+/// WARNING: this is sound only while every HOME read in this test binary goes
+/// through a test holding this guard. A new test (or helper) that reads HOME
+/// without taking `HomeEnvGuard::set` races the unsafe `set_var` below and is
+/// undefined behavior on multi-threaded runs — route it through the guard.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct HomeEnvGuard<'a> {
+    _lock: std::sync::MutexGuard<'a, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl HomeEnvGuard<'_> {
+    fn set(home: &Path) -> Self {
+        let lock = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("HOME");
+        // SAFETY: HOME_LOCK serializes tests that mutate HOME via this guard.
+        // Tests in this binary that depend on HOME route through here, so
+        // there's no read racing the mutation.
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for HomeEnvGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: lock still held; restore the prior HOME (or remove if unset
+        // coming in) before releasing it so the next test sees a clean slate.
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+/// The secret store is a whole-file read-modify-write; before the handlers
+/// took the agent-config mutation lock, concurrent set/delete requests could
+/// interleave open→mutate→persist and silently drop each other's writes.
+/// With the lock, every accepted mutation must be visible afterwards.
+#[tokio::test]
+async fn concurrent_secret_mutations_do_not_drop_writes() {
+    let home_dir = tempfile::tempdir().expect("home tempdir");
+    SecretStore::open_or_create(home_dir.path()).expect("create home secret store");
+    let _home = HomeEnvGuard::set(home_dir.path());
+
+    let harness = ServerHarness::spawn().await;
+    let client = reqwest::Client::new();
+
+    let seed = client
+        .post(format!("{}/v1/secrets", harness.base_url))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .json(&serde_json::json!({ "name": "SEED_DOOMED", "value": "v" }))
+        .send()
+        .await
+        .expect("seed set");
+    assert_eq!(seed.status(), StatusCode::OK);
+
+    let mut requests = tokio::task::JoinSet::new();
+    for index in 0..8 {
+        let client = client.clone();
+        let base_url = harness.base_url.clone();
+        requests.spawn(async move {
+            client
+                .post(format!("{base_url}/v1/secrets"))
+                .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+                .json(&serde_json::json!({
+                    "name": format!("CONCURRENT_{index}"),
+                    "value": format!("value-{index}"),
+                }))
+                .send()
+                .await
+                .expect("concurrent set")
+                .status()
+        });
+    }
+    {
+        let client = client.clone();
+        let base_url = harness.base_url.clone();
+        requests.spawn(async move {
+            client
+                .delete(format!("{base_url}/v1/secrets/SEED_DOOMED"))
+                .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+                .send()
+                .await
+                .expect("concurrent delete")
+                .status()
+        });
+    }
+    while let Some(status) = requests.join_next().await {
+        assert_eq!(status.expect("request task"), StatusCode::OK);
+    }
+
+    let store = SecretStore::open(home_dir.path()).expect("reopen store");
+    for index in 0..8 {
+        assert!(
+            store.contains(&format!("CONCURRENT_{index}")),
+            "concurrent set CONCURRENT_{index} was dropped by another writer"
+        );
+    }
+    assert!(
+        !store.contains("SEED_DOOMED"),
+        "concurrent delete was dropped by another writer"
+    );
+}
+
 #[tokio::test]
 async fn config_validate_secret_ref_value_error_does_not_echo_secret() {
     let harness = ServerHarness::spawn().await;

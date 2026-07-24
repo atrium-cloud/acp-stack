@@ -44,6 +44,7 @@ pub(super) struct SupervisorTask {
     pub(super) shell: String,
     pub(super) command: String,
     pub(super) sandbox: crate::config::SandboxConfig,
+    pub(super) network_provider: Option<crate::extensions::NetworkProviderExtension>,
     pub(super) workspace_root: std::path::PathBuf,
     pub(super) cwd: ResolvedCommandCwd,
     pub(super) env: Option<HashMap<String, String>>,
@@ -348,9 +349,17 @@ impl SupervisorTask {
             std::path::Path::new(&self.shell),
             &shell_args,
             &self.sandbox,
+            self.network_provider.as_ref(),
             &self.workspace_root,
         )?;
-        super::exec::spawn_child(&program, &args, &self.cwd, self.env.as_ref(), &self.sandbox)
+        super::exec::spawn_child(
+            &program,
+            &args,
+            &self.cwd,
+            self.env.as_ref(),
+            &self.sandbox,
+            self.network_provider.as_ref(),
+        )
     }
 
     async fn mark_running(&self) -> Result<()> {
@@ -575,6 +584,7 @@ mod tests {
             shell: "/bin/sh".to_owned(),
             command: format!("printf spawned > {}", marker.to_string_lossy()),
             sandbox: Default::default(),
+            network_provider: None,
             workspace_root: tempdir.path().to_path_buf(),
             cwd: resolve_cwd_under_workspace(tempdir.path(), &tempdir.path().to_string_lossy())
                 .expect("resolved cwd"),

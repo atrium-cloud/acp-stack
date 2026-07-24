@@ -12557,3 +12557,93 @@ fn agent_set_provider_for_mapped_provider_redirects_to_provider_use() {
         .failure()
         .stderr(predicates::str::contains("acps agent provider use"));
 }
+
+#[test]
+fn extensions_status_reports_none_declared() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["extensions", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("extensions: none declared"));
+}
+
+#[test]
+fn extensions_status_reports_managed_state_watermark_without_values() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n\
+         capability = \"provider-credential\"\n"
+    );
+    fs::write(config_dir.join("acps-config.toml"), config_text).expect("config should be written");
+
+    let secret_value = "sk-status-secret";
+    {
+        let mut store =
+            SecretStore::open_or_create(tempdir.path()).expect("secret store should initialize");
+        store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                7,
+                Some(acp_stack::secrets::ManagedCredentialSelection {
+                    provider_id: "openai".to_owned(),
+                    values: BTreeMap::from([(
+                        "OPENAI_API_KEY".to_owned(),
+                        secret_value.to_owned(),
+                    )]),
+                    source_refs: BTreeMap::new(),
+                }),
+            )
+            .expect("managed apply should persist");
+    }
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["extensions", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("platform-state: managed-state"))
+        .stdout(predicates::str::contains("applied_revision: 7"))
+        .stdout(predicates::str::contains("provider: openai"))
+        .stdout(predicates::str::contains(secret_value).not());
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["extensions", "status", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"applied_revision\": 7"))
+        .stdout(predicates::str::contains(secret_value).not());
+}
+
+#[test]
+fn extensions_status_treats_missing_secret_store_as_no_watermark() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n\
+         capability = \"provider-credential\"\n"
+    );
+    fs::write(config_dir.join("acps-config.toml"), config_text).expect("config should be written");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["extensions", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("platform-state: managed-state"))
+        .stdout(predicates::str::contains("applied_revision: none"));
+}

@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod core;
 mod deps;
+mod extensions;
 mod init;
 mod installer;
 mod logging;
