@@ -155,10 +155,14 @@ pub(crate) async fn secrets_list_handler(
 }
 
 pub(crate) async fn secrets_set_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(body): Json<SecretsSetBody>,
 ) -> std::result::Result<ApiSuccess<SecretsSetResponse>, StackError> {
     crate::secrets::reject_auth_ref_mutation(&body.name)?;
+    // Serialize with other secret-store writers: the store is a whole-file
+    // read-modify-write, so an unlocked writer can silently drop a concurrent
+    // mutation.
+    let _mutation = state.lock_agent_config_mutation().await?;
     let home = home_dir()?;
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let action = if store.contains(&body.name) {
@@ -175,9 +179,10 @@ pub(crate) async fn secrets_set_handler(
 
 pub(crate) async fn secrets_delete_handler(
     Path(name): Path<String>,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<SecretsDeleteResponse>, StackError> {
     crate::secrets::reject_auth_ref_mutation(&name)?;
+    let _mutation = state.lock_agent_config_mutation().await?;
     let home = home_dir()?;
     let mut store = crate::secrets::SecretStore::open(&home)?;
     store.delete(&name)?;

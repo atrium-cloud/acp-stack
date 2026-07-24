@@ -33,6 +33,8 @@ Secret values are stored in the encrypted local secret store. Config files carry
 
 The same `secrets.age` ciphertext contains the instance-wide mapped-provider credential catalog. A provider has either one aliasless credential or a permanently promoted alias map. Each credential bundle contains its required and supplied env fields, retained source-ref names, and an opaque revision used only to detect whether a running process is stale.
 
+Catalog entries carry a provenance source: operator (the default, written by CLI and import flows) or external, owned by a named managed-state extension namespace (see [extensions.md](extensions.md)). Overwrite protection is a property of the store: operator flows refuse to touch external entries, an external namespace can only create entries or replace its own, and the ciphertext also carries each namespace's applied-revision watermark, persisted atomically with the catalog swap so the watermark never diverges from the stored credential.
+
 Rules:
 
 - API responses never return secret values.
@@ -134,20 +136,20 @@ Secrets referenced in `[agent].env` are still delivered to the harness through i
 
 ### Network isolation (`unshare` only)
 
-`[workspace.sandbox.network]` adds per-spawn network-namespace isolation to the `unshare` backend. An omitted block means `mode = "host"`: the workload shares the host network stack and the wrapper is unchanged byte for byte. Any non-default network block with a backend other than `unshare` is rejected at config load; in particular `bwrap` network isolation is not implemented and configuring it would imply an unenforced guarantee. `mode = "host"` with provider settings is likewise rejected — a block that looks configured but enforces nothing must not load. Isolated networking also requires working Linux `pidfd_open` and `pidfd_send_signal` syscalls; startup fails closed when the kernel or seccomp policy blocks them. There is no CLI surface for the block — imported or directly edited TOML is the only way to configure it, and `acps workspace sandbox set` refuses (without writing) a mode change that would conflict with a configured network block.
+Per-spawn network-namespace isolation is declared through a `network-provider` extension instance (see [extensions.md](extensions.md)). No declared instance means host networking: the workload shares the host network stack and the wrapper is unchanged byte for byte. A declared instance with a backend other than `unshare` is rejected at config load; in particular `bwrap` network isolation is not implemented and configuring it would imply an unenforced guarantee. At most one `network-provider` instance may be declared. Isolated networking also requires working Linux `pidfd_open` and `pidfd_send_signal` syscalls; startup fails closed when the kernel or seccomp policy blocks them. There is no CLI surface for the declaration — imported or directly edited TOML is the only way to configure it, and `acps workspace sandbox set` refuses (without writing) a mode change that would conflict with a declared network-provider extension.
 
 ```toml
 [workspace.sandbox]
 mode = "unshare"
 
-[workspace.sandbox.network]
-mode = "isolated"
+[extensions.egress]
+type = "network-provider"
 provider = ["/usr/local/libexec/acps-network-provider", "--config", "/etc/provider.toml"]
 provider_timeout = "30s"
 provider_stderr = "daemon"
 ```
 
-`isolated` gives every wrapped spawn (agent harness and each mediated command alike) its own fresh network namespace. With an empty `provider` the namespace is deny-all: acp-stack configures nothing, not even loopback. All network policy — veth devices, routes, DNS, gateways, proxies — belongs to the optional operator-supplied lifecycle provider; acp-stack never injects proxy variables, configures interfaces, resolves DNS, or inspects traffic.
+Declaring the instance gives every wrapped spawn (agent harness and each mediated command alike) its own fresh network namespace. With an empty `provider` the namespace is deny-all: acp-stack configures nothing, not even loopback. All network policy — veth devices, routes, DNS, gateways, proxies — belongs to the optional operator-supplied lifecycle provider; acp-stack never injects proxy variables, configures interfaces, resolves DNS, or inspects traffic.
 
 The provider is invoked as `<executable> setup <configured-args...>` when the namespace exists but before the workload runs, and `<executable> teardown <configured-args...>` after the workload exits, each bounded independently by `provider_timeout` (default `30s`). The executable must be an absolute path — mediated spawns can run without `PATH` in their environment, so name resolution is not deterministic. Setup is fail-closed: on nonzero exit or timeout the workload is never executed, teardown is attempted for partial-setup cleanup, and the spawn fails. Both phases must be idempotent. Each phase runs in an internal monitor's process group; a liveness fd makes supervisor death kill the monitor, provider, and descendants, so providers must remain in that inherited group and must not daemonize, call `setsid`, or otherwise detach. The provider runs with the supervisor's privileges, `/` as its working directory (never the agent-writable workload cwd), and a cleared environment holding exactly the contract variables (it must set its own `PATH`); agent environment variables and secrets never reach it:
 

@@ -41,6 +41,7 @@ flowchart LR
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |
 | Sandbox          | optional isolation backend wrapping each harness and mediated-shell spawn so the workload cannot read the daemon's secrets/state or reach its socket |
+| Extensions       | typed, data-declared integration seams (`src/extensions.rs`): resolves `[extensions]` instances into the network-provider policy the sandbox consumes and the managed-state apply orchestration behind the fixed admin endpoint |
 | Permissions      | durable approval, denial, cancellation, and expiry                |
 | Dependencies     | declaration checks and explicit install actions                   |
 | Logging          | local event history, metrics, and optional external sink          |
@@ -56,7 +57,9 @@ flowchart LR
 - Agent behavior stays behind ACP; `acp-stack` owns runtime mediation around it.
 - Native Agent-config import derives the parser and fixed user-global destination from the configured harness. It separates compatible canonical candidates from protected and unmanaged fields, then commits canonical and harness-native files as one journaled transaction.
 - The sandbox backend is selected by config and is portable across deployments; the set of masked sensitive paths is derived from the runtime's own path helpers, never from operator config.
-- Network isolation is an `unshare`-backend option: a per-spawn supervisor process owns the namespace lifecycle and gates workload execution on an operator-supplied lifecycle provider's setup. All network policy (interfaces, routes, DNS, proxies) lives in the provider behind a small versioned env-var contract; `acp-stack` stays provider- and platform-neutral and never configures or inspects traffic. `bwrap` network isolation is intentionally rejected rather than implied.
+- Platform-specific behavior never compiles into `acp-stack`: it ships behind the typed extension seams (`[extensions]`), each a generic contract `acp-stack` supervises or serves without learning the extension's semantics. No dynamic route registration, no in-process plugins (see [../specs/extensions.md](../specs/extensions.md)).
+- Network isolation is the `network-provider` extension type on the `unshare` backend: a per-spawn supervisor process owns the namespace lifecycle and gates workload execution on the external lifecycle provider's setup. All network policy (interfaces, routes, DNS, proxies) lives in the provider behind a small versioned env-var contract; `acp-stack` stays provider- and platform-neutral and never configures or inspects traffic. `bwrap` network isolation is intentionally rejected rather than implied.
+- Managed state is the `managed-state` extension type: an external orchestrator owns a named namespace through one fixed admin apply endpoint with revision watermarks, and the secret store enforces provenance (operator vs external) so ownership cannot be bypassed by any endpoint.
 - `acps init serve` exposes only bootstrap init routes and exits after result acknowledgement; normal session/admin routes are not available in bootstrap mode.
 - The local socket is allowlisted for low-risk observability plus admin-enabled session-tier HTTP access; public admin APIs are not exposed through it.
 - Deployment profiles should not change runtime behavior, only process and edge shape.

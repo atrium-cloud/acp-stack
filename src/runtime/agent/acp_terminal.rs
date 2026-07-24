@@ -542,6 +542,7 @@ pub(crate) struct TerminalHandlerContext {
     pub(crate) registry: Arc<TerminalRegistry>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) sandbox: crate::config::SandboxConfig,
+    pub(crate) network_provider: Option<crate::extensions::NetworkProviderExtension>,
     /// Durable command-log target. `None` (e.g. discovery probes) means
     /// terminals still work but leave no `commands` rows behind and publish
     /// no live command events.
@@ -592,6 +593,7 @@ pub(crate) async fn handle_create_terminal(
         Path::new(&request.command),
         &request.args,
         &context.sandbox,
+        context.network_provider.as_ref(),
         &context.workspace_root,
     )
     .map_err(AcpError::into_internal_error)?;
@@ -632,7 +634,14 @@ pub(crate) async fn handle_create_terminal(
         }
     };
 
-    let spawn_result = spawn_child(&program, &args, &resolved_cwd, Some(&env), &context.sandbox);
+    let spawn_result = spawn_child(
+        &program,
+        &args,
+        &resolved_cwd,
+        Some(&env),
+        &context.sandbox,
+        context.network_provider.as_ref(),
+    );
     let child = match spawn_result {
         Ok(child) => child,
         Err(error) => {
@@ -951,6 +960,7 @@ mod tests {
             &resolved,
             None,
             &crate::config::SandboxConfig::default(),
+            None,
         )
         .expect("spawn");
 
@@ -992,6 +1002,7 @@ mod tests {
             &resolved,
             None,
             &crate::config::SandboxConfig::default(),
+            None,
         )
         .expect("spawn");
 
@@ -1045,6 +1056,7 @@ mod tests {
             registry: Arc::new(TerminalRegistry::default()),
             workspace_root: root.path().to_path_buf(),
             sandbox: crate::config::SandboxConfig::default(),
+            network_provider: None,
             command_log: None,
             sink: Arc::new(CwdStubSink {
                 cwd: session_dir.to_string_lossy().into_owned(),
@@ -1107,6 +1119,7 @@ mod tests {
             registry: Arc::new(TerminalRegistry::default()),
             workspace_root: std::env::temp_dir(),
             sandbox: crate::config::SandboxConfig::default(),
+            network_provider: None,
             command_log: Some(TerminalCommandLog {
                 state: state.clone(),
                 event_hub: EventHub::new(),
@@ -1145,6 +1158,7 @@ mod tests {
             registry: Arc::new(TerminalRegistry::default()),
             workspace_root: std::env::temp_dir(),
             sandbox: crate::config::SandboxConfig::default(),
+            network_provider: None,
             command_log: Some(TerminalCommandLog {
                 state: state.clone(),
                 event_hub: EventHub::new(),
@@ -1203,6 +1217,7 @@ mod tests {
             &resolved,
             None,
             &crate::config::SandboxConfig::default(),
+            None,
         )
         .expect("spawn");
         let pid = child.id().expect("child pid") as i32;

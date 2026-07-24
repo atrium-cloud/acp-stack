@@ -272,6 +272,7 @@ struct RestartContext {
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     sandbox: crate::config::SandboxConfig,
+    network_provider: Option<crate::extensions::NetworkProviderExtension>,
 }
 
 pub struct AgentStartRequest<'a> {
@@ -285,6 +286,7 @@ pub struct AgentStartRequest<'a> {
     pub event_hub: EventHub,
     pub permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     pub sandbox: crate::config::SandboxConfig,
+    pub network_provider: Option<crate::extensions::NetworkProviderExtension>,
 }
 
 impl Default for AgentSupervisor {
@@ -364,6 +366,7 @@ impl AgentSupervisor {
             event_hub: request.event_hub.clone(),
             permissions: request.permissions.clone(),
             sandbox: request.sandbox.clone(),
+            network_provider: request.network_provider.clone(),
         };
         match self.do_start(request).await {
             Ok((capabilities, bridge)) => {
@@ -411,6 +414,7 @@ impl AgentSupervisor {
             request.event_hub,
             request.permissions,
             request.sandbox,
+            request.network_provider,
         )
         .await
     }
@@ -1270,6 +1274,7 @@ async fn spawn_agent_bridge(
     event_hub: EventHub,
     permissions: Option<crate::runtime::mediation::permissions::PermissionService>,
     sandbox: crate::config::SandboxConfig,
+    network_provider: Option<crate::extensions::NetworkProviderExtension>,
 ) -> Result<(AgentCapabilitiesDto, AcpBridge)> {
     let cwd = resolve_agent_cwd(agent, workspace_root);
 
@@ -1307,6 +1312,7 @@ async fn spawn_agent_bridge(
         sink,
         permissions,
         &sandbox,
+        network_provider.as_ref(),
         Some(crate::runtime::agent::acp_bridge::TerminalCommandLog {
             state: state.clone(),
             event_hub: event_hub.clone(),
@@ -1500,6 +1506,7 @@ async fn monitor_bridge_exit(
         restart_context.event_hub.clone(),
         restart_context.permissions.clone(),
         restart_context.sandbox.clone(),
+        restart_context.network_provider.clone(),
     )
     .await
     {

@@ -123,7 +123,15 @@ acps workspace sandbox set --mode <off|unshare|bwrap|custom> [--wrapper-arg <arg
 
 `workspace sync` creates missing workspace base directories and syncs every configured source. Existing source destinations with matching sentinels are verified and skipped.
 
-`workspace sandbox set` manages only `[workspace.sandbox].mode` and `wrapper`; existing extra mask and allow paths and any `[workspace.sandbox.network]` block are preserved. The network block has no CLI flags — it is configured only through imported or directly edited TOML — and a mode change that would conflict with a configured network block (anything other than `unshare`) fails without writing, pointing at the block to remove or change first. Non-`off` modes are preflighted before config is written. `workspace sandbox status` additionally reports the network mode, provider, timeout, and provider stderr routing when network isolation is configured. Sandbox changes require a supervised-agent restart with `acps restart`; they do not require a daemon restart.
+`workspace sandbox set` manages only `[workspace.sandbox].mode` and `wrapper`; existing extra mask and allow paths and any declared extensions are preserved. Extension declarations have no CLI flags — they are configured only through imported or directly edited TOML — and a mode change that would conflict with a declared network-provider extension (anything other than `unshare`) fails without writing, pointing at the extension to remove or change first. Non-`off` modes are preflighted before config is written. `workspace sandbox status` additionally reports the network isolation state, provider, timeout, and provider stderr routing when a network-provider extension is declared. Sandbox changes require a supervised-agent restart with `acps restart`; they do not require a daemon restart.
+
+## Extension Commands
+
+```sh
+acps extensions status
+```
+
+`extensions status` lists the declared `[extensions]` instances read-only: the type and provider settings for a network-provider instance, and the capability, applied revision, and provider id (never values) for a managed-state instance. There is no mutating extensions CLI — declarations are edited in the config TOML, and managed-state namespaces are written only by their external orchestrator through the admin apply endpoint (see [extensions.md](extensions.md)).
 
 ## Secret Commands
 

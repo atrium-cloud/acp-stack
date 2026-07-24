@@ -87,6 +87,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[edge.cloudflare]` | Cloudflare Tunnel edge profile and managed provisioning refs         |
 | `[logging]`        | local logging and optional external sink settings                    |
 | `[local]`          | internal Unix socket override and local session-tier access mode      |
+| `[extensions.<name>]` | typed extension instances (network-provider, managed-state)       |
 
 ## API And Security
 
@@ -220,6 +221,10 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 ```
 
 Secret refs are resolved at session attach time. Secret values do not appear in config export, API responses, or durable logs.
+
+## Extensions
+
+`[extensions.<name>]` declares typed integration seam instances. Each instance carries `type = "network-provider"` (per-spawn network isolation with an external provider executable; unshare backend only, at most one instance) or `type = "managed-state"` with `capability = "provider-credential"` (a state namespace owned by an external orchestrator through the admin apply endpoint). Fields that do not belong to the declared type are rejected. The former `[workspace.sandbox.network]` block was replaced by the network-provider type and fails config load with a migration error. Contracts and examples are in [extensions.md](extensions.md).
 
 ## Import And Export
 

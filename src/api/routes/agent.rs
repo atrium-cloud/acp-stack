@@ -344,6 +344,7 @@ async fn start_agent_target(
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
             sandbox: config.workspace.sandbox.clone(),
+            network_provider: crate::extensions::resolve_network_provider(&config),
         })
         .await?;
     {
@@ -659,6 +660,7 @@ async fn restart_agent_target(
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
             sandbox: fresh_config.workspace.sandbox.clone(),
+            network_provider: crate::extensions::resolve_network_provider(&fresh_config),
         })
         .await?;
     let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
@@ -1103,6 +1105,7 @@ async fn start_agent_with_config(
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
             sandbox: config.workspace.sandbox.clone(),
+            network_provider: crate::extensions::resolve_network_provider(config),
         })
         .await?;
     Ok(())

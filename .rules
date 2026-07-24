@@ -17,6 +17,7 @@ References:
 - Project spec: docs/specs/project-spec.md
 - API contract: docs/specs/api/api.md
 - ACP bridge: docs/specs/acp/acp-bridge.md
+- Extensions: docs/specs/extensions.md
 - CLI: docs/specs/cli.md
 - Init guide: docs/specs/init.md
 - Runtime: docs/specs/runtime.md

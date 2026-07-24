@@ -3,6 +3,7 @@ pub(crate) mod auth;
 pub(crate) mod commands;
 pub(crate) mod config;
 pub(crate) mod deps;
+pub(crate) mod extensions;
 pub(crate) mod logs;
 pub(crate) mod metrics;
 pub(crate) mod native_config;

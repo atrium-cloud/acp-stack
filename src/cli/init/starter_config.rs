@@ -1390,6 +1390,7 @@ pub(super) fn starter_config(args: &InitArgs) -> Result<String> {
         dependencies: Default::default(),
         mcp: mcp_from_args(args)?,
         local: Default::default(),
+        extensions: Default::default(),
     };
 
     let canonical = starter.to_canonical_toml()?;

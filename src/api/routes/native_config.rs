@@ -580,6 +580,7 @@ async fn start_agent_for_config(state: &AppState, config: &Config) -> Result<()>
             event_hub: state.event_hub.clone(),
             permissions: Some(state.permissions.clone()),
             sandbox: config.workspace.sandbox.clone(),
+            network_provider: crate::extensions::resolve_network_provider(config),
         })
         .await?;
     Ok(())

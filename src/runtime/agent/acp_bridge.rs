@@ -465,6 +465,7 @@ impl AcpBridge {
     /// `command_log` is the durable command-log target (state store plus live
     /// event hub) for client terminals; `None` (discovery probes, most tests)
     /// keeps terminals functional without `commands` rows or live events.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         agent: &AgentConfig,
         env: HashMap<String, String>,
@@ -472,6 +473,7 @@ impl AcpBridge {
         sink: Arc<dyn SessionEventSink>,
         permissions: Option<PermissionService>,
         sandbox: &crate::config::SandboxConfig,
+        network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
     ) -> Result<Self> {
         let env = build_agent_process_env(agent, env)?;
@@ -490,6 +492,7 @@ impl AcpBridge {
         } else {
             crate::runtime::sandbox::wrap(
                 sandbox,
+                network_provider,
                 &command_path,
                 &agent.args,
                 &crate::fs_util::home_dir()?,
@@ -534,9 +537,13 @@ impl AcpBridge {
         // Network-isolated spawns get the daemon's stderr at the supervisor's
         // diagnostic fd (a no-op wrapper-detection pass for every other mode).
         #[cfg(unix)]
-        let diag_handle =
-            crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, &mut command, &wrapped.args)
-                .map_err(|source| StackError::AgentSpawnFailed { source })?;
+        let diag_handle = crate::runtime::sandbox::wire_supervise_diag_fd(
+            sandbox,
+            network_provider,
+            &mut command,
+            &wrapped.args,
+        )
+        .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
         let spawn_result = command.spawn();
         #[cfg(unix)]
@@ -583,6 +590,7 @@ impl AcpBridge {
             registry: Arc::clone(&terminals),
             workspace_root: cwd.clone(),
             sandbox: sandbox.clone(),
+            network_provider: network_provider.cloned(),
             command_log,
             sink: sink.clone(),
         });

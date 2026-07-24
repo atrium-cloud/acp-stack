@@ -84,6 +84,7 @@ async fn spawn_completes_initialize_and_captures_capabilities() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("bridge spawns");
@@ -105,6 +106,7 @@ async fn spawn_sends_client_identity() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("placebo accepted clientInfo");
@@ -122,6 +124,7 @@ async fn spawn_rejects_an_incompatible_protocol_version() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -150,6 +153,7 @@ async fn new_session_rejects_unadvertised_http_mcp_transport() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -182,6 +186,7 @@ async fn shutdown_terminates_the_child() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -220,6 +225,7 @@ async fn terminate_probe_terminates_the_child() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -268,6 +274,7 @@ async fn spawn_forwards_only_reserved_runtime_context_and_explicit_env() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("bridge spawns");
@@ -290,6 +297,7 @@ async fn new_session_round_trips_and_prompt_emits_notifications() {
         sink_dyn,
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -347,6 +355,7 @@ async fn prompt_rejects_unadvertised_image_content() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -402,6 +411,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
         Some(permissions),
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -449,6 +459,7 @@ async fn new_session_returns_custom_model_config_option_id() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -482,6 +493,7 @@ async fn new_session_advertises_config_options_to_strict_agent() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -507,6 +519,7 @@ async fn list_sessions_returns_agent_sessions() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -535,6 +548,7 @@ async fn list_sessions_follows_pagination() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -559,6 +573,7 @@ async fn list_sessions_returns_unsupported_capability_when_agent_disables_flag()
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -590,6 +605,7 @@ async fn list_sessions_rejects_repeated_cursor() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -620,6 +636,7 @@ async fn load_session_returns_unsupported_capability_when_agent_disables_flag() 
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -656,6 +673,7 @@ async fn resume_session_returns_unsupported_capability_when_agent_disables_flag(
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -690,6 +708,7 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -720,6 +739,7 @@ async fn fork_session_returns_child_session() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -749,6 +769,7 @@ async fn fork_session_returns_unsupported_capability_when_agent_disables_flag() 
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -787,6 +808,7 @@ async fn fork_session_sends_message_id_when_capability_is_present() {
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("spawn");
@@ -816,6 +838,7 @@ async fn fork_session_rejects_message_id_when_capability_is_missing() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -891,6 +914,7 @@ async fn shutdown_waits_for_connection_task_before_flushing_sink() {
             sink_dyn,
             None,
             &Default::default(),
+            None,
             None,
         )
         .await
@@ -995,6 +1019,7 @@ async fn shutdown_drains_notification_queued_before_capture_blocks() {
             None,
             &Default::default(),
             None,
+            None,
         )
         .await
         .expect("spawn"),
@@ -1049,6 +1074,7 @@ async fn cancel_session_settles_prompt_with_cancelled_stop_reason() {
         null_sink(),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -1109,6 +1135,7 @@ async fn run_terminal_probe(
         sink_dyn,
         None,
         &Default::default(),
+        None,
         command_log,
     )
     .await

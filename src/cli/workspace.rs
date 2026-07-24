@@ -341,16 +341,22 @@ fn add_data_source_to_config(config: &mut Config, source: DataSourceConfig) -> R
 
 fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
     validate_sandbox_args(args)?;
-    // The network block has no CLI surface, so a mode change can never fix an
-    // incompatible combination in the same invocation — fail before any write
-    // with a pointer at the block instead of a generic validation error.
-    if !config.workspace.sandbox.network.is_host() && args.mode != SandboxModeArg::Unshare {
+    // The extensions table has no CLI surface, so a mode change can never fix
+    // an incompatible combination in the same invocation — fail before any
+    // write with a pointer at the extension instead of a generic validation
+    // error.
+    let network_provider = crate::extensions::resolve_network_provider(config);
+    if let Some(network) = &network_provider
+        && args.mode != SandboxModeArg::Unshare
+    {
         return Err(StackError::InvalidParam {
-            field: "workspace.sandbox.network",
+            field: "extensions",
             reason: format!(
-                "cannot set sandbox mode `{}` while a [workspace.sandbox.network] block is \
-                 configured; remove or change the network block in the config TOML first",
-                sandbox_mode_label(args.mode.to_config())
+                "cannot set sandbox mode `{}` while network-provider extension `{}` is \
+                 declared; remove or change the [extensions.{}] table in the config TOML first",
+                sandbox_mode_label(args.mode.to_config()),
+                network.name,
+                network.name
             ),
         });
     }
@@ -362,7 +368,7 @@ fn apply_sandbox_set(config: &mut Config, args: &SandboxSetArgs) -> Result<()> {
         Vec::new()
     };
     if sandbox_config.mode != SandboxMode::Off {
-        sandbox::preflight(&sandbox_config)
+        sandbox::preflight(&sandbox_config, network_provider.as_ref())
             .map_err(|reason| StackError::SandboxFailed { reason })?;
     }
     config.workspace.sandbox = sandbox_config;
@@ -548,9 +554,8 @@ fn print_sandbox_status(config: &Config, output: OutputFormat) -> Result<()> {
             shell_words(&config.workspace.sandbox.wrapper)
         );
     }
-    let network = &config.workspace.sandbox.network;
-    if network.is_isolated() {
-        println!("network: isolated");
+    if let Some(network) = crate::extensions::resolve_network_provider(config) {
+        println!("network: isolated (extension `{}`)", network.name);
         if network.provider.is_empty() {
             println!("network provider: none (deny-all)");
         } else {
@@ -654,19 +659,19 @@ fn source_reports_json(
 }
 
 fn sandbox_config_json(config: &Config) -> Value {
-    let network = &config.workspace.sandbox.network;
     let mut value = json!({
         "mode": sandbox_mode_label(config.workspace.sandbox.mode),
         "wrapper": config.workspace.sandbox.wrapper,
         "restart_required_for_changes": "supervised-agent",
     });
-    if network.is_isolated()
+    if let Some(network) = crate::extensions::resolve_network_provider(config)
         && let Some(object) = value.as_object_mut()
     {
         object.insert(
             "network".to_owned(),
             json!({
                 "mode": "isolated",
+                "extension": network.name,
                 "provider_configured": !network.provider.is_empty(),
                 "provider_timeout": network.provider_timeout_raw(),
                 "provider_stderr": network.provider_stderr.as_str(),
@@ -875,10 +880,19 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_set_fails_without_write_when_network_block_conflicts() {
+    fn sandbox_set_fails_without_write_when_network_extension_conflicts() {
         let mut config = fixture_config();
         config.workspace.sandbox.mode = SandboxMode::Unshare;
-        config.workspace.sandbox.network.mode = config::SandboxNetworkMode::Isolated;
+        config.extensions.insert(
+            "egress".to_owned(),
+            config::ExtensionConfig {
+                extension_type: config::ExtensionType::NetworkProvider,
+                provider: Vec::new(),
+                provider_timeout: None,
+                provider_stderr: config::SandboxProviderStderr::default(),
+                capability: None,
+            },
+        );
         let before = config.clone();
 
         for mode in [SandboxModeArg::Off, SandboxModeArg::Bwrap] {
@@ -889,8 +903,8 @@ mod tests {
                     wrapper_args: Vec::new(),
                 },
             )
-            .expect_err("a configured network block must block the mode change");
-            assert!(error.to_string().contains("workspace.sandbox.network"));
+            .expect_err("a declared network-provider extension must block the mode change");
+            assert!(error.to_string().contains("extensions.egress"));
             assert_eq!(config, before, "config must be untouched on failure");
         }
     }

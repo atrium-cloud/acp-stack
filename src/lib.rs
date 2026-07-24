@@ -7,6 +7,7 @@ pub mod edge;
 pub mod envelope;
 pub mod error;
 pub mod events;
+pub mod extensions;
 pub mod fs_util;
 pub mod http_hardening;
 pub mod local_listener;

@@ -21,13 +21,13 @@ pub use self::schema::{
     ArrayConfig, ArrayTargetConfig, CloudflareEdgeConfig, CodeSourceConfig, CommandsConfig,
     CustomProviderApi, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DEFAULT_COMMAND_PROGRESS_INTERVAL,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
-    DEFAULT_PERMISSION_REQUEST_TIMEOUT, DEFAULT_PERMISSION_TIMEOUT_ACTION,
-    DEFAULT_PROMPTS_STALE_THRESHOLD, DEFAULT_PROMPTS_SWEEP_INTERVAL,
-    DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig,
-    DependenciesConfig, DependencyEntry, DependencyInstallAction, DependencyInstallScope,
-    EdgeConfig, HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig,
-    McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
-    PromptsConfig, SandboxConfig, SandboxMode, SandboxNetworkConfig, SandboxNetworkMode,
+    DEFAULT_NETWORK_PROVIDER_TIMEOUT, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
+    DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
+    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY,
+    DataSourceConfig, DependenciesConfig, DependencyEntry, DependencyInstallAction,
+    DependencyInstallScope, EdgeConfig, ExtensionConfig, ExtensionType, HttpHeaderRef, LocalConfig,
+    LocalSessionAuth, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
+    PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SandboxConfig, SandboxMode,
     SandboxProviderStderr, SecurityConfig, SecurityHttpConfig, StackUpdateConfig,
     StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig, UpdatesConfig,
     WorkspaceConfig,
@@ -65,6 +65,10 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub local: LocalConfig,
+    /// Operator-declared extension instances, keyed by operator-chosen name.
+    /// See [`ExtensionConfig`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extensions: std::collections::BTreeMap<String, ExtensionConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -131,6 +135,8 @@ struct RawConfig {
     mcp: Option<McpConfig>,
     #[serde(default)]
     local: Option<LocalConfig>,
+    #[serde(default)]
+    extensions: Option<std::collections::BTreeMap<String, ExtensionConfig>>,
     #[serde(default)]
     auth: Option<LegacyAuthConfig>,
 }
@@ -204,6 +210,14 @@ fn has_removed_startup_table(input: &str) -> bool {
     })
 }
 
+fn has_removed_sandbox_network_table(input: &str) -> bool {
+    input.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("[workspace.sandbox.network]")
+            || trimmed.starts_with("[workspace.sandbox.network.")
+    })
+}
+
 pub fn default_config_path() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -238,6 +252,15 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
         return Err(StackError::InvalidParam {
             field: "startup",
             reason: "`[startup]` was removed because startup scripts were never executed; use workspace sources, dependency declarations, or agent install configuration instead"
+                .to_owned(),
+        });
+    }
+    if has_removed_sandbox_network_table(input) {
+        return Err(StackError::InvalidParam {
+            field: "workspace.sandbox.network",
+            reason: "`[workspace.sandbox.network]` moved to the extensions framework; declare \
+                 `[extensions.<name>]` with `type = \"network-provider\"` instead (see \
+                 docs/specs/extensions.md)"
                 .to_owned(),
         });
     }
@@ -305,6 +328,7 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
         dependencies: raw.dependencies.unwrap_or_default(),
         mcp: raw.mcp.unwrap_or_default(),
         local: raw.local.unwrap_or_default(),
+        extensions: raw.extensions.unwrap_or_default(),
     };
 
     config.validate()?;

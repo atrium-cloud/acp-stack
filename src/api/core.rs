@@ -55,6 +55,7 @@ use super::routes::config::{
     secrets_list_handler, secrets_set_handler,
 };
 use super::routes::deps::{deps_apply_handler, deps_check_handler, deps_get_handler};
+use super::routes::extensions::extension_managed_state_apply_handler;
 use super::routes::logs::{
     logs_commands_handler, logs_events_handler, logs_permissions_handler, logs_security_handler,
     logs_sessions_handler,
@@ -651,6 +652,10 @@ pub fn build_router(state: AppState) -> Router {
         ));
 
     let admin_routes = Router::new()
+        .route(
+            "/v1/admin/extensions/{name}/apply",
+            post(extension_managed_state_apply_handler),
+        )
         .route("/v1/security/check", get(security_check_handler))
         .route("/v1/security/history", get(security_history_handler))
         .route(

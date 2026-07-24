@@ -86,6 +86,7 @@ async fn assert_real_agent_advertises_model(
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("real ACP agent should initialize");
@@ -126,6 +127,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
         None,
         &Default::default(),
         None,
+        None,
     )
     .await
     .expect("real ACP agent should initialize");
@@ -159,6 +161,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
         Arc::new(NoopSessionEventSink),
         None,
         &Default::default(),
+        None,
         None,
     )
     .await
@@ -248,6 +251,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
         Arc::new(NoopSessionEventSink),
         None,
         &Default::default(),
+        None,
         Some(acp_stack::runtime::agent::acp_bridge::TerminalCommandLog {
             state: state.clone(),
             event_hub: acp_stack::events::EventHub::new(),
