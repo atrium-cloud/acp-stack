@@ -27,8 +27,8 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentNotification, CancelNotification, ClientCapabilities, ClientSessionCapabilities,
-    CloseSessionRequest, ContentBlock, CreateTerminalRequest, FileSystemCapabilities,
-    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
+    CloseSessionRequest, CreateTerminalRequest, FileSystemCapabilities, ForkSessionRequest,
+    ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
     KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
@@ -38,8 +38,6 @@ use agent_client_protocol::schema::v1::{
     WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex as TokioMutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -60,6 +58,14 @@ use crate::runtime::agent::inference_failure::{self, Classified};
 use crate::runtime::mediation::permissions::PermissionService;
 use crate::runtime::process_runner::{forward_host_env_tokio, kill_tokio_process_group};
 use crate::state::FailureClass;
+
+mod capabilities;
+mod process_env;
+
+use self::process_env::build_agent_process_env;
+
+pub use self::capabilities::AgentCapabilitiesDto;
+pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
 
 // External callers (CLI, supervisor, model_discovery, integration tests) wrote
 // `crate::runtime::agent::acp_bridge::{SessionEventSink, StateStoreSessionSink, session_*}`
@@ -87,22 +93,6 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// remain parked until orderly shutdown, so process death is observed directly.
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
-const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
-const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
-const KIMI_MODEL_NAME_ENV: &str = "KIMI_MODEL_NAME";
-const KIMI_MODEL_BASE_URL_ENV: &str = "KIMI_MODEL_BASE_URL";
-// Kimi Code requires a model before its ACP process can initialize. Init pins
-// this default into config when `--model` is not passed, and the launch env
-// falls back to it when a hand-edited config omits `agent.model`. It is the
-// one id available on every subscription tier, whereas `k3` is gated to
-// Moderato and above.
-pub(crate) const KIMI_CODE_DEFAULT_MODEL: &str = "kimi-for-coding";
-// Kimi's provider default points at the general Moonshot API. Pinning the
-// first-party coding endpoint is the boundary that keeps this catalog entry
-// scoped to Kimi Code rather than exposing an undeclared custom-provider lane.
-const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSessionConfigCategory {
     Mode,
@@ -128,176 +118,6 @@ impl AgentSessionConfigCategory {
             (Self::Mode, SessionConfigOptionCategory::Mode)
                 | (Self::Model, SessionConfigOptionCategory::Model)
         )
-    }
-}
-
-/// Our owned view of the `initialize` response. Mirrors the protocol shape
-/// but is independent of the SDK's `AgentCapabilities` type so our
-/// `GET /v1/agent/capabilities` JSON contract stays stable across SDK
-/// minor-version churn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentCapabilitiesDto {
-    pub protocol_version: u16,
-    /// Raw JSON object of the agent's advertised capabilities. We surface it
-    /// verbatim so clients can read every field today without the daemon
-    /// growing a struct for each one. Named accessors land alongside the
-    /// session API.
-    pub capabilities: Value,
-    /// `agentInfo.name` if the agent provided it. The spec says `SHOULD`,
-    /// not `MUST`, so this is best-effort.
-    pub agent_name: Option<String>,
-    pub agent_title: Option<String>,
-    pub agent_version: Option<String>,
-}
-
-impl AgentCapabilitiesDto {
-    pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|err| StackError::AgentInitializeFailed {
-            reason: format!("failed to serialize agent capabilities: {err}"),
-        })
-    }
-
-    /// Whether the agent advertised the `load_session` capability in its
-    /// `initialize` response. Used to gate `POST /v1/sessions/{id}/load`.
-    pub fn supports_load_session(&self) -> bool {
-        self.capabilities
-            .get("loadSession")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    pub fn supports_list_sessions(&self) -> bool {
-        self.supports_session_capability("list")
-    }
-
-    pub fn supports_resume_session(&self) -> bool {
-        self.supports_session_capability("resume")
-    }
-
-    pub fn supports_close_session(&self) -> bool {
-        self.supports_session_capability("close")
-    }
-
-    pub fn supports_fork_session(&self) -> bool {
-        self.supports_session_capability("fork")
-    }
-
-    pub fn supports_fork_message_id(&self) -> bool {
-        let fork = self
-            .capabilities
-            .get("sessionCapabilities")
-            .and_then(Value::as_object)
-            .and_then(|caps| caps.get("fork"))
-            .and_then(Value::as_object);
-        fork.and_then(|fork| fork.get("_meta"))
-            .and_then(Value::as_object)
-            .and_then(|meta| meta.get("acpStack"))
-            .and_then(Value::as_object)
-            .and_then(|stack| stack.get("messageId"))
-            .is_some_and(Value::is_object)
-    }
-
-    fn supports_prompt_capability(&self, name: &str) -> bool {
-        self.capabilities
-            .get("promptCapabilities")
-            .and_then(Value::as_object)
-            .and_then(|capabilities| capabilities.get(name))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    fn supports_mcp_capability(&self, name: &str) -> bool {
-        self.capabilities
-            .get("mcpCapabilities")
-            .and_then(Value::as_object)
-            .and_then(|capabilities| capabilities.get(name))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    fn validate_prompt(&self, prompt: &[ContentBlock]) -> Result<()> {
-        for block in prompt {
-            let required = match block {
-                ContentBlock::Text(_) | ContentBlock::ResourceLink(_) => None,
-                ContentBlock::Image(_) => Some(("image", "promptCapabilities.image")),
-                ContentBlock::Audio(_) => Some(("audio", "promptCapabilities.audio")),
-                ContentBlock::Resource(_) => {
-                    Some(("embeddedContext", "promptCapabilities.embeddedContext"))
-                }
-                _ => {
-                    return Err(StackError::AgentUnsupportedCapability {
-                        name: "promptCapabilities.unknown",
-                    });
-                }
-            };
-            if let Some((capability, error_name)) = required
-                && !self.supports_prompt_capability(capability)
-            {
-                return Err(StackError::AgentUnsupportedCapability { name: error_name });
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_mcp_servers(&self, servers: &[McpServer]) -> Result<()> {
-        for server in servers {
-            let required = match server {
-                McpServer::Stdio(_) => None,
-                McpServer::Http(_) => Some(("http", "mcpCapabilities.http")),
-                McpServer::Sse(_) => Some(("sse", "mcpCapabilities.sse")),
-                _ => {
-                    return Err(StackError::AgentUnsupportedCapability {
-                        name: "mcpCapabilities.unknown",
-                    });
-                }
-            };
-            if let Some((capability, error_name)) = required
-                && !self.supports_mcp_capability(capability)
-            {
-                return Err(StackError::AgentUnsupportedCapability { name: error_name });
-            }
-        }
-        Ok(())
-    }
-
-    fn supports_session_capability(&self, name: &str) -> bool {
-        self.capabilities
-            .get("sessionCapabilities")
-            .and_then(Value::as_object)
-            .and_then(|caps| caps.get(name))
-            .is_some_and(Value::is_object)
-    }
-
-    fn from_initialize_response(response: &InitializeResponse) -> Result<Self> {
-        // The SDK's `AgentCapabilities` is a typed struct that may rename
-        // fields between minor versions; serialize through serde_json to keep
-        // our durable storage and API contract independent of that surface.
-        let raw_caps = serde_json::to_value(&response.agent_capabilities).map_err(|err| {
-            StackError::AgentInitializeFailed {
-                reason: format!("failed to serialize agent capabilities: {err}"),
-            }
-        })?;
-        let protocol_version = response.protocol_version.as_u16();
-        let (agent_name, agent_title, agent_version) = match serde_json::to_value(response) {
-            Ok(Value::Object(map)) => {
-                let info = map.get("agentInfo").cloned().unwrap_or(Value::Null);
-                (
-                    info.get("name").and_then(Value::as_str).map(str::to_owned),
-                    info.get("title").and_then(Value::as_str).map(str::to_owned),
-                    info.get("version")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                )
-            }
-            _ => (None, None, None),
-        };
-        Ok(Self {
-            protocol_version,
-            capabilities: raw_caps,
-            agent_name,
-            agent_title,
-            agent_version,
-        })
     }
 }
 
@@ -405,54 +225,6 @@ impl Drop for NotificationGuard {
         self.drain.active.fetch_sub(1, Ordering::SeqCst);
         self.drain.changed.notify_waiters();
     }
-}
-
-fn build_agent_process_env(
-    agent: &AgentConfig,
-    mut env: HashMap<String, String>,
-) -> Result<HashMap<String, String>> {
-    if agent.id != KIMI_CODE_AGENT_ID {
-        return Ok(env);
-    }
-
-    if let Some(name) = env
-        .keys()
-        .filter(|name| name.starts_with("KIMI_MODEL_"))
-        .min()
-    {
-        return Err(StackError::AgentInitializeFailed {
-            reason: format!(
-                "Kimi Code launch env `{name}` is runtime-managed; configure only `{KIMI_API_KEY_ENV}` in [agent].env"
-            ),
-        });
-    }
-
-    let api_key = env
-        .remove(KIMI_API_KEY_ENV)
-        .ok_or_else(|| StackError::AgentInitializeFailed {
-            reason: format!(
-                "Kimi Code requires `{KIMI_API_KEY_ENV}` in [agent].env so acp-stack can construct its headless launch environment"
-            ),
-        })?;
-    if api_key.trim().is_empty() {
-        return Err(StackError::AgentInitializeFailed {
-            reason: format!("Kimi Code secret `{KIMI_API_KEY_ENV}` must not be empty"),
-        });
-    }
-    let model = agent.model.as_deref().unwrap_or(KIMI_CODE_DEFAULT_MODEL);
-    if model.trim().is_empty() || model.len() != model.trim().len() {
-        return Err(StackError::AgentInitializeFailed {
-            reason: "Kimi Code requires a non-empty, trimmed agent.model".to_owned(),
-        });
-    }
-
-    env.insert(KIMI_MODEL_API_KEY_ENV.to_owned(), api_key);
-    env.insert(KIMI_MODEL_NAME_ENV.to_owned(), model.to_owned());
-    env.insert(
-        KIMI_MODEL_BASE_URL_ENV.to_owned(),
-        KIMI_CODE_BASE_URL.to_owned(),
-    );
-    Ok(env)
 }
 
 impl AcpBridge {
@@ -1423,10 +1195,11 @@ fn command_search_paths() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, KIMI_CODE_BASE_URL, KIMI_MODEL_API_KEY_ENV,
-        KIMI_MODEL_BASE_URL_ENV, KIMI_MODEL_NAME_ENV, NotificationDrain, build_agent_process_env,
+    use super::process_env::{
+        KIMI_API_KEY_ENV, KIMI_CODE_BASE_URL, KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV,
+        KIMI_MODEL_NAME_ENV, build_agent_process_env,
     };
+    use super::{KIMI_CODE_AGENT_ID, NotificationDrain};
     use crate::config::AgentConfig;
     use std::collections::HashMap;
     use std::sync::Arc;

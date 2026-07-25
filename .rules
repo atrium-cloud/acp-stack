@@ -102,6 +102,8 @@ This project is early-stage. Catching bugs early matters more than graceful degr
 - Prefer implementing functionality in existing files unless it is a new logical component.
 - Avoid creating many tiny files for tightly coupled code.
 - Never create files with `mod.rs` paths; prefer `src/some_module.rs` over `src/some_module/mod.rs`.
+    - Sole exception: `tests/common/mod.rs`, the Cargo-sanctioned shared-helper module for integration tests. A subdirectory module under `tests/` is not compiled as its own test binary; a top-level `tests/common.rs` would be.
+- When splitting a large module, keep the parent file as `src/foo.rs` declaring `mod bar;` with siblings in `src/foo/bar.rs`. Siblings start with `use super::*;` and may re-open `impl TypeName` blocks; moved `pub` items get a `pub use` (named or glob) in the parent so external paths are unchanged.
 - When creating new crates, specify the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of relying on the default `lib.rs`.
 - Never use `unwrap()` in production code. Propagate errors with `?` or handle them explicitly.
 - Never silently discard errors with `let _ =` on fallible operations.

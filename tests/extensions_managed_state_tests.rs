@@ -25,7 +25,7 @@ const NAMESPACE: &str = "platform-state";
 const PEER_NAMESPACE: &str = "peer-state";
 
 /// Serializes HOME mutations across the parallel-by-default `#[tokio::test]`
-/// functions in this file (same pattern as tests/agent_api_tests.rs). The
+/// functions in this file (same pattern as tests/common/mod.rs). The
 /// handler resolves the secret store through `$HOME`, so each test repoints
 /// HOME at its own tempdir for the full test body.
 ///
