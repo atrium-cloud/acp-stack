@@ -1,6 +1,6 @@
 # acp-stack
 
-`acp-stack` is a self-hostable Linux runtime for ACP-compatible agents. It wraps an agent with durable config, encrypted secrets, workspace access, MCP server wiring, command mediation, permission review, logs, and an HTTP/WebSocket API.
+`acp-stack` is a self-hostable Linux runtime for ACP-compatible agents. It wraps an agent with durable config, encrypted secrets, workspace access, MCP server wiring, command mediation, permission review, logs, typed extension seams, and an HTTP/WebSocket API.
 
 ## Deployment
 
@@ -11,6 +11,7 @@
 - CLI contract: [docs/specs/cli.md](docs/specs/cli.md)
 - Config contract: [docs/specs/config.md](docs/specs/config.md)
 - API contract: [docs/specs/api/api.md](docs/specs/api/api.md)
+- Extension contract: [docs/specs/extensions.md](docs/specs/extensions.md)
 
 ## Supported Agents
 
