@@ -57,6 +57,7 @@ Out of scope for the initial release:
 - [Security](security.md)
 - [State and logging](state-logging.md)
 - [ACP bridge](acp/acp-bridge.md)
+- [Extensions](extensions.md)
 - [Agent support](agents/support.md)
 - [Agent provider config](agents/config.md)
 - [MCP compatibility](mcp.md)
