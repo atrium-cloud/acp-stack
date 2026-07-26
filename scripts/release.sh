@@ -202,7 +202,9 @@ git add -- "${RELEASE_FILES[@]}"
 # files are staged first so the release commit is exactly what passed.
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets --all-features
+# Tests must see the same non-interactive stdin as CI: interactivity checks
+# (io::stdin().is_terminal()) otherwise prompt and hang under a terminal run.
+cargo test --locked --all-targets --all-features </dev/null
 
 if [[ "$dry_run" -eq 1 ]]; then
     printf 'release: dry run passed; would commit and tag %s\n' "$new_tag"
