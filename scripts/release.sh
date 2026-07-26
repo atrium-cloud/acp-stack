@@ -193,7 +193,9 @@ trap 'exit 130' INT TERM HUP
 
 printf 'release: preparing %s -> %s\n' "$current_version" "$new_version"
 write_package_version "$new_version"
-cargo metadata --format-version 1 --no-deps >/dev/null
+# Full resolution, not --no-deps: only then does cargo rewrite Cargo.lock
+# with the bumped package version, which the --locked release gates require.
+cargo metadata --format-version 1 >/dev/null
 git add -- "${RELEASE_FILES[@]}"
 
 # These are the tracked equivalent of the release-gate checks. The release
