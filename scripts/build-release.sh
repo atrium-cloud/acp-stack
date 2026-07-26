@@ -82,6 +82,9 @@ sha256_file() {
     shasum -a 256 "$1" | awk '{print $1}'
   fi
 }
+byte_size_file() {
+  wc -c <"$1" | tr -d '[:space:]'
+}
 
 command -v cargo-zigbuild >/dev/null 2>&1 \
   || fail "cargo-zigbuild not found; install with: cargo install cargo-zigbuild (and a zig toolchain)"
@@ -163,12 +166,13 @@ manifest="${DIST_DIR}/${MANIFEST_NAME}"
     target="${TARGETS[$index]}"
     tarball="${PROJECT}-${version}-${target}.tar.gz"
     digest="$(sha256_file "${DIST_DIR}/${tarball}")"
+    byte_size="$(byte_size_file "${DIST_DIR}/${tarball}")"
     comma=","
     if [[ "${index}" -eq "$((${#TARGETS[@]} - 1))" ]]; then
       comma=""
     fi
-    printf '    { "target": "%s", "archive": "%s", "sha256": "%s" }%s\n' \
-      "${target}" "${tarball}" "${digest}" "${comma}"
+    printf '    { "target": "%s", "archive": "%s", "byte_size": %s, "sha256": "%s" }%s\n' \
+      "${target}" "${tarball}" "${byte_size}" "${digest}" "${comma}"
   done
   printf '  ]\n'
   printf '}\n'
@@ -184,9 +188,7 @@ cat >&2 <<EOF
 build-release: done. Artifacts in ${DIST_DIR}:
 $(cd "${DIST_DIR}" && ls -1)
 
-To publish (after committing + tagging v${version}):
-  gh release create v${version} \\
-    dist/${PROJECT}-${version}-*.tar.gz \\
-    dist/SHA256SUMS dist/install.sh dist/${MANIFEST_NAME} \\
-    --title "v${version}" --notes "..."
+To publish, cut the release with scripts/release.sh (commits, tags, and
+optionally pushes v${version}); the tag-triggered GitHub Actions workflow then
+builds and publishes the release artifacts.
 EOF

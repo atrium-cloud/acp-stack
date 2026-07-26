@@ -2,13 +2,16 @@ name: release
 
 # Builds and publishes the Linux release artifacts on GitHub's runners. A single
 # Linux job cross-compiles both arches via cargo-zigbuild (glibc 2.17 floor),
-# reusing scripts/build-release.sh verbatim, then attaches the tarballs +
-# SHA256SUMS + install.sh + acps-release.json (the self-updater manifest) to the
-# GitHub Release.
+# reusing scripts/build-release.sh verbatim, then publishes the tarballs to the
+# configured release hosting service over GitHub OIDC and attaches the tarballs
+# + SHA256SUMS + install.sh + acps-release.json (the self-updater manifest) to
+# the GitHub Release.
 #
-# Normal flow: push a tag.
-#   git tag v0.1.0 && git push origin v0.1.0
-# The workflow_dispatch path re-runs a build for an already-pushed tag.
+# Normal flow: cut a release with scripts/release.sh --push.
+# Retry a failed run with GitHub's "re-run failed jobs" (it keeps the
+# refs/tags/* ref and push event the hosting service's publisher trust policy
+# requires). The workflow_dispatch path re-runs a build for an already-pushed
+# tag; dispatch with the tag as the run ref or publication is rejected.
 
 on:
   push:
@@ -17,11 +20,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and release (e.g. v0.1.0)"
+        description: "Existing tag to build and release (e.g. v0.1.0); dispatch with the tag as the run ref"
         required: true
 
 permissions:
   contents: write
+  id-token: write
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -38,6 +45,13 @@ jobs:
           toolchain: "1.95.0"
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
+      - name: Validate tag and package version
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)"
+          test "$RELEASE_TAG" = "v$version"
+
       - uses: mlugg/setup-zig@v2
         with:
           version: latest
@@ -48,10 +62,21 @@ jobs:
       - name: Build release artifacts
         run: bash scripts/build-release.sh
 
+      # Publishes to the release hosting service configured through repository
+      # variables. Forks without those variables skip publication and keep the
+      # GitHub Release flow only.
+      - name: Publish release artifacts
+        if: vars.PUBLISH_BASE_URL != ''
+        env:
+          PUBLISH_BASE_URL: ${{ vars.PUBLISH_BASE_URL }}
+          PUBLISH_OIDC_AUDIENCE: ${{ vars.PUBLISH_OIDC_AUDIENCE }}
+          PUBLISH_RUNTIME_PROFILE: ${{ vars.PUBLISH_RUNTIME_PROFILE }}
+        run: bash scripts/publish-release.sh dist/acps-release.json acp-stack "$RELEASE_TAG"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/acp-stack-*.tar.gz
             dist/SHA256SUMS
@@ -61,5 +86,5 @@ jobs:
           # the tag (docs/changelogs/<tag>.md, e.g. docs/changelogs/v0.1.1.md);
           # generated commit/PR notes are appended below it. The release fails if
           # the file is missing, which keeps every tag paired with a changelog.
-          body_path: docs/changelogs/${{ github.event.inputs.tag || github.ref_name }}.md
+          body_path: docs/changelogs/${{ env.RELEASE_TAG }}.md
           generate_release_notes: true
