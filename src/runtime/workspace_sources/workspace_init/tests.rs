@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use tempfile::tempdir;
 
-use super::code_git::write_askpass_helper;
+use super::code_git::{run_git_clone, run_git_rev_parse, write_askpass_helper};
 use super::common::write_command_capture;
 use super::https::materialize_https;
 use super::local::materialize_local;
@@ -32,9 +32,18 @@ fn workspace_with(root: &Path) -> WorkspaceConfig {
 // git through `output()` and carry both streams into the panic message;
 // a bare `assert!(status.success())` left past failures undiagnosable.
 fn run_fixture_git(repo: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(repo);
+    // When the test binary runs inside a git hook (pre-commit runs the
+    // suite), git exports repo-scoping vars (GIT_DIR, GIT_INDEX_FILE, ...)
+    // that would point fixture git at the developer's repo instead of the
+    // tempdir, so scrub every inherited GIT_* variable.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(&name);
+        }
+    }
+    let output = command
         .output()
         .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
     assert!(
@@ -168,6 +177,44 @@ fn clones_git_source_and_records_sentinel() {
     // Rerun is idempotent.
     let report2 = materialize_workspace(&workspace, &secrets, None).expect("rerun");
     assert_eq!(report2.code[0].outcome, MaterializeOutcome::Verified);
+}
+
+#[test]
+fn git_materialization_ignores_inherited_repo_scope_env() {
+    if !git_available() {
+        eprintln!("skipping: git not on PATH");
+        return;
+    }
+    let upstream = tempdir().expect("upstream");
+    run_git_init(upstream.path());
+    git_commit_in(upstream.path(), "README.md", "hello\n", "init");
+    let dest_root = tempdir().expect("dest root");
+    let dest = dest_root.path().join("clone");
+
+    // Regression: when this suite runs under the pre-commit hook, git
+    // exports repo-scoping vars to the hook environment, and clone /
+    // rev-parse must not honor them. Bogus paths make any leak fail loudly.
+    // SAFETY: tests in this binary share env; other tests spawning git
+    // scrub these vars, and we remove them before asserting.
+    unsafe {
+        std::env::set_var("GIT_DIR", "/nonexistent/repo-scope-git-dir");
+        std::env::set_var("GIT_INDEX_FILE", "/nonexistent/repo-scope-index");
+    }
+    let clone = run_git_clone(
+        &upstream.path().display().to_string(),
+        None,
+        None,
+        &dest,
+        None,
+    );
+    let rev_parse = run_git_rev_parse(&dest, None);
+    unsafe {
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_INDEX_FILE");
+    }
+    clone.expect("clone must ignore inherited GIT_DIR/GIT_INDEX_FILE");
+    let head = rev_parse.expect("rev-parse must ignore inherited GIT_DIR/GIT_INDEX_FILE");
+    assert_eq!(head.len(), 40, "expected a full commit hash, got: {head}");
 }
 
 #[test]
