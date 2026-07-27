@@ -785,9 +785,12 @@ async fn native_config_inspect_request_layer_defers_to_content_cap() {
 
     // Past the whole-request cap: rejected at the body-limit layer. The
     // middleware response may not be JSON, so assert on status and only on
-    // the envelope if the body parses as JSON.
+    // the envelope if the body parses as JSON. The layer also stops reading
+    // and may abort the connection before the client finishes writing the
+    // oversize body, so a reset/broken-pipe mid-send races the 413 response;
+    // both are the rejection observed from the socket.
     let over_request = "x".repeat(acp_stack::config::IMPORT_REQUEST_SIZE_LIMIT + 1_048_576);
-    let response = client
+    let result = client
         .post(format!(
             "{}/v1/agent/config/native/inspect",
             harness.base_url
@@ -795,15 +798,44 @@ async fn native_config_inspect_request_layer_defers_to_content_cap() {
         .header("Authorization", admin_bearer())
         .json(&json!({ "filename": "opencode.json", "content": over_request }))
         .send()
-        .await
-        .expect("send oversize inspect");
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let text = response.text().await.unwrap_or_default();
-    if let Ok(body) = serde_json::from_str::<Value>(&text) {
-        assert_ne!(
-            body["error"]["code"], "native_config_too_large",
-            "oversize request should be rejected by the body-limit layer, not the content cap: {body}"
-        );
+        .await;
+    match result {
+        Ok(response) => {
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let text = response.text().await.unwrap_or_default();
+            if let Ok(body) = serde_json::from_str::<Value>(&text) {
+                assert_ne!(
+                    body["error"]["code"], "native_config_too_large",
+                    "oversize request should be rejected by the body-limit layer, not the content cap: {body}"
+                );
+            }
+        }
+        Err(error) => {
+            // The abort can surface as a reset, broken pipe, or hyper's
+            // sourceless "incomplete message", so no error shape is asserted
+            // here. A crashed server would also land in this arm, so prove
+            // the server is still alive and rejecting by re-issuing the
+            // content-cap request and re-asserting its typed 413.
+            let retry_content = "x".repeat(OVER_CONTENT_UNDER_REQUEST_BYTES);
+            let response = client
+                .post(format!(
+                    "{}/v1/agent/config/native/inspect",
+                    harness.base_url
+                ))
+                .header("Authorization", admin_bearer())
+                .json(&json!({ "filename": "opencode.json", "content": retry_content }))
+                .send()
+                .await
+                .unwrap_or_else(|retry_error| {
+                    panic!("server unreachable after oversize send failed ({error}): {retry_error}")
+                });
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let body: Value = response
+                .json()
+                .await
+                .expect("inspect json after oversize send abort");
+            assert_eq!(body["error"]["code"], "native_config_too_large");
+        }
     }
 }
 
