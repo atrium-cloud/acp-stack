@@ -28,43 +28,41 @@ fn workspace_with(root: &Path) -> WorkspaceConfig {
     }
 }
 
-fn run_git_init(repo: &Path) {
-    let status = Command::new("git")
-        .arg("init")
-        .arg("-q")
+// Child stdout/stderr is invisible under libtest capture, so run fixture
+// git through `output()` and carry both streams into the panic message;
+// a bare `assert!(status.success())` left past failures undiagnosable.
+fn run_fixture_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
         .current_dir(repo)
-        .status()
-        .expect("git init");
-    assert!(status.success());
+        .output()
+        .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed ({}):\nstdout: {}\nstderr: {}",
+        repo.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn run_git_init(repo: &Path) {
+    run_fixture_git(repo, &["init", "-q"]);
     // Pin local user identity so commits work in CI sandboxes.
     for (k, v) in [
         ("user.email", "test@example.com"),
         ("user.name", "Test"),
         ("commit.gpgsign", "false"),
     ] {
-        let status = Command::new("git")
-            .args(["config", k, v])
-            .current_dir(repo)
-            .status()
-            .expect("git config");
-        assert!(status.success());
+        run_fixture_git(repo, &["config", k, v]);
     }
 }
 
 fn git_commit_in(repo: &Path, file: &str, contents: &str, message: &str) {
     std::fs::write(repo.join(file), contents).expect("write");
-    let status = Command::new("git")
-        .args(["add", file])
-        .current_dir(repo)
-        .status()
-        .expect("git add");
-    assert!(status.success());
-    let status = Command::new("git")
-        .args(["commit", "-q", "-m", message])
-        .current_dir(repo)
-        .status()
-        .expect("git commit");
-    assert!(status.success());
+    run_fixture_git(repo, &["add", file]);
+    run_fixture_git(repo, &["commit", "-q", "-m", message]);
 }
 
 fn git_available() -> bool {
