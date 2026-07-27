@@ -20,6 +20,9 @@
 set -euo pipefail
 
 readonly STABLE_TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+# Only this target is served from the release hosting service; the other
+# built targets ship via the GitHub Release alone.
+readonly PUBLISH_TARGET="x86_64-unknown-linux-gnu"
 
 usage() {
     cat <<'EOF'
@@ -88,19 +91,25 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 dist_dir="$(cd "$(dirname "$manifest_path")" && pwd)"
 
 # The publish manifest accepts exactly these fields. The build manifest's
-# artifact entries gain the fixed binary name to complete the required shape.
+# artifact entries are filtered to the published target and gain the fixed
+# binary name to complete the required shape.
 body="$(
     jq --compact-output --exit-status \
         --arg product "$product" \
         --arg version "$version_tag" \
         --arg runtime_profile "$PUBLISH_RUNTIME_PROFILE" \
+        --arg publish_target "$PUBLISH_TARGET" \
         '{product: $product, version: $version, runtime_profile: $runtime_profile,
-          artifacts: [.artifacts[] | . + {binary: "acps"}]}' \
+          artifacts: [.artifacts[] | select(.target == $publish_target) | . + {binary: "acps"}]}' \
         "$manifest_path"
 )" || fail "could not derive the publish manifest from $manifest_path"
-artifact_count="$(jq --exit-status '.artifacts | length' "$manifest_path")" \
-    || fail "could not read the artifact list from $manifest_path"
-[[ "$artifact_count" -gt 0 ]] || fail "manifest has an empty artifact list: $manifest_path"
+artifact_count="$(
+    jq --exit-status --arg publish_target "$PUBLISH_TARGET" \
+        '[.artifacts[] | select(.target == $publish_target)] | length' \
+        "$manifest_path"
+)" || fail "could not read the artifact list from $manifest_path"
+[[ "$artifact_count" -gt 0 ]] \
+    || fail "manifest has no artifacts for target $PUBLISH_TARGET: $manifest_path"
 
 log "initiating publication of $product $version_tag ($artifact_count artifacts)"
 token="$(mint_token)" || fail "could not mint a GitHub OIDC token"
