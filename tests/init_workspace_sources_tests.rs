@@ -101,13 +101,29 @@ fn git_available() -> bool {
         .unwrap_or(false)
 }
 
+// Mirrors run_fixture_git in src/runtime/workspace_sources/workspace_init/tests.rs:
+// scrub git's hook-exported repo-scoping env (GIT_DIR, GIT_INDEX_FILE, ...)
+// so fixtures built under a pre-commit hook stay in their tempdir, and carry
+// both streams into the panic message since libtest cannot capture child stdio.
 fn run_git(repo: &Path, args: &[&str]) {
-    let status = StdCommand::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .expect("git");
-    assert!(status.success(), "git {args:?}");
+    let mut command = StdCommand::new("git");
+    command.args(args).current_dir(repo);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(&name);
+        }
+    }
+    let output = command
+        .output()
+        .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} in {} failed ({}):\nstdout: {}\nstderr: {}",
+        repo.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 fn prepare_upstream() -> tempfile::TempDir {

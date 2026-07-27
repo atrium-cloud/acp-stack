@@ -20,6 +20,30 @@ use super::{
     WORKSPACE_STDERR_TAIL_BYTES,
 };
 
+// Repo-scoping variables git exports to hooks and subprocesses. If the
+// runtime is itself launched from such an environment (observed: the test
+// suite running under a pre-commit hook), an inherited GIT_DIR or
+// GIT_INDEX_FILE silently redirects clone/rev-parse at the launcher's
+// repository, so every git we spawn must drop them. Enumerated rather than
+// a GIT_* prefix sweep so operator-intended env such as GIT_SSH_COMMAND or
+// proxy settings keeps working.
+const GIT_REPO_SCOPE_ENV_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_CONFIG_PARAMETERS",
+];
+
+fn scrub_repo_scope_env(cmd: &mut Command) {
+    for var in GIT_REPO_SCOPE_ENV_VARS {
+        cmd.env_remove(var);
+    }
+}
+
 pub(super) fn materialize_code_source(
     index: usize,
     source: &CodeSourceConfig,
@@ -146,6 +170,7 @@ pub(super) fn run_git_clone(
     }
     cmd.arg("--").arg(repo).arg(dest);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    scrub_repo_scope_env(&mut cmd);
 
     // Force non-interactive auth. If we pass a credential, it goes via
     // GIT_ASKPASS so the token never lands in process args (which would
@@ -189,12 +214,14 @@ pub(super) fn run_git_clone(
 }
 
 pub(super) fn run_git_rev_parse(dest: &Path, log_dir: Option<&Path>) -> Result<String> {
-    let output = Command::new("git")
-        .arg("rev-parse")
+    let mut cmd = Command::new("git");
+    cmd.arg("rev-parse")
         .arg("HEAD")
         .current_dir(dest)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    scrub_repo_scope_env(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|source| StackError::WorkspaceMaterializeFailed {
             reason: format!("spawning `git rev-parse` failed: {source}"),
