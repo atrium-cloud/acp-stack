@@ -43,10 +43,26 @@ fail() {
 }
 
 mint_token() {
-    curl --fail-with-body --silent --show-error \
-        --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-        "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${PUBLISH_OIDC_AUDIENCE}" \
-        | jq --exit-status --raw-output '.value'
+    local response curl_status=0
+    response="$(
+        curl --fail-with-body --silent --show-error \
+            --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${PUBLISH_OIDC_AUDIENCE}"
+    )" || curl_status=$?
+    if [[ "$curl_status" -ne 0 ]]; then
+        # Only an HTTP-error body (curl exit 22) is safe to print. A
+        # transport failure after a 200 (partial transfer, timeout, reset)
+        # leaves a truncated token body in $response, and nothing has
+        # ::add-mask::ed it yet.
+        if [[ "$curl_status" -eq 22 ]]; then
+            fail "OIDC token request was rejected: $response"
+        fi
+        fail "OIDC token request failed (curl exit $curl_status)"
+    fi
+    # A successful body carries the token itself, so never echo it on the
+    # parse-failure path either.
+    jq --exit-status --raw-output '.value' <<<"$response" \
+        || fail "OIDC token response was not understood"
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -83,11 +99,15 @@ body="$(
         "$manifest_path"
 )" || fail "could not derive the publish manifest from $manifest_path"
 artifact_count="$(jq --exit-status '.artifacts | length' "$manifest_path")" \
-    || fail "manifest has no artifact list: $manifest_path"
+    || fail "could not read the artifact list from $manifest_path"
+[[ "$artifact_count" -gt 0 ]] || fail "manifest has an empty artifact list: $manifest_path"
 
 log "initiating publication of $product $version_tag ($artifact_count artifacts)"
 token="$(mint_token)" || fail "could not mint a GitHub OIDC token"
 printf '::add-mask::%s\n' "$token"
+# On curl --fail-with-body failures the service's error body lands on stdout
+# and is captured by the substitution, so carry it into the failure message;
+# --show-error alone reports only the bare HTTP status.
 response="$(
     curl --fail-with-body --silent --show-error \
         --request POST \
@@ -95,40 +115,55 @@ response="$(
         --header 'Content-Type: application/json' \
         --data "$body" \
         "${PUBLISH_BASE_URL}/v1/publishes"
-)" || fail "publish initiation was rejected"
+)" || fail "publish initiation was rejected: $response"
 
+# The initiation response must never be echoed wholesale into failure
+# messages: its presigned upload URLs are bearer-equivalent credentials.
 publish_id="$(jq --exit-status --raw-output '.publish_id' <<<"$response")" \
     || fail "publish initiation response is missing publish_id"
 state="$(jq --exit-status --raw-output '.state' <<<"$response")" \
     || fail "publish initiation response is missing state"
 
 if [[ "$state" == "pending" ]]; then
-    upload_count="$(jq --exit-status '.uploads | length' <<<"$response")"
+    upload_count="$(jq --exit-status '.uploads | length' <<<"$response")" \
+        || fail "publish initiation response is missing the uploads list"
     [[ "$upload_count" -eq "$artifact_count" ]] \
         || fail "service issued $upload_count uploads for $artifact_count manifest artifacts"
 
     for ((index = 0; index < upload_count; index++)); do
-        upload="$(jq --compact-output ".uploads[$index]" <<<"$response")"
-        archive="$(jq --exit-status --raw-output '.archive' <<<"$upload")"
-        url="$(jq --exit-status --raw-output '.url' <<<"$upload")"
+        upload="$(jq --compact-output --exit-status ".uploads[$index]" <<<"$response")" \
+            || fail "upload entry $index is missing from the initiation response"
+        archive="$(jq --exit-status --raw-output '.archive' <<<"$upload")" \
+            || fail "upload entry $index has no archive name"
+        url="$(jq --exit-status --raw-output '.url' <<<"$upload")" \
+            || fail "upload entry $index ($archive) has no presigned url"
         file="$dist_dir/$archive"
         [[ -f "$file" ]] || fail "upload archive missing from dist: $archive"
 
+        # Parse the headers before the loop that consumes them: a jq failure
+        # inside a process substitution is invisible to set -e, and a PUT
+        # without the issued headers would fail later with an opaque
+        # storage-side error instead of here. The service always binds
+        # uploads to at least the size and checksum headers, so an empty
+        # set is also an error (jq --exit-status fails on empty output).
+        headers_tsv="$(jq --exit-status --raw-output \
+            '.headers | to_entries[] | "\(.key)\t\(.value)"' <<<"$upload")" \
+            || fail "upload entry for $archive carries no headers"
         header_args=()
         while IFS=$'\t' read -r header_name header_value; do
             header_args+=(--header "$header_name: $header_value")
-        done < <(jq --exit-status --raw-output \
-            '.headers | to_entries[] | "\(.key)\t\(.value)"' <<<"$upload")
+        done <<<"$headers_tsv"
 
         log "uploading $archive"
         # The presigned request is bound to the declared size and checksum;
         # send the returned headers exactly as issued.
-        curl --fail-with-body --silent --show-error \
-            --request PUT \
-            "${header_args[@]}" \
-            --data-binary "@$file" \
-            "$url" >/dev/null \
-            || fail "upload failed for $archive"
+        upload_response="$(
+            curl --fail-with-body --silent --show-error \
+                --request PUT \
+                "${header_args[@]}" \
+                --data-binary "@$file" \
+                "$url"
+        )" || fail "upload failed for $archive: $upload_response"
     done
 elif [[ "$state" == "published" ]]; then
     # Identical retry of an already-finalized publication: nothing to upload.
@@ -146,8 +181,8 @@ finalize="$(
         --request POST \
         --header "Authorization: Bearer ${token}" \
         "${PUBLISH_BASE_URL}/v1/publishes/${publish_id}/finalize"
-)" || fail "publication finalization failed"
+)" || fail "publication finalization failed: $finalize"
 
 jq --exit-status --raw-output \
     '"published \(.product) \(.version): release_id=\(.release_id) advanced_latest=\(.advanced_latest)"' \
-    <<<"$finalize" >&2 || fail "finalization response was not understood"
+    <<<"$finalize" >&2 || fail "finalization response was not understood: $finalize"
