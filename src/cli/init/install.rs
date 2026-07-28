@@ -112,6 +112,12 @@ pub(super) const MAX_INSTALL_ATTEMPTS: u32 = 10;
 const INSTALL_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 const INSTALL_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const INSTALL_RETRY_MAX_EXPONENT: u32 = 5;
+/// Wall-clock ceiling on RETRIES: checked between attempts, so the worst case
+/// is the budget plus one in-flight attempt (up to `INSTALLER_TIMEOUT`).
+/// The attempt cap alone lets a pathological installer that times out every
+/// try hold init hostage for attempts x timeout; the budget bounds that
+/// regardless of how the individual attempts fail.
+pub(super) const INSTALL_RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(20 * 60);
 
 /// Exponential backoff with a cap, for the 1-based `attempt` that just failed:
 /// `base * 2^(attempt-1)`, clamped to `INSTALL_RETRY_MAX_DELAY`.
@@ -144,20 +150,26 @@ fn install_error_is_retryable(error: &StackError) -> bool {
 /// Run an agent install with bounded exponential-backoff retry.
 /// `attempt_install` performs one install attempt (and renders its own
 /// progress); `on_retry` runs after a failed-but-retryable attempt to log and
-/// sleep. Returns the first success, or the last error once attempts are
-/// exhausted or a non-retryable (deterministic) error is hit. Kept generic over
-/// the two closures so the retry/backoff logic is unit-testable without touching
-/// the installer or sleeping.
+/// sleep; `elapsed` reports wall-clock time spent so far, checked against
+/// `INSTALL_RETRY_TOTAL_BUDGET` before each retry. Returns the first success,
+/// or the last error once attempts or the budget are exhausted or a
+/// non-retryable (deterministic) error is hit. Kept generic over the closures
+/// so the retry/backoff logic is unit-testable without touching the installer
+/// or sleeping.
 pub(super) fn run_install_with_retry(
     mut attempt_install: impl FnMut(u32) -> Result<InstallerOutcome>,
     mut on_retry: impl FnMut(u32, &StackError, Duration),
+    mut elapsed: impl FnMut() -> Duration,
 ) -> Result<InstallerOutcome> {
     let mut attempt = 1u32;
     loop {
         match attempt_install(attempt) {
             Ok(outcome) => return Ok(outcome),
             Err(error) => {
-                if attempt >= MAX_INSTALL_ATTEMPTS || !install_error_is_retryable(&error) {
+                if attempt >= MAX_INSTALL_ATTEMPTS
+                    || !install_error_is_retryable(&error)
+                    || elapsed() >= INSTALL_RETRY_TOTAL_BUDGET
+                {
                     return Err(error);
                 }
                 let delay = install_retry_backoff(attempt);
@@ -203,6 +215,7 @@ mod tests {
                 Err::<InstallerOutcome, _>(deterministic_error())
             },
             |_, _, _| panic!("a deterministic error must not be retried"),
+            || Duration::ZERO,
         );
         assert!(result.is_err());
         assert_eq!(attempts.get(), 1, "should fail on the first attempt");
@@ -231,6 +244,7 @@ mod tests {
                 }
             },
             |_, _, _| retries.set(retries.get() + 1),
+            || Duration::ZERO,
         )
         .expect("install should succeed on the third attempt");
         assert!(matches!(outcome, InstallerOutcome::AlreadyPresent { .. }));
@@ -247,8 +261,30 @@ mod tests {
                 Err::<InstallerOutcome, _>(fake_error())
             },
             |_, _, _| {},
+            || Duration::ZERO,
         );
         assert!(result.is_err());
         assert_eq!(attempts.get(), MAX_INSTALL_ATTEMPTS);
+    }
+
+    #[test]
+    fn retry_stops_at_total_budget() {
+        let attempts = Cell::new(0u32);
+        // Each attempt "costs" the full installer timeout; the budget must
+        // stop the loop well before the attempt cap does.
+        let result = run_install_with_retry(
+            |attempt| {
+                attempts.set(attempt);
+                Err::<InstallerOutcome, _>(fake_error())
+            },
+            |_, _, _| {},
+            || INSTALL_RETRY_TOTAL_BUDGET * attempts.get(),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.get(),
+            1,
+            "budget exhausted after the first attempt"
+        );
     }
 }

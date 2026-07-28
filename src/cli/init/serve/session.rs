@@ -161,6 +161,8 @@ pub(super) struct SessionInner {
     pending_response: Option<(String, Value)>,
     result_json: Option<String>,
     error: Option<PublicError>,
+    error_acked: bool,
+    errored_at: Option<tokio::time::Instant>,
 }
 
 impl HostedInitSession {
@@ -176,6 +178,8 @@ impl HostedInitSession {
                 pending_response: None,
                 result_json: None,
                 error: None,
+                error_acked: false,
+                errored_at: None,
             }),
             input_ready: Condvar::new(),
             events,
@@ -196,10 +200,15 @@ impl HostedInitSession {
     }
 
     pub(super) fn is_active(&self) -> bool {
-        matches!(
-            self.status().as_str(),
-            "running" | "waiting_for_input" | "completed_awaiting_ack"
-        )
+        let inner = lock_unpoisoned(&self.inner);
+        match inner.status.as_str() {
+            "running" | "waiting_for_input" | "completed_awaiting_ack" => true,
+            // A parked failure keeps the session (and its WebSocket) alive so
+            // the backend can replay and acknowledge the typed error,
+            // symmetric with `completed_awaiting_ack`.
+            "errored" => !inner.error_acked,
+            _ => false,
+        }
     }
 
     pub(super) fn touch(&self) {
@@ -253,13 +262,16 @@ impl HostedInitSession {
 
     pub(super) fn hello_frame(&self) -> String {
         let snapshot = self.status_snapshot();
+        // `error` rides along so a backend that reconnects after its socket
+        // dropped mid-failure learns the typed error from the hello alone.
         json!({
             "type": "hello",
             "session_id": self.id,
             "status": snapshot.status,
             "last_seq": snapshot.last_seq,
             "pending_input": snapshot.pending_input,
-            "result_available": snapshot.result_available
+            "result_available": snapshot.result_available,
+            "error": snapshot.error
         })
         .to_string()
     }
@@ -431,9 +443,14 @@ impl HostedInitSession {
     pub(super) fn cancel(&self, reason: &str) {
         let Some(frame) = ({
             let mut inner = lock_unpoisoned(&self.inner);
+            // `errored` is excluded like `completed_awaiting_ack`: a cancel
+            // racing a parked failure must not overwrite the typed error the
+            // backend is entitled to (`terminal_result` would report a
+            // generic cancellation). The backend releases a parked failure
+            // with `ack_error`; only the internal reapers may expire it.
             if matches!(
                 inner.status.as_str(),
-                "completed_awaiting_ack" | "closed" | "canceled"
+                "completed_awaiting_ack" | "closed" | "canceled" | "errored"
             ) {
                 return;
             }
@@ -458,7 +475,25 @@ impl HostedInitSession {
     pub(super) fn expire(&self, reason: &str) {
         let Some(frame) = ({
             let mut inner = lock_unpoisoned(&self.inner);
-            if matches!(inner.status.as_str(), "closed" | "canceled" | "errored") {
+            if matches!(inner.status.as_str(), "closed" | "canceled") {
+                return;
+            }
+            if inner.status == "errored" {
+                // A parked failure the backend never acknowledged: mark it
+                // acked and fire shutdown while KEEPING status `errored`, so
+                // `terminal_result` reports the typed failure instead of a
+                // generic cancellation. Without this branch the reaper would
+                // stop without ever releasing the terminal waiter.
+                if inner.error_acked {
+                    return;
+                }
+                inner.error_acked = true;
+                let mut payload = json!({ "reason": reason });
+                let frame = self.record_event_locked(&mut inner, "error_expired", &mut payload);
+                drop(inner);
+                let _ = self.events.send(frame.to_string());
+                self.input_ready.notify_all();
+                self.shutdown.notify_one();
                 return;
             }
             if let Some(mut result) = inner.result_json.take() {
@@ -477,6 +512,11 @@ impl HostedInitSession {
         self.shutdown.notify_one();
     }
 
+    /// Record a failure and park the session. Unlike `cancel`/`expire`, this
+    /// does NOT notify shutdown: the broadcast `error` frame may have zero
+    /// receivers (dropped socket, REST-polling backend), so the server stays
+    /// up in `errored` until `ack_error`, cancel, or the error-ack grace
+    /// reaper — symmetric with how `set_result` waits for `ack_result`.
     pub(super) fn set_error(&self, code: &str, message: String) {
         let Some(frame) = ({
             let mut inner = lock_unpoisoned(&self.inner);
@@ -488,6 +528,7 @@ impl HostedInitSession {
             }
             inner.status = "errored".to_owned();
             inner.pending_input = None;
+            inner.errored_at = Some(tokio::time::Instant::now());
             inner.error = Some(PublicError {
                 code: code.to_owned(),
                 message: message.clone(),
@@ -499,7 +540,56 @@ impl HostedInitSession {
         };
         let _ = self.events.send(frame.to_string());
         self.input_ready.notify_all();
+    }
+
+    /// Seq-less replay of the stored failure, for a backend that reconnected
+    /// after the original broadcast `error` frame was lost.
+    pub(super) fn error_replay_frame(&self) -> Option<String> {
+        let inner = lock_unpoisoned(&self.inner);
+        let error = inner.error.as_ref()?;
+        Some(
+            json!({
+                "type": "error",
+                "session_id": self.id,
+                "code": error.code,
+                "message": error.message
+            })
+            .to_string(),
+        )
+    }
+
+    pub(super) fn ack_error(&self) -> std::result::Result<(), String> {
+        let frame = {
+            let mut inner = lock_unpoisoned(&self.inner);
+            if inner.status == "errored" && inner.error_acked {
+                // Lost the race to the grace reaper (or a duplicate ack);
+                // the end state is what the backend wanted, so say so
+                // instead of implying no error ever existed.
+                return Err("init error was already acknowledged or expired".to_owned());
+            }
+            if inner.status != "errored" {
+                return Err("no init error is awaiting acknowledgement".to_owned());
+            }
+            // Status stays `errored` so `terminal_result` still exits non-zero.
+            inner.error_acked = true;
+            let mut payload = json!({ "status": "errored" });
+            self.record_event_locked(&mut inner, "error_acked", &mut payload)
+        };
+        let _ = self.events.send(frame.to_string());
+        self.input_ready.notify_all();
         self.shutdown.notify_one();
+        Ok(())
+    }
+
+    /// True while a failure is parked waiting for `ack_error`, with the time
+    /// since it was recorded — the error-ack grace reaper's input.
+    pub(super) fn unacked_error_age(&self) -> Option<std::time::Duration> {
+        let inner = lock_unpoisoned(&self.inner);
+        if inner.status == "errored" && !inner.error_acked {
+            inner.errored_at.map(|instant| instant.elapsed())
+        } else {
+            None
+        }
     }
 }
 

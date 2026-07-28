@@ -338,6 +338,11 @@ pub struct InitArgs {
     /// Target a specific init run id when resuming. Implies `--resume`.
     #[arg(long, value_name = "ID", requires = "resume")]
     pub(super) run_id: Option<String>,
+    /// Regenerate the session and admin API keys even when verifier rows
+    /// already exist, and include the new plaintexts in the handover. A
+    /// running daemon must be restarted before the new keys are accepted.
+    #[arg(long)]
+    pub(super) rotate_keys: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

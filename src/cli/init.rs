@@ -68,7 +68,7 @@ use self::registry_apply::{
     resolve_custom_agent_spec, select_agent_for_init,
 };
 use self::resume::{
-    FreshKeys, finalize_with_error, init_complete_event_already_recorded,
+    FreshKeys, KeyPolicy, finalize_with_error, init_complete_event_already_recorded,
     installer_postcondition_holds, perform_auth_init, recorded_init_args, resolve_init_run,
     step_needs_resume, workspace_postcondition_holds,
 };

@@ -183,6 +183,13 @@ fn run_init_with_output(
     mode: InitMode,
     output_mode: InitOutputMode,
 ) -> Result<()> {
+    // Hosted init always rotates: the plaintext keys only ever travel in the
+    // result frame, so a preserved run would leave the backend permanently
+    // unable to obtain credentials for an instance with pre-existing state.
+    // Folded into the flag BEFORE the run record is written so a later CLI
+    // `acps init --resume` of a crashed hosted run replays the rotation and
+    // reprints fresh keys instead of "preserving" already-invalidated ones.
+    args.rotate_keys = args.rotate_keys || matches!(output_mode, InitOutputMode::Hosted);
     if args.skip_workspace_init() && mode != InitMode::Dev {
         return Err(StackError::InvalidParam {
             field: "--skip-workspace-init",
@@ -355,6 +362,11 @@ fn run_init_with_output(
     #[cfg(feature = "dev-tools")]
     if resumed && let Some(recorded) = recorded_args.as_ref() {
         args.skip_workspace_init = args.skip_workspace_init || recorded.skip_workspace_init;
+    }
+    // Replay a recorded rotation request so a bare `--resume` cannot silently
+    // downgrade a rotating run into a preserving one.
+    if resumed && let Some(recorded) = recorded_args.as_ref() {
+        args.rotate_keys = args.rotate_keys || recorded.rotate_keys;
     }
     if resumed
         && args.edge.is_none()
@@ -695,24 +707,55 @@ fn run_init_with_output(
     };
     key_handover.failure_context = Some(handoff_context.clone());
     init_println!(output_mode, "progress: initializing auth");
+    // Hosted rotation was already folded into the flag at entry, so this
+    // reads the single source of truth (and any replayed recorded value).
+    let rotate_keys = args.rotate_keys;
+    let key_policy = if rotate_keys {
+        KeyPolicy::RotateExisting
+    } else {
+        KeyPolicy::PreserveExisting
+    };
     let step_result = record_step(
         &store,
         &init_run,
         1,
         step_kind::SECRETS_INIT,
-        || store.auth_key_pair_present(),
+        // A rotating run must never replay as Skipped: a skipped step emits
+        // no plaintext, which is exactly the wedge rotation exists to fix.
         || {
-            let outcome = perform_auth_init(&store, legacy_auth.as_ref(), &home)?;
+            if rotate_keys {
+                Ok(false)
+            } else {
+                store.auth_key_pair_present()
+            }
+        },
+        || {
+            let outcome = perform_auth_init(
+                &store,
+                legacy_auth.as_ref(),
+                &home,
+                &mut secret_store,
+                key_policy,
+            )?;
             auth_status = outcome.status;
             let generated_keys = outcome.generated_keys;
+            let rotated = outcome.rotated_keys;
             key_handover.keys = outcome.fresh_keys;
             key_handover.auth_ready = true;
             if generated_keys {
+                let (kind, message) = if rotated {
+                    ("auth.keys_rotated", "rotated session and admin API keys")
+                } else {
+                    (
+                        "auth.keys_generated",
+                        "generated session and admin API keys",
+                    )
+                };
                 store.append_event_with_source(
                     "info",
-                    "auth.keys_generated",
+                    kind,
                     crate::state::EVENT_SOURCE_CLI,
-                    "generated session and admin API keys",
+                    message,
                     &serde_json::json!({
                         "key_kinds": ["session", "admin"],
                     })
@@ -853,6 +896,7 @@ fn run_init_with_output(
                     .query_installer_runs_filtered(Some(&config.agent.id), 1024)
                     .map(|rows| rows.into_iter().map(|r| r.id).collect())
                     .unwrap_or_default();
+                let install_started = std::time::Instant::now();
                 let outcome = run_install_with_retry(
                     |attempt| {
                         let message = agent_install_progress_message(attempt);
@@ -870,9 +914,10 @@ fn run_init_with_output(
                             output_mode,
                             "agent install attempt {attempt} failed: {error}"
                         );
-                        init_println!(output_mode, "retrying in {}s…", delay.as_secs());
+                        init_println!(output_mode, "retrying in {}s", delay.as_secs());
                         std::thread::sleep(delay);
                     },
+                    || install_started.elapsed(),
                 )?;
                 let label = outcome.label();
                 let path = outcome.path().display().to_string();

@@ -86,14 +86,69 @@ pub fn resolve_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Detach a synchronous child into a brand-new session (and therefore a new
+/// process group with `pgid == pid`). Beyond the group-kill guarantee this
+/// also drops the controlling terminal: a vendor installer that opens
+/// `/dev/tty` to prompt ("existing install detected, overwrite?") gets ENXIO
+/// and takes its non-interactive branch instead of stopping on SIGTTIN until
+/// our timeout fires. Callers must use this INSTEAD of `process_group(0)`:
+/// `setsid` fails with EPERM for a process that is already a group leader.
+#[cfg(unix)]
+pub fn detach_into_new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: pre_exec runs after fork and before exec; setsid/setpgid are
+    // async-signal-safe. setsid makes the child a session leader with no
+    // controlling terminal and pgid == pid, preserving the negative-pid
+    // contract of `kill_process_group`. If setsid somehow fails, fall back
+    // to a plain process group so the group-kill invariant still holds.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() != -1 {
+                return Ok(());
+            }
+            // Report setsid's errno on double failure — it is the primary
+            // call and its errno is the diagnostic one.
+            let setsid_error = std::io::Error::last_os_error();
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(setsid_error)
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+pub fn detach_into_new_session(_command: &mut Command) {}
+
+/// Env vars that steer installers/updaters away from interactive prompts.
+/// Losing the controlling terminal (see [`detach_into_new_session`]) already
+/// breaks `/dev/tty` prompts; these cover tools that decide interactivity
+/// from the environment instead.
+pub const NON_INTERACTIVE_ENV: &[(&str, &str)] = &[
+    ("CI", "1"),
+    ("NONINTERACTIVE", "1"),
+    ("DEBIAN_FRONTEND", "noninteractive"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("TERM", "dumb"),
+];
+
+/// Apply [`NON_INTERACTIVE_ENV`] to a sync `Command`.
+pub fn apply_non_interactive_env(command: &mut Command) {
+    for (name, value) in NON_INTERACTIVE_ENV {
+        command.env(name, value);
+    }
+}
+
 /// Unix process-group kill for a synchronous child. The child MUST have been
-/// spawned with `process_group(0)`; otherwise the negative pid won't reach
-/// the grandchildren a shell forked.
+/// spawned with `process_group(0)` or [`detach_into_new_session`]; otherwise
+/// the negative pid won't reach the grandchildren a shell forked.
 #[cfg(unix)]
 pub fn kill_process_group(child: &mut std::process::Child) {
     // SAFETY: libc::kill is async-signal-safe and we operate on a pid we own
     // (the process-group leader is the child itself because the caller used
-    // `process_group(0)`). A negative pid addresses the whole process group,
+    // `process_group(0)` or `detach_into_new_session`, both of which yield
+    // pgid == pid). A negative pid addresses the whole process group,
     // so grandchildren forked by the shell also receive SIGKILL.
     unsafe {
         let pid = child.id() as i32;
@@ -249,5 +304,41 @@ pub fn join_reader_bounded<T>(handle: JoinHandle<T>) -> Option<T> {
         handle.join().ok()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_child_is_session_leader() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 0.2");
+        detach_into_new_session(&mut command);
+        let mut child = command.spawn().expect("spawn");
+        let pid = child.id() as i32;
+        // Session leadership is what severs the controlling terminal, which
+        // is the property the installer relies on to defeat /dev/tty prompts.
+        // SAFETY: getsid on a pid we own performs no memory access.
+        let sid = unsafe { libc::getsid(pid) };
+        assert_eq!(sid, pid, "detached child must lead its own session");
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detached_child_leads_its_own_process_group() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 0.2");
+        detach_into_new_session(&mut command);
+        let mut child = command.spawn().expect("spawn");
+        let pid = child.id() as i32;
+        // pgid == pid is the precondition `kill_process_group` documents.
+        // SAFETY: getpgid on a pid we own performs no memory access.
+        let pgid = unsafe { libc::getpgid(pid) };
+        assert_eq!(pgid, pid, "detached child must lead its own process group");
+        let _ = child.wait();
     }
 }

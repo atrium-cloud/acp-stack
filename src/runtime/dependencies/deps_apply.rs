@@ -31,7 +31,8 @@ use crate::config::{Config, DependencyEntry, DependencyInstallScope};
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::{DepStatus, check_dependencies};
 use crate::runtime::process_runner::{
-    STDERR_TAIL_BYTES, join_reader_bounded, kill_process_group, read_to_cap, read_to_cap_with_tail,
+    STDERR_TAIL_BYTES, apply_non_interactive_env, detach_into_new_session, join_reader_bounded,
+    kill_process_group, read_to_cap, read_to_cap_with_tail,
 };
 use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
@@ -417,17 +418,13 @@ fn run_shell(
         .stderr(Stdio::piped())
         .env_clear()
         .envs(scrubbed_env());
-    // Put the shell into its own process group so a timeout-induced
-    // kill reaches every grandchild it forked. Without this,
-    // `child.kill()` only stops the shell — a `sleep 999` it spawned
-    // would keep the stdout/stderr pipes open and the join threads
-    // would block forever, defeating the timeout the user thinks
-    // they're getting. Same pattern as agent_installer.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    apply_non_interactive_env(&mut command);
+    // Detach into a fresh session so a timeout-induced kill reaches every
+    // grandchild the shell forked (without this, `child.kill()` only stops
+    // the shell — a `sleep 999` it spawned would keep the stdout/stderr
+    // pipes open and the join threads would block forever), and so a dep
+    // script probing /dev/tty cannot prompt. Same pattern as agent_installer.
+    detach_into_new_session(&mut command);
     let mut child = command
         .spawn()
         .map_err(|source| StackError::AgentSpawnFailed { source })?;

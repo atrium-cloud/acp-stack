@@ -52,6 +52,11 @@ const INIT_WS_CHANNEL_CAPACITY: usize = 128;
 const INIT_EVENT_HISTORY_LIMIT: usize = 256;
 const DEFAULT_INIT_IDLE_TIMEOUT: &str = "15m";
 const IDLE_REAPER_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long a parked failure waits for `ack_error` before the reaper releases
+/// the process. Runs regardless of `--idle-timeout` and of connected
+/// WebSockets: a wedged backend holding the socket must not pin a failed
+/// bootstrap forever.
+const ERROR_ACK_GRACE: std::time::Duration = std::time::Duration::from_secs(2 * 60);
 
 #[derive(Debug, Args)]
 pub(super) struct InitServeArgs {
@@ -115,9 +120,9 @@ pub(super) fn run_init_serve(args: InitServeArgs) -> Result<()> {
         };
         let manager = state.manager.clone();
         let shutdown_manager = state.manager.clone();
-        if let Some(timeout) = idle_timeout {
-            tokio::spawn(reap_idle_session(shutdown_manager.clone(), timeout));
-        }
+        // Always spawned: even with `--idle-timeout 0s` the loop must keep
+        // running for the unconditional error-ack grace check.
+        tokio::spawn(reap_idle_session(shutdown_manager.clone(), idle_timeout));
         if let Some(lifetime) = max_lifetime {
             tokio::spawn(enforce_max_lifetime(shutdown_manager.clone(), lifetime));
         }
@@ -156,11 +161,25 @@ fn parse_optional_duration(raw: &str, field: &'static str) -> Result<Option<std:
 /// session idles out on the same clock — measured from the last authenticated
 /// API call, not just server start — so an abandoned bootstrap process cannot
 /// pin the bind port indefinitely while an actively polling backend can.
-async fn reap_idle_session(manager: Arc<HostedInitManager>, timeout: std::time::Duration) {
+/// `None` disables the idle clock but not the loop: the error-ack grace check
+/// is unconditional, since an unacked parked failure would otherwise keep the
+/// process alive forever.
+async fn reap_idle_session(manager: Arc<HostedInitManager>, timeout: Option<std::time::Duration>) {
     loop {
         tokio::time::sleep(IDLE_REAPER_TICK).await;
         match manager.session_current() {
             Some(session) => {
+                // A parked failure is owned by the ack grace alone: the idle
+                // clock must not pre-empt it, so the backend is guaranteed
+                // the full grace to retrieve and acknowledge the error.
+                if let Some(age) = session.unacked_error_age() {
+                    if age >= ERROR_ACK_GRACE {
+                        session.expire("error_ack_timeout");
+                        break;
+                    }
+                    continue;
+                }
+                let Some(timeout) = timeout else { continue };
                 if !session.has_connected_ws()
                     && session.last_activity_age_secs() >= timeout.as_secs()
                 {
@@ -169,6 +188,7 @@ async fn reap_idle_session(manager: Arc<HostedInitManager>, timeout: std::time::
                 }
             }
             None => {
+                let Some(timeout) = timeout else { continue };
                 if manager.activity_age() >= timeout
                     && manager.shutdown_if_no_session("idle_timeout")
                 {
@@ -348,6 +368,9 @@ fn empty_init_args() -> InitArgs {
         resume: false,
         fresh: false,
         run_id: None,
+        // Hosted mode forces this true at init entry (and records it, so a
+        // CLI --resume of a crashed hosted run re-rotates); no request field.
+        rotate_keys: false,
     }
 }
 
@@ -719,7 +742,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_notifies_terminal_waiter_and_returns_failure() {
+    async fn error_is_parked_until_acked() {
         let manager = HostedInitManager::new();
         let session = HostedInitSession::new("init_error".to_owned(), manager.shutdown.clone());
         *lock_unpoisoned(&manager.active) = Some(session.clone());
@@ -729,10 +752,45 @@ mod tests {
             tokio::pin!(waiter);
             session.set_error("init.failed", "provider setup failed".to_owned());
 
+            // The failure parks: the process must stay up so the backend can
+            // replay and acknowledge the typed error.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut waiter)
+                    .await
+                    .is_err(),
+                "set_error must not notify the terminal waiter"
+            );
+            assert_eq!(session.status(), "errored");
+            assert!(session.is_active());
+            assert!(session.unacked_error_age().is_some());
+
+            // A racing backend cancel must not overwrite the typed failure.
+            session.cancel("backend_cancel");
+            assert_eq!(session.status(), "errored");
+
+            let replay = match handle_client_frame(&session, r#"{"type":"replay_error"}"#) {
+                ClientFrameOutcome::Send(frame) => frame,
+                _ => panic!("replay_error should return an error frame"),
+            };
+            let value: Value = serde_json::from_str(&replay).expect("error frame");
+            assert_eq!(value["type"], "error");
+            assert_eq!(value["code"], "init.failed");
+            assert_eq!(value["message"], "provider setup failed");
+
+            match handle_client_frame(&session, r#"{"type":"ack_error"}"#) {
+                ClientFrameOutcome::Close(frame) => {
+                    let value: Value = serde_json::from_str(&frame).expect("ack frame");
+                    assert_eq!(value["type"], "error_acked");
+                }
+                _ => panic!("ack_error should close the session"),
+            }
             tokio::time::timeout(Duration::from_secs(1), &mut waiter)
                 .await
-                .expect("terminal waiter should be notified");
+                .expect("terminal waiter should be notified after ack_error");
         }
+        assert_eq!(session.status(), "errored");
+        assert!(!session.is_active());
+        assert!(session.unacked_error_age().is_none());
         let error = manager
             .terminal_result()
             .expect_err("errored session should return failure");
@@ -741,6 +799,95 @@ mod tests {
                 .public_message()
                 .contains("init.failed: provider setup failed")
         );
+    }
+
+    #[tokio::test]
+    async fn ack_error_is_rejected_without_parked_error() {
+        let session = test_session("init_no_error");
+        match handle_client_frame(&session, r#"{"type":"ack_error"}"#) {
+            ClientFrameOutcome::Send(frame) => {
+                let value: Value = serde_json::from_str(&frame).expect("error frame");
+                assert_eq!(value["code"], "init.ack_rejected");
+            }
+            _ => panic!("ack_error without a parked error must be rejected"),
+        }
+        match handle_client_frame(&session, r#"{"type":"replay_error"}"#) {
+            ClientFrameOutcome::Send(frame) => {
+                let value: Value = serde_json::from_str(&frame).expect("error frame");
+                assert_eq!(value["code"], "init.error_unavailable");
+            }
+            _ => panic!("replay_error without a recorded error must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parked_error_blocks_new_session_and_surfaces_in_status() {
+        let session = test_session("init_error_409");
+        session.set_error("init.failed", "provider setup failed".to_owned());
+        let app = app_with_session(session);
+
+        let (status, _) = request_json(
+            app.clone(),
+            Method::POST,
+            "/v1/init/sessions",
+            Some(json!({})),
+            Some(TEST_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (status, body) = request_json(
+            app,
+            Method::GET,
+            "/v1/init/sessions/init_error_409",
+            None,
+            Some(TEST_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["status"], "errored");
+        assert_eq!(body["data"]["error"]["code"], "init.failed");
+    }
+
+    #[tokio::test]
+    async fn expiring_unacked_error_notifies_shutdown_and_keeps_status() {
+        let manager = HostedInitManager::new();
+        let session = HostedInitSession::new("init_error_exp".to_owned(), manager.shutdown.clone());
+        *lock_unpoisoned(&manager.active) = Some(session.clone());
+        session.set_error("init.failed", "provider setup failed".to_owned());
+
+        let waiter = manager.wait_for_terminal();
+        tokio::pin!(waiter);
+        session.expire("error_ack_timeout");
+        tokio::time::timeout(Duration::from_secs(1), &mut waiter)
+            .await
+            .expect("expiring an unacked error must notify shutdown");
+        assert_eq!(session.status(), "errored");
+        assert!(
+            manager.terminal_result().is_err(),
+            "expired failure must still exit non-zero"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn errored_session_expires_after_ack_grace_with_connected_ws() {
+        let manager = HostedInitManager::new();
+        let session = HostedInitSession::new("init_error_ws".to_owned(), manager.shutdown.clone());
+        *lock_unpoisoned(&manager.active) = Some(session.clone());
+        // A held socket must not defer the grace: the check ignores
+        // connection state, unlike the idle clock.
+        session.ws_connected();
+        session.set_error("init.failed", "provider setup failed".to_owned());
+
+        // Idle timeout disabled; only the error-ack grace can fire.
+        let reaper = tokio::spawn(reap_idle_session(manager.clone(), None));
+        tokio::time::sleep(ERROR_ACK_GRACE + IDLE_REAPER_TICK * 2).await;
+        tokio::time::timeout(Duration::from_secs(1), reaper)
+            .await
+            .expect("reaper should stop after expiring the error")
+            .expect("reaper task");
+        assert_eq!(session.status(), "errored");
+        assert!(!session.is_active());
     }
 
     fn app_with_manager(manager: Arc<HostedInitManager>) -> Router {
@@ -973,7 +1120,7 @@ mod tests {
         let (manager, session) = reaper_test_manager("init_idle_reap");
         tokio::spawn(reap_idle_session(
             manager.clone(),
-            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
         ));
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -990,7 +1137,7 @@ mod tests {
         session.ws_connected();
         tokio::spawn(reap_idle_session(
             manager.clone(),
-            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
         ));
         // A listen-only backend holds the socket past the timeout; the
         // session must survive.
@@ -1016,7 +1163,7 @@ mod tests {
         let app = app_with_manager(manager.clone());
         tokio::spawn(reap_idle_session(
             manager.clone(),
-            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
         ));
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
         // Polling the status endpoint is API activity; it is what keeps a
@@ -1076,7 +1223,7 @@ mod tests {
         let app = app_with_manager(manager.clone());
         tokio::spawn(reap_idle_session(
             manager.clone(),
-            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
         ));
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
         // Even a 404 poll for a not-yet-created session is authenticated API
@@ -1181,7 +1328,7 @@ mod tests {
         let (manager, session) = reaper_test_manager("init_idle_touch");
         tokio::spawn(reap_idle_session(
             manager.clone(),
-            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
         ));
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
         session.touch();
@@ -1201,7 +1348,7 @@ mod tests {
         let manager = HostedInitManager::new();
         tokio::spawn(reap_idle_session(
             manager.clone(),
-            std::time::Duration::from_secs(10),
+            Some(std::time::Duration::from_secs(10)),
         ));
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
