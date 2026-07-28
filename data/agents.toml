@@ -195,7 +195,21 @@ set -eu
 managed_bin="${HOME}/.local/bin"
 managed_pi="${managed_bin}/pi"
 mkdir -p "$managed_bin"
-curl -fsSL https://pi.dev/install.sh | sh
+# Fetch before running so a curl failure is fatal (no pipefail in POSIX sh).
+installer="$(curl -fsSL https://pi.dev/install.sh)"
+printf '%s' "$installer" | sh
+# install.sh prefers npm's global prefix when writable (e.g. nvm hosts), so
+# link that install into the managed bin the creates/postcheck paths expect.
+# Also refresh links we own so a prefix move (nvm switch) can't pin a stale
+# target; a real binary install.sh placed at the managed path is left alone.
+if { [ ! -x "$managed_pi" ] || [ -L "$managed_pi" ]; } && command -v npm >/dev/null 2>&1; then
+    if npm_prefix="$(npm prefix -g 2>/dev/null)" && [ -n "$npm_prefix" ]; then
+        npm_pi="${npm_prefix}/bin/pi"
+        if [ -x "$npm_pi" ]; then
+            ln -sf "$npm_pi" "$managed_pi"
+        fi
+    fi
+fi
 test -x "$managed_pi"
 '''
 creates = "pi"
