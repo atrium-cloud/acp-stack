@@ -3,6 +3,8 @@ use super::*;
 pub(super) struct HostedInitManager {
     pub(super) active: Mutex<Option<Arc<HostedInitSession>>>,
     pub(super) shutdown: Arc<Notify>,
+    activity: Mutex<tokio::time::Instant>,
+    shutdown_reason: Mutex<Option<&'static str>>,
 }
 
 pub(super) enum StartSessionError {
@@ -14,6 +16,8 @@ impl HostedInitManager {
         Arc::new(Self {
             active: Mutex::new(None),
             shutdown: Arc::new(Notify::new()),
+            activity: Mutex::new(tokio::time::Instant::now()),
+            shutdown_reason: Mutex::new(None),
         })
     }
 
@@ -51,6 +55,10 @@ impl HostedInitManager {
         Ok(response)
     }
 
+    /// Look a session up by id. This does not count as client activity on its
+    /// own: routes that represent activity touch the session explicitly, after
+    /// reading anything time-sensitive, so a status poll can report how long
+    /// the session was idle *before* that poll.
     pub(super) fn session(&self, id: &str) -> Option<Arc<HostedInitSession>> {
         lock_unpoisoned(&self.active)
             .as_ref()
@@ -58,13 +66,57 @@ impl HostedInitManager {
             .cloned()
     }
 
+    /// Record authenticated API activity on the server-level idle clock. This
+    /// clock only governs the pre-session window; once a session exists its
+    /// own activity timestamp takes over.
+    pub(super) fn touch_activity(&self) {
+        *lock_unpoisoned(&self.activity) = tokio::time::Instant::now();
+    }
+
+    pub(super) fn activity_age(&self) -> std::time::Duration {
+        lock_unpoisoned(&self.activity).elapsed()
+    }
+
     pub(super) async fn wait_for_terminal(&self) {
         self.shutdown.notified().await;
     }
 
+    /// Shut the server down without a session transition. Used by the
+    /// lifetime reapers when the server idled out before any session was
+    /// created. `Notify` retains one permit, so firing before
+    /// `wait_for_terminal()` awaits is safe. The reason is recorded so
+    /// `terminal_result()` can exit non-zero: an orchestrator must be able to
+    /// tell a timed-out bootstrap apart from a successful one.
+    pub(super) fn initiate_shutdown(&self, reason: &'static str) {
+        *lock_unpoisoned(&self.shutdown_reason) = Some(reason);
+        self.shutdown.notify_one();
+    }
+
+    /// `initiate_shutdown` variant for the idle reaper's pre-session branch:
+    /// the no-session check and the shutdown fire atomically under the same
+    /// lock so a session created between the reaper's check and the shutdown
+    /// is not silently dropped. Returns false when a session already exists.
+    pub(super) fn shutdown_if_no_session(&self, reason: &'static str) -> bool {
+        let active = lock_unpoisoned(&self.active);
+        if active.is_some() {
+            return false;
+        }
+        self.initiate_shutdown(reason);
+        true
+    }
+
     pub(super) fn terminal_result(&self) -> Result<()> {
         let Some(session) = self.session_current() else {
-            return Ok(());
+            let reason = *lock_unpoisoned(&self.shutdown_reason);
+            return match reason {
+                Some(reason) => Err(StackError::InvalidParam {
+                    field: "init",
+                    reason: format!(
+                        "hosted init server shut down before any session completed: {reason}"
+                    ),
+                }),
+                None => Ok(()),
+            };
         };
         match session.status().as_str() {
             "canceled" => Err(StackError::InvalidParam {
@@ -86,7 +138,7 @@ impl HostedInitManager {
         }
     }
 
-    fn session_current(&self) -> Option<Arc<HostedInitSession>> {
+    pub(super) fn session_current(&self) -> Option<Arc<HostedInitSession>> {
         lock_unpoisoned(&self.active).as_ref().cloned()
     }
 }
@@ -97,6 +149,8 @@ pub(super) struct HostedInitSession {
     input_ready: Condvar,
     events: broadcast::Sender<String>,
     shutdown: Arc<Notify>,
+    activity: Mutex<tokio::time::Instant>,
+    connected_ws: std::sync::atomic::AtomicUsize,
 }
 
 pub(super) struct SessionInner {
@@ -126,6 +180,8 @@ impl HostedInitSession {
             input_ready: Condvar::new(),
             events,
             shutdown,
+            activity: Mutex::new(tokio::time::Instant::now()),
+            connected_ws: std::sync::atomic::AtomicUsize::new(0),
         });
         session.push_event("progress", json!({"message": "init session started"}));
         session
@@ -146,6 +202,41 @@ impl HostedInitSession {
         )
     }
 
+    pub(super) fn touch(&self) {
+        *lock_unpoisoned(&self.activity) = tokio::time::Instant::now();
+    }
+
+    pub(super) fn last_activity_age_secs(&self) -> u64 {
+        lock_unpoisoned(&self.activity).elapsed().as_secs()
+    }
+
+    pub(super) fn ws_connected(&self) {
+        self.connected_ws
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.touch();
+    }
+
+    pub(super) fn ws_disconnected(&self) {
+        // `fetch_update` only errs when the counter was already 0, which the
+        // ConnectionGuard pairing makes unreachable; the count stays correct
+        // either way.
+        self.connected_ws
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |count| count.checked_sub(1),
+            )
+            .ok();
+        // The idle clock starts at disconnect: a listen-only backend whose
+        // socket drops mid-init gets the full idle timeout to reconnect and
+        // replay/ack the result before the reaper may expire the session.
+        self.touch();
+    }
+
+    pub(super) fn has_connected_ws(&self) -> bool {
+        self.connected_ws.load(std::sync::atomic::Ordering::Relaxed) > 0
+    }
+
     pub(super) fn status_snapshot(&self) -> InitStatusResponse {
         let inner = lock_unpoisoned(&self.inner);
         InitStatusResponse {
@@ -156,6 +247,7 @@ impl HostedInitSession {
             recent_events: inner.history.iter().rev().take(50).cloned().collect(),
             result_available: inner.result_json.is_some(),
             error: inner.error.clone(),
+            last_activity_age_secs: self.last_activity_age_secs(),
         }
     }
 
@@ -344,6 +436,33 @@ impl HostedInitSession {
                 "completed_awaiting_ack" | "closed" | "canceled"
             ) {
                 return;
+            }
+            inner.status = "canceled".to_owned();
+            inner.pending_input = None;
+            inner.pending_response = None;
+            let mut payload = json!({ "reason": reason });
+            Some(self.record_event_locked(&mut inner, "canceled", &mut payload))
+        }) else {
+            return;
+        };
+        let _ = self.events.send(frame.to_string());
+        self.input_ready.notify_all();
+        self.shutdown.notify_one();
+    }
+
+    /// Force the session terminal on behalf of the internal lifetime
+    /// reapers. Unlike backend-driven `cancel`, this also fires from
+    /// `completed_awaiting_ack`: an abandoned session holding an un-acked
+    /// result must not pin the server forever. The un-acked result carries
+    /// plaintext handoff keys, so it is zeroized before the session closes.
+    pub(super) fn expire(&self, reason: &str) {
+        let Some(frame) = ({
+            let mut inner = lock_unpoisoned(&self.inner);
+            if matches!(inner.status.as_str(), "closed" | "canceled" | "errored") {
+                return;
+            }
+            if let Some(mut result) = inner.result_json.take() {
+                result.zeroize();
             }
             inner.status = "canceled".to_owned();
             inner.pending_input = None;
