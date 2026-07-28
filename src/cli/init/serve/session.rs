@@ -23,7 +23,7 @@ impl HostedInitManager {
 
     pub(super) fn start_session(
         self: &Arc<Self>,
-        request: StartInitRequest,
+        init_args: InitArgs,
     ) -> std::result::Result<StartInitResponse, StartSessionError> {
         let mut active = lock_unpoisoned(&self.active);
         if let Some(session) = active.as_ref()
@@ -38,7 +38,6 @@ impl HostedInitManager {
             status: session.status(),
         };
         *active = Some(session.clone());
-        let init_args = request.into_init_args();
         let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
             session: session.clone(),
         });

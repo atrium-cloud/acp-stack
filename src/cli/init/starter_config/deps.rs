@@ -156,7 +156,8 @@ pub(crate) fn collect_agent_env_refs_for_init(
                 );
                 continue;
             }
-            let Some(value) = prompt::password(interactive, &format!("value for {name}"))? else {
+            let Some(value) = prompt::password(interactive, &format!("value for {name}"), false)?
+            else {
                 break;
             };
             if value.is_empty() {
@@ -494,6 +495,19 @@ pub(crate) fn reject_deps_args_for_existing_config(args: &InitArgs) -> Result<()
         if !values.is_empty() {
             return Err(StackError::InvalidParam {
                 field: flag,
+                reason: "dependency declarations apply only when creating a starter config"
+                    .to_owned(),
+            });
+        }
+    }
+    // Hosted-request-only declarations (no CLI flag), same starter-only rule.
+    for (field, set) in [
+        ("standard_agent_work_deps", args.standard_agent_work_deps),
+        ("browser_use", args.browser_use_profile),
+    ] {
+        if set {
+            return Err(StackError::InvalidParam {
+                field,
                 reason: "dependency declarations apply only when creating a starter config"
                     .to_owned(),
             });

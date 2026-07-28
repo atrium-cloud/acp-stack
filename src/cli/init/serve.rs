@@ -30,8 +30,8 @@ use super::prompt::{
     self, HostedPromptDriver, HostedPromptOutcome, HostedPromptRequest, HostedPromptStyle,
 };
 use super::{
-    CloudflareModeArg, CloudflaredDeploymentArg, InitArgs, InitMode, InitNativeConfigUpload,
-    run_hosted_init,
+    CloudflareModeArg, CloudflaredDeploymentArg, InitArgs, InitMcpHttpHeader, InitMcpHttpServer,
+    InitMcpStdioServer, InitMode, InitNativeConfigUpload, run_hosted_init,
 };
 
 mod prompt_driver;
@@ -256,6 +256,26 @@ struct StartInitRequest {
     skip_testflight: Option<bool>,
     testflight: Option<bool>,
     native_config: Option<NativeConfigUploadRequest>,
+    #[serde(default)]
+    mcp_preset: Vec<String>,
+    #[serde(default)]
+    mcp_stdio: Vec<McpStdioServerRequest>,
+    #[serde(default)]
+    mcp_http: Vec<McpHttpServerRequest>,
+    skills_source: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    essential_skills: Option<bool>,
+    #[serde(default)]
+    deps: Vec<DepRequest>,
+    #[serde(default)]
+    deps_system: Vec<DepRequest>,
+    deps_apply: Option<bool>,
+    deps_apply_yes: Option<bool>,
+    standard_agent_work_deps: Option<bool>,
+    browser_use: Option<bool>,
+    #[serde(default)]
+    data_sources: Vec<DataSourceRequest>,
 }
 
 #[derive(Deserialize)]
@@ -265,8 +285,170 @@ struct NativeConfigUploadRequest {
     content: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioServerRequest {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    /// Secret ref names exported into the server's environment.
+    #[serde(default)]
+    env: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpHttpServerRequest {
+    name: String,
+    url: String,
+    #[serde(default)]
+    headers: Vec<McpHttpHeaderRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpHttpHeaderRequest {
+    name: String,
+    value_ref: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DepRequest {
+    name: String,
+    shell: String,
+}
+
+// A dedicated wire enum rather than `config::DataSourceConfig`: the config
+// struct accepts any field combination (validation happens later in the config
+// validator), while the hosted contract should reject a malformed declaration
+// at the HTTP boundary and stay decoupled from the config schema.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum DataSourceRequest {
+    Local {
+        name: Option<String>,
+        path: String,
+    },
+    Https {
+        name: Option<String>,
+        url: String,
+        expected_sha256: Option<String>,
+        max_download_bytes: Option<u64>,
+        max_extracted_bytes: Option<u64>,
+    },
+    S3 {
+        name: Option<String>,
+        bucket: String,
+        // Required here because the config validator requires it for s3
+        // sources; accepting it as optional would fail the session only after
+        // the boundary already returned success.
+        region: String,
+        prefix: Option<String>,
+        access_key_ref: String,
+        secret_key_ref: String,
+    },
+}
+
+impl DataSourceRequest {
+    fn into_data_source_config(self) -> config::DataSourceConfig {
+        let mut source = config::DataSourceConfig {
+            source_type: String::new(),
+            name: None,
+            path: None,
+            url: None,
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+            access_key_ref: None,
+            secret_key_ref: None,
+        };
+        match self {
+            DataSourceRequest::Local { name, path } => {
+                source.source_type = "local".to_owned();
+                source.name = name;
+                source.path = Some(path);
+            }
+            DataSourceRequest::Https {
+                name,
+                url,
+                expected_sha256,
+                max_download_bytes,
+                max_extracted_bytes,
+            } => {
+                source.source_type = "https".to_owned();
+                source.name = name;
+                source.url = Some(url);
+                source.expected_sha256 = expected_sha256;
+                source.max_download_bytes = max_download_bytes;
+                source.max_extracted_bytes = max_extracted_bytes;
+            }
+            DataSourceRequest::S3 {
+                name,
+                bucket,
+                region,
+                prefix,
+                access_key_ref,
+                secret_key_ref,
+            } => {
+                source.source_type = "s3".to_owned();
+                source.name = name;
+                source.bucket = Some(bucket);
+                source.region = Some(region);
+                source.prefix = prefix;
+                source.access_key_ref = Some(access_key_ref);
+                source.secret_key_ref = Some(secret_key_ref);
+            }
+        }
+        source
+    }
+}
+
 impl StartInitRequest {
-    fn into_init_args(self) -> InitArgs {
+    fn into_init_args(self) -> Result<InitArgs> {
+        // Only what clap or the engine cannot structurally catch: clap's
+        // `requires`/`conflicts_with` declarations have no hosted equivalent,
+        // and dep names round-trip through a `NAME=SHELL` string split.
+        // Both-or-neither, stricter than the CLI's `requires`: the hosted
+        // driver never streams the interactive apply confirmation, so
+        // `deps_apply` alone would silently default to "not applied".
+        if self.deps_apply.unwrap_or(false) != self.deps_apply_yes.unwrap_or(false) {
+            return Err(StackError::InvalidParam {
+                field: "deps_apply",
+                reason: "deps_apply and deps_apply_yes must be set together".to_owned(),
+            });
+        }
+        let essential_skills = self.essential_skills.unwrap_or(false);
+        if essential_skills && (self.skills_source.is_some() || !self.skills.is_empty()) {
+            return Err(StackError::InvalidParam {
+                field: "essential_skills",
+                reason: "essential_skills conflicts with skills_source/skills".to_owned(),
+            });
+        }
+        if self.skills_source.is_some() == self.skills.is_empty() {
+            return Err(StackError::InvalidParam {
+                field: "skills",
+                reason: "skills and skills_source must be declared together".to_owned(),
+            });
+        }
+        for dep in self.deps.iter().chain(self.deps_system.iter()) {
+            if dep.name.trim().is_empty() || dep.shell.trim().is_empty() {
+                return Err(StackError::InvalidParam {
+                    field: "deps",
+                    reason: "dependency name and shell must not be empty".to_owned(),
+                });
+            }
+            if dep.name.contains('=') {
+                return Err(StackError::InvalidParam {
+                    field: "deps",
+                    reason: format!("dependency name `{}` must not contain `=`", dep.name),
+                });
+            }
+        }
         let mut args = empty_init_args();
         args.agent = self.agent;
         args.provider = self.provider;
@@ -291,7 +473,67 @@ impl StartInitRequest {
             filename: upload.filename,
             content: Zeroizing::new(upload.content),
         });
-        args
+        args.mcp_preset = self.mcp_preset;
+        // Structured records land on the wizard-side prompt_* fields, which
+        // are strictly more expressive than the NAME=VALUE flag strings (argv
+        // and env for stdio servers); `mcp_from_args` merges and validates
+        // them the same way.
+        args.prompt_mcp_stdio = self
+            .mcp_stdio
+            .into_iter()
+            .map(|server| InitMcpStdioServer {
+                name: server.name,
+                command: server.command,
+                args: server.args,
+                env: server.env,
+            })
+            .collect();
+        args.prompt_mcp_http = self
+            .mcp_http
+            .into_iter()
+            .map(|server| InitMcpHttpServer {
+                name: server.name,
+                url: server.url,
+                headers: server
+                    .headers
+                    .into_iter()
+                    .map(|header| InitMcpHttpHeader {
+                        name: header.name,
+                        value_ref: header.value_ref,
+                    })
+                    .collect(),
+            })
+            .collect();
+        // `empty_init_args` defaults to `no_skills: true` and the skill plan
+        // resolver short-circuits on it, so any skills declaration must clear
+        // it or the declaration would be silently dropped.
+        args.no_skills =
+            self.skills_source.is_none() && self.skills.is_empty() && !essential_skills;
+        args.skills_source = self.skills_source;
+        args.skills = self.skills;
+        args.essential_skills = essential_skills;
+        // Same `NAME=SHELL` shape the wizard pushes, so `deps_from_args`
+        // consumes flag, wizard, and hosted declarations uniformly.
+        args.dep = self
+            .deps
+            .iter()
+            .map(|dep| format!("{}={}", dep.name, dep.shell))
+            .collect();
+        args.dep_system = self
+            .deps_system
+            .iter()
+            .map(|dep| format!("{}={}", dep.name, dep.shell))
+            .collect();
+        args.deps_apply = self.deps_apply.unwrap_or(false);
+        args.deps_apply_yes = self.deps_apply_yes.unwrap_or(false);
+        args.standard_agent_work_deps = self.standard_agent_work_deps.unwrap_or(false);
+        args.browser_use_profile = self.browser_use.unwrap_or(false);
+        args.prompt_data_sources = self
+            .data_sources
+            .into_iter()
+            .map(DataSourceRequest::into_data_source_config)
+            .collect();
+        Ok(args)
     }
 }
 
@@ -514,8 +756,243 @@ mod tests {
         let request: StartInitRequest =
             serde_json::from_str(r#"{"agent":"placebo","sandbox":"unshare"}"#)
                 .expect("sandbox must be an accepted request field");
-        let args = request.into_init_args();
+        let args = request.into_init_args().expect("valid request");
         assert_eq!(args.sandbox.as_deref(), Some("unshare"));
+    }
+
+    fn request_from_json(payload: &str) -> StartInitRequest {
+        serde_json::from_str(payload).expect("request payload must deserialize")
+    }
+
+    #[test]
+    fn start_init_request_maps_mcp_declarations_into_prompt_fields() {
+        let args = request_from_json(
+            r#"{
+                "mcp_preset": ["linear"],
+                "mcp_stdio": [
+                    {"name": "files", "command": "mcp-files", "args": ["--root", "/data"], "env": ["FILES_TOKEN"]}
+                ],
+                "mcp_http": [
+                    {"name": "search", "url": "https://mcp.example.com/mcp",
+                     "headers": [{"name": "Authorization", "value_ref": "SEARCH_API_KEY"}]}
+                ]
+            }"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        assert_eq!(args.mcp_preset, vec!["linear".to_owned()]);
+        assert!(args.mcp_stdio.is_empty());
+        assert!(args.mcp_http.is_empty());
+        assert_eq!(args.prompt_mcp_stdio.len(), 1);
+        let stdio = &args.prompt_mcp_stdio[0];
+        assert_eq!(stdio.name, "files");
+        assert_eq!(stdio.command, "mcp-files");
+        assert_eq!(stdio.args, vec!["--root".to_owned(), "/data".to_owned()]);
+        assert_eq!(stdio.env, vec!["FILES_TOKEN".to_owned()]);
+        assert_eq!(args.prompt_mcp_http.len(), 1);
+        let http = &args.prompt_mcp_http[0];
+        assert_eq!(http.name, "search");
+        assert_eq!(http.url, "https://mcp.example.com/mcp");
+        assert_eq!(http.headers.len(), 1);
+        assert_eq!(http.headers[0].name, "Authorization");
+        assert_eq!(http.headers[0].value_ref, "SEARCH_API_KEY");
+    }
+
+    #[test]
+    fn start_init_request_maps_deps_and_flags() {
+        let args = request_from_json(
+            r#"{
+                "deps": [{"name": "ripgrep", "shell": "apt-get install -y ripgrep"}],
+                "deps_system": [{"name": "ffmpeg", "shell": "apt-get install -y ffmpeg"}],
+                "deps_apply": true,
+                "deps_apply_yes": true,
+                "standard_agent_work_deps": true,
+                "browser_use": true
+            }"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        assert_eq!(
+            args.dep,
+            vec!["ripgrep=apt-get install -y ripgrep".to_owned()]
+        );
+        assert_eq!(
+            args.dep_system,
+            vec!["ffmpeg=apt-get install -y ffmpeg".to_owned()]
+        );
+        assert!(args.deps_apply);
+        assert!(args.deps_apply_yes);
+        assert!(args.standard_agent_work_deps);
+        assert!(args.browser_use_profile);
+    }
+
+    #[test]
+    fn start_init_request_skills_declaration_clears_no_skills() {
+        let args = request_from_json(
+            r#"{"skills_source": "github:example", "skills": ["writing-plans"]}"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        assert!(!args.no_skills);
+        assert_eq!(args.skills_source.as_deref(), Some("github:example"));
+        assert_eq!(args.skills, vec!["writing-plans".to_owned()]);
+
+        let essential = request_from_json(r#"{"essential_skills": true}"#)
+            .into_init_args()
+            .expect("valid request");
+        assert!(!essential.no_skills);
+        assert!(essential.essential_skills);
+
+        let none = request_from_json(r#"{}"#)
+            .into_init_args()
+            .expect("valid request");
+        assert!(none.no_skills);
+    }
+
+    #[test]
+    fn start_init_request_maps_data_sources() {
+        let args = request_from_json(
+            r#"{
+                "data_sources": [
+                    {"type": "local", "path": "/srv/import"},
+                    {"type": "https", "url": "https://example.com/data.tar.gz", "expected_sha256": "ab"},
+                    {"type": "s3", "name": "corpus", "bucket": "my-bucket", "region": "us-east-1",
+                     "prefix": "corpus/", "access_key_ref": "AWS_ACCESS_KEY_ID",
+                     "secret_key_ref": "AWS_SECRET_ACCESS_KEY"}
+                ]
+            }"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        assert_eq!(args.prompt_data_sources.len(), 3);
+        assert_eq!(args.prompt_data_sources[0].source_type, "local");
+        assert_eq!(
+            args.prompt_data_sources[0].path.as_deref(),
+            Some("/srv/import")
+        );
+        assert_eq!(args.prompt_data_sources[1].source_type, "https");
+        assert_eq!(
+            args.prompt_data_sources[1].url.as_deref(),
+            Some("https://example.com/data.tar.gz")
+        );
+        assert_eq!(
+            args.prompt_data_sources[1].expected_sha256.as_deref(),
+            Some("ab")
+        );
+        let s3 = &args.prompt_data_sources[2];
+        assert_eq!(s3.source_type, "s3");
+        assert_eq!(s3.name.as_deref(), Some("corpus"));
+        assert_eq!(s3.bucket.as_deref(), Some("my-bucket"));
+        assert_eq!(s3.region.as_deref(), Some("us-east-1"));
+        assert_eq!(s3.prefix.as_deref(), Some("corpus/"));
+        assert_eq!(s3.access_key_ref.as_deref(), Some("AWS_ACCESS_KEY_ID"));
+        assert_eq!(s3.secret_key_ref.as_deref(), Some("AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn start_init_request_rejects_invalid_environment_declarations() {
+        assert!(
+            serde_json::from_str::<StartInitRequest>(r#"{"mcp_servers": []}"#).is_err(),
+            "unknown fields must be rejected"
+        );
+        assert!(
+            serde_json::from_str::<StartInitRequest>(
+                r#"{"data_sources": [{"type": "s3", "bucket": "b", "path": "/x", "access_key_ref": "A", "secret_key_ref": "S"}]}"#
+            )
+            .is_err(),
+            "fields from another data-source type must be rejected"
+        );
+        assert!(
+            serde_json::from_str::<StartInitRequest>(
+                r#"{"data_sources": [{"type": "s3", "bucket": "b", "access_key_ref": "A", "secret_key_ref": "S"}]}"#
+            )
+            .is_err(),
+            "s3 sources must declare a region"
+        );
+        for payload in [r#"{"deps_apply_yes": true}"#, r#"{"deps_apply": true}"#] {
+            let mismatched_apply = request_from_json(payload).into_init_args();
+            assert!(matches!(
+                mismatched_apply,
+                Err(StackError::InvalidParam {
+                    field: "deps_apply",
+                    ..
+                })
+            ));
+        }
+        for payload in [
+            r#"{"skills_source": "github:example"}"#,
+            r#"{"skills": ["writing-plans"]}"#,
+        ] {
+            let unpaired_skills = request_from_json(payload).into_init_args();
+            assert!(matches!(
+                unpaired_skills,
+                Err(StackError::InvalidParam {
+                    field: "skills",
+                    ..
+                })
+            ));
+        }
+        let essential_conflict = request_from_json(
+            r#"{"essential_skills": true, "skills_source": "github:example", "skills": ["x"]}"#,
+        )
+        .into_init_args();
+        assert!(matches!(
+            essential_conflict,
+            Err(StackError::InvalidParam {
+                field: "essential_skills",
+                ..
+            })
+        ));
+        let bad_dep_name =
+            request_from_json(r#"{"deps": [{"name": "a=b", "shell": "true"}]}"#).into_init_args();
+        assert!(matches!(
+            bad_dep_name,
+            Err(StackError::InvalidParam { field: "deps", .. })
+        ));
+        let empty_dep_shell =
+            request_from_json(r#"{"deps": [{"name": "a", "shell": " "}]}"#).into_init_args();
+        assert!(matches!(
+            empty_dep_shell,
+            Err(StackError::InvalidParam { field: "deps", .. })
+        ));
+    }
+
+    #[test]
+    fn start_init_request_declarations_assemble_into_starter_config() {
+        let args = request_from_json(
+            r#"{
+                "mcp_stdio": [
+                    {"name": "files", "command": "mcp-files", "args": ["--root", "/data"], "env": ["FILES_TOKEN"]}
+                ],
+                "mcp_http": [
+                    {"name": "search", "url": "https://mcp.example.com/mcp",
+                     "headers": [{"name": "Authorization", "value_ref": "SEARCH_API_KEY"}]}
+                ],
+                "deps": [{"name": "ripgrep", "shell": "apt-get install -y ripgrep"}],
+                "data_sources": [
+                    {"type": "s3", "bucket": "my-bucket", "region": "us-east-1",
+                     "access_key_ref": "AWS_ACCESS_KEY_ID", "secret_key_ref": "AWS_SECRET_ACCESS_KEY"}
+                ]
+            }"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        let toml = super::super::starter_config::starter_config(&args)
+            .expect("declarations must assemble into a starter config");
+        for expected in [
+            "name = \"files\"",
+            "command = \"mcp-files\"",
+            "FILES_TOKEN",
+            "https://mcp.example.com/mcp",
+            "SEARCH_API_KEY",
+            "my-bucket",
+            "AWS_SECRET_ACCESS_KEY",
+        ] {
+            assert!(
+                toml.contains(expected),
+                "starter config must contain {expected}: {toml}"
+            );
+        }
     }
 
     #[test]

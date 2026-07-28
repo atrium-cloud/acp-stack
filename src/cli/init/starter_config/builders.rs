@@ -31,7 +31,38 @@ pub(crate) fn reject_starter_only_mcp_args_for_existing_config(args: &InitArgs) 
     reject_starter_only_mcp_arg("--mcp-stdio", &args.mcp_stdio)?;
     reject_starter_only_mcp_arg("--mcp-stdio-env", &args.mcp_stdio_env)?;
     reject_starter_only_mcp_arg("--mcp-http", &args.mcp_http)?;
-    reject_starter_only_mcp_arg("--mcp-http-header", &args.mcp_http_header)
+    reject_starter_only_mcp_arg("--mcp-http-header", &args.mcp_http_header)?;
+    // Structured declarations (hosted request or wizard) declare into a fresh
+    // starter config only, same as the flag forms above.
+    if !args.prompt_mcp_stdio.is_empty() {
+        return starter_only_mcp_error("--mcp-stdio");
+    }
+    if !args.prompt_mcp_http.is_empty() {
+        return starter_only_mcp_error("--mcp-http");
+    }
+    Ok(())
+}
+
+/// `--data-from` and structured data-source declarations seed a fresh starter
+/// config only; reject them when a config already exists (the operator edits
+/// `[[workspace.data_sources]]` directly).
+pub(crate) fn reject_data_source_args_for_existing_config(args: &InitArgs) -> Result<()> {
+    // The structured field only arrives from the hosted request (or wizard),
+    // so name the hosted field in that error rather than the CLI flag.
+    let field = if !args.data_from.is_empty() {
+        Some("--data-from")
+    } else if !args.prompt_data_sources.is_empty() {
+        Some("data_sources")
+    } else {
+        None
+    };
+    if let Some(field) = field {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: "data source declarations apply only when creating a starter config".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn sandbox_mode_str(mode: SandboxMode) -> &'static str {
@@ -529,6 +560,10 @@ fn reject_starter_only_mcp_arg(field: &'static str, values: &[String]) -> Result
     if values.is_empty() {
         return Ok(());
     }
+    starter_only_mcp_error(field)
+}
+
+fn starter_only_mcp_error(field: &'static str) -> Result<()> {
     Err(StackError::InvalidParam {
         field,
         reason: "MCP init declarations apply only when creating a starter config".to_owned(),

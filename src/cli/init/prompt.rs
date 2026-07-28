@@ -289,13 +289,16 @@ pub(super) fn with_spinner<T>(message: &str, work: impl FnOnce() -> Result<T>) -
     }
 }
 
-/// Masked secret entry. Returns `None` when not interactive.
-pub(super) fn password(interactive: bool, prompt: &str) -> Result<Option<String>> {
+/// Masked secret entry. Returns `None` when not interactive. `required` is
+/// hosted-wire metadata only: it tells the client whether a `null` answer
+/// skips cleanly (declared-ref collection) or leads to a hard failure
+/// (provider key refs); the server accepts `null` either way.
+pub(super) fn password(interactive: bool, prompt: &str, required: bool) -> Result<Option<String>> {
     if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
         let request = HostedPromptRequest {
             style: HostedPromptStyle::Password,
             prompt: prompt.to_owned(),
-            required: true,
+            required,
             default: None,
             items: Vec::new(),
             inspection: None,
@@ -364,6 +367,6 @@ mod tests {
 
     #[test]
     fn password_returns_none_when_not_interactive() {
-        assert_eq!(password(false, "secret").expect("password"), None);
+        assert_eq!(password(false, "secret", true).expect("password"), None);
     }
 }
