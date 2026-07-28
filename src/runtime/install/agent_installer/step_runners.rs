@@ -13,8 +13,8 @@ use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{GithubInstall, InstallSet, github_repo_from_url};
 use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::runtime::process_runner::{
-    forward_host_env, join_reader_bounded, kill_process_group, path_env_with_extra_dirs,
-    spawn_capped_reader, wait_with_timeout,
+    apply_non_interactive_env, detach_into_new_session, forward_host_env, join_reader_bounded,
+    kill_process_group, path_env_with_extra_dirs, spawn_capped_reader, wait_with_timeout,
 };
 
 use super::{
@@ -653,13 +653,24 @@ fn run_program_install(
     }
     forward_host_env(&mut command, "HOME");
     forward_host_env(&mut command, "LANG");
+    apply_non_interactive_env(&mut command);
     // Inject `[agent].env` values, but refuse to let them override
-    // PATH/HOME/LANG. The same security argument applies as in the bridge:
-    // the daemon's environment is the source of truth for where to find
-    // binaries and the operator's home, not values reachable through the
-    // secret store.
+    // PATH/HOME/LANG (the same security argument as in the bridge: the
+    // daemon's environment is the source of truth for where to find binaries
+    // and the operator's home) or the non-interactive hints (an agent entry
+    // must not be able to re-enable prompting in a headless install).
     for (name, value) in agent_env {
-        if matches!(name.as_str(), "PATH" | "HOME" | "LANG") {
+        if matches!(
+            name.as_str(),
+            "PATH"
+                | "HOME"
+                | "LANG"
+                | "CI"
+                | "NONINTERACTIVE"
+                | "DEBIAN_FRONTEND"
+                | "GIT_TERMINAL_PROMPT"
+                | "TERM"
+        ) {
             tracing::warn!(
                 name = %name,
                 "refusing to inject `{name}` from `[agent].env` into installer: reserved",
@@ -669,13 +680,10 @@ fn run_program_install(
         command.env(name, value);
     }
 
-    // Detach into a fresh process group so the timeout-induced SIGKILL also
-    // reaches whatever grandchildren the shell forks.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    // Detach into a fresh session so the timeout-induced SIGKILL also reaches
+    // whatever grandchildren the shell forks, and so an installer probing
+    // /dev/tty cannot prompt-and-stop when prior state (e.g. ~/.pi) exists.
+    detach_into_new_session(&mut command);
 
     let mut child = command
         .spawn()

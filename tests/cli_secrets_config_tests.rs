@@ -347,7 +347,7 @@ fn init_prints_session_and_admin_keys_on_first_run() {
     let stdout = String::from_utf8(output).expect("utf8");
     assert!(stdout.contains("session key: acps_"));
     assert!(stdout.contains("admin key: acps_"));
-    assert!(stdout.contains("save the admin key now"));
+    assert!(stdout.contains("save both keys now"));
 }
 
 #[test]
@@ -450,6 +450,45 @@ fn init_handoff_json_preserves_keys_without_reprinting_material() {
     assert!(!stdout.contains(&admin_key));
     assert!(!stdout.contains("session key:"));
     assert!(!stdout.contains("admin key:"));
+}
+
+#[test]
+fn init_handoff_json_rotate_keys_reissues_plaintext_over_existing_state() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (old_session_key, old_admin_key) = run_init_with_home(tempdir.path());
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--rotate-keys",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "initialized");
+    assert_eq!(body["auth"]["generated_keys"], json!(["session", "admin"]));
+    assert_eq!(body["auth"]["preserved_keys"], json!([]));
+    let session_key = body["session_key"].as_str().expect("session key");
+    let admin_key = body["admin_key"].as_str().expect("admin key");
+    assert_ne!(session_key, old_session_key);
+    assert_ne!(admin_key, old_admin_key);
+
+    let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
+    let verifiers = store.load_auth_verifier_pair().expect("auth verifiers");
+    assert_eq!(verifiers.verify(session_key), Some(KeyKind::Session));
+    assert_eq!(verifiers.verify(admin_key), Some(KeyKind::Admin));
+    assert_eq!(verifiers.verify(&old_session_key), None);
+    assert_eq!(verifiers.verify(&old_admin_key), None);
 }
 
 #[test]

@@ -80,7 +80,7 @@ impl KeyHandover {
         println!("session key: {}", keys.session_value.as_str());
         println!("admin key: {}", keys.admin_value.as_str());
         println!(
-            "save the admin key now; it is never regenerable. use `acps reset --yes` to rotate it."
+            "save both keys now; they are not reprinted. rotate later with `acps init --rotate-keys` (or `acps reset --yes` to reinitialize)."
         );
         println!("---");
         Some(("session".to_owned(), "admin".to_owned()))

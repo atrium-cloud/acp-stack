@@ -165,6 +165,21 @@ impl StateStore {
         Ok(())
     }
 
+    /// Rotate both keys atomically. Two sequential [`Self::upsert_auth_key`]
+    /// calls would leave a mismatched session/admin pair if the process died
+    /// between them — a state `ensure_auth_verifier_pair` treats as
+    /// unrecoverable — so the pair replacement must be a single transaction.
+    /// `created_at` is preserved on rows that already exist.
+    pub fn replace_auth_key_pair(&self, verifiers: &crate::auth::AuthVerifierSet) -> Result<()> {
+        let transaction =
+            Transaction::new_unchecked(self.connection(), TransactionBehavior::Immediate)?;
+        let now = current_timestamp();
+        upsert_auth_key_in_transaction(&transaction, KeyKind::Session, &verifiers.session, &now)?;
+        upsert_auth_key_in_transaction(&transaction, KeyKind::Admin, &verifiers.admin, &now)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn append_auth_failure(
         &self,
         key_kind: &str,
@@ -258,6 +273,34 @@ fn auth_key_record_to_verifier(key_kind: KeyKind, record: AuthKeyRecord) -> Resu
     AuthVerifier::from_encoded(key_kind, record.algorithm, record.salt, record.digest)
 }
 
+fn upsert_auth_key_in_transaction(
+    transaction: &Transaction<'_>,
+    key_kind: KeyKind,
+    verifier: &AuthVerifier,
+    now: &str,
+) -> Result<()> {
+    transaction.execute(
+        r#"
+        INSERT INTO auth_keys
+            (key_kind, algorithm, salt, digest, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+        ON CONFLICT(key_kind) DO UPDATE SET
+            algorithm = excluded.algorithm,
+            salt = excluded.salt,
+            digest = excluded.digest,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            key_kind.as_wire_str(),
+            verifier.algorithm(),
+            verifier.encoded_salt(),
+            verifier.encoded_digest(),
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
 fn insert_auth_key_in_transaction(
     transaction: &Transaction<'_>,
     key_kind: KeyKind,
@@ -279,4 +322,59 @@ fn insert_auth_key_in_transaction(
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthVerifierSet;
+
+    fn store() -> (tempfile::TempDir, StateStore) {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+        store.migrate().expect("migrate");
+        (tempdir, store)
+    }
+
+    #[test]
+    fn replace_auth_key_pair_rotates_both_rows_and_preserves_created_at() {
+        let (_tempdir, store) = store();
+        store
+            .insert_auth_key_pair(&AuthVerifierSet::create("old-session", "old-admin"))
+            .expect("seed pair");
+        let seeded_session = store
+            .get_auth_key(KeyKind::Session)
+            .expect("query")
+            .expect("session row");
+
+        store
+            .replace_auth_key_pair(&AuthVerifierSet::create("new-session", "new-admin"))
+            .expect("replace pair");
+
+        let pair = store.load_auth_verifier_pair().expect("pair");
+        assert!(pair.verify("old-session").is_none());
+        assert!(pair.verify("old-admin").is_none());
+        assert_eq!(pair.verify("new-session"), Some(KeyKind::Session));
+        assert_eq!(pair.verify("new-admin"), Some(KeyKind::Admin));
+
+        let rotated_session = store
+            .get_auth_key(KeyKind::Session)
+            .expect("query")
+            .expect("session row");
+        assert_eq!(rotated_session.created_at, seeded_session.created_at);
+        assert_ne!(rotated_session.digest, seeded_session.digest);
+    }
+
+    #[test]
+    fn replace_auth_key_pair_works_on_empty_store() {
+        let (_tempdir, store) = store();
+
+        store
+            .replace_auth_key_pair(&AuthVerifierSet::create("session", "admin"))
+            .expect("replace pair");
+
+        let pair = store.load_auth_verifier_pair().expect("pair");
+        assert_eq!(pair.verify("session"), Some(KeyKind::Session));
+        assert_eq!(pair.verify("admin"), Some(KeyKind::Admin));
+    }
 }

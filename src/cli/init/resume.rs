@@ -9,6 +9,7 @@ use crate::auth::{
 use crate::config::{Config, LegacyAuthConfig};
 use crate::error::{Result, StackError};
 use crate::runtime::init_runner::{self, begin_run, finalize_run, find_resumable_run};
+use crate::secrets::SecretStore;
 use crate::state::{
     INIT_RUN_FAILED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, InitRunRecord,
     InitStepRecord, StateStore,
@@ -62,6 +63,7 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "stack_update": args.stack_update,
         "stack_update_frequency": args.stack_update_frequency,
         "native_config_revision": args.native_config_revision,
+        "rotate_keys": args.rotate_keys,
         "fresh": args.fresh,
         "resume": args.resume,
     })
@@ -132,6 +134,8 @@ pub(super) struct RecordedInitArgs {
     pub(super) stack_update: Option<String>,
     pub(super) stack_update_frequency: Option<String>,
     pub(super) native_config_revision: Option<String>,
+    #[serde(default)]
+    pub(super) rotate_keys: bool,
 }
 
 // Arguments that existed in earlier releases but can no longer be replayed.
@@ -230,24 +234,74 @@ pub(super) struct FreshKeys {
 
 pub(super) struct AuthInitOutcome {
     pub(super) status: &'static str,
-    /// `Some` only on fresh generation. Existing stores must never surface
-    /// plaintext keys again.
+    /// `Some` on fresh generation or rotation. A preserving run must never
+    /// surface plaintext keys again.
     pub(super) fresh_keys: Option<FreshKeys>,
     pub(super) generated_keys: bool,
+    /// True when existing verifier rows were replaced rather than created.
+    pub(super) rotated_keys: bool,
 }
 
+/// What `secrets_init` does when verifier rows already exist. Hosted init
+/// always rotates: the backend has no other way to recover credentials for an
+/// instance whose state predates this session, and a preserved run would
+/// deliver a keyless result frame the backend cannot accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyPolicy {
+    PreserveExisting,
+    RotateExisting,
+}
+
+/// `secret_store` must be the caller's live handle: later init steps persist
+/// that handle's full in-memory map, so writing the rotated legacy refs
+/// through a separate `SecretStore::open` would be silently rolled back to
+/// the pre-rotation snapshot on the next persist.
 pub(super) fn perform_auth_init(
     store: &StateStore,
     legacy_auth: Option<&LegacyAuthConfig>,
     home: &Path,
+    secret_store: &mut SecretStore,
+    policy: KeyPolicy,
 ) -> Result<AuthInitOutcome> {
     match ensure_auth_verifier_pair(store, legacy_auth, home)? {
         AuthVerifierEnsureOutcome::Preserved
-        | AuthVerifierEnsureOutcome::BackfilledLegacySecrets => Ok(AuthInitOutcome {
-            status: "preserved existing API keys",
-            fresh_keys: None,
-            generated_keys: false,
-        }),
+        | AuthVerifierEnsureOutcome::BackfilledLegacySecrets => match policy {
+            KeyPolicy::PreserveExisting => Ok(AuthInitOutcome {
+                status: "preserved existing API keys",
+                fresh_keys: None,
+                generated_keys: false,
+                rotated_keys: false,
+            }),
+            KeyPolicy::RotateExisting => {
+                let session_value = generate_api_key();
+                let admin_value = generate_api_key();
+                let verifiers = AuthVerifierSet::create(&session_value, &admin_value);
+                // Rewrite legacy secret-store entries BEFORE replacing the
+                // verifier rows (a future backfill would otherwise resurrect
+                // the retired plaintexts). The order is load-bearing: a
+                // failed rewrite here leaves the old keys valid, while a
+                // failed replace below leaves inert refs — the reverse order
+                // could invalidate the old keys and then lose the new
+                // plaintexts to the error path, the exact wedge rotation
+                // exists to close.
+                if let Some(legacy_auth) = legacy_auth {
+                    secret_store.set_many([
+                        (legacy_auth.session_key_ref.as_str(), session_value.as_str()),
+                        (legacy_auth.admin_key_ref.as_str(), admin_value.as_str()),
+                    ])?;
+                }
+                store.replace_auth_key_pair(&verifiers)?;
+                Ok(AuthInitOutcome {
+                    status: "rotated session and admin API keys",
+                    generated_keys: true,
+                    rotated_keys: true,
+                    fresh_keys: Some(FreshKeys {
+                        session_value: Zeroizing::new(session_value),
+                        admin_value: Zeroizing::new(admin_value),
+                    }),
+                })
+            }
+        },
         AuthVerifierEnsureOutcome::Missing => {
             let session_value = generate_api_key();
             let admin_value = generate_api_key();
@@ -256,6 +310,7 @@ pub(super) fn perform_auth_init(
             Ok(AuthInitOutcome {
                 status: "generated session and admin API keys",
                 generated_keys: true,
+                rotated_keys: false,
                 fresh_keys: Some(FreshKeys {
                     session_value: Zeroizing::new(session_value),
                     admin_value: Zeroizing::new(admin_value),
@@ -394,10 +449,153 @@ mod tests {
         let verifiers = AuthVerifierSet::create("session-value", "admin-value");
         store.insert_auth_key_pair(&verifiers).expect("seed keys");
 
-        let outcome = perform_auth_init(&store, None, tempdir.path()).expect("outcome");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secrets");
+        let outcome = perform_auth_init(
+            &store,
+            None,
+            tempdir.path(),
+            &mut secret_store,
+            KeyPolicy::PreserveExisting,
+        )
+        .expect("outcome");
 
         assert_eq!(outcome.status, "preserved existing API keys");
         assert!(!outcome.generated_keys);
+        assert!(!outcome.rotated_keys);
         assert!(outcome.fresh_keys.is_none());
+    }
+
+    #[test]
+    fn perform_auth_init_rotates_existing_keys_and_returns_plaintext() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&state_path).expect("state");
+        store.migrate().expect("migrate");
+        let verifiers = AuthVerifierSet::create("session-value", "admin-value");
+        store.insert_auth_key_pair(&verifiers).expect("seed keys");
+
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secrets");
+        let outcome = perform_auth_init(
+            &store,
+            None,
+            tempdir.path(),
+            &mut secret_store,
+            KeyPolicy::RotateExisting,
+        )
+        .expect("outcome");
+
+        assert_eq!(outcome.status, "rotated session and admin API keys");
+        assert!(outcome.generated_keys);
+        assert!(outcome.rotated_keys);
+        let fresh = outcome.fresh_keys.expect("rotation must return plaintext");
+
+        let pair = store.load_auth_verifier_pair().expect("pair");
+        assert!(
+            pair.verify("session-value").is_none() && pair.verify("admin-value").is_none(),
+            "retired keys must stop verifying"
+        );
+        assert!(pair.verify(fresh.session_value.as_str()).is_some());
+        assert!(pair.verify(fresh.admin_value.as_str()).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotation_failure_in_legacy_rewrite_keeps_old_keys_valid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&state_path).expect("state");
+        store.migrate().expect("migrate");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secrets");
+        secret_store
+            .set("legacy_session", "session-value")
+            .expect("seed session secret");
+        secret_store
+            .set("legacy_admin", "admin-value")
+            .expect("seed admin secret");
+        let verifiers = AuthVerifierSet::create("session-value", "admin-value");
+        store.insert_auth_key_pair(&verifiers).expect("seed keys");
+        let legacy_auth = LegacyAuthConfig {
+            session_key_ref: "legacy_session".to_owned(),
+            admin_key_ref: "legacy_admin".to_owned(),
+        };
+
+        // Make the secret-store persist fail so the legacy rewrite errors.
+        let store_dir = secret_store
+            .store_path()
+            .parent()
+            .expect("store dir")
+            .to_path_buf();
+        std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make store dir read-only");
+        let result = perform_auth_init(
+            &store,
+            Some(&legacy_auth),
+            tempdir.path(),
+            &mut secret_store,
+            KeyPolicy::RotateExisting,
+        );
+        std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore store dir permissions");
+
+        // The rewrite failed BEFORE the verifier replace: the old keys must
+        // still verify, or the failed rotation would itself be a key wedge.
+        assert!(
+            result.is_err(),
+            "rotation must fail when the legacy rewrite fails"
+        );
+        let pair = store.load_auth_verifier_pair().expect("pair");
+        assert!(pair.verify("session-value").is_some());
+        assert!(pair.verify("admin-value").is_some());
+    }
+
+    #[test]
+    fn perform_auth_init_rotation_rewrites_legacy_secret_refs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state_path = tempdir.path().join("state.sqlite");
+        let store = StateStore::open(&state_path).expect("state");
+        store.migrate().expect("migrate");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secrets");
+        secret_store
+            .set("legacy_session", "session-value")
+            .expect("seed session secret");
+        secret_store
+            .set("legacy_admin", "admin-value")
+            .expect("seed admin secret");
+        let verifiers = AuthVerifierSet::create("session-value", "admin-value");
+        store.insert_auth_key_pair(&verifiers).expect("seed keys");
+        let legacy_auth = LegacyAuthConfig {
+            session_key_ref: "legacy_session".to_owned(),
+            admin_key_ref: "legacy_admin".to_owned(),
+        };
+
+        let outcome = perform_auth_init(
+            &store,
+            Some(&legacy_auth),
+            tempdir.path(),
+            &mut secret_store,
+            KeyPolicy::RotateExisting,
+        )
+        .expect("outcome");
+        let fresh = outcome.fresh_keys.expect("rotation must return plaintext");
+
+        // A later init step persisting through the same live handle must not
+        // roll the rotated refs back to the pre-rotation snapshot.
+        secret_store
+            .set("unrelated", "value")
+            .expect("later write through the same handle");
+
+        // A future legacy backfill reads these refs; stale plaintexts here
+        // would resurrect the retired keys.
+        let reopened = SecretStore::open(tempdir.path()).expect("reopen secrets");
+        assert_eq!(
+            reopened.get("legacy_session").expect("session secret"),
+            fresh.session_value.as_str()
+        );
+        assert_eq!(
+            reopened.get("legacy_admin").expect("admin secret"),
+            fresh.admin_value.as_str()
+        );
     }
 }

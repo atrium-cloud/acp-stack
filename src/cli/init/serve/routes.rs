@@ -460,6 +460,34 @@ pub(super) fn handle_client_frame(
                 .to_string(),
             ),
         },
+        "replay_error" => match session.error_replay_frame() {
+            Some(frame) => ClientFrameOutcome::Send(frame),
+            None => ClientFrameOutcome::Send(
+                json!({
+                    "type": "error",
+                    "code": "init.error_unavailable",
+                    "message": "no init error is recorded for this session"
+                })
+                .to_string(),
+            ),
+        },
+        "ack_error" => match session.ack_error() {
+            Ok(()) => ClientFrameOutcome::Close(
+                json!({
+                    "type": "error_acked",
+                    "session_id": session.id
+                })
+                .to_string(),
+            ),
+            Err(message) => ClientFrameOutcome::Send(
+                json!({
+                    "type": "error",
+                    "code": "init.ack_rejected",
+                    "message": message
+                })
+                .to_string(),
+            ),
+        },
         _ => ClientFrameOutcome::Send(
             json!({
                 "type": "error",

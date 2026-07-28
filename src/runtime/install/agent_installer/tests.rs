@@ -896,6 +896,37 @@ fn installer_log_persist_failure_prevents_history_row() {
 }
 
 #[test]
+fn installer_env_is_non_interactive_and_reserved_names_resist_agent_env() {
+    let (tempdir, store) = open_store();
+    let capture = tempdir.path().join("env-capture");
+    // The script records the env the installer actually ran with; `creates`
+    // is left unresolvable so the outcome itself is irrelevant to the pin.
+    let script = format!(
+        "printf '%s:%s:%s' \"$CI\" \"$TERM\" \"$CUSTOM\" > {}",
+        shell_quote_literal(&capture.display().to_string())
+    );
+    let install = install_config(&script, "definitely-not-a-real-binary-xyz123");
+    let mut agent_env = HashMap::new();
+    agent_env.insert("CI".to_owned(), "0".to_owned());
+    agent_env.insert("TERM".to_owned(), "xterm-256color".to_owned());
+    agent_env.insert("CUSTOM".to_owned(), "custom-value".to_owned());
+    let _ = run_installer(
+        "test-agent",
+        &install,
+        None,
+        agent_env,
+        &workspace_root(),
+        &store,
+        None,
+    );
+    let captured = std::fs::read_to_string(&capture).expect("script ran and captured env");
+    assert_eq!(
+        captured, "1:dumb:custom-value",
+        "reserved non-interactive names must resist [agent].env; others pass through"
+    );
+}
+
+#[test]
 fn precheck_short_circuits_when_creates_resolves() {
     // `true` ships on every POSIX system; the installer should skip.
     let (_tempdir, store) = open_store();

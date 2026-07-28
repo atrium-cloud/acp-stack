@@ -7,8 +7,6 @@ use serde::Serialize;
 
 use crate::config::{AgentConfig, Config};
 use crate::error::{Result, StackError};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 use crate::runtime::install::agent_installer::{
     INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL,
@@ -19,8 +17,8 @@ use crate::runtime::install::agent_registry::{
     github_repo_from_url,
 };
 use crate::runtime::process_runner::{
-    forward_host_env, join_reader_bounded, kill_process_group, path_env_with_extra_dirs,
-    spawn_capped_reader, wait_with_timeout,
+    apply_non_interactive_env, detach_into_new_session, forward_host_env, join_reader_bounded,
+    kill_process_group, path_env_with_extra_dirs, spawn_capped_reader, wait_with_timeout,
 };
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
@@ -597,12 +595,13 @@ fn run_command_step_with_started_at(
     if let Some(path) = path_env_with_extra_dirs(&[context.dest_dir]) {
         command.env("PATH", path);
     }
+    apply_non_interactive_env(&mut command);
+    command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        command.process_group(0);
-    }
+    // Detach so a native updater (e.g. `pi update`) probing the terminal
+    // cannot prompt-and-block the daemon's uncancellable update task.
+    detach_into_new_session(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -703,6 +702,29 @@ mod tests {
         INSTALLER_METHOD_APT, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_SHELL,
         INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE, InstallerRun, StateStore,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn command_step_runs_with_null_stdin() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        // `cat` with inherited stdin would block until the daemon's stdin
+        // closes (the pre-fix behavior for `pi update`); with a null stdin it
+        // sees immediate EOF and exits 0 within the timeout.
+        let row = super::run_command_step_with_started_at(
+            "harness",
+            "native",
+            crate::runtime::install::agent_installer::current_timestamp(),
+            std::path::PathBuf::from("sh"),
+            &["-c", "cat"],
+            &super::CommandStepContext {
+                workspace_root: tempdir.path(),
+                dest_dir: tempdir.path(),
+                timeout: std::time::Duration::from_secs(5),
+            },
+        );
+        assert_eq!(row.status, "ran");
+        assert_eq!(row.exit_status, Some(0));
+    }
 
     #[test]
     fn native_help_probe_matches_exact_subcommand_tokens() {
