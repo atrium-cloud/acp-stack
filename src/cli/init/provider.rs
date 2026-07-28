@@ -193,21 +193,71 @@ pub(super) fn collect_prepared_secret_refs_for_init(
         }
         required_refs.extend(provider_refs);
     }
-    for server in &config.mcp.servers {
-        match server {
-            crate::config::McpServerConfig::Stdio(server) => {
-                required_refs.extend(server.env.iter().cloned());
-            }
-            crate::config::McpServerConfig::Http(server) => {
-                required_refs.extend(server.headers.iter().map(|header| header.value_ref.clone()));
-            }
-        }
-    }
+    required_refs.extend(config_mcp_secret_refs(config));
     collect_missing_provider_refs(
         prompts_enabled(args),
         secret_store,
         &required_refs.into_iter().collect::<Vec<_>>(),
     )
+}
+
+fn config_mcp_secret_refs(config: &Config) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for server in &config.mcp.servers {
+        match server {
+            crate::config::McpServerConfig::Stdio(server) => {
+                refs.extend(server.env.iter().cloned());
+            }
+            crate::config::McpServerConfig::Http(server) => {
+                refs.extend(server.headers.iter().map(|header| header.value_ref.clone()));
+            }
+        }
+    }
+    refs
+}
+
+/// Offer masked entry for MCP env/header refs and S3 data-source key refs the
+/// config declares but the store lacks. Unlike `collect_missing_provider_refs`
+/// this never hard-fails on a still-missing ref: the ordinary init path has
+/// always deferred MCP secrets to runtime health (and S3 refs to workspace
+/// materialization), and a hosted backend may legitimately skip a prompt here
+/// and push the secret through the API after init completes. Returns the ref
+/// names actually stored.
+pub(super) fn collect_declared_secret_refs_for_init(
+    interactive: bool,
+    config: &Config,
+    secret_store: &mut SecretStore,
+) -> Result<Vec<String>> {
+    if !interactive {
+        return Ok(Vec::new());
+    }
+    let mut declared_refs = config_mcp_secret_refs(config);
+    for source in &config.workspace.data_sources {
+        declared_refs.extend(source.access_key_ref.iter().cloned());
+        declared_refs.extend(source.secret_key_ref.iter().cloned());
+    }
+    let mut collected = Vec::new();
+    for env_ref in &declared_refs {
+        if secret_store.contains(env_ref) {
+            continue;
+        }
+        let Some(value) = prompt::password(interactive, env_ref, false)? else {
+            continue;
+        };
+        let value = zeroize::Zeroizing::new(value);
+        if !value.is_empty() {
+            collected.push((env_ref.clone(), value));
+        }
+    }
+    if collected.is_empty() {
+        return Ok(Vec::new());
+    }
+    secret_store.set_many(
+        collected
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    )?;
+    Ok(collected.into_iter().map(|(name, _)| name).collect())
 }
 
 fn ensure_configured_provider_refs_for_init(
@@ -799,7 +849,7 @@ fn collect_missing_provider_refs(
             // Masked entry via the wizard: a provider API key is a secret value;
             // echoing it to the terminal (and scrollback) would defeat the
             // encrypted store.
-            let Some(value) = prompt::password(interactive, env_ref)? else {
+            let Some(value) = prompt::password(interactive, env_ref, true)? else {
                 continue;
             };
             let value = zeroize::Zeroizing::new(value);

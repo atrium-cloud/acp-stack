@@ -230,6 +230,7 @@ fn run_init_with_output(
         reject_supabase_init_args_for_existing_config(&args)?;
         reject_agent_env_refs_for_existing_config(&args)?;
         reject_deps_args_for_existing_config(&args)?;
+        reject_data_source_args_for_existing_config(&args)?;
     }
     // A custom agent declared via `--custom-agent-*` is resolved up front; it
     // satisfies the "real agent" requirement without an `--agent` registry id
@@ -679,8 +680,15 @@ fn run_init_with_output(
         return finalize_with_error(&store, &init_run, error);
     }
 
+    // An unsatisfiable skills declaration (e.g. essential skills for an agent
+    // without an install dir) is a hard error — a declaration silently
+    // skipped would be worse — but it must finalize the run like every other
+    // failure here, or the pending row would be adopted by a later --resume.
     let skill_install_plan =
-        resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog)?;
+        match resolve_skill_install_plan(&args, &home, &config, &registry, &skill_catalog) {
+            Ok(plan) => plan,
+            Err(error) => return finalize_with_error(&store, &init_run, error),
+        };
 
     let mut auth_status: &'static str = "preserved existing API keys";
     let mut key_handover = KeyHandover {
@@ -801,6 +809,24 @@ fn run_init_with_output(
     })();
     if let Err(error) = env_apply {
         return finalize_with_error(&store, &init_run, error);
+    }
+    // Offer masked entry for secret refs declared by MCP servers and S3 data
+    // sources (flags, wizard, or hosted request). Skipped refs are not an
+    // error: they surface later in MCP health or workspace materialization,
+    // and a hosted backend may push them through the secrets API post-init.
+    // Resume runs re-offer refs that were skipped on the failed attempt.
+    if creating_config || args.resume {
+        match collect_declared_secret_refs_for_init(
+            prompts_enabled(&args),
+            &config,
+            &mut secret_store,
+        ) {
+            Ok(stored) if !stored.is_empty() => {
+                init_println!(output_mode, "declared secrets: set ({})", stored.join(", "));
+            }
+            Ok(_) => {}
+            Err(error) => return finalize_with_error(&store, &init_run, error),
+        }
     }
     // Hold the freshly-generated keys until init exits. Drop renders the
     // handover last (after the summary and testflight), and still surfaces them

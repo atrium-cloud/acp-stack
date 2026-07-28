@@ -143,10 +143,11 @@ async fn create_session_handler(
     State(state): State<BootstrapState>,
     body: Option<Json<StartInitRequest>>,
 ) -> Response {
-    match state
-        .manager
-        .start_session(body.map(|body| body.0).unwrap_or_default())
-    {
+    let init_args = match body.map(|body| body.0).unwrap_or_default().into_init_args() {
+        Ok(init_args) => init_args,
+        Err(error) => return error.into_response(),
+    };
+    match state.manager.start_session(init_args) {
         Ok(response) => ApiSuccess::new(response).into_response(),
         Err(StartSessionError::Active) => api_error(
             StatusCode::CONFLICT,

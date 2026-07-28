@@ -47,12 +47,28 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 
 | Route                                      | Contract |
 | ------------------------------------------ | -------- |
-| `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args plus an in-memory native config upload |
+| `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args, environment configuration declarations, plus an in-memory native config upload |
 | `GET /v1/init/sessions/{id}`              | returns non-secret status, pending input, recent progress, `last_activity_age_secs`, and `completed_awaiting_ack` when a result exists |
 | `GET /v1/init/sessions/{id}/events?after_seq=N` | replays non-secret progress and input lifecycle events |
 | `GET /v1/init/sessions/{id}/ws`           | upgrades to the hosted init WebSocket |
 
-`POST /v1/init/sessions` returns `{ "session_id": "...", "status": "running" }` in the standard success envelope. It returns `409 init.session_active` while another session is running or awaiting result acknowledgement.
+`POST /v1/init/sessions` returns `{ "session_id": "...", "status": "running" }` in the standard success envelope. It returns `409 init.session_active` while another session is running or awaiting result acknowledgement. Unknown request fields are rejected.
+
+The request body groups into:
+
+- Agent/provider/model: `agent`, `provider`, `api_key_ref`, `model`, `custom_provider`, `provider_name`, `base_url`, `provider_api`, `model_name`, `context`, `output_max_tokens`, `skip_testflight`, `testflight`, `native_config` (`{ "filename", "content" }`).
+- Workspace: `workspace_root`, `workspace_uploads`, `runtime_user`, `sandbox`, `code_from` (array of git URLs), `data_from` (array of local paths or https archive URLs).
+- Environment configuration (mirrors the `acps init` flag and wizard surface; these replace the interactive environment wizard, which is never streamed to hosted clients):
+  - `mcp_preset`: array of preset ids (`linear`).
+  - `mcp_stdio`: array of `{ "name", "command", "args": [...], "env": [...] }`; `env` entries are secret ref names exported into the server's environment.
+  - `mcp_http`: array of `{ "name", "url", "headers": [{ "name", "value_ref" }] }`; URLs must be https.
+  - `skills_source` + `skills`: explicit skill selection, same semantics as `--skills-source`/`--skills`; both must be declared together. `essential_skills`: boolean, conflicts with the explicit pair. An unsatisfiable skills declaration (e.g. the selected agent has no Agent Skills install directory) fails the init session.
+  - `deps` and `deps_system`: arrays of `{ "name", "shell" }` install records (user/system scope). `deps_apply` + `deps_apply_yes`: booleans, must be set together (the interactive apply confirmation is never streamed); when set, init runs the declared install actions, otherwise dependencies are declared in config but not installed. `standard_agent_work_deps` and `browser_use`: booleans enabling the standard dependency bundle and the browser-use profile.
+  - `data_sources`: array of tagged records — `{ "type": "local", "path" }`, `{ "type": "https", "url", "expected_sha256"?, "max_download_bytes"?, "max_extracted_bytes"? }`, or `{ "type": "s3", "bucket", "region", "prefix"?, "access_key_ref", "secret_key_ref" }` — each with an optional `name`.
+
+The create route validates request shape and the cross-field rules above; semantic validation of field values (secret ref name syntax, https-only MCP URLs, data-source paths) happens in-session, so a semantically invalid declaration returns `200` with `"status": "running"` and then fails the init session.
+
+Secret values referenced by these declarations (MCP `env`/`value_ref` entries, S3 key refs) are never carried in the request body: init collects any refs missing from the secret store over the prompt stream as `password` inputs with `required: false`. Answering with `null` skips a ref without failing the session; a skipped MCP secret later surfaces through runtime MCP health, and a skipped S3 key ref fails workspace materialization. Provider key ref prompts stream `required: true` instead: a `null` answer is accepted but a still-unresolved provider ref fails the session. The values never appear in status or event replay.
 
 Status and event replay never include plaintext session/admin keys or secret input values. Pending input includes `request_id`, `style`, `prompt`, `required`, optional `default`, and visible option labels/hints. A native upload produces `style: "native_config_review"` plus the redacted `inspection`; its client response value is the revision-bound selection object used by the normal import contract. Client `input` frames must include the active `request_id`; stale input is rejected.
 

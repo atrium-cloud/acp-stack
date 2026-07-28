@@ -40,8 +40,8 @@ mod prompts;
 // list) escape `starter_config`, so they are declared `pub(crate)` in their
 // sibling and re-exported here.
 pub(super) use self::builders::{
-    reject_starter_only_mcp_args_for_existing_config, starter_config,
-    validate_deployment_overrides_match_existing,
+    reject_data_source_args_for_existing_config, reject_starter_only_mcp_args_for_existing_config,
+    starter_config, validate_deployment_overrides_match_existing,
 };
 pub(super) use self::deps::{
     AgentEnvCollection, append_agent_env_refs, apply_agent_env_collection,
@@ -154,13 +154,23 @@ mod tests {
     struct ScriptedPromptDriver {
         selects: Mutex<VecDeque<Option<usize>>>,
         confirms: Mutex<VecDeque<bool>>,
+        passwords: Mutex<VecDeque<Option<String>>>,
     }
 
     impl ScriptedPromptDriver {
         fn new(selects: Vec<Option<usize>>, confirms: Vec<bool>) -> Self {
+            Self::with_passwords(selects, confirms, Vec::new())
+        }
+
+        fn with_passwords(
+            selects: Vec<Option<usize>>,
+            confirms: Vec<bool>,
+            passwords: Vec<Option<String>>,
+        ) -> Self {
             Self {
                 selects: Mutex::new(VecDeque::from(selects)),
                 confirms: Mutex::new(VecDeque::from(confirms)),
+                passwords: Mutex::new(VecDeque::from(passwords)),
             }
         }
     }
@@ -203,7 +213,15 @@ mod tests {
             &self,
             _request: prompt::HostedPromptRequest,
         ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
-            Ok(prompt::HostedPromptOutcome::Handled(None))
+            // An empty queue keeps the pre-password-queue behavior (None ends
+            // any add-loop immediately) so wizard tests need no scripting.
+            Ok(prompt::HostedPromptOutcome::Handled(
+                self.passwords
+                    .lock()
+                    .expect("passwords lock")
+                    .pop_front()
+                    .unwrap_or(None),
+            ))
         }
 
         fn progress(&self, _message: String) {}
@@ -386,6 +404,173 @@ mod tests {
         assert!(!args.browser_use_profile);
         assert!(!args.prompt_skills);
         assert!(!args.prompt_agent_env_refs);
+    }
+
+    // Builds the config a hosted request with one stdio env ref, one HTTP
+    // header ref, and one S3 source would produce; declared refs iterate in
+    // BTreeSet order: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, FILES_TOKEN,
+    // PRESENT_REF, SEARCH_API_KEY.
+    fn declared_refs_config() -> Config {
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+        args.prompt_mcp_stdio.push(InitMcpStdioServer {
+            name: "files".to_owned(),
+            command: "mcp-files".to_owned(),
+            args: Vec::new(),
+            env: vec!["FILES_TOKEN".to_owned(), "PRESENT_REF".to_owned()],
+        });
+        args.prompt_mcp_http.push(InitMcpHttpServer {
+            name: "search".to_owned(),
+            url: "https://mcp.example.com/mcp".to_owned(),
+            headers: vec![InitMcpHttpHeader {
+                name: "Authorization".to_owned(),
+                value_ref: "SEARCH_API_KEY".to_owned(),
+            }],
+        });
+        args.prompt_data_sources.push(config::DataSourceConfig {
+            source_type: "s3".to_owned(),
+            name: Some("corpus".to_owned()),
+            path: None,
+            url: None,
+            expected_sha256: None,
+            max_download_bytes: None,
+            max_extracted_bytes: None,
+            bucket: Some("my-bucket".to_owned()),
+            prefix: None,
+            region: Some("us-east-1".to_owned()),
+            access_key_ref: Some("AWS_ACCESS_KEY_ID".to_owned()),
+            secret_key_ref: Some("AWS_SECRET_ACCESS_KEY".to_owned()),
+        });
+        starter_config_from_args(&args)
+    }
+
+    #[test]
+    fn collect_declared_secret_refs_prompts_missing_and_skips_unanswered() {
+        let home = tempdir().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+        store
+            .set_many([("PRESENT_REF", "already-there")])
+            .expect("seed store");
+        let config = declared_refs_config();
+        // AWS_ACCESS_KEY_ID answered, AWS_SECRET_ACCESS_KEY skipped (None),
+        // FILES_TOKEN answered, PRESENT_REF not prompted, SEARCH_API_KEY answered.
+        let driver = Arc::new(ScriptedPromptDriver::with_passwords(
+            Vec::new(),
+            Vec::new(),
+            vec![
+                Some("ak-value".to_owned()),
+                None,
+                Some("ft-value".to_owned()),
+                Some("sk-value".to_owned()),
+            ],
+        ));
+        let stored = prompt::with_hosted_driver(driver, || {
+            super::super::provider::collect_declared_secret_refs_for_init(true, &config, &mut store)
+        })
+        .expect("collection must not fail on a skipped ref");
+        assert_eq!(
+            stored,
+            vec![
+                "AWS_ACCESS_KEY_ID".to_owned(),
+                "FILES_TOKEN".to_owned(),
+                "SEARCH_API_KEY".to_owned(),
+            ]
+        );
+        assert!(store.contains("AWS_ACCESS_KEY_ID"));
+        assert!(store.contains("FILES_TOKEN"));
+        assert!(store.contains("SEARCH_API_KEY"));
+        assert!(!store.contains("AWS_SECRET_ACCESS_KEY"));
+    }
+
+    // A hosted client that leaves password prompts outside its scope must not
+    // wedge init: Unhandled maps to skip and the collection is a clean no-op.
+    #[test]
+    fn collect_declared_secret_refs_is_noop_under_unhandled_driver() {
+        let home = tempdir().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+        let config = declared_refs_config();
+        let stored = prompt::with_hosted_driver(Arc::new(UnhandledPromptDriver), || {
+            super::super::provider::collect_declared_secret_refs_for_init(true, &config, &mut store)
+        })
+        .expect("unhandled prompts must not fail collection");
+        assert!(stored.is_empty());
+        assert!(!store.contains("FILES_TOKEN"));
+    }
+
+    #[test]
+    fn structured_declarations_rejected_for_existing_config() {
+        let mut mcp_args = parse_init_args(&[]);
+        mcp_args.prompt_mcp_stdio.push(InitMcpStdioServer {
+            name: "files".to_owned(),
+            command: "mcp-files".to_owned(),
+            args: Vec::new(),
+            env: Vec::new(),
+        });
+        assert!(reject_starter_only_mcp_args_for_existing_config(&mcp_args).is_err());
+
+        let mut http_args = parse_init_args(&[]);
+        http_args.prompt_mcp_http.push(InitMcpHttpServer {
+            name: "search".to_owned(),
+            url: "https://mcp.example.com/mcp".to_owned(),
+            headers: Vec::new(),
+        });
+        assert!(reject_starter_only_mcp_args_for_existing_config(&http_args).is_err());
+
+        let mut standard_args = parse_init_args(&[]);
+        standard_args.standard_agent_work_deps = true;
+        assert!(reject_deps_args_for_existing_config(&standard_args).is_err());
+
+        let mut browser_args = parse_init_args(&[]);
+        browser_args.browser_use_profile = true;
+        assert!(reject_deps_args_for_existing_config(&browser_args).is_err());
+
+        let data_args = parse_init_args(&["--data-from", "/srv/import"]);
+        assert!(reject_data_source_args_for_existing_config(&data_args).is_err());
+
+        let mut source_args = parse_init_args(&[]);
+        source_args
+            .prompt_data_sources
+            .push(config::DataSourceConfig {
+                source_type: "local".to_owned(),
+                name: None,
+                path: Some("/srv/import".to_owned()),
+                url: None,
+                expected_sha256: None,
+                max_download_bytes: None,
+                max_extracted_bytes: None,
+                bucket: None,
+                prefix: None,
+                region: None,
+                access_key_ref: None,
+                secret_key_ref: None,
+            });
+        assert!(reject_data_source_args_for_existing_config(&source_args).is_err());
+
+        assert!(reject_starter_only_mcp_args_for_existing_config(&parse_init_args(&[])).is_ok());
+        assert!(reject_deps_args_for_existing_config(&parse_init_args(&[])).is_ok());
+        assert!(reject_data_source_args_for_existing_config(&parse_init_args(&[])).is_ok());
+    }
+
+    // A declared-but-unsatisfiable skills install is a hard error (the wizard
+    // gates the offer instead; a hosted request is a declaration and silently
+    // skipping it would be worse). run_init_with_output routes this failure
+    // through finalize_with_error so the init run row turns terminal.
+    #[test]
+    fn essential_skills_declaration_fails_for_agent_without_skills_support() {
+        let home = tempdir().expect("tempdir");
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+        args.essential_skills = true;
+        let config = starter_config_from_args(&args);
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let skill_catalog = SkillCatalog::load_embedded().expect("skill catalog");
+        let error = super::super::skills::resolve_skill_install_plan(
+            &args,
+            home.path(),
+            &config,
+            &registry,
+            &skill_catalog,
+        )
+        .expect_err("essential skills for a non-skills agent must fail");
+        assert!(matches!(error, StackError::SkillInstallFailed { .. }));
     }
 
     #[test]
