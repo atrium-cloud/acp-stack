@@ -25,10 +25,14 @@ use sha2::{Digest, Sha256};
 use crate::dev_gates::{GITHUB_API_BASE_ENV, fixture_string};
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::ArchiveKind;
+use crate::runtime::net_rate_limit;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const USER_AGENT: &str = concat!("acp-stack/", env!("CARGO_PKG_VERSION"));
+const HEADER_RETRY_AFTER: &str = "retry-after";
+const HEADER_RATELIMIT_REMAINING: &str = "x-ratelimit-remaining";
+const HEADER_RATELIMIT_RESET: &str = "x-ratelimit-reset";
 
 fn github_api_base() -> String {
     if let Some(value) = fixture_string(GITHUB_API_BASE_ENV) {
@@ -235,6 +239,7 @@ fn fetch_release(
         Some(tag) => format!("{base}/repos/{repo}/releases/tags/{tag}"),
         None => format!("{base}/repos/{repo}/releases/latest"),
     };
+    acquire_for_url(&url)?;
     let mut request = client
         .get(&url)
         .header("Accept", "application/vnd.github+json");
@@ -247,6 +252,7 @@ fn fetch_release(
             repo: repo.to_owned(),
             source,
         })?;
+    observe_rate_limit(&response);
     let response =
         response
             .error_for_status()
@@ -262,12 +268,85 @@ fn fetch_release(
         })
 }
 
+/// Pace requests to quota-bearing domains before they leave the process.
+/// Unparseable URLs pass through — they will fail at `send()` with the
+/// caller's typed error, which is more specific than anything we could
+/// report here.
+fn acquire_for_url(url: &str) -> Result<()> {
+    match reqwest::Url::parse(url)
+        .ok()
+        .as_ref()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+    {
+        Some(host) => net_rate_limit::acquire(&host),
+        None => Ok(()),
+    }
+}
+
+/// Feed rate-limit responses to the per-domain circuit before the caller
+/// turns them into errors.
+fn observe_rate_limit(response: &reqwest::blocking::Response) {
+    let status = response.status();
+    let headers = response.headers();
+    if !is_rate_limit_response(status, headers) {
+        return;
+    }
+    let Some(host) = response.url().host_str() else {
+        return;
+    };
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .ok();
+    net_rate_limit::report_rate_limited(host, rate_limit_retry_after(headers, now_epoch));
+}
+
+/// GitHub signals rate limiting three ways: 429; 403 with the primary
+/// quota exhausted (`x-ratelimit-remaining: 0`); and secondary/abuse
+/// limits as 403 with a `Retry-After` header while the primary quota
+/// still has budget. A plain 403 (private repo, bad token) matches none
+/// of these and must not open the circuit.
+fn is_rate_limit_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> bool {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return true;
+    }
+    if status != reqwest::StatusCode::FORBIDDEN {
+        return false;
+    }
+    header_u64(headers, HEADER_RATELIMIT_REMAINING) == Some(0)
+        || header_u64(headers, HEADER_RETRY_AFTER).is_some()
+}
+
+fn rate_limit_retry_after(
+    headers: &reqwest::header::HeaderMap,
+    now_epoch: Option<u64>,
+) -> Option<Duration> {
+    if let Some(secs) = header_u64(headers, HEADER_RETRY_AFTER) {
+        return Some(Duration::from_secs(secs));
+    }
+    // `x-ratelimit-reset` is a unix timestamp of when the quota window
+    // reopens.
+    let reset_epoch = header_u64(headers, HEADER_RATELIMIT_RESET)?;
+    Some(Duration::from_secs(reset_epoch.saturating_sub(now_epoch?)))
+}
+
+fn header_u64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
 fn download_bytes(
     client: &reqwest::blocking::Client,
     url: &str,
     token: Option<&str>,
     repo: &str,
 ) -> Result<Vec<u8>> {
+    acquire_for_url(url)?;
     let mut request = client.get(url).header("Accept", "application/octet-stream");
     if let Some(token) = token {
         request = request.bearer_auth(token);
@@ -278,6 +357,7 @@ fn download_bytes(
             repo: repo.to_owned(),
             source,
         })?;
+    observe_rate_limit(&response);
     let response =
         response
             .error_for_status()
@@ -605,6 +685,77 @@ impl LogBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+                value.parse().expect("header value"),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn rate_limit_classification_catches_all_github_shapes() {
+        use reqwest::StatusCode;
+        assert!(is_rate_limit_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers(&[])
+        ));
+        assert!(is_rate_limit_response(
+            StatusCode::FORBIDDEN,
+            &headers(&[(HEADER_RATELIMIT_REMAINING, "0")]),
+        ));
+        // Secondary/abuse limit: 403 + Retry-After while primary quota remains.
+        assert!(is_rate_limit_response(
+            StatusCode::FORBIDDEN,
+            &headers(&[
+                (HEADER_RETRY_AFTER, "60"),
+                (HEADER_RATELIMIT_REMAINING, "42")
+            ]),
+        ));
+        // Plain 403 (private repo, bad token) must not open the circuit.
+        assert!(!is_rate_limit_response(
+            StatusCode::FORBIDDEN,
+            &headers(&[(HEADER_RATELIMIT_REMAINING, "42")]),
+        ));
+        assert!(!is_rate_limit_response(
+            StatusCode::NOT_FOUND,
+            &headers(&[])
+        ));
+    }
+
+    #[test]
+    fn retry_after_header_wins_over_reset_epoch() {
+        let map = headers(&[(HEADER_RETRY_AFTER, "90"), (HEADER_RATELIMIT_RESET, "2000")]);
+        assert_eq!(
+            rate_limit_retry_after(&map, Some(1000)),
+            Some(Duration::from_secs(90)),
+        );
+    }
+
+    #[test]
+    fn reset_epoch_converts_to_relative_wait() {
+        let map = headers(&[(HEADER_RATELIMIT_RESET, "2000")]);
+        assert_eq!(
+            rate_limit_retry_after(&map, Some(1500)),
+            Some(Duration::from_secs(500)),
+        );
+        // A reset in the past saturates to zero rather than underflowing.
+        assert_eq!(
+            rate_limit_retry_after(&map, Some(3000)),
+            Some(Duration::from_secs(0)),
+        );
+        assert_eq!(rate_limit_retry_after(&map, None), None);
+    }
+
+    #[test]
+    fn unparseable_rate_limit_headers_yield_no_retry_hint() {
+        let map = headers(&[(HEADER_RETRY_AFTER, "Wed, 21 Oct 2026 07:28:00 GMT")]);
+        assert_eq!(rate_limit_retry_after(&map, Some(1000)), None);
+    }
 
     #[test]
     fn glob_match_literal() {

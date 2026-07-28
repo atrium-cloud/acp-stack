@@ -309,6 +309,108 @@ exit 99
 }
 
 #[test]
+fn unpinned_npm_install_accepts_array_version_output() {
+    // Fresh hosts have been observed getting a JSON array from
+    // `npm view <pkg> version --json` (e.g. `["1.18.7"]`); npm orders it
+    // ascending, so the last element is the version to install.
+    let tempdir = TempDir::new().expect("tempdir");
+    let dest_dir = tempdir.path().join("bin");
+    std::fs::create_dir(&dest_dir).expect("create bin dir");
+    write_fake_npm(
+        &dest_dir,
+        r#"
+set -eu
+if [ "$1" = "view" ]; then
+  printf '[\n  "1.0.0",\n  "1.18.7"\n]\n'
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  test "$5" = "@scope/agent@1.18.7"
+  mkdir -p "$4/bin"
+  printf agent > "$4/bin/agent"
+  chmod 755 "$4/bin/agent"
+  exit 0
+fi
+exit 99
+"#,
+    );
+    let install = InstallSet {
+        npm: Some(crate::runtime::install::agent_registry::NpmInstall {
+            package: "@scope/agent".to_owned(),
+            creates: "agent".to_owned(),
+        }),
+        ..InstallSet::default()
+    };
+    let entry = native_entry(
+        "npm-agent",
+        "Npm Agent",
+        Some("docs/agents/npm-agent.md"),
+        harness_spec("agent", install),
+    );
+
+    let result = install_resolved_capture(
+        &agent_config("agent"),
+        &entry,
+        HashMap::new(),
+        tempdir.path(),
+        &dest_dir,
+    );
+
+    result.outcome.expect("array version output should pass");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].status, "ran");
+    assert_eq!(result.rows[0].version.as_deref(), Some("1.18.7"));
+}
+
+#[test]
+fn npm_version_lookup_empty_array_fails_step() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let dest_dir = tempdir.path().join("bin");
+    std::fs::create_dir(&dest_dir).expect("create bin dir");
+    write_fake_npm(
+        &dest_dir,
+        r#"
+set -eu
+if [ "$1" = "view" ]; then
+  printf '[]\n'
+  exit 0
+fi
+exit 99
+"#,
+    );
+    let install = InstallSet {
+        npm: Some(crate::runtime::install::agent_registry::NpmInstall {
+            package: "@scope/agent".to_owned(),
+            creates: "agent".to_owned(),
+        }),
+        ..InstallSet::default()
+    };
+    let entry = native_entry(
+        "npm-agent",
+        "Npm Agent",
+        Some("docs/agents/npm-agent.md"),
+        harness_spec("agent", install),
+    );
+
+    let result = install_resolved_capture(
+        &agent_config("agent"),
+        &entry,
+        HashMap::new(),
+        tempdir.path(),
+        &dest_dir,
+    );
+
+    assert!(matches!(
+        result.outcome.expect_err("empty array should fail"),
+        StackError::AgentInitializeFailed { .. }
+    ));
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].status, "failed");
+    assert!(result.rows[0].stderr.contains("empty version"));
+    assert!(result.rows[0].version.is_none());
+}
+
+#[test]
 fn npm_version_lookup_failure_fails_step() {
     let tempdir = TempDir::new().expect("tempdir");
     let dest_dir = tempdir.path().join("bin");
@@ -402,7 +504,7 @@ exit 99
     ));
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0].status, "failed");
-    assert!(result.rows[0].stderr.contains("invalid JSON string"));
+    assert!(result.rows[0].stderr.contains("unexpected JSON"));
     assert!(result.rows[0].version.is_none());
 }
 
@@ -459,10 +561,18 @@ exit 9
     // The chain exhausted both paths, so the overall outcome is Err.
     // But the rows must include BOTH attempts — proof that the
     // fallback walk actually happened.
-    assert!(
-        result.outcome.is_err(),
-        "every declared path is unreachable; expected Err",
-    );
+    match result
+        .outcome
+        .expect_err("every declared path is unreachable")
+    {
+        StackError::AgentInstallAllPathsFailed { summary } => {
+            assert!(
+                summary.contains("shell:") && summary.contains("npm:"),
+                "terminal error must enumerate both attempted paths, got `{summary}`",
+            );
+        }
+        other => panic!("expected the enumerated all-paths error, got {other:?}"),
+    }
     assert!(
         result.rows.len() >= 2,
         "expected fallback chain to record both attempts, got {:?}",
@@ -587,39 +697,89 @@ exit 9
         tempdir.path(),
     );
 
-    assert!(
-        matches!(
-            chain.terminal_error,
-            Some(StackError::AgentInstallerFailed { exit: Some(9), .. })
-        ),
-        "npm fallback should run and fail as the terminal error, got {:?}",
-        chain.terminal_error
-    );
+    match chain.terminal_error.expect("chain should fail") {
+        StackError::AgentInstallAllPathsFailed { summary } => {
+            assert!(
+                summary
+                    .contains("shell: skipped, missing tools: definitely-missing-acp-stack-tool"),
+                "summary must record the skipped shell path, got `{summary}`",
+            );
+            assert!(
+                summary.contains("npm: agent installer exited with status 9"),
+                "summary must record the npm failure, got `{summary}`",
+            );
+        }
+        other => panic!("expected the enumerated all-paths error, got {other:?}"),
+    }
     assert_eq!(chain.rows.len(), 1);
 }
 
 #[test]
 fn missing_fallback_prerequisite_does_not_mask_runnable_path_failure() {
+    let attempts = vec![
+        ("shell", "agent installer exited with status 7".to_owned()),
+        ("npm", "skipped, missing tools: npm".to_owned()),
+    ];
     let chain = exhausted_after_missing_prerequisites(
         "preflight-agent",
         "harness.install",
         STEP_INSTALL,
         vec![InstallerRowDraft::config_error(STEP_INSTALL)],
+        &attempts,
         Some(StackError::AgentInstallerFailed {
             exit: Some(7),
             stderr_tail: "failed".to_owned(),
         }),
         BTreeSet::from(["npm".to_owned()]),
     );
+    match chain.terminal_error.expect("chain should fail") {
+        StackError::AgentInstallAllPathsFailed { summary } => {
+            assert!(
+                summary.contains("shell: agent installer exited with status 7"),
+                "summary must keep the shell failure visible, got `{summary}`",
+            );
+            assert!(
+                summary.contains("npm: skipped, missing tools: npm"),
+                "summary must record the skipped npm path, got `{summary}`",
+            );
+        }
+        other => panic!("expected the enumerated all-paths error, got {other:?}"),
+    }
+    assert_eq!(chain.rows.len(), 1);
+}
+
+#[test]
+fn single_path_failure_keeps_its_typed_error() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let install = InstallSet {
+        shell: Some(ShellInstall {
+            script: "exit 3".to_owned(),
+            creates: "agent".to_owned(),
+            required_tools: Vec::new(),
+        }),
+        ..InstallSet::default()
+    };
+
+    let chain = install_one_with_fallback(
+        "single-path-agent",
+        "harness.install",
+        STEP_INSTALL,
+        &install,
+        None,
+        None,
+        &HashMap::new(),
+        tempdir.path(),
+        tempdir.path(),
+    );
+
     assert!(
         matches!(
             chain.terminal_error,
-            Some(StackError::AgentInstallerFailed { exit: Some(7), .. })
+            Some(StackError::AgentInstallerFailed { exit: Some(3), .. })
         ),
-        "shell failure should remain terminal when npm is unavailable, got {:?}",
+        "a lone failed path must surface unwrapped, got {:?}",
         chain.terminal_error
     );
-    assert_eq!(chain.rows.len(), 1);
 }
 
 #[test]

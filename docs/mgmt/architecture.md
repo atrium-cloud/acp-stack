@@ -38,6 +38,7 @@ flowchart LR
 | Provider CLI     | target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation |
 | Native config import | redacted inspection and transactional semantic replacement of supported harness global config |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |
+| Net rate limit   | process-wide per-domain pacing and rate-limit circuit for outbound HTTP to quota-bearing hosts (`src/runtime/net_rate_limit.rs`), consumed by the GitHub Release installer |
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |
 | Sandbox          | optional isolation backend wrapping each harness and mediated-shell spawn so the workload cannot read the daemon's secrets/state or reach its socket |

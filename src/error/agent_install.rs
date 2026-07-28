@@ -30,6 +30,8 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SkillInstallSkillMissing { .. } => "agent.skill_install_missing_skill",
         SkillInstallTargetConflict { .. } => "agent.skill_install_target_conflict",
         SkillInstallFailed { .. } => "agent.skill_install_failed",
+        AgentInstallAllPathsFailed { .. } => "agent.install_all_paths_failed",
+        DomainRateLimited { .. } => "agent.domain_rate_limited",
         GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
         NpmRegistryFetch { .. } => "agent.npm_registry_fetch_failed",
         NpmRegistryEmptyVersion { .. } => "agent.npm_registry_empty_version",
@@ -99,6 +101,15 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("skill install target conflict at {}: {reason}", path.display())
         }
         SkillInstallFailed { reason } => format!("skill install failed: {reason}"),
+        AgentInstallAllPathsFailed { summary } => {
+            format!("all install paths failed — {summary}")
+        }
+        DomainRateLimited {
+            domain,
+            retry_after_secs,
+        } => {
+            format!("requests to {domain} are rate limited; retry in {retry_after_secs}s")
+        }
         GithubReleaseFetch { repo, .. } => format!("failed to query GitHub Releases for {repo}"),
         NpmRegistryFetch { package, .. } => {
             format!("failed to query npm registry for `{package}`")
@@ -149,6 +160,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SkillInstallInvalidName { .. }
         | SkillInstallSkillMissing { .. } => StatusCode::BAD_REQUEST,
         SkillInstallTargetConflict { .. } => StatusCode::CONFLICT,
+        DomainRateLimited { .. } => StatusCode::SERVICE_UNAVAILABLE,
         AgentInstallerFailed { .. }
         | AgentInstallerCreatesMissing { .. }
         | AgentInstallerPrerequisitesMissing { .. }
@@ -160,6 +172,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | RegistryLoad { .. }
         | SkillInstallSourceMissing { .. }
         | SkillInstallFailed { .. }
+        | AgentInstallAllPathsFailed { .. }
         | GithubReleaseFetch { .. }
         | NpmRegistryFetch { .. }
         | NpmRegistryEmptyVersion { .. }

@@ -5,6 +5,7 @@ pub mod init_runner;
 pub mod install;
 pub mod logging;
 pub mod mediation;
+pub mod net_rate_limit;
 pub mod process_runner;
 pub mod sandbox;
 pub mod workspace_sources;
