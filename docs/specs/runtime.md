@@ -44,6 +44,10 @@ Installer behavior:
 
 Pinned installs use catalog metadata when available. Floating installs use the catalog's preferred install path.
 
+Each install field walks its declared paths in priority order (shell → npm → github_release floating; github → npm pinned), recording every attempt. When several paths fail or are skipped, the surfaced error enumerates each path with its own failure (`shell: …; npm: …; github: …`) instead of reporting only the last path tried.
+
+Install-flow requests to `api.github.com` (release resolution and asset download, including `acps agent check`) share a process-wide pace: a minimum interval between requests, and a cooldown circuit that opens when GitHub answers with a rate-limit response (429, or 403 with an exhausted quota or `Retry-After` header), honoring `Retry-After`/`X-RateLimit-Reset`. Waits beyond a hard cap surface as a typed rate-limit error instead of blocking indefinitely. This keeps install retry loops on shared-egress-IP hosts from burning the unauthenticated GitHub quota. `acps update` does not go through this pacing.
+
 ## Init
 
 `acps init` creates or validates config and state, initializes encrypted secrets, generates API keys when absent, and can configure agents (registry or custom), Agent Skills, providers, workspace sources, MCP servers, extra agent environment variables, dependency install actions, edge profiles, and testflight. The full operator-facing sequence is documented in [init.md](init.md).

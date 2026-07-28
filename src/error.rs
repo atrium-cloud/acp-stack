@@ -488,6 +488,15 @@ pub enum StackError {
     #[error("skill install failed: {reason}")]
     SkillInstallFailed { reason: String },
 
+    #[error("all install paths failed — {summary}")]
+    AgentInstallAllPathsFailed { summary: String },
+
+    #[error("requests to {domain} are rate limited; retry in {retry_after_secs}s")]
+    DomainRateLimited {
+        domain: String,
+        retry_after_secs: u64,
+    },
+
     #[error("failed to query GitHub Releases for {repo}: {source}")]
     GithubReleaseFetch {
         repo: String,

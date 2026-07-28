@@ -181,11 +181,39 @@ pub fn install_resolved_capture(
 /// Result of walking the `[shell, npm, github]` chain for one install
 /// field. `rows` contains the per-attempt `installer_runs` draft (so
 /// every attempt is preserved for audit, not just the winner);
-/// `terminal_error` is `None` when any path succeeded, otherwise the
-/// LAST path's error.
+/// `terminal_error` is `None` when any path succeeded. When several
+/// paths were attempted or skipped, the terminal error enumerates each
+/// path's failure so no single path's error masks the others.
 pub(crate) struct FallbackChain {
     pub(crate) rows: Vec<InstallerRowDraft>,
     pub(crate) terminal_error: Option<StackError>,
+}
+
+/// Fold the per-path outcomes into the single error surfaced to the
+/// operator. A lone attempt keeps its typed error unchanged; multiple
+/// entries collapse into `AgentInstallAllPathsFailed` listing each
+/// path's failure (`shell: …; npm: …; github: …`), including paths
+/// that were skipped for missing prerequisite tools.
+fn terminal_error_from(
+    attempts: &[(&'static str, String)],
+    last_error: Option<StackError>,
+) -> Option<StackError> {
+    if attempts.len() <= 1
+        && let Some(error) = last_error
+    {
+        return Some(error);
+    }
+    if attempts.is_empty() {
+        return None;
+    }
+    // Recorded attempts with no typed error still must not read as
+    // success — fold whatever was recorded into the enumerated error.
+    let summary = attempts
+        .iter()
+        .map(|(path, error)| format!("{path}: {error}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(StackError::AgentInstallAllPathsFailed { summary })
 }
 
 /// Try each install path declared on the given field in priority order
@@ -209,6 +237,7 @@ pub(crate) fn install_one_with_fallback(
     let mut rows = Vec::new();
     let mut last_error: Option<StackError> = None;
     let mut missing_tools = BTreeSet::new();
+    let mut attempts: Vec<(&'static str, String)> = Vec::new();
     loop {
         let spec = match step_runners::select_install_path(
             agent_id,
@@ -229,15 +258,27 @@ pub(crate) fn install_one_with_fallback(
                         terminal_error: Some(err),
                     };
                 }
+                // `rows` non-empty implies a step ran and failed, so
+                // `last_error` is Some here; the `else` arm is defensive
+                // so a select error can never be silently dropped.
+                let terminal_error = if last_error.is_some() {
+                    terminal_error_from(&attempts, last_error)
+                } else {
+                    Some(err)
+                };
                 return FallbackChain {
                     rows,
-                    terminal_error: last_error.or(Some(err)),
+                    terminal_error,
                 };
             }
         };
         let kind = path_kind_of(&spec);
         let missing_for_path = missing_required_tools(&spec, workspace_root, dest_dir);
         if !missing_for_path.is_empty() {
+            attempts.push((
+                path_label_of(kind),
+                format!("skipped, missing tools: {}", missing_for_path.join(", ")),
+            ));
             for tool in missing_for_path {
                 missing_tools.insert(tool);
             }
@@ -252,6 +293,7 @@ pub(crate) fn install_one_with_fallback(
                     field,
                     step_label,
                     rows,
+                    &attempts,
                     last_error,
                     missing_tools,
                 );
@@ -259,7 +301,6 @@ pub(crate) fn install_one_with_fallback(
             continue;
         }
         let step = run_install_step(step_label, spec, env, workspace_root, dest_dir);
-        let ok = step.outcome.is_ok();
         rows.push(step.row);
         match step.outcome {
             Ok(_) => {
@@ -269,6 +310,9 @@ pub(crate) fn install_one_with_fallback(
                 };
             }
             Err(err) => {
+                // `public_message` reads better in the enumerated summary
+                // than raw Display (e.g. `status 9`, not `status Some(9)`).
+                attempts.push((path_label_of(kind), err.public_message()));
                 last_error = Some(err);
                 // Drop the path we just exhausted so the next select
                 // resolves a different one.
@@ -279,11 +323,10 @@ pub(crate) fn install_one_with_fallback(
                 }
             }
         }
-        let _ = ok;
         if remaining.shell.is_none() && remaining.npm.is_none() && remaining.github.is_none() {
             return FallbackChain {
                 rows,
-                terminal_error: last_error,
+                terminal_error: terminal_error_from(&attempts, last_error),
             };
         }
     }
@@ -294,13 +337,14 @@ pub(super) fn exhausted_after_missing_prerequisites(
     field: &str,
     step_label: &'static str,
     mut rows: Vec<InstallerRowDraft>,
+    attempts: &[(&'static str, String)],
     last_error: Option<StackError>,
     missing_tools: BTreeSet<String>,
 ) -> FallbackChain {
     if !rows.is_empty() {
         return FallbackChain {
             rows,
-            terminal_error: last_error,
+            terminal_error: terminal_error_from(attempts, last_error),
         };
     }
     rows.push(InstallerRowDraft::config_error(step_label));
@@ -319,6 +363,14 @@ enum InstallPathKind {
     Shell,
     Npm,
     Github,
+}
+
+fn path_label_of(kind: InstallPathKind) -> &'static str {
+    match kind {
+        InstallPathKind::Shell => INSTALL_METHOD_SHELL,
+        InstallPathKind::Npm => INSTALL_METHOD_NPM,
+        InstallPathKind::Github => INSTALL_METHOD_GITHUB,
+    }
 }
 
 fn path_kind_of(spec: &ResolvedInstallSpec) -> InstallPathKind {

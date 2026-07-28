@@ -502,8 +502,8 @@ fn resolve_npm_package_version(
     let result = run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir]);
     match result {
         Ok(captured) if captured.exit_status == Some(0) => {
-            let parsed = serde_json::from_str::<String>(captured.stdout.trim()).map_err(|err| {
-                format!("npm view {package} version --json returned invalid JSON string: {err}")
+            let parsed = parse_npm_view_version(captured.stdout.trim()).map_err(|err| {
+                format!("npm view {package} version --json returned unexpected JSON: {err}")
             });
             match parsed {
                 Ok(version) if !version.trim().is_empty() => Ok(version),
@@ -552,6 +552,36 @@ fn resolve_npm_package_version(
                 log_dir: None,
             },
         })),
+    }
+}
+
+/// `npm view <pkg> version --json` prints a plain JSON string when the spec
+/// resolves to one version, but a JSON array of version strings when it
+/// matches several (observed on fresh hosts: `["1.18.7"]`). npm orders the
+/// array ascending, so the last element is the newest.
+fn parse_npm_view_version(stdout: &str) -> std::result::Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|err| err.to_string())?;
+    match value {
+        serde_json::Value::String(version) => Ok(version),
+        serde_json::Value::Array(items) => {
+            let mut versions = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    serde_json::Value::String(version) => versions.push(version),
+                    other => {
+                        return Err(format!(
+                            "invalid type: array element {other}, expected a string"
+                        ));
+                    }
+                }
+            }
+            // An empty array yields an empty version so the caller's existing
+            // empty-version failure path reports it.
+            Ok(versions.pop().unwrap_or_default())
+        }
+        other => Err(format!(
+            "invalid type: {other}, expected a string or array of strings"
+        )),
     }
 }
 
