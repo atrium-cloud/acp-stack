@@ -88,13 +88,15 @@ References:
 
 ## Error Handling
 
-This project is early-stage. Catching bugs early matters more than graceful degradation.
+Prefer resilience over failing fast. A long-running runtime should degrade gracefully, not die on the first recoverable error.
 
-- Fail fast. No silent swallowing.
-- No catch-all error handlers that hide root causes.
-- Rust: propagate errors with `?`. Never use `let _ =` on fallible operations.
-- Never write empty `match` arms that discard errors.
-- Error messages should be specific enough to identify the failed subsystem and action.
+- Favor simple fallbacks (defaults, retries, skip-and-continue, degraded mode) over process-ending exceptions or panics.
+- Retries use exponential backoff when possible. Centralize backoff logic in one shared helper; do not hand-roll per-call-site backoff loops.
+- Keep fallbacks simple. One sensible fallback per failure point; do not build layered recovery machinery or try to account for every scenario.
+- Reserve hard failure for genuinely unrecoverable states: corrupt local state, invalid config at startup, security-relevant violations.
+- Recoverable errors must still be visible: log them with enough context to identify the failed subsystem and action. No silent swallowing.
+- No catch-all error handlers that hide root causes; handle errors where the fallback decision can be made.
+- Rust: propagate errors with `?` up to the layer that owns the fallback. Never use `let _ =` on fallible operations; never write empty `match` arms that discard errors.
 
 ## Guidance On Rust
 
