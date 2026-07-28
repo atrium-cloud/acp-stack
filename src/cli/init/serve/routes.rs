@@ -82,6 +82,9 @@ async fn require_bootstrap_auth(
             "invalid bearer token",
         );
     }
+    // Only authenticated calls count as API activity; unauthenticated probes
+    // must not keep an abandoned bootstrap server alive.
+    state.manager.touch_activity();
     next.run(req).await
 }
 
@@ -158,7 +161,14 @@ async fn session_status_handler(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     match state.manager.session(&id) {
-        Some(session) => ApiSuccess::new(session.status_snapshot()).into_response(),
+        Some(session) => {
+            // Snapshot before touching: the reported `last_activity_age_secs`
+            // is the idle time leading up to this poll, not the ~0 the poll's
+            // own activity would produce.
+            let snapshot = session.status_snapshot();
+            session.touch();
+            ApiSuccess::new(snapshot).into_response()
+        }
         None => api_error(
             StatusCode::NOT_FOUND,
             "init.session_not_found",
@@ -178,11 +188,14 @@ async fn session_events_handler(
     Query(query): Query<EventsQuery>,
 ) -> Response {
     match state.manager.session(&id) {
-        Some(session) => ApiSuccess::new(InitEventsResponse {
-            session_id: id,
-            events: session.events_after(query.after_seq.unwrap_or(0)),
-        })
-        .into_response(),
+        Some(session) => {
+            session.touch();
+            ApiSuccess::new(InitEventsResponse {
+                session_id: id,
+                events: session.events_after(query.after_seq.unwrap_or(0)),
+            })
+            .into_response()
+        }
         None => api_error(
             StatusCode::NOT_FOUND,
             "init.session_not_found",
@@ -231,6 +244,7 @@ async fn session_native_config_cancel_handler(
             "init session not found",
         );
     };
+    session.touch();
     if session.status() != "completed_awaiting_ack" {
         return api_error(
             StatusCode::CONFLICT,
@@ -284,6 +298,22 @@ async fn session_ws_handler(
 }
 
 async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) {
+    // A connected client is liveness on its own: the idle reaper must not
+    // fire while a backend holds the socket, even if it only listens during
+    // long init steps. The guard keeps the count correct on every early
+    // return below.
+    struct ConnectionGuard {
+        session: Arc<HostedInitSession>,
+    }
+    impl Drop for ConnectionGuard {
+        fn drop(&mut self) {
+            self.session.ws_disconnected();
+        }
+    }
+    session.ws_connected();
+    let _guard = ConnectionGuard {
+        session: session.clone(),
+    };
     let (mut sender, mut receiver) = socket.split();
     let hello = session.hello_frame();
     if sender.send(Message::Text(hello.into())).await.is_err() {
@@ -297,6 +327,7 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                     break;
                 };
                 if let Message::Text(text) = message {
+                    session.touch();
                     let response = handle_client_frame(&session, text.as_str());
                     match response {
                         ClientFrameOutcome::None => {}
@@ -319,6 +350,15 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                         if sender.send(Message::Text(frame.into())).await.is_err() {
                             break;
                         }
+                        // A terminal session (reaper-cancelled, errored, or
+                        // acked on another connection) means the server is on
+                        // its way down; close instead of waiting for the
+                        // client so a hung backend holding the socket cannot
+                        // pin the process past --max-lifetime.
+                        if !session.is_active() {
+                            let _ = sender.send(Message::Close(None)).await;
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let frame = json!({
@@ -327,6 +367,12 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                             "message": "websocket client lagged behind init event stream"
                         }).to_string();
                         let _ = sender.send(Message::Text(frame.into())).await;
+                        // A lagged receiver can miss the terminal event
+                        // itself; check the session state directly.
+                        if !session.is_active() {
+                            let _ = sender.send(Message::Close(None)).await;
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

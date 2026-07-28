@@ -48,7 +48,7 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 | Route                                      | Contract |
 | ------------------------------------------ | -------- |
 | `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args plus an in-memory native config upload |
-| `GET /v1/init/sessions/{id}`              | returns non-secret status, pending input, recent progress, and `completed_awaiting_ack` when a result exists |
+| `GET /v1/init/sessions/{id}`              | returns non-secret status, pending input, recent progress, `last_activity_age_secs`, and `completed_awaiting_ack` when a result exists |
 | `GET /v1/init/sessions/{id}/events?after_seq=N` | replays non-secret progress and input lifecycle events |
 | `GET /v1/init/sessions/{id}/ws`           | upgrades to the hosted init WebSocket |
 
@@ -59,6 +59,8 @@ Status and event replay never include plaintext session/admin keys or secret inp
 WebSocket server frames are `hello`, `progress`, `input_required`, `input_accepted`, `result`, and `error`. Client frames are `input`, `cancel`, `replay_result`, and `ack_result`. The final `result` frame carries the platform handoff payload, including freshly generated keys when present.
 
 After `result`, the session remains `completed_awaiting_ack`. If the WebSocket drops before acknowledgement, the backend reconnects and sends `replay_result`; the server does not replay keys through status or generic events. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
+
+The server also self-terminates abandoned sessions: after `--idle-timeout` (default `15m`) with no connected WebSocket and no API activity, or once `--max-lifetime` elapses, the session is cancelled (reason `idle_timeout`/`max_lifetime`), any un-acknowledged result is discarded, attached WebSockets are closed server-side after the final event, and the process exits non-zero — including when a limit is reached before any session was created (the pre-session idle clock runs from the last authenticated API call). A WebSocket disconnect restarts the idle clock, leaving the full timeout for the documented reconnect-and-`replay_result` flow. `last_activity_age_secs` in the status response is the idle time leading up to that request, measured before the request itself counts as activity, and supports backend-side reap decisions.
 
 ## Config And Secrets
 
