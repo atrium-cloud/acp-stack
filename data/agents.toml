@@ -34,7 +34,15 @@ set -eu
 managed_bin="${HOME}/.local/bin"
 managed_opencode="${managed_bin}/opencode"
 mkdir -p "$managed_bin"
-curl -fsSL https://opencode.ai/install | XDG_BIN_DIR="$managed_bin" bash -s -- --no-modify-path
+# Fetch before running so a curl failure is fatal (no pipefail in POSIX sh).
+# Without it an empty script runs, bash exits 0, and a stale binary left by an
+# earlier run passes the postcheck — hiding the failure and skipping the npm
+# fallback below, which is the path that survives GitHub API rate limits.
+installer="$(curl -fsSL https://opencode.ai/install)"
+# A fetch that exits 0 with an empty body would replay the same stale-binary
+# postcheck hole, so an empty script is a failed fetch too.
+test -n "$installer"
+printf '%s' "$installer" | XDG_BIN_DIR="$managed_bin" bash -s -- --no-modify-path
 test -x "$managed_opencode"
 '''
 creates = "opencode"
