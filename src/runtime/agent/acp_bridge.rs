@@ -80,9 +80,12 @@ pub use crate::runtime::agent::session_changes::SessionChangesHandle;
 pub use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
-/// unresponsive. Headless ACP agents handshake in milliseconds; anything more
-/// than this is a configuration or compatibility problem.
-const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15);
+/// unresponsive. A warm agent handshakes in milliseconds, but the first launch
+/// on a freshly provisioned host pays for cold page cache, JIT/runtime warmup
+/// and the agent's own first-run setup; 15s was tight enough that hosted init
+/// failed `provider_configure` on real sprites. The deadline exists to catch a
+/// wedged or incompatible agent, so it can be generous without losing that.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum time we wait between sending the shutdown signal and SIGKILLing
 /// the agent child. The closure should return immediately once the oneshot

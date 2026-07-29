@@ -594,6 +594,85 @@ exit 9
 }
 
 #[test]
+fn github_backed_shell_failure_falls_back_to_npm_and_records_both_attempts() {
+    // opencode's upstream installer resolves its release through the GitHub
+    // API, so unauthenticated hosts start failing it once the hourly quota is
+    // gone. The npm path must then take over, and both attempts must land in
+    // `installer_runs` under distinct methods so the fallback is visible.
+    let tempdir = TempDir::new().expect("tempdir");
+    let dest_dir = tempdir.path().join("bin");
+    std::fs::create_dir(&dest_dir).expect("create bin dir");
+    let installed = dest_dir.join("opencode");
+    write_fake_npm(
+        &dest_dir,
+        r#"
+set -eu
+if [ "$1" = "view" ]; then
+  test "$2" = "opencode-ai"
+  test "$3" = "version"
+  test "$4" = "--json"
+  printf '"1.2.3"\n'
+  exit 0
+fi
+if [ "$1" = "install" ]; then
+  test "$2" = "-g"
+  test "$3" = "--prefix"
+  test "$5" = "opencode-ai@1.2.3"
+  mkdir -p "$4/bin"
+  printf '#!/bin/sh\n' > "$4/bin/opencode"
+  chmod 755 "$4/bin/opencode"
+  exit 0
+fi
+exit 1
+"#,
+    );
+
+    let install = InstallSet {
+        shell: Some(ShellInstall {
+            script: "exit 1".to_owned(),
+            creates: "opencode".to_owned(),
+            required_tools: Vec::new(),
+        }),
+        npm: Some(crate::runtime::install::agent_registry::NpmInstall {
+            package: "opencode-ai".to_owned(),
+            creates: "opencode".to_owned(),
+        }),
+        ..InstallSet::default()
+    };
+
+    let chain = install_one_with_fallback(
+        "opencode",
+        "harness.install",
+        STEP_INSTALL,
+        &install,
+        None,
+        None,
+        &HashMap::new(),
+        tempdir.path(),
+        &dest_dir,
+    );
+
+    assert!(
+        chain.terminal_error.is_none(),
+        "npm fallback should carry the install, got {:?}",
+        chain.terminal_error,
+    );
+    assert_eq!(
+        chain
+            .rows
+            .iter()
+            .map(|row| (row.method.as_deref(), row.status.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(INSTALL_METHOD_SHELL), "failed"),
+            (Some(INSTALL_METHOD_NPM), "ran"),
+        ],
+    );
+    assert_eq!(chain.rows[1].version.as_deref(), Some("1.2.3"));
+    assert!(installed.is_file(), "npm fallback must produce the binary");
+}
+
+#[test]
 fn shell_install_records_no_version() {
     let tempdir = TempDir::new().expect("tempdir");
     let binary_path = tempdir.path().join("shell-agent");

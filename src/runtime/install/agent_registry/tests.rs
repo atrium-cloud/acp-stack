@@ -38,6 +38,38 @@ fn lookup_returns_matching_entry() {
 }
 
 #[test]
+fn opencode_keeps_an_npm_fallback_behind_its_github_backed_shell_installer() {
+    // The shell recipe runs opencode's upstream installer, which resolves its
+    // release through the GitHub API and fails on rate-limited hosts. The npm
+    // path is what the fallback chain lands on then, so it must stay declared.
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let harness = catalog
+        .lookup("opencode")
+        .expect("opencode must be present in the embedded registry")
+        .harness
+        .as_ref()
+        .expect("opencode must declare a harness");
+    let shell = harness
+        .install
+        .shell
+        .as_ref()
+        .expect("opencode must declare a shell install path");
+    assert!(
+        !shell
+            .script
+            .contains("curl -fsSL https://opencode.ai/install |"),
+        "the installer must be fetched before it runs so a failed fetch is fatal",
+    );
+    let npm = harness
+        .install
+        .npm
+        .as_ref()
+        .expect("opencode must declare an npm fallback install path");
+    assert_eq!(npm.package, "opencode-ai");
+    assert_eq!(npm.creates, "opencode");
+}
+
+#[test]
 fn multiple_active_provider_capability_is_limited_to_opencode_and_pi() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
     let capable = catalog
