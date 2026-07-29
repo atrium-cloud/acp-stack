@@ -10,8 +10,9 @@ use crate::config::validate::primitives::{
     validate_secret_ref_name_value,
 };
 use crate::error::{Result, StackError};
-use crate::runtime::agent::claude_code_provider_profiles::CLAUDE_CODE_AGENT_ID;
-use crate::runtime::agent::provider_keys::{provider_id_is_known, provider_id_supports_agent};
+use crate::runtime::agent::provider_keys::{
+    CLAUDE_CODE_AGENT_ID, provider_id_is_known, provider_id_supports_agent,
+};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
 use std::collections::HashSet;

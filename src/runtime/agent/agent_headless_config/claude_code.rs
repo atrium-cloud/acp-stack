@@ -102,7 +102,7 @@ fn write_claude_provider_env(
         return Ok(());
     }
 
-    let Some(profile) = profile_for_provider_id(&provider.id) else {
+    let Some(profile) = claude_code_profile_for_provider_id(&provider.id) else {
         return Err(StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!(
@@ -153,7 +153,7 @@ fn claude_api_key_helper_for_provider(
             require_agent_env_for_provider_config(config, provider, &provider.id, path)?;
         return Ok(Some(claude_api_key_helper_command(api_key_ref)));
     }
-    let Some(profile) = profile_for_provider_id(&provider.id) else {
+    let Some(profile) = claude_code_profile_for_provider_id(&provider.id) else {
         return Err(StackError::AgentConfigProvision {
             path: path.to_path_buf(),
             reason: format!(

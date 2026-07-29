@@ -27,11 +27,9 @@ use crate::runtime::agent::acp_bridge::{
     session_config_id_for_value, session_config_values, session_model_selection_for_value,
     session_model_values,
 };
-use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider,
-};
 use crate::runtime::agent::provider_keys::{
-    resolve_agent_environment, resolve_agent_environment_without_secrets,
+    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider, resolve_agent_environment,
+    resolve_agent_environment_without_secrets,
 };
 use crate::secrets::SecretStore;
 
