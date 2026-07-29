@@ -2,7 +2,8 @@
 //!
 //! `resolve_mcp_servers` converts the project's `[mcp.servers]` config blocks
 //! into the SDK's `McpServer` enum, resolving stdio commands to absolute paths
-//! and resolving stdio env names and HTTP header `value_ref`s against the
+//! and resolving stdio env entries and HTTP header values (whole-value
+//! `value_ref`s and `${NAME}`-interpolated `value` templates) against the
 //! encrypted secret store. Secret values are pulled at session
 //! create/load/resume time and passed straight to the agent's `session/new`
 //! (or load/resume) call — they never enter SQLite, never enter any event
@@ -12,7 +13,9 @@ use agent_client_protocol::schema::v1::{
     EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio,
 };
 
-use crate::config::{McpConfig, McpServerConfig};
+use crate::config::{
+    HeaderValueSource, McpConfig, McpServerConfig, SecretTemplate, resolve_env_entry,
+};
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::resolve_command_path;
 use crate::secrets::SecretStore;
@@ -23,9 +26,9 @@ pub fn resolve_mcp_servers(config: &McpConfig, store: &SecretStore) -> Result<Ve
         match server {
             McpServerConfig::Stdio(stdio) => {
                 let mut env_vars = Vec::with_capacity(stdio.env.len());
-                for env_name in &stdio.env {
-                    let value = store.get(env_name)?;
-                    env_vars.push(EnvVariable::new(env_name.clone(), value.to_owned()));
+                for env_entry in &stdio.env {
+                    let (var_name, value) = resolve_env_entry("mcp.servers.env", env_entry, store)?;
+                    env_vars.push(EnvVariable::new(var_name, value));
                 }
                 let command = resolve_command_path(&stdio.command)
                     .and_then(|path| path.canonicalize().ok())
@@ -45,8 +48,14 @@ pub fn resolve_mcp_servers(config: &McpConfig, store: &SecretStore) -> Result<Ve
             McpServerConfig::Http(http) => {
                 let mut headers = Vec::with_capacity(http.headers.len());
                 for header in &http.headers {
-                    let value = store.get(&header.value_ref)?;
-                    headers.push(HttpHeader::new(header.name.clone(), value.to_owned()));
+                    let value = match header.source()? {
+                        HeaderValueSource::Ref(value_ref) => store.get(value_ref)?.to_owned(),
+                        HeaderValueSource::Template(template) => {
+                            SecretTemplate::parse("mcp.servers.headers.value", template)?
+                                .resolve(store)?
+                        }
+                    };
+                    headers.push(HttpHeader::new(header.name.clone(), value));
                 }
                 let http_server =
                     McpServerHttp::new(http.name.clone(), http.url.clone()).headers(headers);
@@ -65,13 +74,34 @@ pub(crate) fn validate_mcp_secret_refs(config: &McpConfig, store: &SecretStore) 
     for server in &config.servers {
         match server {
             McpServerConfig::Stdio(stdio) => {
-                for env_name in &stdio.env {
-                    store.get(env_name)?;
+                for env_entry in &stdio.env {
+                    match crate::config::parse_env_entry("mcp.servers.env", env_entry)? {
+                        crate::config::EnvEntry::WholeValueRef(name) => {
+                            store.get(&name)?;
+                        }
+                        crate::config::EnvEntry::Templated { template, .. } => {
+                            for ref_name in template.ref_names() {
+                                store.get(ref_name)?;
+                            }
+                        }
+                    }
                 }
             }
             McpServerConfig::Http(http) => {
                 for header in &http.headers {
-                    store.get(&header.value_ref)?;
+                    match header.source()? {
+                        HeaderValueSource::Ref(value_ref) => {
+                            store.get(value_ref)?;
+                        }
+                        HeaderValueSource::Template(template) => {
+                            for ref_name in
+                                SecretTemplate::parse("mcp.servers.headers.value", template)?
+                                    .ref_names()
+                            {
+                                store.get(ref_name)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -142,10 +172,7 @@ mod tests {
             servers: vec![McpServerConfig::Http(McpHttpServer {
                 name: "linear".into(),
                 url: "https://api.example.com/mcp".into(),
-                headers: vec![HttpHeaderRef {
-                    name: "Authorization".into(),
-                    value_ref: "LINEAR_API_KEY".into(),
-                }],
+                headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })],
         };
         let servers = resolve_mcp_servers(&config, &store).expect("resolve");
@@ -156,6 +183,91 @@ mod tests {
             }
             _ => panic!("expected http"),
         }
+    }
+
+    #[test]
+    fn resolves_templated_http_header() {
+        let home = TempDir::new().expect("tempdir");
+        let store = store_with(&home, &[("PARALLEL_API_KEY", "key-xyz")]);
+        let config = McpConfig {
+            servers: vec![McpServerConfig::Http(McpHttpServer {
+                name: "parallel".into(),
+                url: "https://api.example.com/mcp".into(),
+                headers: vec![HttpHeaderRef::from_template(
+                    "Authorization",
+                    "Bearer ${PARALLEL_API_KEY}",
+                )],
+            })],
+        };
+        let servers = resolve_mcp_servers(&config, &store).expect("resolve");
+        match &servers[0] {
+            McpServer::Http(http) => {
+                assert_eq!(http.headers[0].name, "Authorization");
+                assert_eq!(http.headers[0].value, "Bearer key-xyz");
+            }
+            _ => panic!("expected http"),
+        }
+    }
+
+    #[test]
+    fn resolves_templated_stdio_env_with_var_name() {
+        let home = TempDir::new().expect("tempdir");
+        let store = store_with(&home, &[("DB_PASS", "hunter2")]);
+        let config = McpConfig {
+            servers: vec![McpServerConfig::Stdio(McpStdioServer {
+                name: "db".into(),
+                command: "sh".into(),
+                args: vec![],
+                env: vec!["DATABASE_URL=postgres://u:${DB_PASS}@h/db".into()],
+            })],
+        };
+        let servers = resolve_mcp_servers(&config, &store).expect("resolve");
+        match &servers[0] {
+            McpServer::Stdio(stdio) => {
+                assert_eq!(stdio.env[0].name, "DATABASE_URL");
+                assert_eq!(stdio.env[0].value, "postgres://u:hunter2@h/db");
+            }
+            _ => panic!("expected stdio"),
+        }
+    }
+
+    #[test]
+    fn missing_template_ref_propagates_as_secret_not_found() {
+        use crate::error::StackError;
+        let home = TempDir::new().expect("tempdir");
+        let store = SecretStore::open_or_create(home.path()).expect("store");
+        let config = McpConfig {
+            servers: vec![McpServerConfig::Http(McpHttpServer {
+                name: "parallel".into(),
+                url: "https://api.example.com/mcp".into(),
+                headers: vec![HttpHeaderRef::from_template(
+                    "Authorization",
+                    "Bearer ${GONE}",
+                )],
+            })],
+        };
+        let err = resolve_mcp_servers(&config, &store).expect_err("must fail");
+        assert!(matches!(err, StackError::SecretNotFound { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn secret_ref_validation_covers_template_refs() {
+        use crate::error::StackError;
+        let home = TempDir::new().expect("tempdir");
+        let store = store_with(&home, &[("PRESENT", "value")]);
+        let config = McpConfig {
+            servers: vec![McpServerConfig::Stdio(McpStdioServer {
+                name: "db".into(),
+                command: "definitely-not-installed-mcp-12345".into(),
+                args: vec![],
+                env: vec!["DATABASE_URL=x-${PRESENT}-${ABSENT}".into()],
+            })],
+        };
+        let err = validate_mcp_secret_refs(&config, &store).expect_err("must fail");
+        assert!(
+            matches!(err, StackError::SecretNotFound { ref name } if name == "ABSENT"),
+            "{err:?}"
+        );
     }
 
     #[test]

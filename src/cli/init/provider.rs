@@ -162,8 +162,22 @@ pub(super) fn configured_provider_refs_satisfied(
         return false;
     }
     required_refs.iter().all(|env_ref| {
-        config.agent.env.iter().any(|name| name == env_ref) && secret_store.contains(env_ref)
+        crate::config::agent_env_declares(&config.agent.env, env_ref)
+            && agent_env_secret_refs_for_var(&config.agent.env, env_ref)
+                .iter()
+                .all(|name| secret_store.contains(name))
     })
+}
+
+/// The secret refs that must exist in the store for env var `var_name` to
+/// resolve: the entry itself when declared bare, the template's inner refs
+/// when declared as `VAR=template`, and the var name as a plain ref when the
+/// env list does not declare it at all (the pre-template behavior).
+fn agent_env_secret_refs_for_var(env: &[String], var_name: &str) -> Vec<String> {
+    env.iter()
+        .find(|entry| crate::config::env_entry_var_name(entry) == var_name)
+        .map(|entry| crate::config::env_entry_ref_names_lossy(entry))
+        .unwrap_or_else(|| vec![var_name.to_owned()])
 }
 
 pub(super) fn collect_prepared_secret_refs_for_init(
@@ -183,7 +197,7 @@ pub(super) fn collect_prepared_secret_refs_for_init(
         );
         if provider_refs
             .iter()
-            .any(|name| !config.agent.env.iter().any(|configured| configured == name))
+            .any(|name| !crate::config::agent_env_declares(&config.agent.env, name))
         {
             return Err(StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
@@ -191,7 +205,11 @@ pub(super) fn collect_prepared_secret_refs_for_init(
                     .to_owned(),
             });
         }
-        required_refs.extend(provider_refs);
+        required_refs.extend(
+            provider_refs
+                .iter()
+                .flat_map(|name| agent_env_secret_refs_for_var(&config.agent.env, name)),
+        );
     }
     required_refs.extend(config_mcp_secret_refs(config));
     collect_missing_provider_refs(
@@ -206,10 +224,20 @@ fn config_mcp_secret_refs(config: &Config) -> BTreeSet<String> {
     for server in &config.mcp.servers {
         match server {
             crate::config::McpServerConfig::Stdio(server) => {
-                refs.extend(server.env.iter().cloned());
+                refs.extend(
+                    server
+                        .env
+                        .iter()
+                        .flat_map(|entry| crate::config::env_entry_ref_names_lossy(entry)),
+                );
             }
             crate::config::McpServerConfig::Http(server) => {
-                refs.extend(server.headers.iter().map(|header| header.value_ref.clone()));
+                refs.extend(
+                    server
+                        .headers
+                        .iter()
+                        .flat_map(|header| header.ref_names_lossy()),
+                );
             }
         }
     }
@@ -235,6 +263,13 @@ pub(super) fn collect_declared_secret_refs_for_init(
     for source in &config.workspace.data_sources {
         declared_refs.extend(source.access_key_ref.iter().cloned());
         declared_refs.extend(source.secret_key_ref.iter().cloned());
+    }
+    // Bare agent.env refs are handled by the provider flow; only the inner
+    // refs of `VAR=template` entries would otherwise never be prompted.
+    for entry in &config.agent.env {
+        if crate::config::env_entry_var_name(entry) != entry.as_str() {
+            declared_refs.extend(crate::config::env_entry_ref_names_lossy(entry));
+        }
     }
     let mut collected = Vec::new();
     for env_ref in &declared_refs {
@@ -296,7 +331,7 @@ fn ensure_configured_provider_refs_for_init(
     );
     let mut env_changed = false;
     for env_ref in &required_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
             env_changed = true;
         }
@@ -657,7 +692,7 @@ pub(super) fn apply_provider_to_config(
         api_key_ref.as_deref(),
     );
     for env_ref in &required_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
@@ -710,7 +745,7 @@ fn apply_custom_provider_to_config(
         args.output_max_tokens.as_deref(),
         DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     )?;
-    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
+    if !crate::config::agent_env_declares(&config.agent.env, &api_key_ref) {
         config.agent.env.push(api_key_ref.clone());
     }
     config.agent.provider = Some(AgentProviderConfig {

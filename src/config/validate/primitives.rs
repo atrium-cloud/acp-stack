@@ -170,13 +170,6 @@ pub(crate) fn validate_non_empty_trimmed(field: &'static str, value: &str) -> Re
     Ok(())
 }
 
-pub(crate) fn validate_http_url_prefix(field: &'static str, value: &str) -> Result<()> {
-    if value.starts_with("http://") || value.starts_with("https://") {
-        return Ok(());
-    }
-    Err(StackError::UrlMustBeHttp { field })
-}
-
 pub(crate) fn validate_optional_config_path(field: &'static str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(StackError::MissingField { field });
@@ -223,20 +216,28 @@ pub(crate) fn secret_ref_looks_like_value(name: &str) -> bool {
     if name.len() > 128 {
         return true;
     }
-    if name.len() > 40 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+    secret_value_shape(name)
+}
+
+/// The shape heuristics of [`secret_ref_looks_like_value`] without the
+/// length ceiling, which only makes sense for ref names. Concatenated
+/// template literals are screened with this so long-but-legitimate static
+/// text does not trip the name-length rule.
+pub(crate) fn secret_value_shape(text: &str) -> bool {
+    if text.len() > 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
     }
-    if name.starts_with("acps_")
-        || name.starts_with("sk-")
-        || name.starts_with("ghp_")
-        || name.starts_with("github_pat_")
-        || name.starts_with("xoxb-")
-        || name.starts_with("xoxp-")
-        || name.starts_with("xoxa-")
+    if text.starts_with("acps_")
+        || text.starts_with("sk-")
+        || text.starts_with("ghp_")
+        || text.starts_with("github_pat_")
+        || text.starts_with("xoxb-")
+        || text.starts_with("xoxp-")
+        || text.starts_with("xoxa-")
     {
         return true;
     }
-    let jwt_parts = name.split('.').collect::<Vec<_>>();
+    let jwt_parts = text.split('.').collect::<Vec<_>>();
     if jwt_parts.len() == 3
         && jwt_parts
             .iter()

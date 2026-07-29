@@ -369,10 +369,7 @@ pub fn switch_mcp_config() -> McpConfig {
             McpServerConfig::Http(McpHttpServer {
                 name: "linear".to_owned(),
                 url: "https://mcp.linear.app/mcp".to_owned(),
-                headers: vec![HttpHeaderRef {
-                    name: "Authorization".to_owned(),
-                    value_ref: "LINEAR_API_KEY".to_owned(),
-                }],
+                headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             }),
         ],
     }

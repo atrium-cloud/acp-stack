@@ -87,7 +87,10 @@ fn init_writes_mcp_declarations_to_starter_config() {
     assert_eq!(linear.url, "https://mcp.linear.app/mcp");
     assert_eq!(linear.headers.len(), 1);
     assert_eq!(linear.headers[0].name, "Authorization");
-    assert_eq!(linear.headers[0].value_ref, "LINEAR_API_KEY");
+    assert_eq!(
+        linear.headers[0].value_ref.as_deref(),
+        Some("LINEAR_API_KEY")
+    );
 
     let local = config
         .mcp
@@ -114,7 +117,10 @@ fn init_writes_mcp_declarations_to_starter_config() {
     assert_eq!(remote.url, "https://mcp.example/mcp");
     assert_eq!(remote.headers.len(), 1);
     assert_eq!(remote.headers[0].name, "Authorization");
-    assert_eq!(remote.headers[0].value_ref, "REMOTE_MCP_TOKEN");
+    assert_eq!(
+        remote.headers[0].value_ref.as_deref(),
+        Some("REMOTE_MCP_TOKEN")
+    );
 }
 
 #[test]

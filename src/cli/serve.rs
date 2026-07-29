@@ -1,7 +1,6 @@
 use crate::api::{self, AppState, RuntimePaths};
 use crate::auth::{AuthVerifierEnsureOutcome, ensure_auth_verifier_pair};
-use crate::config::SupabaseLoggingBackend;
-use crate::config::{self, Config};
+use crate::config::{self, SupabaseLoggingBackend};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
     create_dir_owner_only, home_dir, parent_dir, pre_create_owner_only, set_owner_only_dir,
@@ -95,7 +94,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
     if config_path.exists() {
         set_owner_only_file(&config_path)?;
     }
-    let loaded_config = Config::load_from_path_with_legacy(&config_path)?;
+    let loaded_config = config::load_for_serve(&config_path)?;
     let config = loaded_config.config;
 
     // Fail closed: if a sandbox backend is configured but cannot run on this

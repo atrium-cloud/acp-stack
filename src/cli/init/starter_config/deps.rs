@@ -177,7 +177,7 @@ pub(crate) fn collect_agent_env_refs_for_init(
 pub(crate) fn append_agent_env_refs(config: &mut Config, collection: &AgentEnvCollection) -> bool {
     let mut changed = false;
     for name in collection.ref_names() {
-        if !config.agent.env.contains(&name) {
+        if !crate::config::agent_env_declares(&config.agent.env, &name) {
             config.agent.env.push(name);
             changed = true;
         }

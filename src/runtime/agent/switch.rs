@@ -443,7 +443,7 @@ fn build_provider_for_target(
 
 fn append_missing_refs(env: &mut Vec<String>, refs: &[String]) {
     for env_ref in refs {
-        if !env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(env, env_ref) {
             env.push(env_ref.clone());
         }
     }
@@ -483,10 +483,7 @@ mod tests {
                 McpServerConfig::Http(McpHttpServer {
                     name: "linear".to_owned(),
                     url: "https://mcp.linear.app/mcp".to_owned(),
-                    headers: vec![HttpHeaderRef {
-                        name: "Authorization".to_owned(),
-                        value_ref: "LINEAR_API_KEY".to_owned(),
-                    }],
+                    headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
                 }),
             ],
         }

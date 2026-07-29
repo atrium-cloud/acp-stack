@@ -564,7 +564,16 @@ fn prompt_setup_row_action(interactive: bool, prompt_label: &str) -> Result<Setu
 fn parse_secret_ref_prompt_values(field: &'static str, raw: &str) -> Result<Vec<String>> {
     let values = parse_comma_separated_prompt_values(raw);
     for value in &values {
-        if !is_valid_secret_ref_name(value) {
+        // Screening runs first so a pasted credential is redacted rather
+        // than echoed by the name-shape errors below. Bare `NAME` keeps the
+        // fast-fail identifier check; `VAR=template` entries get the full
+        // template validation. Comma-splitting above means a template
+        // containing `,` is unrepresentable in the wizard; the flag and
+        // hosted forms carry those.
+        crate::config::screen_env_entry(field, value)?;
+        if value.contains('=') {
+            crate::config::parse_env_entry(field, value)?;
+        } else if !is_valid_secret_ref_name(value) {
             return Err(StackError::InvalidParam {
                 field,
                 reason: format!(
@@ -579,8 +588,12 @@ fn parse_secret_ref_prompt_values(field: &'static str, raw: &str) -> Result<Vec<
 fn parse_http_header_prompt_values(raw: &str) -> Result<Vec<InitMcpHttpHeader>> {
     let mut out = Vec::new();
     for value in parse_comma_separated_prompt_values(raw) {
-        let (name, value_ref) = split_mcp_header_ref(&value)?;
-        out.push(InitMcpHttpHeader { name, value_ref });
+        let header = split_mcp_header_ref(&value)?;
+        out.push(InitMcpHttpHeader {
+            name: header.name,
+            value_ref: header.value_ref,
+            value: header.value,
+        });
     }
     Ok(out)
 }

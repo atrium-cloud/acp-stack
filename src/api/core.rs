@@ -296,7 +296,7 @@ impl AppState {
     }
 
     pub(crate) async fn refresh_array_runtime_from_disk(&self) -> Result<Config> {
-        let mut config = Config::load_from_path(&self.runtime_paths.config_path)?;
+        let mut config = crate::config::load_for_runtime_reload(&self.runtime_paths.config_path)?;
         if let Ok(registry) = load_active_registry() {
             populate_agent_adapter_from_registry(&mut config, &registry);
         }

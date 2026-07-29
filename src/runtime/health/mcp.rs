@@ -46,10 +46,19 @@ fn mcp_secret_refs(config: &McpConfig) -> BTreeSet<String> {
     for server in &config.servers {
         match server {
             McpServerConfig::Stdio(stdio) => {
-                refs.extend(stdio.env.iter().cloned());
+                refs.extend(
+                    stdio
+                        .env
+                        .iter()
+                        .flat_map(|entry| crate::config::env_entry_ref_names_lossy(entry)),
+                );
             }
             McpServerConfig::Http(http) => {
-                refs.extend(http.headers.iter().map(|header| header.value_ref.clone()));
+                refs.extend(
+                    http.headers
+                        .iter()
+                        .flat_map(|header| header.ref_names_lossy()),
+                );
             }
         }
     }
@@ -65,7 +74,14 @@ fn collect_mcp_server(
         McpServerConfig::Stdio(stdio) => {
             let command_path = resolve_command_path(&stdio.command)
                 .map(|path| path.to_string_lossy().into_owned());
-            let missing_secret_refs = missing_refs(&stdio.env, secret_names, secret_probe_reason);
+            // Missing refs are reported by secret-ref name (what the operator
+            // types into `acps secrets set`), not by env var name.
+            let refs: Vec<String> = stdio
+                .env
+                .iter()
+                .flat_map(|entry| crate::config::env_entry_ref_names_lossy(entry))
+                .collect();
+            let missing_secret_refs = missing_refs(&refs, secret_names, secret_probe_reason);
             let reason = if command_path.is_none() {
                 Some(format!(
                     "`{}` not found or not executable on PATH",
@@ -89,7 +105,7 @@ fn collect_mcp_server(
             let refs: Vec<String> = http
                 .headers
                 .iter()
-                .map(|header| header.value_ref.clone())
+                .flat_map(|header| header.ref_names_lossy())
                 .collect();
             let missing_secret_refs = missing_refs(&refs, secret_names, secret_probe_reason);
             let reason = secret_probe_reason
@@ -225,10 +241,7 @@ mod tests {
             servers: vec![McpServerConfig::Http(McpHttpServer {
                 name: "linear".to_owned(),
                 url: "https://mcp.linear.app/mcp".to_owned(),
-                headers: vec![HttpHeaderRef {
-                    name: "Authorization".to_owned(),
-                    value_ref: "LINEAR_API_KEY".to_owned(),
-                }],
+                headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })],
         };
         let health = collect_mcp(&config, &paths);
@@ -245,10 +258,7 @@ mod tests {
             servers: vec![McpServerConfig::Http(McpHttpServer {
                 name: "linear".to_owned(),
                 url: "https://mcp.linear.app/mcp".to_owned(),
-                headers: vec![HttpHeaderRef {
-                    name: "Authorization".to_owned(),
-                    value_ref: "LINEAR_API_KEY".to_owned(),
-                }],
+                headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })],
         };
         let health = collect_mcp(&config, &paths);
@@ -258,5 +268,33 @@ mod tests {
             health.servers[0].missing_secret_refs,
             vec!["LINEAR_API_KEY"]
         );
+    }
+
+    #[test]
+    fn collect_mcp_reports_missing_template_refs_by_secret_name() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let paths = secret_paths_with(&home, &[("PRESENT", "value")]);
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig::Http(McpHttpServer {
+                    name: "relay".to_owned(),
+                    url: "http://127.0.0.1:8787/mcp".to_owned(),
+                    headers: vec![HttpHeaderRef::from_template(
+                        "Authorization",
+                        "Bearer ${RELAY_TOKEN}",
+                    )],
+                }),
+                McpServerConfig::Stdio(McpStdioServer {
+                    name: "db".to_owned(),
+                    command: "sh".to_owned(),
+                    args: Vec::new(),
+                    env: vec!["DATABASE_URL=x-${PRESENT}-${DB_PASS}".to_owned()],
+                }),
+            ],
+        };
+        let health = collect_mcp(&config, &paths);
+        assert_eq!(health.failing_count, 2);
+        assert_eq!(health.servers[0].missing_secret_refs, vec!["RELAY_TOKEN"]);
+        assert_eq!(health.servers[1].missing_secret_refs, vec!["DB_PASS"]);
     }
 }

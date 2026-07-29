@@ -18,7 +18,10 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         | SecretStorePlaintextNotUtf8 { .. } => "secrets.plaintext_invalid",
         SecretNotFound { .. } => "secrets.not_found",
         ProviderCredentialRollbackFailed { .. } => "secrets.rollback_failed",
-        InvalidSecretRefName { .. } | DuplicateSecretRef { .. } => "config.invalid",
+        InvalidSecretRefName { .. }
+        | DuplicateSecretRef { .. }
+        | SecretTemplateInvalid { .. }
+        | DuplicateEnvVarName { .. } => "config.invalid",
         _ => return None,
     })
 }
@@ -45,6 +48,12 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         DuplicateSecretRef { name } => {
             format!("secret ref `{name}` is declared more than once")
         }
+        SecretTemplateInvalid { field, reason } => {
+            format!("secret template at `{field}` is invalid: {reason}")
+        }
+        DuplicateEnvVarName { field, name } => {
+            format!("`{field}` declares env var `{name}` more than once")
+        }
         _ => return None,
     })
 }
@@ -65,7 +74,10 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SecretStorePlaintextInvalid { .. }
         | SecretStorePlaintextNotUtf8 { .. }
         | ProviderCredentialRollbackFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-        InvalidSecretRefName { .. } | DuplicateSecretRef { .. } => StatusCode::BAD_REQUEST,
+        InvalidSecretRefName { .. }
+        | DuplicateSecretRef { .. }
+        | SecretTemplateInvalid { .. }
+        | DuplicateEnvVarName { .. } => StatusCode::BAD_REQUEST,
         _ => return None,
     })
 }

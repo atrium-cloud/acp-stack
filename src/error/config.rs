@@ -37,14 +37,13 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         | InvalidAgentRestart
         | InvalidExpectedSha256
         | InvalidAgentInstallType
-        | UrlMustBeHttp { .. }
         | UrlMustBeHttps { .. }
         | InvalidPermissionsMode
         | InvalidDurationField { .. }
         | InvalidEnvName { .. } => "config.invalid",
         ImportTooLarge { .. } => "import.too_large",
         UnsupportedConfigVersion { .. } => "config.unsupported_version",
-        SecretRefLooksLikeValue { .. } => "config.invalid",
+        SecretRefLooksLikeValue { .. } | InvalidHeaderValueSource { .. } => "config.invalid",
         _ => return None,
     })
 }
@@ -89,7 +88,6 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         InvalidAgentInstallType => {
             "agent.install.type must be `shell` (the only operator-facing install type)".to_owned()
         }
-        UrlMustBeHttp { field } => format!("{field} must start with http:// or https://"),
         UrlMustBeHttps { field } => format!("{field} must start with https://"),
         InvalidPermissionsMode => {
             "permissions.mode must be one of auto, supervised, locked".to_owned()
@@ -109,6 +107,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         SecretRefLooksLikeValue { field, .. } => format!(
             "secret ref at `{field}` looks like an inline secret value rather than a reference name"
         ),
+        InvalidHeaderValueSource { header } => {
+            format!("mcp header `{header}` must set exactly one of `value_ref` or `value`")
+        }
         _ => return None,
     })
 }
@@ -155,7 +156,6 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | InvalidAgentRestart
         | InvalidExpectedSha256
         | InvalidAgentInstallType
-        | UrlMustBeHttp { .. }
         | UrlMustBeHttps { .. }
         | InvalidPermissionsMode
         | InvalidDurationField { .. }
@@ -173,7 +173,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | StdinRead { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         ImportTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         UnsupportedConfigVersion { .. } => StatusCode::BAD_REQUEST,
-        SecretRefLooksLikeValue { .. } => StatusCode::BAD_REQUEST,
+        SecretRefLooksLikeValue { .. } | InvalidHeaderValueSource { .. } => StatusCode::BAD_REQUEST,
         _ => return None,
     })
 }

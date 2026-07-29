@@ -1,5 +1,9 @@
 use super::*;
 
+// === CONSTANTS ===
+const HEADER_TEMPLATE_SEPARATOR: &str = ":=";
+const HEADER_REF_SEPARATOR: char = ':';
+
 pub(crate) fn validate_deployment_overrides_match_existing(
     args: &InitArgs,
     config: &Config,
@@ -263,10 +267,7 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
             "linear" => servers.push(McpServerConfig::Http(McpHttpServer {
                 name: "linear".to_owned(),
                 url: "https://mcp.linear.app/mcp".to_owned(),
-                headers: vec![HttpHeaderRef {
-                    name: "Authorization".to_owned(),
-                    value_ref: "LINEAR_API_KEY".to_owned(),
-                }],
+                headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
             })),
             other => {
                 return Err(StackError::InvalidParam {
@@ -313,6 +314,7 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
                 .map(|header| HttpHeaderRef {
                     name: header.name.clone(),
                     value_ref: header.value_ref.clone(),
+                    value: header.value.clone(),
                 })
                 .collect(),
         }));
@@ -324,10 +326,12 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
 
 fn apply_mcp_stdio_env_refs(servers: &mut [McpServerConfig], values: &[String]) -> Result<()> {
     for value in values {
-        let (server_name, env_ref) = split_mcp_pair("mcp-stdio-env", value)?;
+        let (server_name, env_entry) = split_mcp_pair("mcp-stdio-env", value)?;
+        crate::config::screen_env_entry("mcp-stdio-env", &env_entry)?;
+        crate::config::parse_env_entry("mcp-stdio-env", &env_entry)?;
         let server = find_mcp_server_mut(servers, &server_name, "mcp-stdio-env")?;
         match server {
-            McpServerConfig::Stdio(stdio) => stdio.env.push(env_ref),
+            McpServerConfig::Stdio(stdio) => stdio.env.push(env_entry),
             McpServerConfig::Http(_) => {
                 return Err(StackError::InvalidParam {
                     field: "mcp-stdio-env",
@@ -342,26 +346,24 @@ fn apply_mcp_stdio_env_refs(servers: &mut [McpServerConfig], values: &[String]) 
 fn apply_mcp_http_headers(servers: &mut [McpServerConfig], values: &[String]) -> Result<()> {
     for value in values {
         let (server_name, header_ref) = split_mcp_pair("mcp-http-header", value)?;
-        let (header_name, value_ref) = split_mcp_header_ref(&header_ref)?;
+        let header = split_mcp_header_ref(&header_ref)?;
         let server = find_mcp_server_mut(servers, &server_name, "mcp-http-header")?;
         match server {
             McpServerConfig::Http(http) => {
                 if http
                     .headers
                     .iter()
-                    .any(|header| header.name.eq_ignore_ascii_case(&header_name))
+                    .any(|existing| existing.name.eq_ignore_ascii_case(&header.name))
                 {
                     return Err(StackError::InvalidParam {
                         field: "mcp-http-header",
                         reason: format!(
-                            "MCP HTTP server `{server_name}` already has header `{header_name}`"
+                            "MCP HTTP server `{server_name}` already has header `{}`",
+                            header.name
                         ),
                     });
                 }
-                http.headers.push(HttpHeaderRef {
-                    name: header_name,
-                    value_ref,
-                });
+                http.headers.push(header);
             }
             McpServerConfig::Stdio(_) => {
                 return Err(StackError::InvalidParam {
@@ -406,46 +408,46 @@ fn split_mcp_pair(field: &'static str, value: &str) -> Result<(String, String)> 
     Ok((name.to_owned(), target.to_owned()))
 }
 
-pub(super) fn split_mcp_header_ref(value: &str) -> Result<(String, String)> {
-    let Some((header_name, value_ref)) = value.split_once(':') else {
-        return Err(StackError::InvalidParam {
-            field: "mcp-http-header",
-            reason: format!("`{value}` must use HEADER:SECRET_REF"),
-        });
-    };
+/// Split a `HEADER:SECRET_REF` (whole-value ref) or `HEADER:=TEMPLATE`
+/// (interpolated value) declaration. `:=` is unambiguous because an HTTP
+/// header name can contain neither `:` nor `=`, while templates contain `:`
+/// freely (`Bearer ${X}` does not, but URLs do).
+pub(super) fn split_mcp_header_ref(value: &str) -> Result<HttpHeaderRef> {
+    let (header_name, header_value, is_template) =
+        if let Some((header_name, template)) = value.split_once(HEADER_TEMPLATE_SEPARATOR) {
+            (header_name, template, true)
+        } else if let Some((header_name, value_ref)) = value.split_once(HEADER_REF_SEPARATOR) {
+            (header_name, value_ref, false)
+        } else {
+            return Err(StackError::InvalidParam {
+                field: "mcp-http-header",
+                reason: format!("`{value}` must use HEADER:SECRET_REF or HEADER:=TEMPLATE"),
+            });
+        };
     let header_name = header_name.trim();
-    let value_ref = value_ref.trim();
-    if header_name.is_empty() || value_ref.is_empty() {
+    let header_value = header_value.trim();
+    if header_name.is_empty() || header_value.is_empty() {
         return Err(StackError::InvalidParam {
             field: "mcp-http-header",
-            reason: format!("`{value}` must include a non-empty header and secret ref"),
+            reason: format!("`{value}` must include a non-empty header and value"),
         });
     }
     HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| StackError::InvalidParam {
         field: "mcp-http-header",
         reason: format!("`{header_name}` is not a valid HTTP header name"),
     })?;
-    Ok((header_name.to_owned(), value_ref.to_owned()))
+    if is_template {
+        crate::config::screen_template("mcp-http-header", header_value)?;
+        crate::config::SecretTemplate::parse("mcp-http-header", header_value)?;
+        Ok(HttpHeaderRef::from_template(header_name, header_value))
+    } else {
+        crate::config::screen_ref_name("mcp-http-header", header_value)?;
+        Ok(HttpHeaderRef::from_ref(header_name, header_value))
+    }
 }
 
 fn validate_mcp_https_url(name: &str, url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| StackError::InvalidParam {
-        field: "mcp-http",
-        reason: format!("MCP HTTP server `{name}` URL is not valid"),
-    })?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() {
-        return Err(StackError::InvalidParam {
-            field: "mcp-http",
-            reason: format!("MCP HTTP server `{name}` must use an https:// URL with a host"),
-        });
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(StackError::InvalidParam {
-            field: "mcp-http",
-            reason: format!("MCP HTTP server `{name}` URL must not include credentials"),
-        });
-    }
-    Ok(())
+    crate::config::validate_mcp_http_url("mcp-http", name, url)
 }
 
 pub(super) fn classify_data_from(value: &str) -> Result<DataSourceConfig> {

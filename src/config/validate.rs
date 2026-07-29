@@ -22,7 +22,10 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::config::schema::{
-    AgentConfig, McpServerConfig, SupabaseLoggingBackend, SupabaseLoggingConfig,
+    AgentConfig, HeaderValueSource, McpServerConfig, SupabaseLoggingBackend, SupabaseLoggingConfig,
+};
+use crate::config::secret_template::{
+    EnvEntry, SecretTemplate, env_entry_var_name, parse_env_entry, screen_env_entry,
 };
 use crate::error::{Result, StackError};
 
@@ -142,8 +145,13 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_trusted_proxies(&config.security.http)?;
     validate_edge(&config.edge)?;
     validate_dependencies(&config.dependencies)?;
-    validate_mcp(&config.mcp)?;
+    // The screening sweep must run before any name-shape validation
+    // (validate_mcp included): a screening rejection redacts the offending
+    // value, a name-shape rejection echoes it, and secret-shaped strings
+    // (`sk-...`, `xoxb-...`) fail identifier validation precisely because of
+    // their dashes.
     validate_secret_refs_not_looking_like_values(config)?;
+    validate_mcp(&config.mcp)?;
     validate_secret_refs(config)?;
     validate_supabase_logging(config.logging.supabase.as_ref())?;
 
@@ -298,6 +306,12 @@ fn validate_stack_updates(config: &Config) -> Result<()> {
 
 /// Walk every secret-ref name in the config and ensure the name itself is a
 /// syntactically valid identifier and is not declared twice.
+///
+/// Only whole-value declarations participate in `DuplicateSecretRef` dedupe.
+/// Refs *inside* `${NAME}` templates are validated for name shape but may
+/// repeat freely — composing the same secret into a header and an env value
+/// is the point of templating, not a declaration conflict. Env var names
+/// produced within one env list must still be unique.
 fn validate_secret_refs(config: &Config) -> Result<()> {
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -319,18 +333,24 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
     // only WITHIN itself, so an intra-target duplicate is still caught for each
     // one instead of being silently skipped.
     for target in &config.array.targets {
+        validate_env_var_names_unique("agent.env", &target.agent.env)?;
         if target.id == config.array.primary_target {
             for env_ref in &target.agent.env {
-                record(env_ref, "agent.env")?;
+                match parse_env_entry("agent.env", env_ref)? {
+                    EnvEntry::WholeValueRef(name) => record(&name, "agent.env")?,
+                    EnvEntry::Templated { .. } => {}
+                }
             }
         } else {
             let mut target_seen: HashSet<String> = HashSet::new();
             for env_ref in &target.agent.env {
-                validate_secret_ref_name_value(env_ref)?;
-                if !target_seen.insert(env_ref.clone()) {
-                    return Err(StackError::DuplicateSecretRef {
-                        name: env_ref.clone(),
-                    });
+                match parse_env_entry("agent.env", env_ref)? {
+                    EnvEntry::WholeValueRef(name) => {
+                        if !target_seen.insert(name.clone()) {
+                            return Err(StackError::DuplicateSecretRef { name });
+                        }
+                    }
+                    EnvEntry::Templated { .. } => {}
                 }
             }
         }
@@ -357,15 +377,44 @@ fn validate_secret_refs(config: &Config) -> Result<()> {
     for server in &config.mcp.servers {
         match server {
             McpServerConfig::Stdio(s) => {
+                // Per-server env var name uniqueness is already enforced by
+                // `validate_mcp`, which runs before this sweep.
                 for env_ref in &s.env {
-                    record(env_ref, "mcp.servers.env")?;
+                    match parse_env_entry("mcp.servers.env", env_ref)? {
+                        EnvEntry::WholeValueRef(name) => record(&name, "mcp.servers.env")?,
+                        EnvEntry::Templated { .. } => {}
+                    }
                 }
             }
             McpServerConfig::Http(s) => {
                 for header in &s.headers {
-                    record(&header.value_ref, "mcp.servers.headers")?;
+                    match header.source()? {
+                        HeaderValueSource::Ref(value_ref) => {
+                            record(value_ref, "mcp.servers.headers")?;
+                        }
+                        HeaderValueSource::Template(template) => {
+                            SecretTemplate::parse("mcp.servers.headers.value", template)?;
+                        }
+                    }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// The env var names an env list produces must be unique within that list,
+/// regardless of entry form. This is the fail-fast backstop for code that
+/// appends a bare `NAME` entry without noticing an existing `NAME=template`.
+fn validate_env_var_names_unique(field: &'static str, env: &[String]) -> Result<()> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for entry in env {
+        let var_name = env_entry_var_name(entry);
+        if !seen.insert(var_name) {
+            return Err(StackError::DuplicateEnvVarName {
+                field,
+                name: var_name.to_owned(),
+            });
         }
     }
     Ok(())
@@ -379,9 +428,15 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
         Ok(())
     };
 
+    // Templates get the same paste-a-credential screening as ref names: both
+    // the refs inside `${}` and the literal fragments around them, so
+    // `value = "sk-...${X}"` fails just like a `sk-...` ref name would. This
+    // sweep runs before any name validation and must stay parse-error-free:
+    // a screening rejection redacts the value, a name-shape rejection echoes
+    // it, so echoing errors may only fire after screening has passed.
     for target in &config.array.targets {
         for env_ref in &target.agent.env {
-            check(env_ref, "agent.env")?;
+            screen_env_entry("agent.env", env_ref)?;
         }
         if let Some(provider) = &target.agent.provider
             && let Some(api_key_ref) = provider.api_key_ref.as_deref()
@@ -415,18 +470,7 @@ fn validate_secret_refs_not_looking_like_values(config: &Config) -> Result<()> {
         }
     }
     for server in &config.mcp.servers {
-        match server {
-            McpServerConfig::Stdio(s) => {
-                for env_ref in &s.env {
-                    check(env_ref, "mcp.servers.env")?;
-                }
-            }
-            McpServerConfig::Http(s) => {
-                for header in &s.headers {
-                    check(&header.value_ref, "mcp.servers.headers")?;
-                }
-            }
-        }
+        self::mcp::screen_server(server)?;
     }
     Ok(())
 }
