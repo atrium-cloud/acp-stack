@@ -93,7 +93,7 @@ Prefer resilience over failing fast. A long-running runtime should degrade grace
 - Favor simple fallbacks (defaults, retries, skip-and-continue, degraded mode) over process-ending exceptions or panics.
 - Retries use exponential backoff when possible. Centralize backoff logic in one shared helper; do not hand-roll per-call-site backoff loops.
 - Keep fallbacks simple. One sensible fallback per failure point; do not build layered recovery machinery or try to account for every scenario.
-- Reserve hard failure for genuinely unrecoverable states: corrupt local state, invalid config at startup, security-relevant violations.
+- Reserve hard failure for genuinely unrecoverable states: corrupt local state, an unparseable config file at startup, security-relevant violations. An individually invalid declaration (e.g. one bad MCP server) must not fail startup: skip it, log a warning, and keep everything else running.
 - Recoverable errors must still be visible: log them with enough context to identify the failed subsystem and action. No silent swallowing.
 - No catch-all error handlers that hide root causes; handle errors where the fallback decision can be made.
 - Rust: propagate errors with `?` up to the layer that owns the fallback. Never use `let _ =` on fallible operations; never write empty `match` arms that discard errors.

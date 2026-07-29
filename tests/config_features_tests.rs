@@ -93,11 +93,204 @@ fn rejects_http_mcp_with_bad_url() {
     );
     let error = load_config_from_str(&updated).expect_err("bad url must fail");
     assert!(
-        error
-            .to_string()
-            .contains("must start with http:// or https://"),
+        error.to_string().contains("must use an https:// URL"),
         "got: {error}",
     );
+}
+
+#[test]
+fn rejects_http_mcp_url_to_non_loopback_host() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[[mcp.servers]]\ntype = \"http\"\nname = \"external\"\nurl = \"http://mcp.example.com/mcp\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&updated).expect_err("non-loopback http must fail");
+    assert!(error.to_string().contains("loopback"), "got: {error}",);
+}
+
+#[test]
+fn rejects_http_mcp_url_with_userinfo_credentials() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://user:pass@x.example/mcp\"\n\n[agent]",
+    );
+    let error = load_config_from_str(&updated).expect_err("userinfo credentials must fail");
+    assert!(
+        error.to_string().contains("must not include credentials"),
+        "got: {error}",
+    );
+}
+
+#[test]
+fn accepts_templated_mcp_header_and_env() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"relay\"\nurl = \"http://127.0.0.1:8787/mcp\"\n",
+            "headers = [{ name = \"Authorization\", value = \"Bearer ${RELAY_TOKEN}\" }]\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"db-mcp\"\n",
+            "env = [\"PLAIN_REF\", \"DATABASE_URL=postgres://u:${DB_PASS}@h/db\"]\n\n",
+            "[agent]"
+        ),
+    );
+    let config = load_config_from_str(&updated).expect("templated declarations parse");
+    assert_eq!(config.mcp.servers.len(), 2);
+}
+
+#[test]
+fn rejects_mcp_header_with_both_value_sources() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"A\", value_ref = \"R\", value = \"${R}\" }]\n\n[agent]"
+        ),
+    );
+    let error = load_config_from_str(&updated).expect_err("both sources must fail");
+    assert!(error.to_string().contains("exactly one"), "got: {error}");
+}
+
+#[test]
+fn rejects_mcp_header_with_no_value_source() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"A\" }]\n\n[agent]"
+        ),
+    );
+    let error = load_config_from_str(&updated).expect_err("missing source must fail");
+    assert!(error.to_string().contains("exactly one"), "got: {error}");
+}
+
+#[test]
+fn rejects_pure_literal_mcp_header_template() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"A\", value = \"Bearer plaintext\" }]\n\n[agent]"
+        ),
+    );
+    let error = load_config_from_str(&updated).expect_err("pure literal must fail");
+    assert!(
+        error.to_string().contains("no `${NAME}` reference"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_agent_env_var_names() {
+    let updated = VALID_CONFIG.replace(
+        "env = [\"OPENCODE_API_KEY\"]",
+        "env = [\"OPENCODE_API_KEY\", \"OPENCODE_API_KEY=x-${OTHER}\"]",
+    );
+    let error =
+        load_config_from_str(&updated).expect_err("duplicate agent env var names must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("declares env var `OPENCODE_API_KEY` more than once"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_env_var_names_within_one_env_list() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"db-mcp\"\n",
+            "env = [\"API_KEY\", \"API_KEY=x-${OTHER}\"]\n\n[agent]"
+        ),
+    );
+    let error = load_config_from_str(&updated).expect_err("duplicate env var names must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("declares env var `API_KEY` more than once"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn allows_same_template_ref_in_multiple_places() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"relay\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"Authorization\", value = \"Bearer ${SHARED}\" }]\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"db-mcp\"\n",
+            "env = [\"URL=x-${SHARED}\"]\n\n[agent]"
+        ),
+    );
+    load_config_from_str(&updated).expect("template refs may repeat across the config");
+}
+
+#[test]
+fn still_rejects_duplicate_whole_value_refs() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"a\"\ncommand = \"a-mcp\"\nenv = [\"DUP_REF\"]\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"b\"\ncommand = \"b-mcp\"\nenv = [\"DUP_REF\"]\n\n",
+            "[agent]"
+        ),
+    );
+    let error = load_config_from_str(&updated).expect_err("duplicate whole-value refs must fail");
+    assert!(
+        error.to_string().contains("declared more than once"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn rejects_secret_shaped_strings_inside_templates() {
+    let ref_name = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"A\", value = \"Bearer ${ghp_ABCDEFXYZ}\" }]\n\n[agent]"
+        ),
+    );
+    let error = load_config_from_str(&ref_name).expect_err("secret-shaped ref name must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("looks like an inline secret value"),
+        "got: {error}"
+    );
+
+    let literal = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"A\", value = \"sk-ABCDEF${SUFFIX}\" }]\n\n[agent]"
+        ),
+    );
+    let error = load_config_from_str(&literal).expect_err("secret-shaped literal must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("looks like an inline secret value"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn ref_only_header_serializes_without_value_key() {
+    let updated = VALID_CONFIG.replace(
+        "[agent]",
+        concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"linear\"\nurl = \"https://mcp.linear.app/mcp\"\n",
+            "headers = [{ name = \"Authorization\", value_ref = \"LINEAR_API_KEY\" }]\n\n[agent]"
+        ),
+    );
+    let config = load_config_from_str(&updated).expect("ref-only header parses");
+    let toml = config.to_canonical_toml().expect("serialize");
+    assert!(toml.contains("value_ref = \"LINEAR_API_KEY\""), "{toml}");
+    assert!(!toml.contains("value = "), "{toml}");
+    load_config_from_str(&toml).expect("round-trips");
 }
 
 fn enable_supabase(input: &str) -> String {

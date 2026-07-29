@@ -282,9 +282,9 @@ pub fn resolve_agent_env(
     secrets: &SecretStore,
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::with_capacity(agent.env.len());
-    for name in &agent.env {
-        let value = secrets.get(name)?;
-        env.insert(name.clone(), value.to_owned());
+    for entry in &agent.env {
+        let (var_name, value) = crate::config::resolve_env_entry("[agent].env", entry, secrets)?;
+        env.insert(var_name, value);
     }
     Ok(env)
 }
@@ -350,4 +350,43 @@ pub(super) fn resolve_agent_cwd(agent: &AgentConfig, workspace_root: &str) -> Pa
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(workspace_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_agent_env_supports_templated_entries() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut secrets = crate::secrets::SecretStore::open_or_create(home.path()).expect("store");
+        secrets
+            .set_many([("PLAIN", "p1"), ("TOK", "t1")])
+            .expect("set secrets");
+        let agent = AgentConfig {
+            id: "test".to_owned(),
+            name: "Test".to_owned(),
+            command: "test".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: vec!["PLAIN".to_owned(), "AUTH=Bearer ${TOK}".to_owned()],
+            expected_sha256: None,
+            restart: "on-crash".to_owned(),
+            mode: None,
+            model: None,
+            harness_version: None,
+            adapter: None,
+            provider: None,
+            providers: None,
+            subagent: None,
+            auto_update: None,
+            install: None,
+        };
+
+        let env = resolve_agent_env(&agent, &secrets).expect("resolve");
+
+        assert_eq!(env["PLAIN"], "p1");
+        assert_eq!(env["AUTH"], "Bearer t1");
+        assert!(!env.contains_key("TOK"));
+    }
 }

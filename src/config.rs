@@ -8,6 +8,7 @@
 //! they always have — the split is internal.
 
 mod schema;
+mod secret_template;
 mod validate;
 
 use crate::error::{Result, StackError};
@@ -25,15 +26,23 @@ pub use self::schema::{
     DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
     DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY,
     DataSourceConfig, DependenciesConfig, DependencyEntry, DependencyInstallAction,
-    DependencyInstallScope, EdgeConfig, ExtensionConfig, ExtensionType, HttpHeaderRef, LocalConfig,
-    LocalSessionAuth, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
-    PermissionTimeoutAction, PermissionsConfig, PromptsConfig, SandboxConfig, SandboxMode,
-    SandboxProviderStderr, SecurityConfig, SecurityHttpConfig, StackUpdateConfig,
-    StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig, UpdatesConfig,
-    WorkspaceConfig,
+    DependencyInstallScope, EdgeConfig, ExtensionConfig, ExtensionType, HeaderValueSource,
+    HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig, McpHttpServer,
+    McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig, PromptsConfig,
+    SandboxConfig, SandboxMode, SandboxProviderStderr, SecurityConfig, SecurityHttpConfig,
+    StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig,
+    UpdatesConfig, WorkspaceConfig,
 };
-pub(crate) use self::validate::primitives::normalize_day_or_week_duration;
+pub use self::secret_template::{
+    EnvEntry, SecretTemplate, TemplateSegment, agent_env_declares, env_entry_ref_names_lossy,
+    env_entry_var_name, parse_env_entry, ref_names_lossy, resolve_env_entry, screen_env_entry,
+    screen_ref_name, screen_template, template_pieces_lossy,
+};
+pub(crate) use self::validate::mcp::validate_mcp_http_url;
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
+pub(crate) use self::validate::primitives::{
+    normalize_day_or_week_duration, validate_secret_ref_name_value,
+};
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
 pub(crate) use self::validate::validate_supabase_identifiers;
 
@@ -233,6 +242,59 @@ pub fn load_config_from_str(input: &str) -> Result<Config> {
 }
 
 pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
+    let loaded = parse_config_from_str_with_legacy(input)?;
+    loaded.config.validate()?;
+    Ok(loaded)
+}
+
+/// Daemon-startup load. Like [`Config::load_from_path_with_legacy`], but an
+/// MCP server declaration that fails per-server validation degrades to a
+/// skipped server plus a startup warning instead of failing the boot: the
+/// daemon is long-running and one bad peripheral declaration must not brick
+/// it. Config syntax and every non-MCP rule still fail fast, as do all
+/// candidate-config write paths, which go through the strict loaders.
+pub(crate) fn load_for_serve(path: impl AsRef<Path>) -> Result<LoadedConfig> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    load_from_str_for_serve(&content)
+}
+
+/// Runtime reload of the on-disk config after startup. Same degradation as
+/// [`load_for_serve`] but quiet: startup already warned about any dropped
+/// declaration, and re-warning on every reload would spam the log once per
+/// API request.
+pub(crate) fn load_for_runtime_reload(path: impl AsRef<Path>) -> Result<Config> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(lenient_mcp_config_from_str(&content, false)?.config)
+}
+
+pub(crate) fn load_from_str_for_serve(input: &str) -> Result<LoadedConfig> {
+    lenient_mcp_config_from_str(input, true)
+}
+
+fn lenient_mcp_config_from_str(input: &str, log_drops: bool) -> Result<LoadedConfig> {
+    let mut loaded = parse_config_from_str_with_legacy(input)?;
+    let (kept, dropped) = self::validate::mcp::partition_valid_servers(std::mem::take(
+        &mut loaded.config.mcp.servers,
+    ));
+    if log_drops {
+        for (name, reason) in dropped {
+            tracing::warn!(server = %name, %reason, "skipping invalid MCP server declaration");
+        }
+    }
+    loaded.config.mcp.servers = kept;
+    loaded.config.validate()?;
+    Ok(loaded)
+}
+
+fn parse_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
     // Phase 4 removed the legacy single `[workspace.source]` block in favor
     // of `[[workspace.code_sources]]` / `[[workspace.data_sources]]`. The
     // serde error for an unknown field is correct but unhelpful for
@@ -331,7 +393,6 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
         extensions: raw.extensions.unwrap_or_default(),
     };
 
-    config.validate()?;
     Ok(LoadedConfig {
         config,
         legacy_auth: raw.auth,
@@ -360,4 +421,89 @@ fn validate_legacy_auth_ref(field: &'static str, value: &str) -> Result<()> {
             reason: error.to_string(),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_CONFIG: &str = include_str!("../tests/fixtures/valid-opencode-stack.toml");
+
+    fn config_with_mcp(servers_toml: &str) -> String {
+        VALID_CONFIG.replace("[agent]", &format!("{servers_toml}\n[agent]"))
+    }
+
+    fn server_names(loaded: &LoadedConfig) -> Vec<String> {
+        loaded
+            .config
+            .mcp
+            .servers
+            .iter()
+            .map(|server| server.name().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn serve_load_drops_non_loopback_http_server() {
+        let input = config_with_mcp(concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"good\"\nurl = \"https://mcp.example/mcp\"\n\n",
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"plain\"\nurl = \"http://mcp.example.com/mcp\"\n\n",
+        ));
+        // The strict loader (candidate-config write paths) still rejects.
+        assert!(load_config_from_str(&input).is_err());
+        let loaded = load_from_str_for_serve(&input).expect("serve load degrades");
+        assert_eq!(server_names(&loaded), vec!["good"]);
+    }
+
+    #[test]
+    fn serve_load_drops_duplicate_and_malformed_servers() {
+        let input = config_with_mcp(concat!(
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"db-mcp\"\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"other\"\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"broken\"\ncommand = \"\"\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"dupenv\"\ncommand = \"x\"\nenv = [\"A\", \"A\"]\n\n",
+        ));
+        let loaded = load_from_str_for_serve(&input).expect("serve load degrades");
+        assert_eq!(server_names(&loaded), vec!["db"]);
+    }
+
+    #[test]
+    fn serve_load_keeps_later_valid_server_when_first_of_name_is_invalid() {
+        let input = config_with_mcp(concat!(
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"\"\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"db\"\ncommand = \"db-mcp\"\n\n",
+        ));
+        let loaded = load_from_str_for_serve(&input).expect("valid later declaration survives");
+        assert_eq!(server_names(&loaded), vec!["db"]);
+    }
+
+    #[test]
+    fn serve_load_drops_screening_tripping_server() {
+        // A pasted credential in a header trips the looks-like-a-secret
+        // screening. The server is dropped (the drop reason is the redacted
+        // screening error, not an echoing name-validation error) instead of
+        // failing the boot.
+        let input = config_with_mcp(concat!(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"s\"\nurl = \"https://x.example/mcp\"\n",
+            "headers = [{ name = \"Authorization\", value_ref = \"sk-livekey-abc-def\" }]\n\n",
+            "[[mcp.servers]]\ntype = \"stdio\"\nname = \"ok\"\ncommand = \"sh\"\n\n",
+        ));
+        let loaded = load_from_str_for_serve(&input).expect("screening drop degrades");
+        assert_eq!(server_names(&loaded), vec!["ok"]);
+    }
+
+    #[test]
+    fn serve_load_keeps_loopback_http_server() {
+        let input = config_with_mcp(
+            "[[mcp.servers]]\ntype = \"http\"\nname = \"relay\"\nurl = \"http://127.0.0.1:8787/mcp\"\n\n",
+        );
+        let loaded = load_from_str_for_serve(&input).expect("loopback relay loads");
+        assert_eq!(server_names(&loaded), vec!["relay"]);
+    }
+
+    #[test]
+    fn serve_load_still_fails_on_non_mcp_errors() {
+        assert!(load_from_str_for_serve("not toml = [").is_err());
+        assert!(load_from_str_for_serve("[agent]\nid = \"x\"\n").is_err());
+    }
 }

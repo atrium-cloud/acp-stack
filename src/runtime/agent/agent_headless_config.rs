@@ -431,7 +431,7 @@ fn require_agent_env_for_provider_config<'a>(
     path: &Path,
 ) -> Result<&'a str> {
     if let Some(api_key_ref) = provider.api_key_ref.as_deref() {
-        if config.agent.env.iter().any(|name| name == api_key_ref) {
+        if crate::config::agent_env_declares(&config.agent.env, api_key_ref) {
             return Ok(api_key_ref);
         }
         return Err(StackError::AgentConfigProvision {

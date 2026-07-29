@@ -211,7 +211,8 @@ mod tests {
             url: "https://mcp.example.com".to_owned(),
             headers: vec![InitMcpHttpHeader {
                 name: "Authorization".to_owned(),
-                value_ref: "REMOTE_MCP_TOKEN".to_owned(),
+                value_ref: Some("REMOTE_MCP_TOKEN".to_owned()),
+                value: None,
             }],
         });
 
@@ -233,7 +234,10 @@ mod tests {
                 assert_eq!(http.url, "https://mcp.example.com");
                 assert_eq!(http.headers.len(), 1);
                 assert_eq!(http.headers[0].name, "Authorization");
-                assert_eq!(http.headers[0].value_ref, "REMOTE_MCP_TOKEN");
+                assert_eq!(
+                    http.headers[0].value_ref.as_deref(),
+                    Some("REMOTE_MCP_TOKEN")
+                );
             }
             other => panic!("expected HTTP MCP, got {other:?}"),
         }

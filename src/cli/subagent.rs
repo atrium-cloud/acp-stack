@@ -244,7 +244,7 @@ fn run_subagent_free() -> Result<()> {
         .and_then(|main| main.api_key_ref.clone());
     let configured_legacy_api_key_ref = inherited_main_api_key_ref.clone().or_else(|| {
         default_api_key_ref_for_agent_provider(&config.agent.id, &provider_id)
-            .filter(|name| config.agent.env.iter().any(|configured| configured == name))
+            .filter(|name| crate::config::agent_env_declares(&config.agent.env, name))
     });
     require_explicit_active_subagent_provider(&config, &provider_id)?;
     let structured = if configured_legacy_api_key_ref.is_some() {
@@ -269,7 +269,7 @@ fn run_subagent_free() -> Result<()> {
         .map(|api_key_ref| required_env_refs_for_provider_id(&provider_id, api_key_ref))
         .unwrap_or_default();
     for env_ref in &required_env_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
@@ -461,7 +461,7 @@ fn configure_mapped_subagent(
         .map(|api_key_ref| required_env_refs_for_provider_id(&provider, api_key_ref))
         .unwrap_or_default();
     for env_ref in &required_env_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
@@ -590,7 +590,7 @@ fn configure_custom_subagent(
         args.output_max_tokens.as_deref(),
         DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     )?;
-    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
+    if !crate::config::agent_env_declares(&config.agent.env, &api_key_ref) {
         config.agent.env.push(api_key_ref.clone());
     }
     config.agent.subagent = Some(AgentSubagentConfig {
@@ -677,8 +677,9 @@ fn resolve_free_model<'a>(
     }
     if main.is_none()
         && let Some(free) = entry.subagent_free_models.iter().find(|free| {
-            default_api_key_ref_for_agent_provider(&config.agent.id, &free.provider)
-                .is_some_and(|env_ref| config.agent.env.iter().any(|name| name == &env_ref))
+            default_api_key_ref_for_agent_provider(&config.agent.id, &free.provider).is_some_and(
+                |env_ref| crate::config::agent_env_declares(&config.agent.env, &env_ref),
+            )
         })
     {
         return Ok(free);

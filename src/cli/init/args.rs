@@ -29,10 +29,14 @@ pub(super) struct InitMcpHttpServer {
     pub(super) headers: Vec<InitMcpHttpHeader>,
 }
 
+/// Mirrors `HttpHeaderRef`: exactly one of `value_ref` (whole-value secret
+/// ref) or `value` (`${NAME}` template) is set; enforced where the record is
+/// built (wire boundary or flag splitter).
 #[derive(Debug, Clone)]
 pub(super) struct InitMcpHttpHeader {
     pub(super) name: String,
-    pub(super) value_ref: String,
+    pub(super) value_ref: Option<String>,
+    pub(super) value: Option<String>,
 }
 
 #[derive(Clone)]
@@ -276,13 +280,16 @@ pub struct InitArgs {
     /// Add a custom stdio MCP server as `name=command`.
     #[arg(long = "mcp-stdio", value_name = "NAME=COMMAND")]
     pub(super) mcp_stdio: Vec<String>,
-    /// Add a secret ref to a custom stdio MCP server as `server=SECRET_REF`.
-    #[arg(long = "mcp-stdio-env", value_name = "SERVER=SECRET_REF")]
+    /// Add an env entry to a custom stdio MCP server as `server=SECRET_REF`
+    /// or `server=VAR=template` (template values interpolate `${SECRET_REF}`).
+    #[arg(long = "mcp-stdio-env", value_name = "SERVER=ENTRY")]
     pub(super) mcp_stdio_env: Vec<String>,
     /// Add a custom HTTP MCP server as `name=https://...`.
     #[arg(long = "mcp-http", value_name = "NAME=URL")]
     pub(super) mcp_http: Vec<String>,
-    /// Add a header secret ref to a custom HTTP MCP server as `server=Header:SECRET_REF`.
+    /// Add a header to a custom HTTP MCP server as `server=Header:SECRET_REF`
+    /// (whole-value ref) or `server=Header:=template` (template values
+    /// interpolate `${SECRET_REF}`).
     #[arg(long = "mcp-http-header", value_name = "SERVER=HEADER:SECRET_REF")]
     pub(super) mcp_http_header: Vec<String>,
     /// Enable Supabase external logging during init.

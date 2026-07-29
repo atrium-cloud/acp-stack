@@ -419,13 +419,16 @@ fn migrate_one_provider_ref(
 
 fn config_references_secret(config: &Config, name: &str) -> bool {
     if config.array.targets.iter().any(|target| {
-        target.agent.env.iter().any(|value| value == name)
-            || target
-                .agent
-                .provider
-                .as_ref()
-                .and_then(|provider| provider.api_key_ref.as_deref())
-                == Some(name)
+        target.agent.env.iter().any(|entry| {
+            crate::config::env_entry_ref_names_lossy(entry)
+                .iter()
+                .any(|r| r == name)
+        }) || target
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.api_key_ref.as_deref())
+            == Some(name)
             || target
                 .agent
                 .subagent
@@ -459,11 +462,81 @@ fn config_references_secret(config: &Config, name: &str) -> bool {
         return true;
     }
     config.mcp.servers.iter().any(|server| match server {
-        crate::config::McpServerConfig::Stdio(server) => {
-            server.env.iter().any(|value| value == name)
-        }
-        crate::config::McpServerConfig::Http(server) => {
-            server.headers.iter().any(|header| header.value_ref == name)
-        }
+        crate::config::McpServerConfig::Stdio(server) => server.env.iter().any(|entry| {
+            crate::config::env_entry_ref_names_lossy(entry)
+                .iter()
+                .any(|r| r == name)
+        }),
+        crate::config::McpServerConfig::Http(server) => server
+            .headers
+            .iter()
+            .any(|header| header.ref_names_lossy().iter().any(|r| r == name)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config_from_str;
+
+    #[test]
+    fn config_references_secret_sees_refs_inside_templates() {
+        let config = load_config_from_str(
+            r#"
+[api]
+bind = "127.0.0.1:7700"
+public_url = "http://127.0.0.1:7700"
+max_request_bytes = 104857600
+
+[security.http]
+max_request_bytes = 104857600
+rate_limit_per_minute = 120
+burst = 30
+auth_failures_per_minute = 5
+auth_block_duration = "15m"
+allowed_origins = []
+trust_proxy_headers = false
+
+[workspace]
+root = "/workspace"
+uploads = "/workspace/uploads"
+default_shell = "/bin/bash"
+runtime_user = "acp"
+max_file_bytes = 8388608
+
+[logging]
+level = "info"
+local_retention_days = 30
+
+[agent]
+id = "placebo"
+name = "Test Agent"
+command = "placebo"
+args = []
+cwd = "/workspace"
+env = ["AUTH=Bearer ${AGENT_TPL_REF}"]
+restart = "on-crash"
+
+[[mcp.servers]]
+type = "http"
+name = "relay"
+url = "https://x.example/mcp"
+headers = [{ name = "Authorization", value = "Bearer ${HEADER_TPL_REF}" }]
+
+[[mcp.servers]]
+type = "stdio"
+name = "db"
+command = "db-mcp"
+env = ["URL=x-${ENV_TPL_REF}"]
+"#,
+        )
+        .expect("config parses");
+
+        assert!(config_references_secret(&config, "AGENT_TPL_REF"));
+        assert!(config_references_secret(&config, "HEADER_TPL_REF"));
+        assert!(config_references_secret(&config, "ENV_TPL_REF"));
+        // Env var names on the left of `=` are not secret refs.
+        assert!(!config_references_secret(&config, "AUTH"));
+        assert!(!config_references_secret(&config, "ABSENT"));
+    }
 }

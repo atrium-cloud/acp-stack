@@ -560,9 +560,10 @@ pub fn rebase_prepared_native_config_import(
         candidate.agent.provider = imported.agent.provider.clone();
         candidate.agent.providers = imported.agent.providers.clone();
         candidate.agent.model = None;
-        for name in &imported.agent.env {
-            if !candidate.agent.env.iter().any(|existing| existing == name) {
-                candidate.agent.env.push(name.clone());
+        for entry in &imported.agent.env {
+            let var_name = crate::config::env_entry_var_name(entry);
+            if !crate::config::agent_env_declares(&candidate.agent.env, var_name) {
+                candidate.agent.env.push(entry.clone());
             }
         }
     }

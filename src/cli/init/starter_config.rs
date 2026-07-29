@@ -104,6 +104,120 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mcp_http_header_flag_supports_ref_and_template_forms() {
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-http",
+            "search=https://mcp.example.com/mcp",
+            "--mcp-http-header",
+            "search=Authorization:=Bearer ${SEARCH_KEY}",
+            "--mcp-http-header",
+            "search=X-Plain:PLAIN_REF",
+        ]);
+        let config = starter_config_from_args(&args);
+        let config::McpServerConfig::Http(http) = &config.mcp.servers[0] else {
+            panic!("expected http server");
+        };
+        assert_eq!(http.headers[0].name, "Authorization");
+        assert_eq!(
+            http.headers[0].value.as_deref(),
+            Some("Bearer ${SEARCH_KEY}")
+        );
+        assert_eq!(http.headers[0].value_ref, None);
+        assert_eq!(http.headers[1].name, "X-Plain");
+        assert_eq!(http.headers[1].value_ref.as_deref(), Some("PLAIN_REF"));
+    }
+
+    #[test]
+    fn mcp_http_header_flag_rejects_pure_literal_template() {
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-http",
+            "search=https://mcp.example.com/mcp",
+            "--mcp-http-header",
+            "search=Authorization:=Bearer plaintext",
+        ]);
+        let error = starter_config(&args).expect_err("pure literal must be rejected");
+        assert!(
+            error.to_string().contains("no `${NAME}` reference"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn mcp_flag_rejection_of_pasted_credentials_never_echoes_them() {
+        let secret = "sk-live-AAAABBBBCCCC";
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-http",
+            "search=https://mcp.example.com/mcp",
+            "--mcp-http-header",
+            &format!("search=Authorization:{secret}"),
+        ]);
+        let error = starter_config(&args).expect_err("secret-shaped header ref must be rejected");
+        assert!(!error.to_string().contains(secret), "{error}");
+
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-stdio",
+            "db=db-mcp",
+            "--mcp-stdio-env",
+            &format!("db=URL=x-${{{secret}}}"),
+        ]);
+        let error = starter_config(&args).expect_err("secret-shaped env template must be rejected");
+        assert!(!error.to_string().contains(secret), "{error}");
+    }
+
+    #[test]
+    fn mcp_stdio_env_flag_supports_templated_entries() {
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-stdio",
+            "db=db-mcp",
+            "--mcp-stdio-env",
+            "db=DATABASE_URL=postgres://u:${DB_PASS}@h/db",
+        ]);
+        let config = starter_config_from_args(&args);
+        let config::McpServerConfig::Stdio(stdio) = &config.mcp.servers[0] else {
+            panic!("expected stdio server");
+        };
+        assert_eq!(stdio.env, ["DATABASE_URL=postgres://u:${DB_PASS}@h/db"]);
+    }
+
+    #[test]
+    fn mcp_http_url_allows_loopback_http_only() {
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-http",
+            "relay=http://127.0.0.1:8787/mcp",
+        ]);
+        starter_config(&args).expect("loopback http is allowed");
+
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-http",
+            "relay=http://[::1]:8787/mcp",
+        ]);
+        starter_config(&args).expect("ipv6 loopback http is allowed");
+
+        let args = parse_init_args(&[
+            "--agent",
+            "placebo",
+            "--mcp-http",
+            "external=http://mcp.example.com/mcp",
+        ]);
+        let error = starter_config(&args).expect_err("non-loopback http must be rejected");
+        assert!(error.to_string().contains("https://"), "{error}");
+    }
+
     // A fresh agent-env name that collides with a secret already in the store
     // must be rejected before the upsert, leaving the existing secret untouched.
     #[test]
@@ -423,7 +537,8 @@ mod tests {
             url: "https://mcp.example.com/mcp".to_owned(),
             headers: vec![InitMcpHttpHeader {
                 name: "Authorization".to_owned(),
-                value_ref: "SEARCH_API_KEY".to_owned(),
+                value_ref: Some("SEARCH_API_KEY".to_owned()),
+                value: None,
             }],
         });
         args.prompt_data_sources.push(config::DataSourceConfig {

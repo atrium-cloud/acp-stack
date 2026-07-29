@@ -89,7 +89,7 @@ fn run_agent_custom_provider_set(
         DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     )?;
 
-    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
+    if !crate::config::agent_env_declares(&config.agent.env, &api_key_ref) {
         config.agent.env.push(api_key_ref.clone());
     }
     config.agent.model = None;
@@ -302,7 +302,7 @@ fn run_agent_model_set(
             .collect::<Vec<_>>()
     };
     for env_ref in &required_env_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }

@@ -92,9 +92,9 @@ pub fn resolve_agent_environment(
 ) -> Result<ResolvedAgentEnvironment> {
     let mut env = HashMap::with_capacity(config.agent.env.len());
     let mut owners: HashMap<String, Vec<String>> = HashMap::new();
-    for name in &config.agent.env {
-        let value = secrets.get(name)?.to_owned();
-        insert_resolved_env(&mut env, &mut owners, name, value, "[agent].env")?;
+    for entry in &config.agent.env {
+        let (var_name, value) = crate::config::resolve_env_entry("[agent].env", entry, secrets)?;
+        insert_resolved_env(&mut env, &mut owners, &var_name, value, "[agent].env")?;
     }
 
     let mut snapshots = Vec::new();
@@ -394,7 +394,7 @@ pub fn apply_mapped_agent_provider(
         api_key_ref.as_deref(),
     );
     for env_ref in &required_env_refs {
-        if !config.agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
@@ -445,7 +445,7 @@ pub fn apply_catalog_mapped_agent_provider(
         Vec::new()
     };
     for env_ref in &required_env_refs {
-        if !agent.env.iter().any(|name| name == env_ref) {
+        if !crate::config::agent_env_declares(&agent.env, env_ref) {
             agent.env.push(env_ref.clone());
         }
     }
@@ -583,6 +583,26 @@ restart = "on-crash"
                 .iter()
                 .all(|provider| provider.revision.is_some())
         );
+    }
+
+    #[test]
+    fn templated_agent_env_resolves_var_name_and_composed_value() {
+        let mut config = resolver_config("opencode");
+        config.agent.env = vec![
+            "PLAIN_TOKEN".to_owned(),
+            "AUTH_HEADER=Bearer ${RELAY_TOKEN}".to_owned(),
+        ];
+        let home = tempfile::tempdir().expect("home");
+        let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
+        store
+            .set_many([("PLAIN_TOKEN", "plain"), ("RELAY_TOKEN", "tok-1")])
+            .expect("set secrets");
+
+        let resolved = resolve_agent_environment(&config, &store).expect("resolve");
+
+        assert_eq!(resolved.env["PLAIN_TOKEN"], "plain");
+        assert_eq!(resolved.env["AUTH_HEADER"], "Bearer tok-1");
+        assert!(!resolved.env.contains_key("RELAY_TOKEN"));
     }
 
     #[test]

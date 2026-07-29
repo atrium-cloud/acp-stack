@@ -306,11 +306,17 @@ struct McpHttpServerRequest {
     headers: Vec<McpHttpHeaderRequest>,
 }
 
+/// Exactly one of `value_ref` (whole-value secret ref) or `value`
+/// (`${NAME}`-interpolated template) must be set; enforced in
+/// `into_init_args` so a malformed declaration is a 400 at the boundary.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct McpHttpHeaderRequest {
     name: String,
-    value_ref: String,
+    #[serde(default)]
+    value_ref: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -478,32 +484,86 @@ impl StartInitRequest {
         // are strictly more expressive than the NAME=VALUE flag strings (argv
         // and env for stdio servers); `mcp_from_args` merges and validates
         // them the same way.
+        // Boundary validation runs screening before any name-shape check: a
+        // screening rejection redacts a pasted credential, while name-shape
+        // errors echo the offending string into the 400 body.
         args.prompt_mcp_stdio = self
             .mcp_stdio
             .into_iter()
-            .map(|server| InitMcpStdioServer {
-                name: server.name,
-                command: server.command,
-                args: server.args,
-                env: server.env,
+            .map(|server| {
+                for entry in &server.env {
+                    crate::config::screen_env_entry("mcp_stdio.env", entry)
+                        .and_then(|()| crate::config::parse_env_entry("mcp_stdio.env", entry))
+                        .map_err(|error| StackError::InvalidParam {
+                            field: "mcp_stdio.env",
+                            reason: error.to_string(),
+                        })?;
+                }
+                Ok(InitMcpStdioServer {
+                    name: server.name,
+                    command: server.command,
+                    args: server.args,
+                    env: server.env,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         args.prompt_mcp_http = self
             .mcp_http
             .into_iter()
-            .map(|server| InitMcpHttpServer {
-                name: server.name,
-                url: server.url,
-                headers: server
+            .map(|server| {
+                let headers = server
                     .headers
                     .into_iter()
-                    .map(|header| InitMcpHttpHeader {
-                        name: header.name,
-                        value_ref: header.value_ref,
+                    .map(|header| {
+                        match (header.value_ref.as_deref(), header.value.as_deref()) {
+                            (Some(value_ref), None) => {
+                                crate::config::screen_ref_name("mcp_http.headers", value_ref)
+                                    .and_then(|()| {
+                                        crate::config::validate_secret_ref_name_value(value_ref)
+                                    })
+                                    .map_err(|error| StackError::InvalidParam {
+                                        field: "mcp_http.headers",
+                                        reason: error.to_string(),
+                                    })?;
+                            }
+                            (None, Some(template)) => {
+                                crate::config::screen_template("mcp_http.headers", template)
+                                    .and_then(|()| {
+                                        crate::config::SecretTemplate::parse(
+                                            "mcp_http.headers",
+                                            template,
+                                        )
+                                        .map(|_| ())
+                                    })
+                                    .map_err(|error| StackError::InvalidParam {
+                                        field: "mcp_http.headers",
+                                        reason: error.to_string(),
+                                    })?;
+                            }
+                            _ => {
+                                return Err(StackError::InvalidParam {
+                                    field: "mcp_http.headers",
+                                    reason: format!(
+                                        "header `{}` must set exactly one of `value_ref` or `value`",
+                                        header.name
+                                    ),
+                                });
+                            }
+                        }
+                        Ok(InitMcpHttpHeader {
+                            name: header.name,
+                            value_ref: header.value_ref,
+                            value: header.value,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(InitMcpHttpServer {
+                    name: server.name,
+                    url: server.url,
+                    headers,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         // `empty_init_args` defaults to `no_skills: true` and the skill plan
         // resolver short-circuits on it, so any skills declaration must clear
         // it or the declaration would be silently dropped.
@@ -795,7 +855,102 @@ mod tests {
         assert_eq!(http.url, "https://mcp.example.com/mcp");
         assert_eq!(http.headers.len(), 1);
         assert_eq!(http.headers[0].name, "Authorization");
-        assert_eq!(http.headers[0].value_ref, "SEARCH_API_KEY");
+        assert_eq!(http.headers[0].value_ref.as_deref(), Some("SEARCH_API_KEY"));
+        assert_eq!(http.headers[0].value, None);
+    }
+
+    #[test]
+    fn start_init_request_accepts_templated_header_and_env() {
+        let args = request_from_json(
+            r#"{
+                "mcp_stdio": [
+                    {"name": "db", "command": "db-mcp", "env": ["API_KEY", "URL=x-${DB_PASS}"]}
+                ],
+                "mcp_http": [
+                    {"name": "relay", "url": "http://127.0.0.1:8787/mcp",
+                     "headers": [{"name": "Authorization", "value": "Bearer ${RELAY_TOKEN}"}]}
+                ]
+            }"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        assert_eq!(
+            args.prompt_mcp_stdio[0].env,
+            vec!["API_KEY".to_owned(), "URL=x-${DB_PASS}".to_owned()]
+        );
+        let header = &args.prompt_mcp_http[0].headers[0];
+        assert_eq!(header.value.as_deref(), Some("Bearer ${RELAY_TOKEN}"));
+        assert_eq!(header.value_ref, None);
+    }
+
+    #[test]
+    fn start_init_request_rejects_header_with_both_or_neither_value_source() {
+        let both = request_from_json(
+            r#"{"mcp_http": [{"name": "s", "url": "https://x.example/mcp",
+                "headers": [{"name": "A", "value_ref": "R", "value": "${R}"}]}]}"#,
+        )
+        .into_init_args()
+        .expect_err("both set must be rejected");
+        assert!(both.to_string().contains("exactly one"), "{both}");
+
+        let neither = request_from_json(
+            r#"{"mcp_http": [{"name": "s", "url": "https://x.example/mcp",
+                "headers": [{"name": "A"}]}]}"#,
+        )
+        .into_init_args()
+        .expect_err("neither set must be rejected");
+        assert!(neither.to_string().contains("exactly one"), "{neither}");
+    }
+
+    #[test]
+    fn boundary_rejection_of_pasted_credentials_never_echoes_them() {
+        let secret = "sk-live-AAAABBBBCCCC";
+        let in_template = request_from_json(&format!(
+            r#"{{"mcp_http": [{{"name": "s", "url": "https://x.example/mcp",
+                "headers": [{{"name": "A", "value": "Bearer ${{{secret}}}"}}]}}]}}"#,
+        ))
+        .into_init_args()
+        .expect_err("secret-shaped template ref must be rejected");
+        assert!(!in_template.to_string().contains(secret), "{in_template}");
+
+        let as_value_ref = request_from_json(&format!(
+            r#"{{"mcp_http": [{{"name": "s", "url": "https://x.example/mcp",
+                "headers": [{{"name": "A", "value_ref": "{secret}"}}]}}]}}"#,
+        ))
+        .into_init_args()
+        .expect_err("secret-shaped value_ref must be rejected");
+        assert!(!as_value_ref.to_string().contains(secret), "{as_value_ref}");
+
+        let in_env = request_from_json(&format!(
+            r#"{{"mcp_stdio": [{{"name": "db", "command": "db-mcp", "env": ["{secret}"]}}]}}"#,
+        ))
+        .into_init_args()
+        .expect_err("secret-shaped env entry must be rejected");
+        assert!(!in_env.to_string().contains(secret), "{in_env}");
+    }
+
+    #[test]
+    fn start_init_request_rejects_malformed_templates_at_the_boundary() {
+        let bad_header = request_from_json(
+            r#"{"mcp_http": [{"name": "s", "url": "https://x.example/mcp",
+                "headers": [{"name": "A", "value": "Bearer ${unclosed"}]}]}"#,
+        )
+        .into_init_args()
+        .expect_err("unterminated template must be rejected");
+        assert!(
+            bad_header.to_string().contains("unterminated"),
+            "{bad_header}"
+        );
+
+        let bad_env = request_from_json(
+            r#"{"mcp_stdio": [{"name": "db", "command": "db-mcp", "env": ["URL=plaintext"]}]}"#,
+        )
+        .into_init_args()
+        .expect_err("pure-literal env template must be rejected");
+        assert!(
+            bad_env.to_string().contains("no `${NAME}` reference"),
+            "{bad_env}"
+        );
     }
 
     #[test]

@@ -254,10 +254,7 @@ async fn health_ready_marks_mcp_failing_when_secret_ref_is_missing() {
         servers: vec![McpServerConfig::Http(McpHttpServer {
             name: "linear".to_owned(),
             url: "https://mcp.linear.app/mcp".to_owned(),
-            headers: vec![HttpHeaderRef {
-                name: "Authorization".to_owned(),
-                value_ref: "LINEAR_API_KEY".to_owned(),
-            }],
+            headers: vec![HttpHeaderRef::from_ref("Authorization", "LINEAR_API_KEY")],
         })],
     };
     let harness = ServerHarness::spawn_with_config(config).await;

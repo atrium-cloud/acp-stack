@@ -211,16 +211,34 @@ type = "stdio"
 name = "local-tool"
 command = "tool-server"
 args = ["serve"]
-env = ["TOOL_API_KEY"]
+env = ["TOOL_API_KEY", "DATABASE_URL=postgres://user:${DB_PASS}@host/db"]
 
 [[mcp.servers]]
 type = "http"
 name = "linear"
 url = "https://mcp.linear.app/mcp"
 headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
+
+[[mcp.servers]]
+type = "http"
+name = "parallel"
+url = "https://api.parallel.example/mcp"
+headers = [{ name = "Authorization", value = "Bearer ${PARALLEL_API_KEY}" }]
 ```
 
-Secret refs are resolved at session attach time. Secret values do not appear in config export, API responses, or durable logs.
+Secret refs are resolved at session attach time. Secret values do not appear in config export, API responses, or durable logs. HTTP server URLs must be https, or http toward a loopback host (a local relay never leaves the host). At daemon startup a server declaration that fails these per-server rules is skipped with a startup warning rather than failing the boot — the daemon degrades instead of bricking on one bad declaration; declaration and config-write paths still reject it.
+
+### Secret-Reference Templates
+
+Value positions (HTTP header `value`, stdio `env` entries, and `[agent].env` entries) accept interpolated templates in addition to whole-value refs:
+
+- A header sets exactly one of `value_ref` (whole-value secret ref, as before) or `value` (a template). Setting both or neither fails validation.
+- An `env` entry is either a bare ref name `NAME` (env var `NAME` receives the whole secret `NAME`, as before) or `VAR=template` (env var `VAR` receives the composed template value).
+- Template syntax: `${NAME}` interpolates the secret `NAME` at resolve time; `$$` is a literal `$`; any other `$` is rejected. A template must contain at least one `${NAME}` reference — pure literals are rejected so plaintext credentials cannot be pasted into config.
+- Refs inside templates may repeat freely across the config (composing one secret into several values is the point); whole-value declarations keep the existing duplicate-ref rejection. Within one `env` list, the produced env var names must be unique.
+- The looks-like-a-secret screening that applies to ref names also runs over template literals and the refs inside `${}`; the literals are additionally screened concatenated, so a credential split across a `${}` boundary still trips the heuristic.
+
+acp-stack does not interpret the composed value: the referenced secret may be an opaque token minted elsewhere and the URL a local relay endpoint, and nothing behaves differently.
 
 ## Extensions
 

@@ -736,7 +736,7 @@ fn apply_custom_provider(
         args.output_max_tokens.as_deref(),
         DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     )?;
-    if !config.agent.env.iter().any(|name| name == &api_key_ref) {
+    if !crate::config::agent_env_declares(&config.agent.env, &api_key_ref) {
         config.agent.env.push(api_key_ref.clone());
     }
     config.agent.model = None;

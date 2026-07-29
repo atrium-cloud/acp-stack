@@ -236,11 +236,12 @@ fn json_mcp_server(
     if object.get("enabled").and_then(JsonValue::as_bool) == Some(false) {
         return Err(BlockedReason::McpUnmappable);
     }
-    // Amp remote servers may carry a literal `headers` object.
-    // acps http `headers` are `{name, value_ref}` secret-store references, so a
-    // literal header table cannot be represented; classify by key name so a
-    // credential-bearing table surfaces as credentials rather than a generic
-    // mapping failure.
+    // Amp remote servers may carry a literal `headers` object. acps http
+    // `headers` value positions are secret-store indirections (whole-value
+    // `value_ref` or a `${NAME}` template that must contain at least one
+    // ref), so a literal header table still cannot be represented; classify
+    // by key name so a credential-bearing table surfaces as credentials
+    // rather than a generic mapping failure.
     if matches!(dialect, JsonMcpDialect::Amp)
         && let Some(headers) = object.get("headers")
     {

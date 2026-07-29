@@ -386,9 +386,6 @@ pub enum StackError {
     #[error("agent.install.type must be `shell` (the only operator-facing install type)")]
     InvalidAgentInstallType,
 
-    #[error("{field} must start with http:// or https://")]
-    UrlMustBeHttp { field: &'static str },
-
     #[error("{field} must start with https://")]
     UrlMustBeHttps { field: &'static str },
 
@@ -715,6 +712,18 @@ pub enum StackError {
 
     #[error("secret ref name `{name}` is declared more than once across the config")]
     DuplicateSecretRef { name: String },
+
+    #[error("secret template at `{field}` is invalid: {reason}")]
+    SecretTemplateInvalid {
+        field: &'static str,
+        reason: &'static str,
+    },
+
+    #[error("`{field}` declares env var `{name}` more than once")]
+    DuplicateEnvVarName { field: &'static str, name: String },
+
+    #[error("mcp header `{header}` must set exactly one of `value_ref` or `value`")]
+    InvalidHeaderValueSource { header: String },
 
     // === permission / mcp / dependencies runtime + config ===
     #[error("permissions.timeout_action must be one of deny, approve")]
