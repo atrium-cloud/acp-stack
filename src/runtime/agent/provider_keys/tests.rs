@@ -600,3 +600,138 @@ fn env_keyed_values_reject_empty_value() {
         .expect_err("empty value must be rejected");
     assert!(invalid_param_reason(error).contains("must not be empty"));
 }
+
+#[test]
+fn embedded_claude_code_profiles_parse_from_provider_metadata() {
+    assert!(is_claude_code_profiled_provider("deepseek"));
+    assert!(is_claude_code_profiled_provider("xiaomi-token-plan-sgp"));
+    assert!(is_claude_code_profiled_provider("anthropic"));
+    assert!(!is_claude_code_profiled_provider("openai"));
+
+    let anthropic = claude_code_profile_for_provider_id("anthropic").expect("anthropic profile");
+    assert!(!anthropic.agent_native_auth);
+    assert!(anthropic.base_url.is_none());
+    assert!(anthropic.env.is_empty());
+}
+
+#[test]
+fn claude_code_native_auth_profiles_resolve_no_api_key() {
+    for provider_id in ["amazon-bedrock", "google-vertex-anthropic"] {
+        let profile = claude_code_profile_for_provider_id(provider_id)
+            .unwrap_or_else(|| panic!("{provider_id} profile should exist"));
+        assert!(profile.agent_native_auth);
+        assert_eq!(
+            env_var_for_agent_provider_id("claude-code", provider_id),
+            None
+        );
+    }
+}
+
+#[test]
+fn claude_code_profiles_declare_role_model_defaults() {
+    let cases = [
+        (
+            "deepseek",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash",
+        ),
+        (
+            "zai",
+            "glm-5.2[1m]",
+            "glm-5.2[1m]",
+            "glm-5.2[1m]",
+            "GLM-4.7",
+        ),
+    ];
+
+    for (provider_id, default_model, opus_model, sonnet_model, haiku_model) in cases {
+        let profile = claude_code_profile_for_provider_id(provider_id)
+            .unwrap_or_else(|| panic!("{provider_id} profile"));
+
+        assert_eq!(profile.default_model.as_deref(), Some(default_model));
+        assert_eq!(profile.default_opus_model.as_deref(), Some(opus_model));
+        assert_eq!(profile.default_sonnet_model.as_deref(), Some(sonnet_model));
+        assert_eq!(profile.default_haiku_model.as_deref(), Some(haiku_model));
+    }
+}
+
+#[test]
+fn invalid_mapping_rejects_claude_code_profile_without_agent_support() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["pi"]
+
+[providers.claude_code]
+default_model = "some-model"
+"#,
+    )
+    .expect_err("claude_code profile without claude-code support fails");
+
+    assert!(err.to_string().contains("does not support `claude-code`"));
+}
+
+#[test]
+fn invalid_mapping_rejects_claude_code_role_models_without_default_model() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["claude-code"]
+
+[providers.claude_code]
+default_opus_model = "opus-model"
+"#,
+    )
+    .expect_err("role model defaults without default_model fails");
+
+    assert!(err.to_string().contains("without default_model"));
+}
+
+#[test]
+fn invalid_mapping_rejects_claude_code_native_auth_with_api_key_env_var() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["claude-code"]
+
+[providers.api_key_env_vars]
+claude-code = "SOLO_API_KEY"
+
+[providers.claude_code]
+agent_native_auth = true
+"#,
+    )
+    .expect_err("native auth with claude-code api key env var fails");
+
+    assert!(err.to_string().contains("native auth"));
+}
+
+#[test]
+fn invalid_mapping_rejects_claude_code_native_auth_with_api_key_mapping() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[api_keys]]
+env_var = "SOLO_API_KEY"
+provider_ids = ["solo"]
+
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["claude-code"]
+
+[providers.claude_code]
+agent_native_auth = true
+"#,
+    )
+    .expect_err("native auth with api key mapping fails");
+
+    assert!(err.to_string().contains("native auth"));
+}

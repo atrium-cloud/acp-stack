@@ -15,15 +15,13 @@ use toml::{Value as TomlValue, map::Map as TomlMap};
 use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi};
 use crate::error::{Result, StackError};
 use crate::fs_util::parent_dir;
-use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, ClaudeCodeProviderProfile, profile_for_provider_id,
-};
 use crate::runtime::agent::config_io::{
     ensure_object_field, ensure_toml_table_field, insert_if_missing, read_json_object,
     read_toml_table, read_yaml_mapping, write_json_object, write_toml_table, write_yaml_mapping,
 };
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, effective_active_provider_ids,
+    CLAUDE_CODE_AGENT_ID, ClaudeCodeProviderProfile, agent_provider_id_for_provider_id,
+    claude_code_profile_for_provider_id, effective_active_provider_ids,
     env_var_for_agent_provider_id, provider_name_for_provider_id,
 };
 

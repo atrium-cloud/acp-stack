@@ -10,15 +10,12 @@ use crate::runtime::agent::acp_bridge::{
     AgentSessionConfigCategory, session_config_id_for_value, session_model_selection_for_value,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
-use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
-};
 use crate::runtime::agent::model_discovery::{
     fetch_session_config, model_value_is_explicit_without_discovery, resolve_advertised_model_value,
 };
 use crate::runtime::agent::provider_keys::{
-    agent_provider_id_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
-    required_env_refs_for_agent_provider_id,
+    CLAUDE_CODE_AGENT_ID, agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
+    env_refs_for_agent_id, env_var_for_agent_provider_id, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
@@ -493,7 +490,7 @@ fn claude_code_profile_default_model(config: &Config) -> Option<&'static str> {
         .agent
         .provider
         .as_ref()
-        .and_then(|provider| profile_for_provider_id(&provider.id))
+        .and_then(|provider| claude_code_profile_for_provider_id(&provider.id))
         .and_then(|profile| profile.default_model.as_deref())
         .filter(|model| !model.trim().is_empty())
 }

@@ -6,11 +6,10 @@ use crate::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
 use crate::error::{Result, StackError};
-use crate::runtime::agent::claude_code_provider_profiles::CLAUDE_CODE_AGENT_ID;
 use crate::runtime::agent::provider_keys::{
-    AgentProviderSummary, env_var_for_agent_provider_id, provider_id_is_known,
-    provider_id_supports_agent, provider_uses_agent_native_auth, providers_for_agent,
-    required_env_refs_for_agent_provider_id,
+    AgentProviderSummary, CLAUDE_CODE_AGENT_ID, env_var_for_agent_provider_id,
+    provider_id_is_known, provider_id_supports_agent, provider_uses_agent_native_auth,
+    providers_for_agent, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;

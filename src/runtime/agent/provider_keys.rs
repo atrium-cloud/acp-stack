@@ -12,9 +12,6 @@ use serde::Deserialize;
 
 use crate::config::{AgentConfig, AgentProviderConfig, Config};
 use crate::error::{Result, StackError};
-use crate::runtime::agent::claude_code_provider_profiles::{
-    CLAUDE_CODE_AGENT_ID, profile_for_provider_id,
-};
 use crate::secrets::SecretStore;
 
 pub use self::resolve::{
@@ -25,6 +22,7 @@ pub use self::resolve::{
 
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
+pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
 const CODEX_AGENT_ID: &str = "codex";
 const CODEX_NATIVE_AUTH_PROVIDER_ID: &str = "openai";
 
@@ -59,6 +57,37 @@ pub struct ProviderEnvMapping {
     pub companion_env_vars: Vec<String>,
     #[serde(default)]
     pub optional_env_vars: Vec<String>,
+    #[serde(default)]
+    pub claude_code: Option<ClaudeCodeProviderProfile>,
+}
+
+/// Claude Code-specific headless provisioning metadata for one provider.
+///
+/// `companion_env_vars`/`optional_env_vars` are `Option`s so an omitted list
+/// (fall back to the provider-level and env_vars.toml lists) is
+/// distinguishable from an explicitly empty one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ClaudeCodeProviderProfile {
+    #[serde(default)]
+    pub agent_native_auth: bool,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub default_opus_model: Option<String>,
+    #[serde(default)]
+    pub default_sonnet_model: Option<String>,
+    #[serde(default)]
+    pub default_haiku_model: Option<String>,
+    #[serde(default)]
+    pub set_subagent_model: bool,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub companion_env_vars: Option<Vec<String>>,
+    #[serde(default)]
+    pub optional_env_vars: Option<Vec<String>>,
 }
 
 impl ProviderEnvMapping {
@@ -316,6 +345,9 @@ impl ProviderKeyMapping {
                 format!("providers.{primary_id}.optional_env_vars"),
                 &mapping.optional_env_vars,
             )?;
+            if let Some(profile) = &mapping.claude_code {
+                self.validate_claude_code_profile(mapping, profile)?;
+            }
         }
 
         for mapping in &self.api_keys {
@@ -328,6 +360,101 @@ impl ProviderKeyMapping {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_claude_code_profile(
+        &self,
+        mapping: &ProviderEnvMapping,
+        profile: &ClaudeCodeProviderProfile,
+    ) -> Result<()> {
+        let primary_id = mapping.primary_id();
+        if !mapping
+            .agents
+            .iter()
+            .any(|agent| agent == CLAUDE_CODE_AGENT_ID)
+        {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` declares a Claude Code profile but does not support `{CLAUDE_CODE_AGENT_ID}`"
+            ));
+        }
+        if let Some(base_url) = profile.base_url.as_deref() {
+            validate_token(
+                &format!("providers.{primary_id}.claude_code.base_url"),
+                base_url,
+            )?;
+            if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
+                return provider_mapping_error(format!(
+                    "provider `{primary_id}` claude_code.base_url must be an HTTP(S) URL"
+                ));
+            }
+        }
+        if let Some(default_model) = profile.default_model.as_deref() {
+            validate_token(
+                &format!("providers.{primary_id}.claude_code.default_model"),
+                default_model,
+            )?;
+        }
+        let role_models = [
+            ("default_opus_model", profile.default_opus_model.as_deref()),
+            (
+                "default_sonnet_model",
+                profile.default_sonnet_model.as_deref(),
+            ),
+            (
+                "default_haiku_model",
+                profile.default_haiku_model.as_deref(),
+            ),
+        ];
+        if profile.default_model.is_none() && role_models.iter().any(|(_, model)| model.is_some()) {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` declares Claude Code role model defaults without default_model"
+            ));
+        }
+        for (field, model) in role_models {
+            if let Some(model) = model {
+                validate_token(
+                    &format!("providers.{primary_id}.claude_code.{field}"),
+                    model,
+                )?;
+            }
+        }
+        for (key, value) in &profile.env {
+            validate_token(
+                &format!("providers.{primary_id}.claude_code.env.key `{key}`"),
+                key,
+            )?;
+            validate_token(
+                &format!("providers.{primary_id}.claude_code.env.{key}"),
+                value,
+            )?;
+        }
+        if let Some(companions) = &profile.companion_env_vars {
+            validate_tokens(
+                format!("providers.{primary_id}.claude_code.companion_env_vars"),
+                companions,
+            )?;
+        }
+        if let Some(optional) = &profile.optional_env_vars {
+            validate_tokens(
+                format!("providers.{primary_id}.claude_code.optional_env_vars"),
+                optional,
+            )?;
+        }
+        if profile.agent_native_auth {
+            if mapping.api_key_env_vars.contains_key(CLAUDE_CODE_AGENT_ID) {
+                return provider_mapping_error(format!(
+                    "provider `{primary_id}` uses Claude Code native auth but declares a claude-code API-key env var"
+                ));
+            }
+            for provider_id in &mapping.id {
+                if self.mapping_for_provider_id(provider_id).is_some() {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` uses Claude Code native auth but has an API-key mapping"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -345,12 +472,6 @@ pub fn env_var_for_provider_id(provider_id: &str) -> Option<&'static str> {
 }
 
 pub fn env_var_for_agent_provider_id(agent_id: &str, provider_id: &str) -> Option<&'static str> {
-    if agent_id == CLAUDE_CODE_AGENT_ID
-        && let Some(profile) = profile_for_provider_id(provider_id)
-        && let Some(env_var) = profile.api_key_env_var.as_deref()
-    {
-        return Some(env_var);
-    }
     let mapping = ProviderKeyMapping::load_embedded();
     mapping.provider_mapping(provider_id).and_then(|provider| {
         if !provider.agents.iter().any(|id| id == agent_id) {
@@ -432,10 +553,22 @@ pub fn canonical_provider_id_for_agent_native_id(
         .map(|provider| provider.id)
 }
 
+pub fn claude_code_profile_for_provider_id(
+    provider_id: &str,
+) -> Option<&'static ClaudeCodeProviderProfile> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.claude_code.as_ref())
+}
+
+pub fn is_claude_code_profiled_provider(provider_id: &str) -> bool {
+    claude_code_profile_for_provider_id(provider_id).is_some()
+}
+
 pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
     (agent_id == CODEX_AGENT_ID && provider_id == CODEX_NATIVE_AUTH_PROVIDER_ID)
         || (agent_id == CLAUDE_CODE_AGENT_ID
-            && profile_for_provider_id(provider_id)
+            && claude_code_profile_for_provider_id(provider_id)
                 .is_some_and(|profile| profile.agent_native_auth))
 }
 
@@ -551,13 +684,20 @@ pub fn required_env_refs_for_agent_provider_id(
     api_key_ref: Option<&str>,
 ) -> Vec<String> {
     if agent_id == CLAUDE_CODE_AGENT_ID
-        && let Some(profile) = profile_for_provider_id(provider_id)
+        && let Some(profile) = claude_code_profile_for_provider_id(provider_id)
     {
         let mut refs = Vec::new();
         if let Some(api_key_ref) = api_key_ref {
             refs.push(api_key_ref.to_owned());
         }
-        refs.extend(profile.companion_env_vars.iter().cloned());
+        match &profile.companion_env_vars {
+            Some(companions) => refs.extend(companions.iter().cloned()),
+            None => refs.extend(
+                companion_env_refs_for_provider_id(provider_id)
+                    .into_iter()
+                    .map(str::to_owned),
+            ),
+        }
         return refs;
     }
     api_key_ref
@@ -583,15 +723,10 @@ pub fn companion_env_refs_for_agent_provider_id(
     provider_id: &str,
 ) -> Vec<&'static str> {
     if agent_id == CLAUDE_CODE_AGENT_ID
-        && let Some(profile) = profile_for_provider_id(provider_id)
+        && let Some(profile) = claude_code_profile_for_provider_id(provider_id)
+        && let Some(companions) = &profile.companion_env_vars
     {
-        return dedupe_refs(
-            profile
-                .companion_env_vars
-                .iter()
-                .map(|value| static_str(value))
-                .collect(),
-        );
+        return dedupe_refs(companions.iter().map(|value| static_str(value)).collect());
     }
     companion_env_refs_for_provider_id(provider_id)
 }
@@ -614,15 +749,10 @@ pub fn optional_env_refs_for_agent_provider_id(
     provider_id: &str,
 ) -> Vec<&'static str> {
     if agent_id == CLAUDE_CODE_AGENT_ID
-        && let Some(profile) = profile_for_provider_id(provider_id)
+        && let Some(profile) = claude_code_profile_for_provider_id(provider_id)
+        && let Some(optional) = &profile.optional_env_vars
     {
-        return dedupe_refs(
-            profile
-                .optional_env_vars
-                .iter()
-                .map(|value| static_str(value))
-                .collect(),
-        );
+        return dedupe_refs(optional.iter().map(|value| static_str(value)).collect());
     }
     optional_env_refs_for_provider_id(provider_id)
 }

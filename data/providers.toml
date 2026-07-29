@@ -7,11 +7,20 @@
 # [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [models.dev](https://models.dev/api.json)
 # Last updated on 2026-06-18
+#
+# A `[providers.claude_code]` sub-table carries Claude Code-specific headless
+# provisioning metadata (endpoint, model defaults, env). When the sub-table
+# omits companion_env_vars/optional_env_vars, lookups fall back to the
+# provider-level and env_vars.toml lists.
 
 [[providers]]
 id = ["anthropic"]
 name = "Anthropic"
 agents = ["pi", "opencode", "goose", "claude-code"]
+
+# First-party Anthropic API needs no provisioning extras; the empty sub-table
+# marks the provider as Claude Code-profiled.
+[providers.claude_code]
 
 [[providers]]
 id = ["azure-openai-responses"]
@@ -27,6 +36,13 @@ agents = ["pi", "opencode", "goose", "codex"]
 id = ["deepseek"]
 name = "DeepSeek"
 agents = ["pi", "opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://api.deepseek.com/anthropic"
+default_model = "deepseek-v4-flash"
+default_opus_model = "deepseek-v4-pro"
+default_sonnet_model = "deepseek-v4-flash"
+default_haiku_model = "deepseek-v4-flash"
 
 [[providers]]
 id = ["google"]
@@ -89,6 +105,14 @@ name = "Z.AI"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
 
+[providers.claude_code]
+base_url = "https://api.z.ai/api/anthropic"
+default_model = "glm-5.2[1m]"
+default_opus_model = "glm-5.2[1m]"
+default_sonnet_model = "glm-5.2[1m]"
+default_haiku_model = "GLM-4.7"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
+
 [[providers]]
 id = ["opencode"]
 name = "OpenCode Zen"
@@ -138,10 +162,20 @@ id = ["minimax"]
 name = "MiniMax"
 agents = ["pi", "opencode", "claude-code"]
 
+[providers.claude_code]
+base_url = "https://api.minimax.io/anthropic"
+default_model = "MiniMax-M3"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
 agents = ["pi", "opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://api.minimaxi.com/anthropic"
+default_model = "MiniMax-M3"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
 
 [[providers]]
 id = ["xiaomi"]
@@ -149,11 +183,19 @@ name = "Xiaomi"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
 
+[providers.claude_code]
+base_url = "https://api.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
+
 [[providers]]
 id = ["xiaomi-token-plan-cn"]
 name = "Xiaomi Token Plan (China)"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://token-plan-cn.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
 
 [[providers]]
 id = ["xiaomi-token-plan-ams"]
@@ -161,11 +203,19 @@ name = "Xiaomi Token Plan (Europe)"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
 
+[providers.claude_code]
+base_url = "https://token-plan-ams.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
+
 [[providers]]
 id = ["xiaomi-token-plan-sgp"]
 name = "Xiaomi Token Plan (Singapore)"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://token-plan-sgp.xiaomimimo.com/anthropic"
+default_model = "mimo-v2.5-pro"
 
 [[providers]]
 id = ["google-vertex"]
@@ -180,6 +230,14 @@ name = "Vertex (Anthropic)"
 agents = ["pi", "opencode", "claude-code"]
 companion_env_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"]
 optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+# Claude Code authenticates to Vertex with its own env vars, so it declares
+# companion/optional lists instead of falling back to the provider-level ones.
+[providers.claude_code]
+agent_native_auth = true
+env = { CLAUDE_CODE_USE_VERTEX = "1" }
+companion_env_vars = ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"]
+optional_env_vars = ["GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_VERTEX_BASE_URL"]
 
 [[providers]]
 id = ["amazon-bedrock"]
@@ -204,10 +262,20 @@ optional_env_vars = [
   "AWS_BEDROCK_FORCE_CACHE",
 ]
 
+# Optional AWS env vars fall back to the provider-level list above.
+[providers.claude_code]
+agent_native_auth = true
+env = { CLAUDE_CODE_USE_BEDROCK = "1" }
+
 [[providers]]
 id = ["microsoft-foundry"]
 name = "Microsoft Foundry"
 agents = ["claude-code"]
+
+# Companion/optional env vars fall back to the ANTHROPIC_FOUNDRY_API_KEY
+# lists in env_vars.toml.
+[providers.claude_code]
+env = { CLAUDE_CODE_USE_FOUNDRY = "1" }
 
 [[providers]]
 id = ["amp-code"]
@@ -485,10 +553,20 @@ id = ["minimax-cn-coding-plan"]
 name = "MiniMax Token Plan (minimaxi.com)"
 agents = ["opencode", "claude-code"]
 
+[providers.claude_code]
+base_url = "https://api.minimaxi.com/anthropic"
+default_model = "MiniMax-M3"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+
 [[providers]]
 id = ["minimax-coding-plan"]
 name = "MiniMax Token Plan (minimax.io)"
 agents = ["opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://api.minimax.io/anthropic"
+default_model = "MiniMax-M3"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
 
 [[providers]]
 id = ["mixlayer"]
@@ -509,6 +587,12 @@ agents = ["opencode"]
 id = ["moonshotai"]
 name = "Moonshot AI"
 agents = ["opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://api.moonshot.ai/anthropic"
+default_model = "kimi-k2.7-code"
+set_subagent_model = true
+env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144" }
 
 [[providers]]
 id = ["moonshotai-cn"]
@@ -734,6 +818,14 @@ agents = ["opencode"]
 id = ["zhipuai"]
 name = "Zhipu AI"
 agents = ["opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://api.z.ai/api/anthropic"
+default_model = "glm-5.2[1m]"
+default_opus_model = "glm-5.2[1m]"
+default_sonnet_model = "glm-5.2[1m]"
+default_haiku_model = "GLM-4.7"
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["zhipuai-coding-plan"]
