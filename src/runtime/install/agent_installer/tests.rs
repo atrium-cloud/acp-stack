@@ -216,10 +216,12 @@ fn select_install_path_captures_pinned_npm_version() {
     match resolved {
         ResolvedInstallSpec::Npm {
             package,
+            name,
             version,
             creates,
         } => {
             assert_eq!(package, "@scope/agent@1.2.3");
+            assert_eq!(name, "@scope/agent");
             assert_eq!(version.as_deref(), Some("1.2.3"));
             assert_eq!(creates, "agent");
         }
@@ -241,10 +243,12 @@ fn select_install_path_unpinned_npm_has_no_version() {
     match resolved {
         ResolvedInstallSpec::Npm {
             package,
+            name,
             version,
             creates,
         } => {
             assert_eq!(package, "@scope/agent");
+            assert_eq!(name, "@scope/agent");
             assert!(version.is_none());
             assert_eq!(creates, "agent");
         }
@@ -271,7 +275,8 @@ fi
 if [ "$1" = "install" ]; then
   test "$2" = "-g"
   test "$3" = "--prefix"
-  test "$5" = "@scope/agent@1.2.3"
+  test "$5" = "--allow-scripts=@scope/agent"
+  test "$6" = "@scope/agent@1.2.3"
   mkdir -p "$4/bin"
   printf agent > "$4/bin/agent"
   chmod 755 "$4/bin/agent"
@@ -325,7 +330,8 @@ if [ "$1" = "view" ]; then
   exit 0
 fi
 if [ "$1" = "install" ]; then
-  test "$5" = "@scope/agent@1.18.7"
+  test "$5" = "--allow-scripts=@scope/agent"
+  test "$6" = "@scope/agent@1.18.7"
   mkdir -p "$4/bin"
   printf agent > "$4/bin/agent"
   chmod 755 "$4/bin/agent"
@@ -617,7 +623,8 @@ fi
 if [ "$1" = "install" ]; then
   test "$2" = "-g"
   test "$3" = "--prefix"
-  test "$5" = "opencode-ai@1.2.3"
+  test "$5" = "--allow-scripts=opencode-ai"
+  test "$6" = "opencode-ai@1.2.3"
   mkdir -p "$4/bin"
   printf '#!/bin/sh\n' > "$4/bin/opencode"
   chmod 755 "$4/bin/opencode"
