@@ -46,11 +46,22 @@ jobs:
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
       - name: Validate tag and package version
+        id: validate
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           version="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)"
-          test "$RELEASE_TAG" = "v$version"
+          if [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            test "$RELEASE_TAG" = "v$version"
+            echo "nightly=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            # Nightly tag: the fourth component exists only in the tag, so the
+            # three-part prefix must match the package version.
+            test "${RELEASE_TAG%.*}" = "v$version"
+            echo "nightly=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -60,7 +71,13 @@ jobs:
         run: cargo install cargo-zigbuild --locked
 
       - name: Build release artifacts
-        run: bash scripts/build-release.sh
+        run: |
+          set -euo pipefail
+          # Pass the tag's version through so nightly (4-part) tags produce
+          # distinctly named artifacts and manifest entries; for 3-part tags
+          # this equals the Cargo.toml version and changes nothing.
+          export ACP_STACK_RELEASE_VERSION="${RELEASE_TAG#v}"
+          bash scripts/build-release.sh
 
       # Publishes to the release hosting service configured through repository
       # variables. Forks without those variables skip publication and keep the
@@ -73,18 +90,40 @@ jobs:
           PUBLISH_RUNTIME_PROFILE: ${{ vars.PUBLISH_RUNTIME_PROFILE }}
         run: bash scripts/publish-release.sh dist/acps-release.json acp-stack "$RELEASE_TAG"
 
+      # Nightlies (4-part tags) ship as prereleases with generated notes only;
+      # regular/major releases pair the tag with its curated changelog.
+      - name: Prepare release notes
+        id: notes
+        env:
+          IS_NIGHTLY: ${{ steps.validate.outputs.nightly }}
+        run: |
+          set -euo pipefail
+          if [[ "$IS_NIGHTLY" == "true" ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            body_file="$(mktemp)"
+            printf 'Nightly release %s — incremental build from main; not part of the stable update channel.\n' \
+              "$RELEASE_TAG" >"$body_file"
+            echo "body_path=$body_file" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "body_path=docs/changelogs/${RELEASE_TAG}.md" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ steps.notes.outputs.prerelease }}
           files: |
             dist/acp-stack-*.tar.gz
             dist/SHA256SUMS
             dist/install.sh
             dist/acps-release.json
-          # Release notes come from the curated per-version changelog committed at
-          # the tag (docs/changelogs/<tag>.md, e.g. docs/changelogs/v0.1.1.md);
-          # generated commit/PR notes are appended below it. The release fails if
-          # the file is missing, which keeps every tag paired with a changelog.
-          body_path: docs/changelogs/${{ env.RELEASE_TAG }}.md
+          # Regular/major release notes come from the curated per-version
+          # changelog committed at the tag (docs/changelogs/<tag>.md, e.g.
+          # docs/changelogs/v0.1.1.md); the release fails if that file is
+          # missing, which keeps every stable tag paired with a changelog.
+          # Nightlies use a generated placeholder body instead. In both cases
+          # generated commit/PR notes are appended below.
+          body_path: ${{ steps.notes.outputs.body_path }}
           generate_release_notes: true

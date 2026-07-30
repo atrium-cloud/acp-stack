@@ -9,9 +9,13 @@ set -euo pipefail
 #
 # Usage: scripts/build-release.sh [--classification regular|security-critical] [--breaking true|false] [--no-default-features]
 #
-# The git tag for a release must be `v<version>` where <version> is the
-# [package] version in Cargo.toml; install.sh derives the artifact filename
-# from the tag by stripping the leading `v`.
+# The git tag for a regular/major release is `v<version>` where <version> is
+# the [package] version in Cargo.toml; install.sh derives the artifact
+# filename from the tag by stripping the leading `v`. Nightly releases instead
+# carry a fourth component that exists only in the tag (`v<version>.<n>`); the
+# release workflow then passes ACP_STACK_RELEASE_VERSION=<version>.<n> so the
+# tarballs and the self-updater manifest are versioned by the full nightly
+# version. The compiled binary still reports the Cargo.toml base version.
 
 # ----- CONSTANTS -----
 readonly PROJECT="acp-stack"
@@ -24,8 +28,10 @@ readonly TARGETS=(
   "aarch64-unknown-linux-gnu"
 )
 readonly BINARIES=(acps)
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT
 readonly DIST_DIR="${REPO_ROOT}/dist"
 # ---------------------
 
@@ -94,9 +100,18 @@ cd "${REPO_ROOT}"
 # Single source of truth for the version: the Cargo manifest. Parsed without
 # sed so the script has no awk/sed dependency beyond tarball packaging.
 version_line="$(grep -m1 '^version = ' Cargo.toml)" || fail "could not read version from Cargo.toml"
-version="${version_line#version = \"}"
-version="${version%\"}"
-[[ -n "${version}" ]] || fail "parsed an empty version from Cargo.toml"
+cargo_version="${version_line#version = \"}"
+cargo_version="${cargo_version%\"}"
+[[ -n "${cargo_version}" ]] || fail "parsed an empty version from Cargo.toml"
+# Nightly releases override the packaging version with the tag's fourth
+# component; anything else must match the Cargo manifest exactly.
+version="${ACP_STACK_RELEASE_VERSION:-$cargo_version}"
+if [[ "${version}" != "${cargo_version}" ]]; then
+  [[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || fail "ACP_STACK_RELEASE_VERSION must be the Cargo.toml version or a 4-part nightly version, got: ${version}"
+  [[ "${version%.*}" == "${cargo_version}" ]] \
+    || fail "nightly version ${version} does not extend the Cargo.toml version ${cargo_version}"
+fi
 log "building ${PROJECT} v${version} for: ${TARGETS[*]}"
 
 # cargo-zigbuild compiles with zig but still links the rustup-managed Rust std
@@ -188,7 +203,7 @@ cat >&2 <<EOF
 build-release: done. Artifacts in ${DIST_DIR}:
 $(cd "${DIST_DIR}" && ls -1)
 
-To publish, cut the release with scripts/release.sh (commits, tags, and
-optionally pushes v${version}); the tag-triggered GitHub Actions workflow then
+To publish, cut the release with scripts/release.sh (tags and optionally
+pushes v${version}); the tag-triggered GitHub Actions workflow then
 builds and publishes the release artifacts.
 EOF
