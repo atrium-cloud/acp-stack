@@ -52,7 +52,10 @@ References:
     - Keep specs in `docs/specs/`.
 - Release workflows
     - Public release builds keep default Cargo features and are the only workflow that publishes GitHub Releases.
-    - Public releases require a human-authored changelog at `docs/changelogs/v<version>.md`, a human commit containing that changelog and release prep, then a human-created `v<version>` tag pointing at that commit.
+    - Release types via `scripts/release.sh`: nightly (default; tags `main` HEAD as `vX.Y.Z.N` with no version commit or changelog; published as a GitHub prerelease), `--regular` (`vX.Y.Z` → `vX.Y.(Z+1)`), and `--major` (`vX.Y.Z` → `vX.(Y+1).0`).
+    - Regular and major releases require a human-authored changelog at `docs/changelogs/v<version>.md`, a human commit containing that changelog and release prep, then a human-created `v<version>` tag pointing at that commit. Nightlies require none of these.
+    - A nightly's fourth version component lives only in the git tag and packaging names; Cargo.toml keeps the three-part base version, so nightly binaries report the base version via `acps --version`.
+    - Nightlies install via `install.sh --version vX.Y.Z.N` or explicit `acps update --version vX.Y.Z.N`. `acps update` never offers them automatically (prereleases are excluded from the latest channel).
     - Dev-build artifacts must be manual-only Actions artifacts and must build with `scripts/build-release.sh --no-default-features` so the binary omits `acps update`.
 - Before writing code
     - Explore first. Search for existing modules, docs, patterns, and naming.

@@ -19,7 +19,10 @@
 
 set -euo pipefail
 
-readonly STABLE_TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+# Stable tags are vMAJOR.MINOR.PATCH; nightly tags add a fourth component that
+# exists only in the tag and packaging names (the Cargo.toml version stays at
+# the three-part base).
+readonly RELEASE_TAG_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$'
 # Only this target is served from the release hosting service; the other
 # built targets ship via the GitHub Release alone.
 readonly PUBLISH_TARGET="x86_64-unknown-linux-gnu"
@@ -79,8 +82,8 @@ product="$2"
 version_tag="$3"
 
 [[ -f "$manifest_path" ]] || fail "manifest not found: $manifest_path"
-[[ "$version_tag" =~ $STABLE_TAG_RE ]] \
-    || fail "version tag must be a canonical stable vMAJOR.MINOR.PATCH tag, got: $version_tag"
+[[ "$version_tag" =~ $RELEASE_TAG_RE ]] \
+    || fail "version tag must be a canonical vMAJOR.MINOR.PATCH tag (optionally with a nightly .N suffix), got: $version_tag"
 [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]] \
     || fail "GitHub OIDC environment is missing; the job needs 'id-token: write' permission"
 [[ -n "${PUBLISH_BASE_URL:-}" ]] || fail "PUBLISH_BASE_URL is not configured"

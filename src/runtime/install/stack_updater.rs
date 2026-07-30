@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -577,7 +576,7 @@ fn validate_manifest(manifest: &StackReleaseManifest, release: &ReleaseResponse)
         StackError::GithubReleaseArchiveExtract {
             repo: REPOSITORY.to_owned(),
             reason: format!(
-                "manifest version `{}` is not valid semver",
+                "manifest version `{}` is not a valid release version",
                 manifest.version
             ),
         }
@@ -586,7 +585,7 @@ fn validate_manifest(manifest: &StackReleaseManifest, release: &ReleaseResponse)
         parse_version(&manifest.tag).ok_or_else(|| StackError::GithubReleaseArchiveExtract {
             repo: REPOSITORY.to_owned(),
             reason: format!(
-                "manifest tag `{}` does not contain valid semver",
+                "manifest tag `{}` does not contain a valid release version",
                 manifest.tag
             ),
         })?;
@@ -905,6 +904,19 @@ fn running_in_container() -> bool {
     railway || Path::new("/.dockerenv").exists()
 }
 
+// A release version is the strict semver core from Cargo.toml plus an
+// optional nightly component that exists only in tags and packaging names
+// (v0.1.1.2). A nightly orders after its base release (0.1.1 < 0.1.1.1) and
+// before the next patch release (0.1.1.9 < 0.1.2); the derived Ord gives
+// exactly this because Option orders None before Some.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    nightly: Option<u64>,
+}
+
 fn is_major_upgrade(current: &str, target: &str) -> bool {
     let Some(current) = parse_version(current) else {
         return false;
@@ -925,8 +937,36 @@ fn is_version_downgrade(current: &str, target: &str) -> bool {
     target < current
 }
 
-fn parse_version(value: &str) -> Option<Version> {
-    Version::parse(normalize_version(value)).ok()
+fn parse_version(value: &str) -> Option<ReleaseVersion> {
+    let mut parts = normalize_version(value).split('.');
+    let major = parse_version_component(parts.next()?)?;
+    let minor = parse_version_component(parts.next()?)?;
+    let patch = parse_version_component(parts.next()?)?;
+    let nightly = match parts.next() {
+        Some(part) => Some(parse_version_component(part)?),
+        None => None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(ReleaseVersion {
+        major,
+        minor,
+        patch,
+        nightly,
+    })
+}
+
+fn parse_version_component(part: &str) -> Option<u64> {
+    // Leading zeros are rejected for parity with the producer-side tag
+    // regexes: a non-canonical component must never alias a canonical one.
+    if part.is_empty()
+        || !part.bytes().all(|byte| byte.is_ascii_digit())
+        || (part.len() > 1 && part.starts_with('0'))
+    {
+        return None;
+    }
+    part.parse().ok()
 }
 
 fn normalize_version(value: &str) -> &str {

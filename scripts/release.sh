@@ -1,30 +1,43 @@
 #!/usr/bin/env bash
 
-# Prepare an acp-stack release commit and tag. The tag triggers the GitHub
-# Actions release workflow, which builds and publishes the artifacts; this
-# script only advances the version, pairs it with its changelog, and tags.
+# Prepare an acp-stack release. Nightly releases (the default) tag the current
+# main HEAD as vX.Y.Z.N without a version commit or changelog; regular and
+# major releases bump the package version, pair it with a curated changelog,
+# and create a release commit. The tag triggers the GitHub Actions release
+# workflow, which builds and publishes the artifacts; this script only
+# advances the version state and tags.
 
 set -euo pipefail
 
 # Release-policy constants live here so version and Git behavior are not split
 # across shell call sites.
-readonly DEFAULT_BUMP="patch"
 readonly RELEASE_BRANCH="main"
 readonly TAG_PREFIX="v"
 readonly COMMIT_PREFIX="chore: release v"
 readonly SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+readonly NIGHTLY_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 readonly RELEASE_FILES=(Cargo.toml Cargo.lock)
 
 usage() {
     cat <<'EOF'
-Prepare an acp-stack release commit and tag.
+Prepare an acp-stack release tag (and, for regular/major, a release commit).
 
 Usage:
-  scripts/release.sh [patch|minor|major|X.Y.Z] [--dry-run] [--push]
+  scripts/release.sh [--regular|--major|X.Y.Z] [--dry-run] [--push]
 
-The bump defaults to patch. A curated changelog must already exist at
-docs/changelogs/vX.Y.Z.md for the new version. Without --push, the release
-commit and tag remain local.
+Release types:
+  nightly (default)  Tag HEAD as vX.Y.Z.N, incrementing the nightly component
+                     (v0.1.1 -> v0.1.1.1 -> v0.1.1.2). For small fixes and
+                     minor incremental changes: no changelog, no version
+                     commit; the workflow publishes it as a GitHub prerelease.
+  --regular          Bump vX.Y.Z -> vX.Y.(Z+1). Marks a larger feature
+                     addition or refactor; requires a curated changelog.
+  --major            Bump vX.Y.Z -> vX.(Y+1).0. Same changelog requirement.
+  X.Y.Z              Explicit version, regular semantics.
+
+A curated changelog must already exist at docs/changelogs/vX.Y.Z.md for
+regular, major, and explicit releases. Without --push, the release commit
+(if any) and tag remain local.
 EOF
 }
 
@@ -101,10 +114,13 @@ next_version() {
     esac
 }
 
+# The latest release tag may be a stable vX.Y.Z tag or a nightly vX.Y.Z.N tag
+# of the same base version; git's version sort orders both shapes correctly.
 latest_release_tag() {
-    local tag
+    local tag version
     while IFS= read -r tag; do
-        if [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+        version="${tag#v}"
+        if [[ "$version" =~ $SEMVER_RE || "$version" =~ $NIGHTLY_RE ]]; then
             printf '%s\n' "$tag"
             return 0
         fi
@@ -112,22 +128,31 @@ latest_release_tag() {
     return 1
 }
 
-bump=""
+release_type="nightly"
+explicit_version=""
 do_push=0
 dry_run=0
 for argument in "$@"; do
     case "$argument" in
         --push) do_push=1 ;;
         --dry-run) dry_run=1 ;;
+        --regular|--major)
+            [[ "$release_type" == "nightly" ]] \
+                || fail "only one release type may be given"
+            release_type="${argument#--}"
+            ;;
         -h|--help) usage; exit 0 ;;
         -*) fail "unknown flag: $argument" ;;
         *)
-            [[ -z "$bump" ]] || fail "unexpected extra argument: $argument"
-            bump="$argument"
+            [[ "$release_type" == "nightly" ]] \
+                || fail "unexpected extra argument: $argument"
+            [[ "$argument" =~ $SEMVER_RE ]] \
+                || fail "explicit version must be strict X.Y.Z, got: $argument"
+            release_type="explicit"
+            explicit_version="$argument"
             ;;
     esac
 done
-bump="${bump:-$DEFAULT_BUMP}"
 if [[ "$dry_run" -eq 1 && "$do_push" -eq 1 ]]; then
     fail "--dry-run and --push cannot be combined"
 fi
@@ -157,21 +182,41 @@ current_version="$(read_package_version)" \
     || fail "could not read the [package] version from Cargo.toml"
 [[ "$current_version" =~ $SEMVER_RE ]] \
     || fail "package version must be stable SemVer, got: $current_version"
-current_tag="${TAG_PREFIX}${current_version}"
 latest_tag="$(latest_release_tag)" \
     || fail "no release baseline found; create and push v0.1.0 manually first"
-[[ "$latest_tag" == "$current_tag" ]] \
+latest_version="${latest_tag#v}"
+# A nightly tag extends the package version with a fourth component; its
+# three-part prefix is the base the nightly series belongs to.
+if [[ "$latest_version" =~ $NIGHTLY_RE ]]; then
+    latest_base="${latest_version%.*}"
+else
+    latest_base="$latest_version"
+fi
+[[ "$latest_base" == "$current_version" ]] \
     || fail "latest release tag $latest_tag does not match package version $current_version"
 
-new_version="$(next_version "$current_version" "$bump")"
+case "$release_type" in
+    nightly)
+        nightly_number=0
+        if [[ "$latest_version" =~ $NIGHTLY_RE ]]; then
+            nightly_number="${latest_version##*.}"
+        fi
+        new_version="${current_version}.$((10#$nightly_number + 1))"
+        ;;
+    regular) new_version="$(next_version "$current_version" patch)" ;;
+    major) new_version="$(next_version "$current_version" minor)" ;;
+    explicit) new_version="$(next_version "$current_version" "$explicit_version")" ;;
+esac
 new_tag="${TAG_PREFIX}${new_version}"
 if git show-ref --verify --quiet "refs/tags/$new_tag"; then
     fail "tag $new_tag already exists"
 fi
-# The release workflow pairs every tag with its curated changelog and fails
-# when it is missing, so require it before tagging.
-[[ -f "docs/changelogs/${new_tag}.md" ]] \
-    || fail "missing changelog docs/changelogs/${new_tag}.md for $new_tag"
+if [[ "$release_type" != "nightly" ]]; then
+    # The release workflow pairs every regular/major tag with its curated
+    # changelog and fails when it is missing, so require it before tagging.
+    [[ -f "docs/changelogs/${new_tag}.md" ]] \
+        || fail "missing changelog docs/changelogs/${new_tag}.md for $new_tag"
+fi
 
 commit_created=0
 tag_created=0
@@ -191,15 +236,18 @@ restore_release_state() {
 trap restore_release_state EXIT
 trap 'exit 130' INT TERM HUP
 
-printf 'release: preparing %s -> %s\n' "$current_version" "$new_version"
-write_package_version "$new_version"
-# Full resolution, not --no-deps: only then does cargo rewrite Cargo.lock
-# with the bumped package version, which the --locked release gates require.
-cargo metadata --format-version 1 >/dev/null
-git add -- "${RELEASE_FILES[@]}"
+printf 'release: preparing %s -> %s (%s)\n' "$current_version" "$new_version" "$release_type"
+if [[ "$release_type" != "nightly" ]]; then
+    write_package_version "$new_version"
+    # Full resolution, not --no-deps: only then does cargo rewrite Cargo.lock
+    # with the bumped package version, which the --locked release gates require.
+    cargo metadata --format-version 1 >/dev/null
+    git add -- "${RELEASE_FILES[@]}"
+fi
 
-# These are the tracked equivalent of the release-gate checks. The release
-# files are staged first so the release commit is exactly what passed.
+# These are the tracked equivalent of the release-gate checks. For regular and
+# major releases the release files are staged first so the release commit is
+# exactly what passed; nightlies tag HEAD, so the gates check that state.
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 # Tests must see the same non-interactive stdin as CI: interactivity checks
@@ -207,29 +255,51 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features </dev/null
 
 if [[ "$dry_run" -eq 1 ]]; then
-    printf 'release: dry run passed; would commit and tag %s\n' "$new_tag"
+    if [[ "$release_type" == "nightly" ]]; then
+        printf 'release: dry run passed; would tag HEAD as %s\n' "$new_tag"
+    else
+        printf 'release: dry run passed; would commit and tag %s\n' "$new_tag"
+    fi
     git restore --staged -- "${RELEASE_FILES[@]}"
     git restore --worktree -- "${RELEASE_FILES[@]}"
     trap - EXIT INT TERM HUP
     exit 0
 fi
 
-git commit --quiet -m "${COMMIT_PREFIX}${new_version}" -- "${RELEASE_FILES[@]}"
-commit_created=1
+if [[ "$release_type" != "nightly" ]]; then
+    git commit --quiet -m "${COMMIT_PREFIX}${new_version}" -- "${RELEASE_FILES[@]}"
+    commit_created=1
+fi
 git tag "$new_tag"
 tag_created=1
 
-# From this point the local commit and tag are intentional release state. A
-# failed network push keeps them available for an explicit retry.
+# From this point the local commit (if any) and tag are intentional release
+# state. A failed network push keeps them available for an explicit retry.
 trap - EXIT INT TERM HUP
-printf 'release: created commit and tag %s\n' "$new_tag"
-if [[ "$do_push" -eq 1 ]]; then
-    if ! git push --atomic origin "$RELEASE_BRANCH" "refs/tags/$new_tag"; then
-        printf 'release: push failed; local commit and tag %s were kept for retry\n' "$new_tag" >&2
-        exit 1
-    fi
-    printf 'release: pushed %s and %s\n' "$RELEASE_BRANCH" "$new_tag"
+if [[ "$release_type" == "nightly" ]]; then
+    printf 'release: created nightly tag %s\n' "$new_tag"
 else
-    printf 'release: next: git push --atomic origin %s refs/tags/%s\n' \
-        "$RELEASE_BRANCH" "$new_tag"
+    printf 'release: created commit and tag %s\n' "$new_tag"
+fi
+if [[ "$do_push" -eq 1 ]]; then
+    if [[ "$release_type" == "nightly" ]]; then
+        if ! git push origin "refs/tags/$new_tag"; then
+            printf 'release: push failed; local tag %s was kept for retry\n' "$new_tag" >&2
+            exit 1
+        fi
+        printf 'release: pushed %s\n' "$new_tag"
+    else
+        if ! git push --atomic origin "$RELEASE_BRANCH" "refs/tags/$new_tag"; then
+            printf 'release: push failed; local commit and tag %s were kept for retry\n' "$new_tag" >&2
+            exit 1
+        fi
+        printf 'release: pushed %s and %s\n' "$RELEASE_BRANCH" "$new_tag"
+    fi
+else
+    if [[ "$release_type" == "nightly" ]]; then
+        printf 'release: next: git push origin refs/tags/%s\n' "$new_tag"
+    else
+        printf 'release: next: git push --atomic origin %s refs/tags/%s\n' \
+            "$RELEASE_BRANCH" "$new_tag"
+    fi
 fi

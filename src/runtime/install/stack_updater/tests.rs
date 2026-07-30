@@ -197,7 +197,7 @@ fn manual_policy_never_auto_installs_with_breaking_override() {
 }
 
 #[test]
-fn manifest_version_must_match_tag_semver() {
+fn manifest_version_must_match_tag_release_version() {
     let release = ReleaseResponse {
         tag_name: "v0.1.1".to_owned(),
         prerelease: false,
@@ -209,8 +209,101 @@ fn manifest_version_must_match_tag_semver() {
     assert!(err.to_string().contains("does not match tag"));
 
     manifest.version = "not-semver".to_owned();
-    let err = validate_manifest(&manifest, &release).expect_err("invalid semver should fail");
-    assert!(err.to_string().contains("not valid semver"));
+    let err = validate_manifest(&manifest, &release).expect_err("invalid version should fail");
+    assert!(err.to_string().contains("not a valid release version"));
+}
+
+#[test]
+fn nightly_manifest_version_validates_against_nightly_tag() {
+    let release = ReleaseResponse {
+        tag_name: "v0.1.1.2".to_owned(),
+        prerelease: true,
+        assets: Vec::new(),
+    };
+    let nightly = manifest("0.1.1.2", StackReleaseClassification::Regular);
+    validate_manifest(&nightly, &release).expect("nightly manifest should validate");
+}
+
+#[test]
+fn release_version_parsing_accepts_stable_and_nightly_shapes() {
+    assert_eq!(
+        parse_version("v0.1.1"),
+        Some(ReleaseVersion {
+            major: 0,
+            minor: 1,
+            patch: 1,
+            nightly: None,
+        })
+    );
+    assert_eq!(
+        parse_version("0.1.1.12"),
+        Some(ReleaseVersion {
+            major: 0,
+            minor: 1,
+            patch: 1,
+            nightly: Some(12),
+        })
+    );
+    for invalid in [
+        "",
+        "0.1",
+        "0.1.1.1.1",
+        "0.1.1-rc",
+        "0.1.x",
+        "v",
+        "0.1.1+build",
+        "0.1.01",
+        "01.1.1",
+    ] {
+        assert_eq!(parse_version(invalid), None, "{invalid} should be rejected");
+    }
+}
+
+#[test]
+fn mismatched_nightly_component_fails_manifest_validation() {
+    let release = ReleaseResponse {
+        tag_name: "v0.1.1.2".to_owned(),
+        prerelease: true,
+        assets: Vec::new(),
+    };
+    let mut mismatched = manifest("0.1.1.2", StackReleaseClassification::Regular);
+    mismatched.version = "0.1.1.3".to_owned();
+    let err = validate_manifest(&mismatched, &release).expect_err("mismatch should fail");
+    assert!(err.to_string().contains("does not match tag"));
+}
+
+#[test]
+fn major_upgrade_detection_handles_nightly_versions() {
+    assert!(is_major_upgrade("0.1.1.2", "1.0.0"));
+    assert!(!is_major_upgrade("0.1.1.2", "0.2.0.1"));
+}
+
+#[test]
+fn nightly_versions_order_between_base_and_next_patch() {
+    let base = parse_version("0.1.1").expect("base");
+    let nightly_one = parse_version("0.1.1.1").expect("nightly 1");
+    let nightly_two = parse_version("0.1.1.2").expect("nightly 2");
+    let next_patch = parse_version("0.1.2").expect("next patch");
+    assert!(base < nightly_one && nightly_one < nightly_two && nightly_two < next_patch);
+    // A same-base stable is a downgrade target from a nightly install; the
+    // next patch release and later nightlies are not.
+    assert!(is_version_downgrade("0.1.1.2", "0.1.1"));
+    assert!(!is_version_downgrade("0.1.1.2", "0.1.2"));
+    assert!(!is_version_downgrade("0.1.1", "0.1.1.1"));
+}
+
+#[test]
+fn compatible_policy_installs_nightly_release() {
+    let nightly = manifest("0.1.1.1", StackReleaseClassification::Regular);
+    let decision = update_decision(
+        StackUpdatePolicy::Compatible,
+        "0.1.1",
+        &nightly,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(decision, StackUpdateDecision::Install);
 }
 
 #[test]
