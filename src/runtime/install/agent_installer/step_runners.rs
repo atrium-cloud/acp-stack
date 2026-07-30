@@ -25,6 +25,15 @@ use super::{
 
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STDERR_TAIL_BYTES: usize = 2 * 1024;
+/// npm 12 skips lifecycle scripts that no `allowScripts` entry covers, and the
+/// skip is soft: npm still exits 0 and links the bin. Agents like `opencode-ai`
+/// download their real binary from a postinstall, so without an explicit
+/// allowance a stub lands on PATH and the install looks successful. Only the
+/// installed package itself is approved; transitive scripts keep npm's default
+/// skip-and-report behavior. Deliberately not `--strict-allow-scripts`: that
+/// would hard-fail the install over an unapproved script anywhere in the
+/// dependency tree, and npm-only agents have no fallback path to move on to.
+const NPM_ALLOW_SCRIPTS_FLAG: &str = "--allow-scripts";
 
 /// Pick the install path to attempt for a given field. Honors a pinned
 /// version (github > npm) when supplied, otherwise walks the floating
@@ -43,6 +52,7 @@ pub(super) fn select_install_path(
         if let Some(npm) = &install.npm {
             return Ok(ResolvedInstallSpec::Npm {
                 package: format!("{}@{version}", npm.package),
+                name: npm.package.clone(),
                 creates: npm.creates.clone(),
                 version: Some(version.to_owned()),
             });
@@ -64,6 +74,7 @@ pub(super) fn select_install_path(
     if let Some(npm) = &install.npm {
         return Ok(ResolvedInstallSpec::Npm {
             package: npm.package.clone(),
+            name: npm.package.clone(),
             creates: npm.creates.clone(),
             version: None,
         });
@@ -154,6 +165,7 @@ pub(super) fn run_install_step(
         }
         ResolvedInstallSpec::Npm {
             package,
+            name,
             creates,
             version,
         } => {
@@ -171,7 +183,7 @@ pub(super) fn run_install_step(
                     Err(step) => return *step,
                 },
             };
-            let result = run_npm_install(&package, agent_env, workspace_root, dest_dir);
+            let result = run_npm_install(&package, &name, agent_env, workspace_root, dest_dir);
             shell_step_with_creates(
                 step_label,
                 started_at,
@@ -462,6 +474,7 @@ static NPM_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn run_npm_install(
     package: &str,
+    name: &str,
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
@@ -477,6 +490,7 @@ fn run_npm_install(
         "-g".to_owned(),
         "--prefix".to_owned(),
         prefix.to_string_lossy().into_owned(),
+        format!("{NPM_ALLOW_SCRIPTS_FLAG}={name}"),
         package.to_owned(),
     ];
     let _guard = NPM_INSTALL_LOCK

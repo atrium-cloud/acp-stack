@@ -340,6 +340,13 @@ pub(super) enum ResolvedInstallSpec {
     },
     Npm {
         package: String,
+        /// Package name as declared in the install spec, passed to npm's
+        /// `--allow-scripts`. Captured separately because `package` may carry
+        /// a resolved `@version` suffix and scoped names make stripping it
+        /// back off ambiguous. May itself carry a version when the spec
+        /// declares one; npm's `allowScripts` accepts pinned `pkg@version`
+        /// entries, so either form matches.
+        name: String,
         creates: String,
         /// Pinned version when the registry/`acps init` resolved one.
         /// Unpinned npm installs resolve their version with `npm view` before
