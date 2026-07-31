@@ -137,7 +137,7 @@ async fn status_agent_returns_adapter_metadata_when_configured() {
     assert_eq!(body["data"]["agent"]["adapter"]["id"], "codex-acp");
     assert_eq!(
         body["data"]["agent"]["adapter"]["source_url"],
-        "https://github.com/zed-industries/codex-acp"
+        "https://github.com/agentclientprotocol/codex-acp"
     );
 }
 

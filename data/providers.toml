@@ -6,7 +6,7 @@
 # [Amp manual](https://ampcode.com/manual)
 # [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-06-18
+# Last updated on 2026-08-01
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
@@ -39,10 +39,11 @@ agents = ["pi", "opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://api.deepseek.com/anthropic"
-default_model = "deepseek-v4-flash"
-default_opus_model = "deepseek-v4-pro"
-default_sonnet_model = "deepseek-v4-flash"
+default_model = "deepseek-v4-pro[1m]"
+default_opus_model = "deepseek-v4-pro[1m]"
+default_sonnet_model = "deepseek-v4-pro[1m]"
 default_haiku_model = "deepseek-v4-flash"
+env = { CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash", CLAUDE_CODE_EFFORT_LEVEL = "max" }
 
 [[providers]]
 id = ["google"]
@@ -111,7 +112,7 @@ default_model = "glm-5.2[1m]"
 default_opus_model = "glm-5.2[1m]"
 default_sonnet_model = "glm-5.2[1m]"
 default_haiku_model = "GLM-4.7"
-env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["opencode"]
@@ -149,13 +150,24 @@ together = "pi"
 togetherai = "opencode"
 
 [[providers]]
-id = ["kimi-coding", "kimi-for-coding"]
+id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan"]
 name = "Kimi For Coding"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "claude-code"]
+
+# Kimi For Coding's Claude Code endpoint speaks Anthropic Messages at the
+# /coding/ root (no /anthropic suffix). Tier-universal defaults: the
+# `kimi-for-coding` model and 256K windows are available on every plan;
+# higher tiers can pin k3-256k or k3[1m] per the Kimi Code docs.
+[providers.claude_code]
+base_url = "https://api.kimi.com/coding/"
+default_model = "kimi-for-coding"
+set_subagent_model = true
+env = { CLAUDE_CODE_EFFORT_LEVEL = "high", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144", CLAUDE_CODE_MAX_CONTEXT_TOKENS = "262144" }
 
 [providers.provider_ids]
 kimi-coding = "pi"
 kimi-for-coding = "opencode"
+kimi-coding-plan = "claude-code"
 
 [[providers]]
 id = ["minimax"]
@@ -165,7 +177,7 @@ agents = ["pi", "opencode", "claude-code"]
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
 default_model = "MiniMax-M3"
-env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["minimax-cn"]
@@ -175,7 +187,7 @@ agents = ["pi", "opencode", "claude-code"]
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
 default_model = "MiniMax-M3"
-env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["xiaomi"]
@@ -556,7 +568,7 @@ agents = ["opencode", "claude-code"]
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
 default_model = "MiniMax-M3"
-env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["minimax-coding-plan"]
@@ -566,7 +578,7 @@ agents = ["opencode", "claude-code"]
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
 default_model = "MiniMax-M3"
-env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "512000" }
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["mixlayer"]
@@ -590,14 +602,20 @@ agents = ["opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://api.moonshot.ai/anthropic"
-default_model = "kimi-k2.7-code"
+default_model = "kimi-k3[1m]"
 set_subagent_model = true
-env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "262144" }
+env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576", CLAUDE_CODE_EFFORT_LEVEL = "max" }
 
 [[providers]]
 id = ["moonshotai-cn"]
 name = "Moonshot AI (China)"
-agents = ["opencode"]
+agents = ["opencode", "claude-code"]
+
+[providers.claude_code]
+base_url = "https://api.moonshot.cn/anthropic"
+default_model = "kimi-k3[1m]"
+set_subagent_model = true
+env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576", CLAUDE_CODE_EFFORT_LEVEL = "max" }
 
 [[providers]]
 id = ["morph"]
@@ -825,7 +843,7 @@ default_model = "glm-5.2[1m]"
 default_opus_model = "glm-5.2[1m]"
 default_sonnet_model = "glm-5.2[1m]"
 default_haiku_model = "GLM-4.7"
-env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
+env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
 id = ["zhipuai-coding-plan"]

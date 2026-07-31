@@ -190,7 +190,7 @@ pub fn codex_adapter() -> AgentAdapterConfig {
         id: "codex-acp".to_owned(),
         name: "Codex ACP Adapter".to_owned(),
         upstream_agent: "codex-cli".to_owned(),
-        source_url: Some("https://github.com/zed-industries/codex-acp".to_owned()),
+        source_url: Some("https://github.com/agentclientprotocol/codex-acp".to_owned()),
     }
 }
 

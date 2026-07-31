@@ -119,6 +119,10 @@ fn write_claude_provider_env(
     }
     if let Some(model) = configured_provider_model(config).filter(|model| !model.trim().is_empty())
     {
+        // Profile env keys such as DeepSeek's CLAUDE_CODE_SUBAGENT_MODEL stay
+        // in effect under an explicit model pin so the provider's recommended
+        // cheap subagent routing is preserved; set_subagent_model profiles
+        // still re-point the subagent at the pinned model below.
         insert_claude_model_env(env, model, profile.set_subagent_model);
     } else {
         insert_claude_profile_default_model_env(env, profile);
@@ -314,28 +318,30 @@ mod tests {
             settings["env"]["ANTHROPIC_BASE_URL"],
             "https://api.moonshot.ai/anthropic"
         );
-        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "kimi-k2.7-code");
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "kimi-k3[1m]");
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
-            "kimi-k2.7-code"
+            "kimi-k3[1m]"
         );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
-            "kimi-k2.7-code"
+            "kimi-k3[1m]"
         );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
-            "kimi-k2.7-code"
+            "kimi-k3[1m]"
         );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
-            "kimi-k2.7-code"
+            "kimi-k3[1m]"
         );
-        assert_eq!(
-            settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-            "kimi-k2.7-code"
-        );
+        assert_eq!(settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "kimi-k3[1m]");
         assert_eq!(settings["env"]["ENABLE_TOOL_SEARCH"], "false");
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+            "1048576"
+        );
+        assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max");
         assert_eq!(settings["apiKeyHelper"], "printenv MOONSHOT_API_KEY");
         assert!(!settings.to_string().contains("sk-"));
 
@@ -388,7 +394,87 @@ mod tests {
             "1000000"
         );
         assert_eq!(settings["env"]["API_TIMEOUT_MS"], "3000000");
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+            "1"
+        );
         assert_eq!(settings["apiKeyHelper"], "printenv ZAI_API_KEY");
+    }
+
+    #[test]
+    fn claude_code_deepseek_uses_flash_for_haiku_and_subagents() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["DEEPSEEK_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "deepseek".to_owned(),
+            model: None,
+            api_key_ref: Some("DEEPSEEK_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tempdir.path().join(".claude/settings.json"))
+                .expect("settings"),
+        )
+        .expect("settings parse");
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "deepseek-v4-pro[1m]");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+            "deepseek-v4-flash"
+        );
+        assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max");
+
+        config.agent.provider.as_mut().expect("provider").model =
+            Some("deepseek-v4-pro[1m]".to_owned());
+        provision_agent_headless_config(&config, tempdir.path()).expect("reprovision");
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tempdir.path().join(".claude/settings.json"))
+                .expect("settings"),
+        )
+        .expect("settings parse");
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn claude_code_kimi_for_coding_uses_coding_endpoint_and_kimi_key() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["KIMI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "kimi-coding".to_owned(),
+            model: None,
+            api_key_ref: Some("KIMI_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tempdir.path().join(".claude/settings.json"))
+                .expect("settings"),
+        )
+        .expect("settings parse");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.kimi.com/coding/"
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "kimi-for-coding");
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+            "kimi-for-coding"
+        );
+        assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "high");
+        assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "262144");
+        assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144");
+        assert_eq!(settings["apiKeyHelper"], "printenv KIMI_API_KEY");
     }
 
     #[test]

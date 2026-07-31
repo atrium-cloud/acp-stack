@@ -249,6 +249,29 @@ fn provider_metadata_scopes_supported_agents() {
         env_var_for_agent_provider_id("claude-code", "moonshotai"),
         Some("MOONSHOT_API_KEY")
     );
+    assert!(provider_id_supports_agent("moonshotai-cn", "claude-code"));
+    assert_eq!(
+        env_var_for_agent_provider_id("claude-code", "moonshotai-cn"),
+        Some("MOONSHOT_API_KEY")
+    );
+    assert!(provider_id_supports_agent("kimi-coding", "claude-code"));
+    assert!(provider_id_supports_agent("kimi-for-coding", "claude-code"));
+    assert_eq!(
+        agent_provider_id_for_provider_id("claude-code", "kimi-coding"),
+        Some("kimi-coding-plan")
+    );
+    assert_eq!(
+        env_var_for_agent_provider_id("claude-code", "kimi-coding"),
+        Some("KIMI_API_KEY")
+    );
+    assert_eq!(
+        env_var_for_agent_provider_id("claude-code", "kimi-for-coding"),
+        Some("KIMI_API_KEY")
+    );
+    assert_eq!(
+        env_var_for_agent_provider_id("opencode", "kimi-for-coding"),
+        Some("KIMI_API_KEY")
+    );
     assert_eq!(
         env_var_for_agent_provider_id("claude-code", "amazon-bedrock"),
         None
@@ -632,9 +655,9 @@ fn claude_code_profiles_declare_role_model_defaults() {
     let cases = [
         (
             "deepseek",
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
+            "deepseek-v4-pro[1m]",
+            "deepseek-v4-pro[1m]",
+            "deepseek-v4-pro[1m]",
             "deepseek-v4-flash",
         ),
         (

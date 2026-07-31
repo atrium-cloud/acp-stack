@@ -26,7 +26,9 @@ Native-auth providers such as Amazon Bedrock and Google Vertex AI omit `api_key_
 
 Claude Code reads managed provider settings from `~/.claude/settings.json` and onboarding state from `~/.claude.json`. `acp-stack` writes Anthropic-compatible endpoint settings and model env vars there, while secrets stay in the encrypted secret store and are exposed through provider-specific env refs. Mapped third-party profiles can provide default Claude model env vars when no explicit provider model is pinned.
 
-Supported native Claude Code provider paths are Anthropic, Amazon Bedrock, Google Vertex AI for Claude, and Microsoft Foundry. Supported Anthropic-compatible mapped providers include DeepSeek, Moonshot AI/Kimi, Z.AI/Zhipu, MiniMax, and Xiaomi MiMo.
+Supported native Claude Code provider paths are Anthropic, Amazon Bedrock, Google Vertex AI for Claude, and Microsoft Foundry. Supported Anthropic-compatible mapped providers include [DeepSeek](https://api-docs.deepseek.com/guides/coding_agents/), [Moonshot AI/Kimi](https://platform.kimi.ai/docs/guide/claude-code-kimi), [Kimi For Coding](https://www.kimi.com/code/docs/en/third-party-tools/claude-code.html), [Z.AI/Zhipu](https://docs.z.ai/devpack/tool/claude), [MiniMax](https://platform.minimax.io/docs/token-plan/claude-code), and [Xiaomi MiMo](https://mimo.mi.com/docs/en-US/tokenplan/integration/claudecode).
+
+Moonshot AI defaults every Claude role and subagent to Kimi K3 with the one-million-token profile. DeepSeek defaults the main, Opus, Sonnet, and Fable roles to V4 Pro with the one-million-token profile, while Haiku and subagents use V4 Flash. Kimi For Coding defaults every role and subagent to `kimi-for-coding` with 256K context limits and high effort so the defaults work on every subscription tier; pin `k3-256k` or `k3[1m]` on higher tiers. MiniMax sets the auto-compact window to one million tokens to match MiniMax-M3's context window. Pinning an explicit provider model overrides the role model env vars but keeps the provider's recommended subagent routing — DeepSeek subagents stay on V4 Flash.
 
 Custom providers must expose an Anthropic Messages-compatible endpoint:
 

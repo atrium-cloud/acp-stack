@@ -138,7 +138,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "MOONSHOT_API_KEY"
-provider_ids = ["moonshotai"]
+provider_ids = ["moonshotai", "moonshotai-cn"]
 companion_env_vars = []
 optional_env_vars = []
 

@@ -255,7 +255,7 @@ fn embedded_registry_contains_only_curated_examples() {
             .npm
             .as_ref()
             .map(|install| install.package.as_str()),
-        Some("@zed-industries/codex-acp")
+        Some("@agentclientprotocol/codex-acp")
     );
     let codex_harness_github = codex
         .harness
@@ -378,13 +378,14 @@ fn embedded_registry_uses_per_install_arch_maps() {
     assert_eq!(amp_github.arch.aarch64.as_deref(), Some("aarch64"));
 
     let codex = catalog.lookup("codex").expect("codex entry exists");
-    let codex_github = codex
-        .adapter
-        .as_ref()
-        .and_then(|adapter| adapter.install.github.as_ref())
-        .expect("codex-acp github install");
-    assert_eq!(codex_github.arch.x86_64.as_deref(), Some("x86_64"));
-    assert_eq!(codex_github.arch.aarch64.as_deref(), Some("aarch64"));
+    assert!(
+        codex
+            .adapter
+            .as_ref()
+            .and_then(|adapter| adapter.install.github.as_ref())
+            .is_none(),
+        "codex-acp is npm-only since the agentclientprotocol move"
+    );
 }
 
 #[test]

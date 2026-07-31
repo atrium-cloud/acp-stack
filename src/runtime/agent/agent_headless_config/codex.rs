@@ -3,7 +3,7 @@ use super::*;
 const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
 // completions endpoint most OpenRouter clients configure by default.
-const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1/responses";
+const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 pub(super) fn provision_codex_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
@@ -156,10 +156,20 @@ fn provision_codex_main_config(config: &Config, home: &Path) -> Result<Option<Pa
         "base_url".to_owned(),
         TomlValue::String(CODEX_OPENROUTER_RESPONSES_BASE_URL.to_owned()),
     );
-    openrouter.insert(
-        "env_key".to_owned(),
-        TomlValue::String(native_ref.to_owned()),
+    // Command-based auth instead of env_key: per the OpenRouter Codex
+    // cookbook, a plain env_key authenticates but skips Codex's model-catalog
+    // refresh, leaving non-OpenAI models with fallback metadata.
+    openrouter.remove("env_key");
+    let mut auth = TomlMap::new();
+    auth.insert("command".to_owned(), TomlValue::String("sh".to_owned()));
+    auth.insert(
+        "args".to_owned(),
+        TomlValue::Array(vec![
+            TomlValue::String("-c".to_owned()),
+            TomlValue::String(format!("echo ${native_ref}")),
+        ]),
     );
+    openrouter.insert("auth".to_owned(), TomlValue::Table(auth));
     openrouter.insert(
         "wire_api".to_owned(),
         TomlValue::String("responses".to_owned()),
@@ -319,15 +329,30 @@ mod tests {
         assert_eq!(value["model_provider"].as_str(), Some("openrouter"));
         assert_eq!(
             value["model_providers"]["openrouter"]["base_url"].as_str(),
-            Some("https://openrouter.ai/api/v1/responses")
+            Some("https://openrouter.ai/api/v1")
         );
         assert_eq!(
             value["model_providers"]["openrouter"]["name"].as_str(),
             Some("OpenRouter")
         );
+        assert!(
+            value["model_providers"]["openrouter"]
+                .get("env_key")
+                .is_none(),
+            "command-based auth replaces env_key"
+        );
         assert_eq!(
-            value["model_providers"]["openrouter"]["env_key"].as_str(),
-            Some("OPENROUTER_API_KEY")
+            value["model_providers"]["openrouter"]["auth"]["command"].as_str(),
+            Some("sh")
+        );
+        assert_eq!(
+            value["model_providers"]["openrouter"]["auth"]["args"]
+                .as_array()
+                .map(|args| args
+                    .iter()
+                    .filter_map(TomlValue::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["-c", "echo $OPENROUTER_API_KEY"])
         );
         assert_eq!(
             value["model_providers"]["openrouter"]["wire_api"].as_str(),
