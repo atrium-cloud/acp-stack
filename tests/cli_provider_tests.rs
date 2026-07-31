@@ -1002,15 +1002,30 @@ fn agent_provider_use_codex_openrouter_writes_responses_provider_config() {
     assert_eq!(codex["model_provider"].as_str(), Some("openrouter"));
     assert_eq!(
         codex["model_providers"]["openrouter"]["base_url"].as_str(),
-        Some("https://openrouter.ai/api/v1/responses")
+        Some("https://openrouter.ai/api/v1")
     );
     assert_eq!(
         codex["model_providers"]["openrouter"]["name"].as_str(),
         Some("OpenRouter")
     );
+    assert!(
+        codex["model_providers"]["openrouter"]
+            .get("env_key")
+            .is_none(),
+        "command-based auth replaces env_key"
+    );
     assert_eq!(
-        codex["model_providers"]["openrouter"]["env_key"].as_str(),
-        Some("OPENROUTER_API_KEY")
+        codex["model_providers"]["openrouter"]["auth"]["command"].as_str(),
+        Some("sh")
+    );
+    assert_eq!(
+        codex["model_providers"]["openrouter"]["auth"]["args"]
+            .as_array()
+            .map(|args| args
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>()),
+        Some(vec!["-c", "echo $OPENROUTER_API_KEY"])
     );
     assert_eq!(
         codex["model_providers"]["openrouter"]["wire_api"].as_str(),
@@ -1425,6 +1440,16 @@ fn agent_provider_use_claude_code_third_party_presets_write_profiled_endpoints()
             api_key_ref: "MOONSHOT_API_KEY",
         },
         Case {
+            provider: "kimi-coding-plan",
+            base_url: "https://api.kimi.com/coding/",
+            api_key_ref: "KIMI_API_KEY",
+        },
+        Case {
+            provider: "moonshotai-cn",
+            base_url: "https://api.moonshot.cn/anthropic",
+            api_key_ref: "MOONSHOT_API_KEY",
+        },
+        Case {
             provider: "zai",
             base_url: "https://api.z.ai/api/anthropic",
             api_key_ref: "ZAI_API_KEY",
@@ -1554,21 +1579,41 @@ fn agent_provider_use_claude_code_third_party_provider_without_model_uses_profil
             provider: "deepseek",
             base_url: "https://api.deepseek.com/anthropic",
             api_key_ref: "DEEPSEEK_API_KEY",
-            model: "deepseek-v4-flash",
-            opus_model: "deepseek-v4-pro",
-            sonnet_model: "deepseek-v4-flash",
+            model: "deepseek-v4-pro[1m]",
+            opus_model: "deepseek-v4-pro[1m]",
+            sonnet_model: "deepseek-v4-pro[1m]",
             haiku_model: "deepseek-v4-flash",
-            subagent_model: None,
+            subagent_model: Some("deepseek-v4-flash"),
         },
         Case {
             provider: "moonshotai",
             base_url: "https://api.moonshot.ai/anthropic",
             api_key_ref: "MOONSHOT_API_KEY",
-            model: "kimi-k2.7-code",
-            opus_model: "kimi-k2.7-code",
-            sonnet_model: "kimi-k2.7-code",
-            haiku_model: "kimi-k2.7-code",
-            subagent_model: Some("kimi-k2.7-code"),
+            model: "kimi-k3[1m]",
+            opus_model: "kimi-k3[1m]",
+            sonnet_model: "kimi-k3[1m]",
+            haiku_model: "kimi-k3[1m]",
+            subagent_model: Some("kimi-k3[1m]"),
+        },
+        Case {
+            provider: "kimi-coding-plan",
+            base_url: "https://api.kimi.com/coding/",
+            api_key_ref: "KIMI_API_KEY",
+            model: "kimi-for-coding",
+            opus_model: "kimi-for-coding",
+            sonnet_model: "kimi-for-coding",
+            haiku_model: "kimi-for-coding",
+            subagent_model: Some("kimi-for-coding"),
+        },
+        Case {
+            provider: "moonshotai-cn",
+            base_url: "https://api.moonshot.cn/anthropic",
+            api_key_ref: "MOONSHOT_API_KEY",
+            model: "kimi-k3[1m]",
+            opus_model: "kimi-k3[1m]",
+            sonnet_model: "kimi-k3[1m]",
+            haiku_model: "kimi-k3[1m]",
+            subagent_model: Some("kimi-k3[1m]"),
         },
         Case {
             provider: "zai",

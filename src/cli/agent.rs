@@ -508,12 +508,12 @@ mod tests {
     #[test]
     fn build_agent_check_report_returns_stale_for_codex_adapter() {
         // Codex declares npm for both harness (`@openai/codex`) and adapter
-        // (`@zed-industries/codex-acp`). The install-path resolver prefers npm
+        // (`@agentclientprotocol/codex-acp`). The install-path resolver prefers npm
         // when both are present, so the mock provides both.
         let entry = embedded_entry("codex");
         let resolver = MockResolver::new()
             .with_npm("@openai/codex", "rust-v999.0.0")
-            .with_npm("@zed-industries/codex-acp", "9.9.9");
+            .with_npm("@agentclientprotocol/codex-acp", "9.9.9");
         let rows = vec![
             installer_row("harness", Some("rust-v0.50.0")),
             installer_row("adapter", Some("0.1.0")),
@@ -538,7 +538,7 @@ mod tests {
         let entry = embedded_entry("codex");
         let resolver = MockResolver::new()
             .with_npm("@openai/codex", "rust-v0.50.0")
-            .with_npm("@zed-industries/codex-acp", "0.1.0");
+            .with_npm("@agentclientprotocol/codex-acp", "0.1.0");
         let rows = vec![
             installer_row("harness", Some("rust-v0.50.0")),
             installer_row("adapter", Some("0.1.0")),
@@ -634,7 +634,7 @@ mod tests {
         let entry = embedded_entry("codex");
         let resolver = MockResolver::new()
             .with_npm("@openai/codex", "rust-v0.50.0")
-            .with_npm("@zed-industries/codex-acp", "0.1.0");
+            .with_npm("@agentclientprotocol/codex-acp", "0.1.0");
         let rows = vec![
             installer_row("harness", Some("rust-v0.50.0")),
             installer_row("adapter", None),

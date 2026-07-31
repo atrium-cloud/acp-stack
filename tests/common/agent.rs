@@ -157,7 +157,7 @@ pub fn test_config() -> Config {
         id: "codex-acp".to_owned(),
         name: "Codex ACP Adapter".to_owned(),
         upstream_agent: "codex-cli".to_owned(),
-        source_url: Some("https://github.com/zed-industries/codex-acp".to_owned()),
+        source_url: Some("https://github.com/agentclientprotocol/codex-acp".to_owned()),
     });
     // Replace the install recipe with something that completes in milliseconds.
     config.agent.install = Some(acp_stack::config::AgentInstallConfig {

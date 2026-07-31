@@ -297,20 +297,14 @@ testflight_expect_fs = ".acp-stack-testflight.txt"
 
 [agents.adapter]
 id = "codex-acp"
-github = "zed-industries/codex-acp"
+github = "agentclientprotocol/codex-acp"
 
+# Upstream moved to the agentclientprotocol org and no longer publishes
+# release binaries (last zed-industries assets are v0.16.0), so install is
+# npm-only like claude-agent-acp.
 [agents.adapter.install.npm]
-package = "@zed-industries/codex-acp"
+package = "@agentclientprotocol/codex-acp"
 creates = "codex-acp"
-
-[agents.adapter.install.github]
-asset_pattern = "codex-acp-*-{arch}-unknown-linux-gnu.tar.gz"
-archive = "tar.gz"
-binary_name = "codex-acp"
-
-[agents.adapter.install.github.arch]
-x86_64 = "x86_64"
-aarch64 = "aarch64"
 
 [agents.harness]
 id = "codex"

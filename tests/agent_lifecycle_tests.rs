@@ -134,7 +134,7 @@ async fn install_then_start_then_capabilities_then_stop() {
     assert_eq!(caps_body["data"]["adapter"]["id"], "codex-acp");
     assert_eq!(
         caps_body["data"]["adapter"]["source_url"],
-        "https://github.com/zed-industries/codex-acp"
+        "https://github.com/agentclientprotocol/codex-acp"
     );
 
     // Stop.
@@ -162,7 +162,7 @@ async fn install_then_start_then_capabilities_then_stop() {
     assert_eq!(payload["adapter"]["id"], "codex-acp");
     assert_eq!(
         payload["adapter"]["source_url"],
-        "https://github.com/zed-industries/codex-acp"
+        "https://github.com/agentclientprotocol/codex-acp"
     );
 }
 

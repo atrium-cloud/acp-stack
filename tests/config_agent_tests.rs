@@ -406,7 +406,7 @@ fn rejects_operator_written_agent_adapter() {
 id = "codex-acp"
 name = "Codex ACP Adapter"
 upstream_agent = "codex-cli"
-source_url = "https://github.com/zed-industries/codex-acp""#,
+source_url = "https://github.com/agentclientprotocol/codex-acp""#,
     );
     let error =
         load_config_from_str(&config).expect_err("operator-written adapter must be rejected");
@@ -424,7 +424,7 @@ fn canonical_export_omits_runtime_adapter_metadata() {
         id: "codex-acp".to_owned(),
         name: "Codex".to_owned(),
         upstream_agent: "codex-cli".to_owned(),
-        source_url: Some("https://github.com/zed-industries/codex-acp".to_owned()),
+        source_url: Some("https://github.com/agentclientprotocol/codex-acp".to_owned()),
     });
 
     let canonical = config
