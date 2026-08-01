@@ -73,6 +73,7 @@ use crate::runtime::agent::acp_bridge::{
     StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
     session_config_id_for_value, session_model_selection_for_value,
 };
+use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::secrets::SecretStore;
@@ -717,11 +718,22 @@ impl AgentSupervisor {
                 .as_ref()
                 .and_then(|provider| provider.model.as_deref())
         }) {
-            let AgentSessionModelSelection::ConfigOption { config_id } =
-                session_model_selection_for_value(&response, model)?;
-            bridge
-                .set_session_config_option(response.session_id.clone(), &config_id, model)
-                .await?;
+            if model_value_is_explicit_without_discovery(agent) {
+                // The harness reads this pin from its on-disk config at
+                // process start; the adapter's advertised list is an echo of
+                // it at best, so an exact-match set here can only fail
+                // spuriously.
+                tracing::debug!(
+                    model,
+                    "model provisioned on disk; skipping session/set_config_option"
+                );
+            } else {
+                let AgentSessionModelSelection::ConfigOption { config_id } =
+                    session_model_selection_for_value(&response, model)?;
+                bridge
+                    .set_session_config_option(response.session_id.clone(), &config_id, model)
+                    .await?;
+            }
         }
 
         // Persist after the agent confirms. If we inserted first and the

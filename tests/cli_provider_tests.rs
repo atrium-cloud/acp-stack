@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::fs;
 
 mod common;
+use common::agent::spawn_provider_models_server;
 use common::cli::*;
 
 fn seed_flat_secrets(home: &std::path::Path, env_names: &[&str]) {
@@ -2745,4 +2746,123 @@ creates = "opencode"
 "#,
             "",
         )
+}
+
+#[test]
+fn agent_provider_use_codex_openrouter_accepts_custom_model_without_discovery() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), codex_config())
+        .expect("config should be written");
+    seed_provider_credential(tempdir.path(), "openrouter", &["OPENROUTER_API_KEY"]);
+
+    // No ACP config-options fixture: codex takes the model verbatim for
+    // OpenRouter, so the command must succeed without spawning the agent.
+    // The dead-port base keeps the best-effort catalog refresh from ever
+    // reaching live `openrouter.ai`.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
+        .args([
+            "agent",
+            "provider",
+            "use",
+            "openrouter",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "model: deepseek/deepseek-v4-flash",
+        ));
+
+    let codex_path = tempdir.path().join(".codex").join("config.toml");
+    let codex: toml::Value =
+        toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
+            .expect("codex config should parse");
+    assert_eq!(codex["model"].as_str(), Some("deepseek/deepseek-v4-flash"));
+    assert_eq!(codex["model_provider"].as_str(), Some("openrouter"));
+}
+
+#[test]
+fn claude_code_provider_use_writes_available_models_from_live_catalog() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+        .expect("config should be written");
+    seed_provider_credential(tempdir.path(), "moonshotai", &["MOONSHOT_API_KEY"]);
+    let base = spawn_provider_models_server(json!({
+        "data": [
+            { "id": "kimi-k3", "name": "Kimi K3" },
+            { "id": "kimi-k3[1m]" },
+            { "id": "kimi-k2.7-code" },
+        ]
+    }));
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", &base)
+        .args([
+            "agent",
+            "provider",
+            "use",
+            "moonshotai",
+            "--model",
+            "kimi-k3",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("model: kimi-k3"));
+
+    let settings = claude_settings(tempdir.path());
+    assert_eq!(
+        settings["availableModels"],
+        json!(["kimi-k3", "kimi-k3[1m]", "kimi-k2.7-code"])
+    );
+    assert_eq!(settings["env"]["ANTHROPIC_MODEL"].as_str(), Some("kimi-k3"));
+
+    let cache_path = tempdir
+        .path()
+        .join(".config/acp-stack/provider-models.json");
+    let cache: Value = serde_json::from_str(
+        &fs::read_to_string(cache_path).expect("provider model cache should be readable"),
+    )
+    .expect("provider model cache parses");
+    assert_eq!(
+        cache["providers"]["moonshotai"]["models"][0]["value"],
+        "kimi-k3"
+    );
+}
+
+#[test]
+fn claude_code_provider_use_succeeds_and_omits_available_models_when_catalog_offline() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), claude_code_config())
+        .expect("config should be written");
+    seed_provider_credential(tempdir.path(), "moonshotai", &["MOONSHOT_API_KEY"]);
+
+    // Dead endpoint: the fetch must degrade to a warning, never fail the
+    // command or leave a stale availableModels list behind.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
+        .args([
+            "agent",
+            "provider",
+            "use",
+            "moonshotai",
+            "--model",
+            "kimi-k3",
+        ])
+        .assert()
+        .success();
+
+    let settings = claude_settings(tempdir.path());
+    assert!(settings.get("availableModels").is_none());
+    assert_eq!(settings["env"]["ANTHROPIC_MODEL"].as_str(), Some("kimi-k3"));
 }

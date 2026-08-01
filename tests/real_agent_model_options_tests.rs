@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use acp_stack::config::AgentConfig;
 use acp_stack::runtime::agent::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, SessionEventSink, session_config_values,
-    session_model_selection_for_value, session_model_values,
+    AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, SessionEventSink,
+    session_config_values, session_model_selection_for_value, session_model_values,
 };
 use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, TextContent};
 
@@ -83,7 +83,7 @@ async fn assert_real_agent_advertises_model(
         env,
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
-        None,
+        AcpPermissionPolicy::Cancel,
         &Default::default(),
         None,
         None,
@@ -124,7 +124,7 @@ async fn print_real_agent_mode_values(agent: AgentConfig, env: HashMap<String, S
         env,
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
-        None,
+        AcpPermissionPolicy::Cancel,
         &Default::default(),
         None,
         None,
@@ -159,7 +159,7 @@ async fn send_real_agent_prompt(agent: AgentConfig, env: HashMap<String, String>
         env,
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
-        None,
+        AcpPermissionPolicy::Cancel,
         &Default::default(),
         None,
         None,
@@ -249,7 +249,7 @@ async fn real_terminal_uname_probe(agent: AgentConfig, env: HashMap<String, Stri
         env,
         cwd.clone(),
         Arc::new(NoopSessionEventSink),
-        None,
+        AcpPermissionPolicy::Cancel,
         &Default::default(),
         None,
         Some(acp_stack::runtime::agent::acp_bridge::TerminalCommandLog {

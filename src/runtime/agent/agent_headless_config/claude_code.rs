@@ -1,10 +1,31 @@
 use super::*;
 
+use crate::runtime::agent::provider_model_catalog::cached_models;
+
 const CLAUDE_CODE_API_KEY_HELPER_PREFIX: &str = "printenv ";
 
 pub(super) fn provision_claude_code_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     let Some(provider) = config.agent.provider.as_ref() else {
+        // A provider-less config still must not leave a previous provider's
+        // model allowlist behind — it would silently constrain every session.
+        let settings_path = home.join(".claude").join("settings.json");
+        if settings_path.exists() {
+            // Unreadable settings degrade to "nothing to strip": this path
+            // was a no-op before the allowlist existed, and a hand-broken
+            // file must not block a provider-less provision.
+            match read_json_object(&settings_path) {
+                Ok(mut settings) => {
+                    if settings.remove("availableModels").is_some() {
+                        write_json_object(&settings_path, settings)?;
+                        written.push(settings_path);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(path = %settings_path.display(), error = %error, "unreadable Claude Code settings; leaving availableModels in place");
+                }
+            }
+        }
         return Ok(written);
     };
     let settings_path = home.join(".claude").join("settings.json");
@@ -20,6 +41,7 @@ pub(super) fn provision_claude_code_config(config: &Config, home: &Path) -> Resu
         settings.remove("env");
     }
     write_claude_api_key_helper(config, provider, &mut settings, &settings_path)?;
+    write_claude_available_models(provider, &mut settings, home);
     write_json_object(&settings_path, settings)?;
     written.push(settings_path);
 
@@ -57,6 +79,7 @@ pub(super) fn cleanup_claude_code_config(
             changed = true;
         }
         changed |= remove_matching_claude_api_key_helper(&mut settings, expected_helper.as_deref());
+        changed |= settings.remove("availableModels").is_some();
         if changed {
             write_or_remove_json_object(&settings_path, settings)?;
             cleaned.push(CleanedAgentConfig {
@@ -130,6 +153,73 @@ fn write_claude_provider_env(
     Ok(())
 }
 
+/// Env keys whose values Claude Code resolves as model ids and must therefore
+/// survive the `availableModels` allowlist. `insert_claude_model_env` writes
+/// from this same list so a new role key can never be pinned without also
+/// being unioned into the allowlist.
+const CLAUDE_MODEL_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    CLAUDE_SUBAGENT_MODEL_ENV_KEY,
+];
+const CLAUDE_SUBAGENT_MODEL_ENV_KEY: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
+
+/// Surface the provider's live model catalog to the claude-agent-acp adapter.
+///
+/// Entries in settings.json `availableModels` are advertised verbatim as ACP
+/// model values, which is the only channel through which a third-party
+/// provider's models become selectable — the CLI itself never queries the
+/// provider. The key is removed rather than left stale whenever there is no
+/// catalog for the active provider (first-party Anthropic, native-auth lanes,
+/// custom providers, or an offline fetch), degrading to the builtin aliases
+/// plus the env-pinned model.
+///
+/// Claude Code treats `availableModels` as an allowlist: a pinned or role
+/// model outside it is silently dropped, not merely hidden from the picker.
+/// Profile pins use alias forms the provider's listing never returns (e.g.
+/// `kimi-k3[1m]`), so every model value the same provisioning run put into
+/// `env` is unioned in ahead of the catalog.
+fn write_claude_available_models(
+    provider: &AgentProviderConfig,
+    settings: &mut Map<String, serde_json::Value>,
+    home: &Path,
+) {
+    let catalog = if provider.custom.is_some() {
+        None
+    } else {
+        claude_code_profile_for_provider_id(&provider.id)
+            .filter(|profile| profile.base_url.is_some() && !profile.agent_native_auth)
+            .and_then(|_| cached_models(home, &provider.id))
+    };
+    match catalog {
+        Some(models) => {
+            let mut values: Vec<String> = Vec::new();
+            if let Some(env) = settings.get("env").and_then(serde_json::Value::as_object) {
+                for key in CLAUDE_MODEL_ENV_KEYS {
+                    if let Some(model) = env.get(*key).and_then(serde_json::Value::as_str)
+                        && !model.trim().is_empty()
+                        && !values.iter().any(|existing| existing == model)
+                    {
+                        values.push(model.to_owned());
+                    }
+                }
+            }
+            for model in models {
+                if !values.contains(&model.value) {
+                    values.push(model.value);
+                }
+            }
+            settings.insert("availableModels".to_owned(), json!(values));
+        }
+        None => {
+            settings.remove("availableModels");
+        }
+    }
+}
+
 fn write_claude_api_key_helper(
     config: &Config,
     provider: &AgentProviderConfig,
@@ -187,17 +277,11 @@ fn insert_claude_model_env(
     model: &str,
     set_subagent_model: bool,
 ) {
-    for key in [
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    ] {
-        env.insert(key.to_owned(), json!(model));
-    }
-    if set_subagent_model {
-        env.insert("CLAUDE_CODE_SUBAGENT_MODEL".to_owned(), json!(model));
+    for key in CLAUDE_MODEL_ENV_KEYS {
+        if *key == CLAUDE_SUBAGENT_MODEL_ENV_KEY && !set_subagent_model {
+            continue;
+        }
+        env.insert((*key).to_owned(), json!(model));
     }
 }
 
@@ -351,6 +435,215 @@ mod tests {
         )
         .expect("onboarding json parses");
         assert_eq!(onboarding["hasCompletedOnboarding"], true);
+    }
+
+    fn seed_provider_model_cache(home: &Path, provider_id: &str, models: &[&str]) {
+        let path = crate::runtime::agent::provider_model_catalog::cache_path(home);
+        std::fs::create_dir_all(path.parent().expect("cache parent")).expect("mkdir");
+        let entries: Vec<serde_json::Value> = models
+            .iter()
+            .map(|value| json!({ "value": value }))
+            .collect();
+        let body = json!({
+            "version": 1,
+            "providers": { provider_id: { "fetched_at": 0, "models": entries } }
+        });
+        std::fs::write(&path, body.to_string()).expect("write cache");
+    }
+
+    fn read_settings(home: &Path) -> Value {
+        let settings_path = home.join(".claude").join("settings.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(&settings_path).expect("settings should be readable"),
+        )
+        .expect("settings json parses")
+    }
+
+    #[test]
+    fn claude_code_profiled_provider_writes_available_models_from_cache() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        seed_provider_model_cache(
+            tempdir.path(),
+            "moonshotai",
+            &["kimi-k3", "kimi-k3[1m]", "kimi-k2.7-code"],
+        );
+        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: None,
+            api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        // The profile pins kimi-k3[1m] into env; env pins lead the list so
+        // the allowlist can never drop them, then the catalog follows.
+        let settings = read_settings(tempdir.path());
+        assert_eq!(
+            settings["availableModels"],
+            json!(["kimi-k3[1m]", "kimi-k3", "kimi-k2.7-code"])
+        );
+    }
+
+    #[test]
+    fn claude_code_available_models_unions_env_pins_absent_from_catalog() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        // DeepSeek's profile pins [1m]-suffixed aliases the provider's
+        // listing endpoint never returns; they must survive the allowlist.
+        seed_provider_model_cache(
+            tempdir.path(),
+            "deepseek",
+            &["deepseek-v4-pro", "deepseek-v4-flash"],
+        );
+        let mut config = config_with_agent("claude-code", &["DEEPSEEK_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "deepseek".to_owned(),
+            model: None,
+            api_key_ref: Some("DEEPSEEK_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let settings = read_settings(tempdir.path());
+        assert_eq!(
+            settings["availableModels"],
+            json!([
+                "deepseek-v4-pro[1m]",
+                "deepseek-v4-flash",
+                "deepseek-v4-pro"
+            ])
+        );
+    }
+
+    #[test]
+    fn claude_code_provider_removal_drops_available_models() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
+        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: None,
+            api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
+            custom: None,
+        });
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+        assert!(
+            read_settings(tempdir.path())
+                .get("availableModels")
+                .is_some()
+        );
+
+        config.agent.provider = None;
+        provision_agent_headless_config(&config, tempdir.path()).expect("reprovision");
+
+        assert!(
+            read_settings(tempdir.path())
+                .get("availableModels")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claude_code_without_cache_omits_available_models() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: None,
+            api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        assert!(
+            read_settings(tempdir.path())
+                .get("availableModels")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claude_code_anthropic_first_party_never_writes_available_models() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        seed_provider_model_cache(tempdir.path(), "anthropic", &["should-not-appear"]);
+        let mut config = config_with_agent("claude-code", &["ANTHROPIC_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "anthropic".to_owned(),
+            model: None,
+            api_key_ref: Some("ANTHROPIC_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        assert!(
+            read_settings(tempdir.path())
+                .get("availableModels")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claude_code_reprovision_after_provider_change_drops_stale_available_models() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
+        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: None,
+            api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
+            custom: None,
+        });
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+        assert_eq!(
+            read_settings(tempdir.path())["availableModels"],
+            json!(["kimi-k3[1m]", "kimi-k3"])
+        );
+
+        // Switch to a provider with no cache entry: the stale moonshot list
+        // must not survive.
+        config.agent.env = vec!["DEEPSEEK_API_KEY".to_owned()];
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "deepseek".to_owned(),
+            model: None,
+            api_key_ref: Some("DEEPSEEK_API_KEY".to_owned()),
+            custom: None,
+        });
+        provision_agent_headless_config(&config, tempdir.path()).expect("reprovision");
+
+        assert!(
+            read_settings(tempdir.path())
+                .get("availableModels")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claude_code_cleanup_removes_available_models() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        seed_provider_model_cache(tempdir.path(), "moonshotai", &["kimi-k3"]);
+        let mut config = config_with_agent("claude-code", &["MOONSHOT_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: None,
+            api_key_ref: Some("MOONSHOT_API_KEY".to_owned()),
+            custom: None,
+        });
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        cleanup_claude_code_config(&config, tempdir.path()).expect("cleanup");
+
+        let settings_path = tempdir.path().join(".claude").join("settings.json");
+        if settings_path.exists() {
+            assert!(
+                read_settings(tempdir.path())
+                    .get("availableModels")
+                    .is_none()
+            );
+        }
     }
 
     #[test]

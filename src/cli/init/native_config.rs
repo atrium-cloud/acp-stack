@@ -201,7 +201,7 @@ pub(super) fn apply_for_init(
     let apply_result = (|| -> Result<Vec<_>> {
         write_native_config_files(&prepared, config_path, home)?;
         if prepared.imported_model
-            && !model_value_is_explicit_without_discovery(&prepared.canonical_config)
+            && !model_value_is_explicit_without_discovery(&prepared.canonical_config.agent)
         {
             let model = native_config_projection(&prepared.canonical_config)
                 .model

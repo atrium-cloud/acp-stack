@@ -17,19 +17,20 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{NewSessionResponse, SessionConfigOption};
 
-use crate::config::Config;
+use crate::config::{AgentConfig, Config};
 use crate::dev_gates::{
     FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, fixture_path,
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, KIMI_CODE_AGENT_ID, SessionEventSink,
-    session_config_id_for_value, session_config_values, session_model_selection_for_value,
-    session_model_values,
+    AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, KIMI_CODE_AGENT_ID,
+    SessionEventSink, session_config_id_for_value, session_config_values,
+    session_model_selection_for_value, session_model_values,
 };
+use crate::runtime::agent::agent_headless_config::CODEX_OPENROUTER_PROVIDER_ID;
 use crate::runtime::agent::provider_keys::{
-    CLAUDE_CODE_AGENT_ID, is_claude_code_profiled_provider, resolve_agent_environment,
-    resolve_agent_environment_without_secrets,
+    CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, is_claude_code_profiled_provider,
+    resolve_agent_environment, resolve_agent_environment_without_secrets,
 };
 use crate::secrets::SecretStore;
 
@@ -39,11 +40,19 @@ use crate::secrets::SecretStore;
 /// advertising config options.
 pub const DEFAULT_MODELS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn model_value_is_explicit_without_discovery(config: &Config) -> bool {
-    config.agent.id == KIMI_CODE_AGENT_ID
-        || (config.agent.id == CLAUDE_CODE_AGENT_ID
-            && config.agent.provider.as_ref().is_some_and(|provider| {
+pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
+    agent.id == KIMI_CODE_AGENT_ID
+        || (agent.id == CLAUDE_CODE_AGENT_ID
+            && agent.provider.as_ref().is_some_and(|provider| {
                 provider.custom.is_some() || is_claude_code_profiled_provider(&provider.id)
+            }))
+        // Codex accepts arbitrary model strings verbatim, while codex-acp
+        // advertises codex-core's bundled OpenAI preset catalog regardless of
+        // the configured provider — so for OpenRouter and custom providers
+        // the advertised list must not gate the operator's model choice.
+        || (agent.id == CODEX_AGENT_ID
+            && agent.provider.as_ref().is_some_and(|provider| {
+                provider.custom.is_some() || provider.id == CODEX_OPENROUTER_PROVIDER_ID
             }))
 }
 
@@ -107,7 +116,7 @@ pub async fn fetch_session_config_with_timeout(
         env,
         cwd.clone(),
         Arc::new(NoopSink),
-        None,
+        AcpPermissionPolicy::Cancel,
         &config.workspace.sandbox,
         crate::extensions::resolve_network_provider(config).as_ref(),
         None,
@@ -248,5 +257,101 @@ impl SessionEventSink for NoopSink {
         _payload_json: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AgentCustomProviderConfig, AgentProviderConfig, CustomProviderApi};
+
+    fn agent(id: &str, provider: Option<AgentProviderConfig>) -> AgentConfig {
+        AgentConfig {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            command: id.to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            expected_sha256: None,
+            restart: "on-crash".to_owned(),
+            mode: None,
+            model: None,
+            harness_version: None,
+            adapter: None,
+            install: None,
+            provider,
+            providers: None,
+            subagent: None,
+            auto_update: None,
+        }
+    }
+
+    fn mapped_provider(id: &str) -> Option<AgentProviderConfig> {
+        Some(AgentProviderConfig {
+            id: id.to_owned(),
+            model: None,
+            api_key_ref: None,
+            custom: None,
+        })
+    }
+
+    fn custom_provider() -> Option<AgentProviderConfig> {
+        Some(AgentProviderConfig {
+            id: "my-gateway".to_owned(),
+            model: None,
+            api_key_ref: None,
+            custom: Some(AgentCustomProviderConfig {
+                name: "My Gateway".to_owned(),
+                base_url: "https://gateway.example/v1".to_owned(),
+                api: CustomProviderApi::default(),
+                model_name: None,
+                context: 200_000,
+                output_max_tokens: 64_000,
+            }),
+        })
+    }
+
+    #[test]
+    fn codex_openrouter_and_custom_skip_discovery_validation() {
+        assert!(model_value_is_explicit_without_discovery(&agent(
+            "codex",
+            mapped_provider("openrouter")
+        )));
+        assert!(model_value_is_explicit_without_discovery(&agent(
+            "codex",
+            custom_provider()
+        )));
+    }
+
+    #[test]
+    fn codex_openai_still_validates_against_advertised_models() {
+        assert!(!model_value_is_explicit_without_discovery(&agent(
+            "codex",
+            mapped_provider("openai")
+        )));
+        assert!(!model_value_is_explicit_without_discovery(&agent(
+            "codex", None
+        )));
+    }
+
+    #[test]
+    fn claude_code_profiled_and_custom_skip_discovery_validation() {
+        assert!(model_value_is_explicit_without_discovery(&agent(
+            "claude-code",
+            mapped_provider("moonshotai")
+        )));
+        assert!(model_value_is_explicit_without_discovery(&agent(
+            "claude-code",
+            custom_provider()
+        )));
+    }
+
+    #[test]
+    fn other_agents_validate_against_advertised_models() {
+        assert!(!model_value_is_explicit_without_discovery(&agent(
+            "opencode",
+            mapped_provider("openrouter")
+        )));
     }
 }

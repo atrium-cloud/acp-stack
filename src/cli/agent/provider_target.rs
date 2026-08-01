@@ -17,6 +17,7 @@ use crate::runtime::agent::provider_keys::{
     agent_provider_id_for_provider_id, apply_catalog_mapped_agent_provider,
     resolve_agent_environment, target_uses_provider,
 };
+use crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
 
@@ -130,6 +131,7 @@ pub(in crate::cli) fn run_target_provider_use(
     let target_index = target_index(&validated, target_id)?;
     let target_config = config_for_target(&validated, target_index);
     resolve_agent_environment(&target_config, &secrets)?;
+    refresh_provider_models_best_effort_blocking(&home, &target_config);
     let provisioned = if migration.changed {
         resolve_configured_target_environments(&validated, &secrets)?;
         provision_configured_targets_with_transition(
@@ -263,6 +265,7 @@ pub(in crate::cli) fn run_target_provider_set_active(
     let target_index = target_index(&validated, target_id)?;
     let target_config = config_for_target(&validated, target_index);
     resolve_agent_environment(&target_config, &secrets)?;
+    refresh_provider_models_best_effort_blocking(&home, &target_config);
     let provisioned = if migration.changed {
         resolve_configured_target_environments(&validated, &secrets)?;
         provision_configured_targets(&validated, &home)?

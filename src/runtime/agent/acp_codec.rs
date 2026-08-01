@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use agent_client_protocol::RequestCancellation;
 use agent_client_protocol::schema::v1::{
-    Meta, NewSessionResponse, PermissionOptionId, ReadTextFileRequest, ReadTextFileResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions, SessionNotification,
-    SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
+    Meta, NewSessionResponse, PermissionOptionId, PermissionOptionKind, ReadTextFileRequest,
+    ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigSelectOptions,
+    SessionNotification, SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
@@ -304,6 +304,38 @@ async fn wait_for_request_cancellation(cancellation: Option<RequestCancellation>
     }
 }
 
+/// Approve an agent permission request without an operator: pick the first
+/// `AllowOnce` option, else the first `AllowAlways`. One-shot grants come
+/// first so a single testflight prompt never leaves a durable allow behind
+/// in harness-side state. Reject-kind options are never selected; a request
+/// offering no allow option is answered `Cancelled`.
+pub(crate) fn auto_approve_acp_permission(
+    request: &RequestPermissionRequest,
+) -> RequestPermissionOutcome {
+    let allow = request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::AllowOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::AllowAlways)
+        });
+    match allow {
+        Some(option) => {
+            tracing::info!(
+                option = %option.name,
+                "auto-approved agent permission request"
+            );
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                option.option_id.clone(),
+            ))
+        }
+        None => RequestPermissionOutcome::Cancelled,
+    }
+}
+
 /// Byte cap on `fs/read_text_file`. ACP has no size field on the request, so
 /// the client bounds what it will load into memory for one call.
 const ACP_FS_READ_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -582,6 +614,74 @@ mod tests {
                 PermissionOptionKind::AllowOnce,
             )],
         )
+    }
+
+    fn request_with_options(
+        options: Vec<(&str, PermissionOptionKind)>,
+    ) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new("sess_auto"),
+            ToolCallUpdate::new(ToolCallId::new("tc_auto"), ToolCallUpdateFields::default()),
+            options
+                .into_iter()
+                .map(|(id, kind)| PermissionOption::new(PermissionOptionId::new(id), id, kind))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn selected_option_id(outcome: RequestPermissionOutcome) -> Option<String> {
+        match outcome {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome { option_id, .. }) => {
+                Some(option_id.0.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn auto_approve_prefers_allow_once_over_allow_always() {
+        let request = request_with_options(vec![
+            ("deny", PermissionOptionKind::RejectOnce),
+            ("allow-always", PermissionOptionKind::AllowAlways),
+            ("allow-once", PermissionOptionKind::AllowOnce),
+        ]);
+        assert_eq!(
+            selected_option_id(auto_approve_acp_permission(&request)),
+            Some("allow-once".to_owned())
+        );
+    }
+
+    #[test]
+    fn auto_approve_takes_allow_always_when_it_is_the_only_allow() {
+        let request = request_with_options(vec![
+            ("deny", PermissionOptionKind::RejectAlways),
+            ("allow-always", PermissionOptionKind::AllowAlways),
+        ]);
+        assert_eq!(
+            selected_option_id(auto_approve_acp_permission(&request)),
+            Some("allow-always".to_owned())
+        );
+    }
+
+    #[test]
+    fn auto_approve_never_selects_reject_options() {
+        let request = request_with_options(vec![
+            ("deny-once", PermissionOptionKind::RejectOnce),
+            ("deny-always", PermissionOptionKind::RejectAlways),
+        ]);
+        assert_eq!(
+            auto_approve_acp_permission(&request),
+            RequestPermissionOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn auto_approve_cancels_on_empty_options() {
+        let request = request_with_options(Vec::new());
+        assert_eq!(
+            auto_approve_acp_permission(&request),
+            RequestPermissionOutcome::Cancelled
+        );
     }
 
     async fn fresh_service() -> (tempfile::TempDir, PermissionService) {

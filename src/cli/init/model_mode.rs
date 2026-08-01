@@ -310,6 +310,9 @@ pub(super) fn configure_model_and_mode_for_init(
     dir_scan.extend(headless_config_side_dirs(&config.agent.id, home));
     let dir_listings = capture_dir_listings_for(&dir_scan)?;
     let discovery_outcome = (|| {
+        crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking(
+            home, config,
+        );
         crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
             config, home,
         )?;

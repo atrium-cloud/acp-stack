@@ -22,9 +22,12 @@ use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::model_discovery::{
     DEFAULT_MODELS_DISCOVERY_TIMEOUT, advertised_values_for_category,
-    fetch_session_config_with_timeout,
+    fetch_session_config_with_timeout, model_value_is_explicit_without_discovery,
 };
-use crate::runtime::agent::provider_keys::{AgentProviderSummary, providers_for_agent};
+use crate::runtime::agent::provider_keys::{
+    AgentProviderSummary, models_url_for_provider_id, providers_for_agent,
+};
+use crate::runtime::agent::provider_model_catalog::{cached_models, refresh_provider_models};
 
 use super::super::core::AppState;
 
@@ -79,12 +82,31 @@ pub(crate) async fn providers_handler(
 #[derive(Serialize)]
 pub(crate) struct ModelsResponse {
     agent_id: String,
-    /// ACP-advertised `model` values, in registry-declared order.
-    models: Vec<String>,
+    /// `"provider_catalog"` when `models` comes from the provider's live
+    /// model listing; `"acp_advertised"` when it comes from the agent's
+    /// ACP `session/new` config options.
+    source: &'static str,
+    models: Vec<ModelJson>,
     /// ACP-advertised `mode` values. Empty when the agent does not
-    /// expose a mode option.
+    /// expose a mode option (or, on the catalog fallback path, when ACP
+    /// discovery failed).
     modes: Vec<String>,
+    /// Set when the provider declares a model listing endpoint but the
+    /// catalog is unavailable (fetch failed and no cache).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_error: Option<String>,
 }
+
+#[derive(Serialize)]
+pub(crate) struct ModelJson {
+    /// Model id accepted verbatim by `acps agent set --model`.
+    value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+}
+
+const MODELS_SOURCE_PROVIDER_CATALOG: &str = "provider_catalog";
+const MODELS_SOURCE_ACP_ADVERTISED: &str = "acp_advertised";
 
 pub(crate) async fn models_handler(
     State(state): State<AppState>,
@@ -94,6 +116,76 @@ pub(crate) async fn models_handler(
     let (config, _) = state.default_agent_target().await?;
     let agent_id = config.agent.id.clone();
     let home = home_dir()?;
+
+    // The provider catalog only serves agents whose harness takes the model
+    // verbatim from its on-disk config (adapter-based agents that cannot
+    // discover provider models over ACP). Agents with real ACP discovery
+    // (e.g. OpenCode) advertise harness-specific model values that a raw
+    // provider catalog would not match.
+    let provider_id = config
+        .agent
+        .provider
+        .as_ref()
+        .filter(|provider| {
+            provider.custom.is_none() && model_value_is_explicit_without_discovery(&config.agent)
+        })
+        .map(|provider| provider.id.clone());
+    let provider_declares_catalog = provider_id
+        .as_deref()
+        .is_some_and(|id| models_url_for_provider_id(id).is_some());
+    let mut catalog_error = None;
+    let catalog = if provider_declares_catalog {
+        match refresh_provider_models(&home, &config).await {
+            Ok(models) => models,
+            Err(error) => {
+                let reason = error.to_string();
+                tracing::warn!(reason = %reason, "provider model catalog refresh failed");
+                catalog_error = Some(reason);
+                // A stale-but-usable cache entry still serves the catalog
+                // through a provider outage.
+                provider_id
+                    .as_deref()
+                    .and_then(|id| cached_models(&home, id))
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(models) = catalog {
+        // ACP discovery still supplies the mode list; a discovery failure
+        // must not take down a response the catalog can serve on its own.
+        let modes = match fetch_session_config_with_timeout(
+            &home,
+            &config,
+            DEFAULT_MODELS_DISCOVERY_TIMEOUT,
+        )
+        .await
+        {
+            Ok(response) => {
+                advertised_values_for_category(&response, AgentSessionConfigCategory::Mode)
+                    .unwrap_or_default()
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "mode discovery failed; serving catalog models without modes");
+                Vec::new()
+            }
+        };
+        return Ok(ApiSuccess::new(ModelsResponse {
+            agent_id,
+            source: MODELS_SOURCE_PROVIDER_CATALOG,
+            models: models
+                .into_iter()
+                .map(|model| ModelJson {
+                    value: model.value,
+                    display_name: model.display_name,
+                })
+                .collect(),
+            modes,
+            catalog_error: None,
+        }));
+    }
+
     let response =
         fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
     // Surface a malformed/missing `model` advertisement as an error
@@ -105,7 +197,15 @@ pub(crate) async fn models_handler(
 
     Ok(ApiSuccess::new(ModelsResponse {
         agent_id,
-        models,
+        source: MODELS_SOURCE_ACP_ADVERTISED,
+        models: models
+            .into_iter()
+            .map(|value| ModelJson {
+                value,
+                display_name: None,
+            })
+            .collect(),
         modes,
+        catalog_error,
     }))
 }

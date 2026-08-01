@@ -53,7 +53,7 @@ pub(super) async fn spawn_agent_bridge(
         env,
         cwd,
         sink,
-        permissions,
+        permissions.into(),
         &sandbox,
         network_provider.as_ref(),
         Some(crate::runtime::agent::acp_bridge::TerminalCommandLog {

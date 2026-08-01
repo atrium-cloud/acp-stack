@@ -37,6 +37,7 @@ use self::goose::*;
 use self::opencode::*;
 use self::pi::*;
 
+pub(crate) use self::codex::CODEX_OPENROUTER_PROVIDER_ID;
 pub(crate) use self::opencode::{OPENCODE_AGENT_ID, OPENCODE_DISABLED_SMALL_MODEL};
 
 pub(crate) const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[

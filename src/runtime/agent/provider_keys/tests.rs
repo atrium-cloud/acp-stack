@@ -441,6 +441,29 @@ agents = ["pi"]
 }
 
 #[test]
+fn invalid_mapping_rejects_plaintext_models_url() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[api_keys]]
+env_var = "PLAIN_API_KEY"
+provider_ids = ["plain"]
+
+[[providers]]
+id = ["plain"]
+name = "Plain"
+agents = ["pi"]
+models_url = "http://example.com/v1/models"
+"#,
+    )
+    .expect_err("plaintext models_url fails");
+
+    assert!(
+        err.to_string()
+            .contains("provider `plain` models_url must be an HTTPS URL")
+    );
+}
+
+#[test]
 fn invalid_mapping_rejects_duplicate_provider_metadata_ids() {
     let err = ProviderKeyMapping::from_toml(
         r#"

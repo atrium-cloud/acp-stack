@@ -7,9 +7,12 @@
 //! All tests drive a real `acps` HTTP server against a `Config` whose
 //! `[agent].command` is the standalone placebo ACP fixture.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::time::Duration;
 
-use acp_stack::config::{ArrayTargetConfig, Config};
+use acp_stack::config::{AgentProviderConfig, ArrayTargetConfig, Config};
+use acp_stack::secrets::{ProviderCredential, ProviderCredentialSet, SecretStore};
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -19,7 +22,7 @@ mod common;
 use common::HomeEnvGuard;
 use common::agent::{
     AgentHarness, EnvVarGuard, add_codex_placebo_target, admin_bearer, http, session_bearer,
-    shell_quote_path, test_config, websocket_request,
+    shell_quote_path, spawn_provider_models_server, test_config, websocket_request,
 };
 
 #[tokio::test]
@@ -400,15 +403,297 @@ async fn models_returns_fixture_advertised_values() {
     let body: Value = serde_json::from_str(&body_text).expect("models json");
     assert_eq!(body["ok"], true);
     assert_eq!(body["data"]["agent_id"], "opencode");
+    assert_eq!(body["data"]["source"], "acp_advertised");
     let models = body["data"]["models"].as_array().expect("models array");
     assert!(
-        models.iter().any(|m| m.as_str() == Some("openai/gpt-4o")),
+        models
+            .iter()
+            .any(|m| m["value"].as_str() == Some("openai/gpt-4o")),
         "advertised model values missing: {models:?}",
     );
     let modes = body["data"]["modes"].as_array().expect("modes array");
     assert!(
         modes.iter().any(|m| m.as_str() == Some("default")),
         "advertised mode values missing: {modes:?}",
+    );
+}
+
+/// Seed a structured provider credential (plus the flat secret) under `home`,
+/// mirroring `common::cli::seed_provider_credential` — that module is gated
+/// behind `dev-tools`, which this binary does not build with.
+fn seed_provider_credential(home: &std::path::Path, provider_id: &str, env_names: &[&str]) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    let values = env_names
+        .iter()
+        .map(|name| ((*name).to_owned(), format!("test-{name}")))
+        .collect::<BTreeMap<_, _>>();
+    store
+        .set_many(
+            values
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )
+        .expect("flat test secrets should be stored");
+    let mut catalog = store.provider_credentials().clone();
+    catalog.insert(
+        provider_id.to_owned(),
+        ProviderCredentialSet::aliasless(ProviderCredential::new(values, BTreeMap::new())),
+    );
+    store
+        .replace_provider_credentials(catalog, &[])
+        .expect("provider credential should be stored");
+}
+
+/// Config for the provider-catalog `/v1/models` path: codex takes the model
+/// verbatim for OpenRouter (`model_value_is_explicit_without_discovery`), and
+/// OpenRouter declares a `models_url`, so the handler serves the provider
+/// catalog instead of the ACP-advertised list.
+fn codex_openrouter_config() -> Config {
+    let mut config = test_config();
+    config.agent.id = "codex".to_owned();
+    config.agent.name = "Codex".to_owned();
+    config.agent.provider = Some(AgentProviderConfig {
+        id: "openrouter".to_owned(),
+        model: Some("deepseek/deepseek-v4-flash".to_owned()),
+        api_key_ref: None,
+        custom: None,
+    });
+    config
+}
+
+/// Config-options fixture with `model` and `mode` categories: the catalog
+/// path reads only the modes, the ACP fallback reads both.
+fn write_models_mode_fixture(root: &std::path::Path) -> std::path::PathBuf {
+    let fixture_path = root.join("config-options.json");
+    let fixture_body = serde_json::json!([
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "fixture/model-a",
+            "options": [
+                { "value": "fixture/model-a", "name": "fixture/model-a" },
+                { "value": "fixture/model-b", "name": "fixture/model-b" }
+            ]
+        },
+        {
+            "id": "mode",
+            "name": "Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "default",
+            "options": [
+                { "value": "default", "name": "default" },
+                { "value": "yolo", "name": "yolo" }
+            ]
+        }
+    ]);
+    std::fs::write(&fixture_path, fixture_body.to_string()).expect("write fixture");
+    fixture_path
+}
+
+/// Shared env for the catalog-path tests: HOME via `HomeEnvGuard` (the
+/// handler resolves the cache and secret store through `home_dir()`), the
+/// remaining fixture vars through one `EnvVarGuard::set_many` so the
+/// discovery-fixture mutex is taken exactly once. The handler reads the
+/// provider key from the seeded secret store; the `OPENROUTER_API_KEY`
+/// process env mirrors a real deployment where the key is also present.
+fn catalog_fixture_env(
+    home: &std::path::Path,
+    models_base: &str,
+    fixture_path: std::path::PathBuf,
+) -> (HomeEnvGuard<'static>, EnvVarGuard<'static>) {
+    let home_guard = HomeEnvGuard::set(home);
+    let fixture_guard = EnvVarGuard::set_many(vec![
+        (
+            "ACP_STACK_PROVIDER_MODELS_BASE",
+            OsString::from(models_base),
+        ),
+        ("OPENROUTER_API_KEY", OsString::from("test-openrouter-key")),
+        (
+            "ACP_STACK_AGENT_CONFIG_OPTIONS_PATH",
+            fixture_path.into_os_string(),
+        ),
+    ]);
+    (home_guard, fixture_guard)
+}
+
+#[tokio::test]
+async fn models_serves_provider_catalog_for_codex_openrouter() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let home = tempdir.path().join("home");
+    // The seeded credential stands in for `acps agent provider credential
+    // add`: key resolution reads the secret store under HOME.
+    seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
+    let fixture_path = write_models_mode_fixture(tempdir.path());
+    let base = spawn_provider_models_server(json!({
+        "data": [
+            { "id": "openai/gpt-5.5", "name": "GPT-5.5" },
+            { "id": "deepseek/deepseek-v4-flash" },
+        ]
+    }));
+    let _guards = catalog_fixture_env(&home, &base, fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
+    let response = http()
+        .await
+        .get(format!("{}/v1/models", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("models json");
+    assert_eq!(body["data"]["source"], "provider_catalog");
+    assert!(
+        body["data"].get("catalog_error").is_none(),
+        "unexpected catalog_error: {body}"
+    );
+    let models = body["data"]["models"].as_array().expect("models array");
+    assert!(
+        models
+            .iter()
+            .any(|model| model["value"].as_str() == Some("openai/gpt-5.5")
+                && model["display_name"].as_str() == Some("GPT-5.5")),
+        "catalog model with display name missing: {models:?}",
+    );
+    assert!(
+        models
+            .iter()
+            .any(|model| model["value"].as_str() == Some("deepseek/deepseek-v4-flash")),
+        "catalog model missing: {models:?}",
+    );
+    let modes = body["data"]["modes"].as_array().expect("modes array");
+    assert!(
+        modes.iter().any(|mode| mode.as_str() == Some("default")),
+        "fixture mode values missing: {modes:?}",
+    );
+}
+
+#[tokio::test]
+async fn models_falls_back_to_acp_with_catalog_error() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let home = tempdir.path().join("home");
+    seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
+    let fixture_path = write_models_mode_fixture(tempdir.path());
+    // Dead port: the catalog fetch must degrade to `catalog_error` while ACP
+    // discovery still serves the response.
+    let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
+    let response = http()
+        .await
+        .get(format!("{}/v1/models", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("models json");
+    assert_eq!(body["data"]["source"], "acp_advertised");
+    let catalog_error = body["data"]["catalog_error"]
+        .as_str()
+        .expect("catalog_error should be a string");
+    assert!(
+        !catalog_error.is_empty(),
+        "catalog_error should describe the failure"
+    );
+    let models = body["data"]["models"].as_array().expect("models array");
+    assert!(
+        models
+            .iter()
+            .any(|model| model["value"].as_str() == Some("fixture/model-a")),
+        "fixture model values missing: {models:?}",
+    );
+
+    // Second poll within the failure-backoff window: the handler must serve
+    // the stored reason from the marker without a new fetch, and the stored
+    // reason must not acquire a second "model catalog fetch failed" prefix.
+    let response = http()
+        .await
+        .get(format!("{}/v1/models", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+    let body: Value = response.json().await.expect("models json");
+    assert_eq!(body["data"]["source"], "acp_advertised");
+    let backed_off_error = body["data"]["catalog_error"]
+        .as_str()
+        .expect("catalog_error should be a string");
+    assert!(
+        backed_off_error.contains("request failed"),
+        "backoff should serve the stored reason, got: {backed_off_error}"
+    );
+    assert_eq!(
+        backed_off_error
+            .matches("model catalog fetch failed")
+            .count(),
+        1,
+        "stored reason must not double the error prefix: {backed_off_error}"
+    );
+}
+
+#[tokio::test]
+async fn models_serves_stale_cache_without_catalog_error() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let home = tempdir.path().join("home");
+    seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
+    // Pre-seed a stale catalog: the ancient `fetched_at` forces a refresh,
+    // which fails against the dead port and leaves this entry to serve.
+    let cache_dir = home.join(".config").join("acp-stack");
+    std::fs::create_dir_all(&cache_dir).expect("cache dir");
+    std::fs::write(
+        cache_dir.join("provider-models.json"),
+        json!({
+            "version": 1,
+            "providers": {
+                "openrouter": {
+                    "fetched_at": 1,
+                    "models": [
+                        { "value": "cached/openrouter-model", "display_name": "Cached Model" }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write cache");
+    let fixture_path = write_models_mode_fixture(tempdir.path());
+    let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(codex_openrouter_config()).await;
+    let response = http()
+        .await
+        .get(format!("{}/v1/models", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("models json");
+    assert_eq!(body["data"]["source"], "provider_catalog");
+    assert!(
+        body["data"].get("catalog_error").is_none(),
+        "stale cache must serve without catalog_error: {body}"
+    );
+    let models = body["data"]["models"].as_array().expect("models array");
+    assert!(
+        models.iter().any(
+            |model| model["value"].as_str() == Some("cached/openrouter-model")
+                && model["display_name"].as_str() == Some("Cached Model")
+        ),
+        "cached models missing: {models:?}",
     );
 }
 

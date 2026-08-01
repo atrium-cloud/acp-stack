@@ -636,6 +636,10 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
         })?;
     let mut target_config = validated.clone();
     target_config.agent = validated.array.targets[target_index].agent.clone();
+    crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking(
+        &home,
+        &target_config,
+    );
     let provisioned =
         provision_agent_headless_config_transition(&previous_target_config, &target_config, &home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;

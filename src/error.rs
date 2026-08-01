@@ -53,6 +53,9 @@ pub enum StackError {
     #[error("failed to provision agent config at {path}: {reason}")]
     AgentConfigProvision { path: PathBuf, reason: String },
 
+    #[error("provider `{provider}` model catalog fetch failed: {reason}")]
+    ProviderModelCatalog { provider: String, reason: String },
+
     #[error("native Agent config import failed ({code})")]
     NativeAgentConfig { code: &'static str },
 

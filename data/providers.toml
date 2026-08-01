@@ -12,6 +12,12 @@
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
 # omits companion_env_vars/optional_env_vars, lookups fall back to the
 # provider-level and env_vars.toml lists.
+#
+# `models_url` is the provider's OpenAI-compatible model listing endpoint:
+# `GET <models_url>` with `Authorization: Bearer <api key>` returning
+# `{"data": [{"id": ..., "name"?: ...}]}`. It backs live model-catalog
+# fetches; providers whose listing API differs simply omit the field. Only
+# declare it after a verified live fetch against the endpoint.
 
 [[providers]]
 id = ["anthropic"]
@@ -36,6 +42,7 @@ agents = ["pi", "opencode", "goose", "codex"]
 id = ["deepseek"]
 name = "DeepSeek"
 agents = ["pi", "opencode", "claude-code"]
+models_url = "https://api.deepseek.com/models"
 
 [providers.claude_code]
 base_url = "https://api.deepseek.com/anthropic"
@@ -90,6 +97,7 @@ agents = ["pi", "opencode", "goose"]
 id = ["openrouter"]
 name = "OpenRouter"
 agents = ["pi", "opencode", "goose", "codex"]
+models_url = "https://openrouter.ai/api/v1/models"
 
 [[providers]]
 id = ["vercel-ai-gateway", "vercel"]
@@ -105,6 +113,9 @@ id = ["zai"]
 name = "Z.AI"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code"]
+# No models_url: GET /api/paas/v4/models answers 401 but is absent from
+# Z.AI's API reference and OpenAPI spec (checked 2026-08-01), so the
+# response shape is unverified.
 
 [providers.claude_code]
 base_url = "https://api.z.ai/api/anthropic"
@@ -599,6 +610,7 @@ agents = ["opencode"]
 id = ["moonshotai"]
 name = "Moonshot AI"
 agents = ["opencode", "claude-code"]
+models_url = "https://api.moonshot.ai/v1/models"
 
 [providers.claude_code]
 base_url = "https://api.moonshot.ai/anthropic"

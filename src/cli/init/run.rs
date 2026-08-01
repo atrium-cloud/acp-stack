@@ -1323,6 +1323,9 @@ fn run_init_with_output(
             dir_scan.extend(headless_config_side_dirs(&config.agent.id, &home));
             let dir_listings = capture_dir_listings_for(&dir_scan)?;
 
+            crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking(
+                &home, &config,
+            );
             match crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
                 &config, &home,
             ) {
