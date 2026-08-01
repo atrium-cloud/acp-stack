@@ -82,27 +82,12 @@ static DISCOVERY_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct EnvVarGuard<'a> {
     _lock: std::sync::MutexGuard<'a, ()>,
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl EnvVarGuard<'_> {
     pub fn set(key: &'static str, value: &std::path::Path) -> Self {
-        let lock = DISCOVERY_FIXTURE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var_os(key);
-        // SAFETY: DISCOVERY_FIXTURE_LOCK serializes tests in this
-        // binary that mutate or depend on this process-wide fixture
-        // env var.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self {
-            _lock: lock,
-            key,
-            previous,
-        }
+        Self::set_many(vec![(key, value.as_os_str().to_os_string())])
     }
 
     pub fn unset(key: &'static str) -> Self {
@@ -117,7 +102,39 @@ impl EnvVarGuard<'_> {
         }
         Self {
             _lock: lock,
-            key,
+            previous: vec![(key, previous)],
+        }
+    }
+
+    /// Sets several fixture env vars while holding the lock once. Stacking
+    /// single-key guards would deadlock: the first guard keeps the
+    /// non-reentrant mutex until drop. Keys must be unique — a duplicated key
+    /// would restore to its intermediate value instead of the original.
+    pub fn set_many(pairs: Vec<(&'static str, std::ffi::OsString)>) -> Self {
+        let lock = DISCOVERY_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(
+            pairs
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == pairs.len(),
+            "set_many keys must be unique",
+        );
+        let mut previous = Vec::with_capacity(pairs.len());
+        // SAFETY: DISCOVERY_FIXTURE_LOCK serializes tests in this
+        // binary that mutate or depend on these process-wide fixture
+        // env vars, and it is acquired exactly once for the whole batch.
+        unsafe {
+            for (key, value) in pairs {
+                previous.push((key, std::env::var_os(key)));
+                std::env::set_var(key, value);
+            }
+        }
+        Self {
+            _lock: lock,
             previous,
         }
     }
@@ -125,12 +142,14 @@ impl EnvVarGuard<'_> {
 
 impl Drop for EnvVarGuard<'_> {
     fn drop(&mut self) {
-        // SAFETY: lock still held; restore the prior fixture setting
+        // SAFETY: lock still held; restore the prior fixture settings
         // before releasing it.
         unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+            for (key, previous) in std::mem::take(&mut self.previous) {
+                match previous {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -373,4 +392,45 @@ pub fn switch_mcp_config() -> McpConfig {
             }),
         ],
     }
+}
+
+/// Serve a fixed OpenAI-shaped `GET /models` payload over a throwaway local
+/// port. Point `ACP_STACK_PROVIDER_MODELS_BASE` at the returned base URL so
+/// provider-catalog fetches never leave the test host. Raw sockets instead of
+/// an async server: callers are a mix of sync CLI tests and tokio tests.
+pub fn spawn_provider_models_server(payload: serde_json::Value) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind models fixture");
+    let base = format!(
+        "http://{}",
+        listener.local_addr().expect("models fixture addr")
+    );
+    std::thread::spawn(move || {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let reader_stream = stream.try_clone().expect("clone models fixture stream");
+            let mut reader = BufReader::new(reader_stream);
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line == "\r\n" || line == "\n" => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            let body = payload.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    base
 }

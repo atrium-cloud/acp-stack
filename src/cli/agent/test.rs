@@ -11,9 +11,10 @@ use crate::config::{self, Config};
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AgentSessionConfigCategory, AgentSessionModelSelection, SessionEventSink,
-    session_config_id_for_value, session_model_selection_for_value,
+    AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, AgentSessionModelSelection,
+    SessionEventSink, session_config_id_for_value, session_model_selection_for_value,
 };
+use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
 use super::install::{operator_registry_override, resolve_agent_env_for_cli};
@@ -401,7 +402,7 @@ async fn run_agent_test_inner(
         env,
         cwd.clone(),
         sink.clone(),
-        None,
+        AcpPermissionPolicy::AutoApprove,
         &sandbox,
         network_provider.as_ref(),
         None,
@@ -522,11 +523,21 @@ async fn apply_agent_test_session_config(
             .as_ref()
             .and_then(|provider| provider.model.as_deref())
     }) {
-        let AgentSessionModelSelection::ConfigOption { config_id } =
-            session_model_selection_for_value(response, model)?;
-        bridge
-            .set_session_config_option(response.session_id.clone(), &config_id, model)
-            .await?;
+        if model_value_is_explicit_without_discovery(agent) {
+            // Same skip as the supervisor: the harness reads this pin from
+            // its on-disk config, so the advertised-list match can only fail
+            // spuriously.
+            tracing::debug!(
+                model,
+                "model provisioned on disk; skipping session/set_config_option"
+            );
+        } else {
+            let AgentSessionModelSelection::ConfigOption { config_id } =
+                session_model_selection_for_value(response, model)?;
+            bridge
+                .set_session_config_option(response.session_id.clone(), &config_id, model)
+                .await?;
+        }
     }
     Ok(())
 }

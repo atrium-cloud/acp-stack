@@ -257,7 +257,7 @@ pub(super) async fn apply_files_and_runtime(
 ) -> Result<()> {
     write_native_config_files(prepared, &state.runtime_paths.config_path, &home_dir()?)?;
     if prepared.imported_model
-        && !model_value_is_explicit_without_discovery(&prepared.canonical_config)
+        && !model_value_is_explicit_without_discovery(&prepared.canonical_config.agent)
     {
         let model = native_config_projection(&prepared.canonical_config)
             .model

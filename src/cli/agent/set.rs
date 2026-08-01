@@ -17,6 +17,7 @@ use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
     env_refs_for_agent_id, env_var_for_agent_provider_id, required_env_refs_for_agent_provider_id,
 };
+use crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking;
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
 use super::AgentSetArgs;
@@ -326,6 +327,7 @@ fn run_agent_model_set(
         .or(config.agent.model.as_deref())
         .expect("agent model set");
     validate_agent_model_if_required(home, &config, model_value)?;
+    refresh_provider_models_best_effort_blocking(home, &config);
     let provisioned = provision_agent_headless_config_transition(&previous_config, &config, home)?;
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
 
@@ -457,7 +459,7 @@ fn validate_agent_model_if_required(home: &Path, config: &Config, model_value: &
 }
 
 pub(in crate::cli) fn agent_model_is_explicit_without_discovery(config: &Config) -> bool {
-    model_value_is_explicit_without_discovery(config)
+    model_value_is_explicit_without_discovery(&config.agent)
 }
 
 pub(in crate::cli) fn model_values_for_cli_display(

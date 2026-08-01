@@ -47,8 +47,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::config::AgentConfig;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_codec::{
-    enqueue_session_notification, handle_read_text_file, handle_write_text_file,
-    resolve_acp_permission, spawn_session_notification_queue,
+    auto_approve_acp_permission, enqueue_session_notification, handle_read_text_file,
+    handle_write_text_file, resolve_acp_permission, spawn_session_notification_queue,
 };
 use crate::runtime::agent::acp_terminal::{
     TerminalHandlerContext, TerminalRegistry, handle_create_terminal, handle_kill_terminal,
@@ -78,6 +78,27 @@ pub use crate::runtime::agent::acp_codec::{
 pub use crate::runtime::agent::acp_terminal::TerminalCommandLog;
 pub use crate::runtime::agent::session_changes::SessionChangesHandle;
 pub use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+
+/// How the bridge answers agent-initiated `session/request_permission` calls.
+#[derive(Clone)]
+pub enum AcpPermissionPolicy {
+    /// No operator channel (model-discovery probes): answer `cancelled`.
+    Cancel,
+    /// Daemon path: durable, operator-decided permissions.
+    Service(PermissionService),
+    /// `acps agent test`: a non-interactive smoke test with no operator to
+    /// ask, so allow-kind options are approved on the spot.
+    AutoApprove,
+}
+
+impl From<Option<PermissionService>> for AcpPermissionPolicy {
+    fn from(service: Option<PermissionService>) -> Self {
+        match service {
+            Some(service) => Self::Service(service),
+            None => Self::Cancel,
+        }
+    }
+}
 
 /// Maximum time we wait for `initialize` to return before declaring the agent
 /// unresponsive. A warm agent handshakes in milliseconds, but the first launch
@@ -246,7 +267,7 @@ impl AcpBridge {
         env: HashMap<String, String>,
         cwd: PathBuf,
         sink: Arc<dyn SessionEventSink>,
-        permissions: Option<PermissionService>,
+        permissions: AcpPermissionPolicy,
         sandbox: &crate::config::SandboxConfig,
         network_provider: Option<&crate::extensions::NetworkProviderExtension>,
         command_log: Option<TerminalCommandLog>,
@@ -394,8 +415,8 @@ impl AcpBridge {
                         let sink = permission_sink.clone();
                         let cancellation = responder.cancellation();
                         cx.spawn(async move {
-                            let outcome = match permissions.as_ref() {
-                                Some(service) => {
+                            let outcome = match &permissions {
+                                AcpPermissionPolicy::Service(service) => {
                                     resolve_acp_permission(
                                         service,
                                         &sink,
@@ -404,7 +425,12 @@ impl AcpBridge {
                                     )
                                     .await
                                 }
-                                None => Ok(RequestPermissionOutcome::Cancelled),
+                                AcpPermissionPolicy::AutoApprove => {
+                                    Ok(auto_approve_acp_permission(&request))
+                                }
+                                AcpPermissionPolicy::Cancel => {
+                                    Ok(RequestPermissionOutcome::Cancelled)
+                                }
                             };
                             match outcome {
                                 Ok(outcome) => {

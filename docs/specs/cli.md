@@ -235,7 +235,7 @@ acps agent update set --frequency 3d
 
 `acps agent start`, `stop`, and `restart` call the running daemon with the admin key. `acps restart` is the preferred top-level alias for `acps agent restart`; both accept `--admin-key <key>`. `acps restart auto` and `acps agent restart auto` queue a supervised-agent restart that runs once the target has no pending/running prompts and no pending ACP permission requests. Active sessions with no in-flight prompt are safe; terminal latest prompts are safe. `acps agent status` prints configured identity, capability summary, and recent lifecycle information. Use `acps agent provider list-active` for sanitized configured/loaded provider state. `acps agent check` reports whether managed install steps are present and current.
 
-`acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional.
+`acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional. The testflight is non-interactive, so it auto-approves agent permission requests by selecting the first allow-kind option (allow-once preferred over allow-always so no durable grant is left behind, never a reject option); a request offering no allow option is cancelled.
 
 `acps agent default set <target>` repoints the Array primary target at an existing target without touching the others, so the default `acps agent *` surfaces follow it.
 

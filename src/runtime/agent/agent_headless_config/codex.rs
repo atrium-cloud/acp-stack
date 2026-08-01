@@ -1,6 +1,6 @@
 use super::*;
 
-const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
+pub(crate) const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
 // completions endpoint most OpenRouter clients configure by default.
 const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1";

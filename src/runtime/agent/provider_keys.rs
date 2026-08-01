@@ -23,7 +23,7 @@ pub use self::resolve::{
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
 pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
-const CODEX_AGENT_ID: &str = "codex";
+pub const CODEX_AGENT_ID: &str = "codex";
 const CODEX_NATIVE_AUTH_PROVIDER_ID: &str = "openai";
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
@@ -57,6 +57,10 @@ pub struct ProviderEnvMapping {
     pub companion_env_vars: Vec<String>,
     #[serde(default)]
     pub optional_env_vars: Vec<String>,
+    /// OpenAI-compatible `GET /models` endpoint for live model-catalog
+    /// fetches. Absent when the provider has no compatible listing API.
+    #[serde(default)]
+    pub models_url: Option<String>,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeProviderProfile>,
 }
@@ -345,6 +349,17 @@ impl ProviderKeyMapping {
                 format!("providers.{primary_id}.optional_env_vars"),
                 &mapping.optional_env_vars,
             )?;
+            if let Some(models_url) = mapping.models_url.as_deref() {
+                validate_token(&format!("providers.{primary_id}.models_url"), models_url)?;
+                // The fetch sends the operator's API key as a bearer token, so
+                // plaintext endpoints are rejected outright (tests use the
+                // compile-gated ACP_STACK_PROVIDER_MODELS_BASE seam instead).
+                if !models_url.starts_with("https://") {
+                    return provider_mapping_error(format!(
+                        "provider `{primary_id}` models_url must be an HTTPS URL"
+                    ));
+                }
+            }
             if let Some(profile) = &mapping.claude_code {
                 self.validate_claude_code_profile(mapping, profile)?;
             }
@@ -570,6 +585,12 @@ pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> boo
         || (agent_id == CLAUDE_CODE_AGENT_ID
             && claude_code_profile_for_provider_id(provider_id)
                 .is_some_and(|profile| profile.agent_native_auth))
+}
+
+pub fn models_url_for_provider_id(provider_id: &str) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.models_url.as_deref())
 }
 
 pub fn provider_name_for_provider_id(provider_id: &str) -> Option<&'static str> {
