@@ -90,6 +90,7 @@ The operator-facing sequence, in order:
     - Supported registry agents:
         - Select or validate provider and required secret refs.
         - Discover ACP-advertised model options with one provisional session.
+        - Codex with a non-OpenAI provider lists models from the provider's live catalog (fetched during init and cached at `~/.config/acp-stack/provider-models.json`) instead of the adapter's advertised OpenAI presets; when no catalog is available (custom provider or an offline fetch), the model step is skipped with a hint to rerun with `--model`.
         - Apply `--provider`, `--api-key-ref`, `--model`, and custom-provider flags.
         - Kimi Code skips model discovery: `--model` is accepted as supplied, and without it init pins `kimi-for-coding` unless config already has a model.
     - Custom agents:

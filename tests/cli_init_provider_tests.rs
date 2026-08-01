@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::fs;
 
 mod common;
+use common::agent::spawn_provider_models_server;
 use common::cli::*;
 
 #[test]
@@ -1339,6 +1340,87 @@ fn init_claude_code_profile_provider_filters_builtin_model_aliases() {
         .expect("config should be readable");
     assert!(config.contains(r#"id = "moonshotai""#));
     assert!(!config.contains(r#"model = "kimi-k2.7-code""#));
+}
+
+#[test]
+fn init_codex_openrouter_lists_provider_catalog_models() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    // codex-acp advertises codex-core's bundled OpenAI presets regardless of
+    // the configured provider; the init model list must come from the live
+    // provider catalog instead.
+    let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
+    let base = spawn_provider_models_server(serde_json::json!({
+        "data": [
+            { "id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+            { "id": "moonshotai/kimi-k3" },
+        ]
+    }));
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", &base)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "codex",
+            "--provider",
+            "openrouter",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "provider catalog models for Codex:",
+        ))
+        .stdout(predicates::str::contains("  deepseek/deepseek-v4-flash"))
+        .stdout(predicates::str::contains("  moonshotai/kimi-k3"))
+        .stdout(predicates::str::contains("  gpt-5.5").not())
+        .stdout(predicates::str::contains("advertised models for Codex:").not());
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "openrouter""#));
+    assert!(!config.contains(r#"model = "gpt-5.5""#));
+}
+
+#[test]
+fn init_codex_openrouter_without_catalog_skips_model_list() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
+
+    // Dead endpoint: the catalog refresh degrades to a warning, and the
+    // model lane must not fall back to codex-acp's OpenAI presets.
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "codex",
+            "--provider",
+            "openrouter",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "no live model catalog available for Codex",
+        ))
+        .stdout(predicates::str::contains("  gpt-5.5").not());
 }
 
 #[test]
