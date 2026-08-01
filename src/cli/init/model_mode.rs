@@ -12,7 +12,8 @@ use crate::runtime::agent::model_discovery::{
     advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
     validate_advertised_value,
 };
-use crate::runtime::agent::provider_keys::agent_provider_id_for_provider_id;
+use crate::runtime::agent::provider_keys::{CODEX_AGENT_ID, agent_provider_id_for_provider_id};
+use crate::runtime::agent::provider_model_catalog::cached_models;
 use crate::runtime::install::agent_registry::RegistryCatalog;
 
 use super::headless_snapshot::{
@@ -23,8 +24,9 @@ use super::registry_apply::is_custom_agent;
 use super::{InitArgs, prompt, prompts_enabled};
 
 /// Outcome of the init model selection step.
-/// `Skipped` covers both "agent doesn't support this category" and
-/// "no flag, no resume, no interactive prompt"; `PrintedList` is the
+/// `Skipped` covers "agent doesn't support this category", "no flag, no
+/// resume, no interactive prompt", and the codex non-OpenAI lane when no
+/// live provider catalog is available; `PrintedList` is the
 /// L87 path where non-interactive init prints advertised values but
 /// declines to mutate config; `Set` triggers a canonical re-write.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -286,13 +288,11 @@ pub(super) fn configure_model_and_mode_for_init(
     //
     // Known narrow caveat: Codex provisioners (`provision_codex_openai_config`
     // and the OpenRouter branch) short-circuit with `Ok(None)` when no
-    // model is configured yet, so the L87 "print advertised models"
-    // path for codex+provider-only discovers against whatever
-    // ~/.codex/config.toml looked like before this run. The advertised
-    // list itself comes from Codex's built-in catalog rather than the
-    // configured provider, so the practical impact is limited to
-    // first-run codex when the operator switches providers without
-    // also passing --model.
+    // model is configured yet, so discovery for codex+provider-only runs
+    // against whatever ~/.codex/config.toml looked like before this run.
+    // Harmless in practice: the codex non-OpenAI lane prints the provider
+    // catalog instead of the advertised list, and the codex+openai lane
+    // advertises the same built-in catalog either way.
     let candidate_paths = headless_config_candidate_paths(&config.agent.id, home);
     let snapshots = capture_path_snapshots(&candidate_paths)?;
     // Also record directory listings so rollback can remove side files
@@ -320,6 +320,7 @@ pub(super) fn configure_model_and_mode_for_init(
         let outcome = ModelModeOutcome {
             model_action: configure_model_for_init(
                 args,
+                home,
                 config,
                 config_path,
                 &response,
@@ -406,6 +407,7 @@ pub(super) fn verify_agent_acp_connection(
 
 fn configure_model_for_init(
     args: &InitArgs,
+    home: &Path,
     config: &mut Config,
     config_path: &Path,
     response: &agent_client_protocol::schema::v1::NewSessionResponse,
@@ -439,10 +441,41 @@ fn configure_model_for_init(
         return Ok(ModelModeAction::Set);
     }
 
-    let values = model_values_for_cli_display(
-        config,
-        advertised_values_for_category(response, AgentSessionConfigCategory::Model)?,
-    );
+    // codex-acp advertises codex-core's bundled OpenAI preset catalog
+    // regardless of the configured provider (see
+    // `model_value_is_explicit_without_discovery`), so for codex lanes the
+    // advertised list is not a truthful pickable set. Substitute the
+    // provider's live catalog — refreshed best-effort by the caller right
+    // before discovery — and when no catalog exists (custom provider or an
+    // offline fetch) skip the lane with a hint rather than surface the
+    // misleading presets.
+    let codex_catalog_lane =
+        agent_model_is_explicit_without_discovery(config) && config.agent.id == CODEX_AGENT_ID;
+    let values: Vec<String> = if codex_catalog_lane {
+        let catalog = config
+            .agent
+            .provider
+            .as_ref()
+            .filter(|provider| provider.custom.is_none())
+            .and_then(|provider| cached_models(home, &provider.id));
+        match catalog {
+            Some(models) => models.into_iter().map(|model| model.value).collect(),
+            None => {
+                if !args.handoff_json {
+                    println!(
+                        "no live model catalog available for {agent_name}; \
+                         rerun with `acps init --model <value>` to write a model into config"
+                    );
+                }
+                return Ok(ModelModeAction::Skipped);
+            }
+        }
+    } else {
+        model_values_for_cli_display(
+            config,
+            advertised_values_for_category(response, AgentSessionConfigCategory::Model)?,
+        )
+    };
     let interactive = prompts_enabled(args);
     if !interactive {
         // L87: non-interactive run, no explicit choice. Print the
@@ -451,7 +484,11 @@ fn configure_model_for_init(
         // whatever it was (most commonly unset, so the agent picks
         // its own default on session/new).
         if !args.handoff_json {
-            println!("advertised models for {agent_name}:");
+            if codex_catalog_lane {
+                println!("provider catalog models for {agent_name}:");
+            } else {
+                println!("advertised models for {agent_name}:");
+            }
             for value in &values {
                 println!("  {value}");
             }

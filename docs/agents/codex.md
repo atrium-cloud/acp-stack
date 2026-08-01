@@ -29,7 +29,7 @@ acps agent set --provider openrouter --model <model-id>
 
 OpenRouter config is written to `~/.codex/config.toml` with `https://openrouter.ai/api/v1` as the Responses base URL. Following the OpenRouter cookbook, authentication uses a command-based `auth` block that echoes `OPENROUTER_API_KEY` instead of a plain `env_key`, so Codex refreshes its model catalog and non-OpenAI models get correct metadata.
 
-For OpenRouter and custom providers the model id is accepted verbatim and written to `config.toml` without validation against the adapter's advertised model list — `codex-acp` advertises codex-core's builtin OpenAI preset catalog regardless of the configured provider, so that list must not gate provider-native slugs like `deepseek/deepseek-v4-flash`. The `openai` provider still validates against advertised models.
+For OpenRouter and custom providers the model id is accepted verbatim and written to `config.toml` without validation against the adapter's advertised model list — `codex-acp` advertises codex-core's builtin OpenAI preset catalog regardless of the configured provider, so that list must not gate provider-native slugs like `deepseek/deepseek-v4-flash`. The `openai` provider still validates against advertised models. During init the model list for these lanes comes from the provider's live catalog (the same listing that backs `GET /v1/models`), so the picker shows real provider slugs; when no catalog is available (custom provider or an offline fetch) init skips the list and asks for an explicit `--model` rather than showing the OpenAI presets.
 
 Codex mode values (read-only, auto, full-access) are supported through:
 
