@@ -37,6 +37,10 @@ pub(crate) struct AgentSwitchResponse {
     provisioned: Vec<ProvisionedAgentConfigJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skills_port: Option<SkillPortReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skills_link: Option<SkillLinkReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skills_link_error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     cleaned_configs: Vec<CleanedAgentConfigJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -148,6 +152,7 @@ pub(crate) async fn agent_switch_handler(
         &fresh_config.agent.id,
         &candidate_config.agent.id,
     )?;
+    let link_outcome = link_agent_skills_best_effort(&home, target_entry);
 
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;
@@ -209,6 +214,8 @@ pub(crate) async fn agent_switch_handler(
             .then_some("acps agent set --model <model-id>"),
         provisioned,
         skills_port,
+        skills_link: link_outcome.report,
+        skills_link_error: link_outcome.error,
         cleaned_configs,
         cleanup_errors,
     };
@@ -279,6 +286,7 @@ async fn switch_to_existing_array_target(
         &fresh_config.agent.id,
         &candidate_config.agent.id,
     )?;
+    let link_outcome = link_agent_skills_best_effort(home, target_entry);
 
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;
@@ -321,6 +329,8 @@ async fn switch_to_existing_array_target(
         follow_up: None,
         provisioned,
         skills_port,
+        skills_link: link_outcome.report,
+        skills_link_error: link_outcome.error,
         cleaned_configs: Vec::new(),
         cleanup_errors: Vec::new(),
     }))

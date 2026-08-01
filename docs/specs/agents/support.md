@@ -23,7 +23,7 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | Cursor CLI  | native  |                    | yes | yes          |
 | Goose       | native  |                    | yes | yes          |
 | Codex CLI   | adapter | `codex-acp`        | yes | yes          |
-| Claude Code | adapter | `claude-agent-acp` | yes | no           |
+| Claude Code | adapter | `claude-agent-acp` | yes | yes          |
 | Kimi Code   | native  |                    | yes | yes          |
 
 Per-agent setup notes live under [../../agents](../../agents).
@@ -33,6 +33,8 @@ Per-agent setup notes live under [../../agents](../../agents).
 The embedded skills catalog is documented in [skills.md](skills.md). It records reviewed Agent Skills from Anthropic, OpenAI, and K-Dense, including individual skills contained in OpenAI plugins.
 
 Supported agents advertise MCP support, Agent Skills support, and the managed skills install directory in `data/agents.toml`. Goose Agent Skills support depends on the built-in Summon extension in supported Goose versions.
+
+An agent whose harness discovers skills somewhere other than its managed install directory declares `agent_skills_link_dir` in `data/agents.toml`; each installed skill is then symlinked from the install directory into that path. Linking is a one-way mirror: the install directory is the source of truth, and only symlinks pointing into it are managed — dangling ones are pruned wherever they sit, a directory emptied by pruning is removed, and user content in the link directory is otherwise never modified. Nested skills are linked under group directories, so a managed link may appear inside a pre-existing directory of the same name. Claude Code is the only such agent today: skills install into `~/.agents/skills` and are linked into `~/.claude/skills`.
 
 ## Currently Unsupported
 

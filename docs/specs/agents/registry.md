@@ -13,6 +13,7 @@ Registry entries describe:
 - provider/model/mode support flags
 - MCP and Agent Skills support flags
 - Agent Skills install directory when skills are supported
+- optional Agent Skills link directory when the harness discovers skills somewhere other than the install directory (e.g. Claude Code's `~/.claude/skills`); it must not equal the install directory, and neither may nest within the other
 - support documentation path
 
 Only entries marked headless-compatible are offered as supported runtime targets.
@@ -33,4 +34,4 @@ The embedded registry is the default source. Operators may provide a local overr
 
 ## Skills Catalog
 
-Agent Skills sources are cataloged separately in `data/skills.toml`. During `acps init`, selected skills are copied into the selected agent's `agent_skills_install_dir`.
+Agent Skills sources are cataloged separately in `data/skills.toml`. During `acps init`, selected skills are copied into the selected agent's `agent_skills_install_dir`. When the agent declares an `agent_skills_link_dir`, each installed skill is additionally symlinked there; the link refresh is best-effort and also prunes dangling links left by removed skills. Linking is a one-way mirror: the install directory is the source of truth and the link directory only receives symlinks — symlinks pointing into the install directory are managed wherever they sit (the refresh recurses into group directories and removes a directory left empty by pruning), while everything else in the link directory is user-owned and left untouched. Nested skills are linked under group directories, so a managed link may be added inside a pre-existing directory of the same name.

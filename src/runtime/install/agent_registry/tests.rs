@@ -129,26 +129,31 @@ fn embedded_registry_advertises_tested_headless_support() {
             "{} must advertise MCP support",
             entry.id
         );
+        assert!(
+            entry.supports_agent_skills,
+            "{} must advertise Agent Skills support",
+            entry.id
+        );
+        assert!(
+            entry
+                .agent_skills_install_dir
+                .as_deref()
+                .is_some_and(|path| {
+                    matches!(entry.id.as_str(), "amp" if path == "~/.config/agents/skills")
+                        || (entry.id != "amp" && path == "~/.agents/skills")
+                }),
+            "{} must declare the documented Agent Skills install directory",
+            entry.id
+        );
+        // Claude Code only discovers `~/.claude/skills`, so it is the one
+        // agent whose installed skills get symlinked out of the shared dir.
         if entry.id == "claude-code" {
-            assert!(!entry.supports_agent_skills);
-            assert!(entry.agent_skills_install_dir.is_none());
+            assert_eq!(
+                entry.agent_skills_link_dir.as_deref(),
+                Some("~/.claude/skills")
+            );
         } else {
-            assert!(
-                entry.supports_agent_skills,
-                "{} must advertise Agent Skills support",
-                entry.id
-            );
-            assert!(
-                entry
-                    .agent_skills_install_dir
-                    .as_deref()
-                    .is_some_and(|path| {
-                        matches!(entry.id.as_str(), "amp" if path == "~/.config/agents/skills")
-                            || (entry.id != "amp" && path == "~/.agents/skills")
-                    }),
-                "{} must declare the documented Agent Skills install directory",
-                entry.id
-            );
+            assert!(entry.agent_skills_link_dir.is_none());
         }
         assert_eq!(
             entry.testflight_expect_fs.as_deref(),
@@ -278,7 +283,15 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(claude_code.allow_custom_model);
     assert!(claude_code.set_mode);
     assert!(claude_code.supports_mcp);
-    assert!(!claude_code.supports_agent_skills);
+    assert!(claude_code.supports_agent_skills);
+    assert_eq!(
+        claude_code.agent_skills_install_dir.as_deref(),
+        Some("~/.agents/skills")
+    );
+    assert_eq!(
+        claude_code.agent_skills_link_dir.as_deref(),
+        Some("~/.claude/skills")
+    );
     assert_eq!(
         claude_code
             .adapter
@@ -895,6 +908,173 @@ creates = "bad-skills"
     match err {
         StackError::RegistryLoad { reason } => {
             assert!(reason.contains("must be absolute"), "reason: {reason}");
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_link_dir_without_skills_support() {
+    let body = r#"
+[[agents]]
+id = "bad-skills"
+name = "Bad Skills"
+kind = "native"
+headless_compatible = true
+agent_skills_link_dir = "~/.bad/skills"
+support_doc = "docs/agents/bad-skills.md"
+
+[agents.harness]
+id = "bad-skills"
+
+[agents.harness.install.npm]
+package = "bad-skills"
+creates = "bad-skills"
+"#;
+    let err = RegistryCatalog::from_toml(body)
+        .expect_err("link dir without skills support must be rejected");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("agent_skills_link_dir without supports_agent_skills"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_invalid_agent_skills_link_dir() {
+    let body = r#"
+[[agents]]
+id = "bad-skills"
+name = "Bad Skills"
+kind = "native"
+headless_compatible = true
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+agent_skills_link_dir = "relative/skills"
+support_doc = "docs/agents/bad-skills.md"
+
+[agents.harness]
+id = "bad-skills"
+
+[agents.harness.install.npm]
+package = "bad-skills"
+creates = "bad-skills"
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("relative link dir must be rejected");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("agent_skills_link_dir") && reason.contains("must be absolute"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_link_dir_equal_to_install_dir() {
+    let body = r#"
+[[agents]]
+id = "bad-skills"
+name = "Bad Skills"
+kind = "native"
+headless_compatible = true
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+agent_skills_link_dir = "~/.agents/skills"
+support_doc = "docs/agents/bad-skills.md"
+
+[agents.harness]
+id = "bad-skills"
+
+[agents.harness.install.npm]
+package = "bad-skills"
+creates = "bad-skills"
+"#;
+    let err =
+        RegistryCatalog::from_toml(body).expect_err("link dir equal to install dir must fail");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("must differ from agent_skills_install_dir"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+
+    let nested = body.replace(
+        r#"agent_skills_link_dir = "~/.agents/skills""#,
+        r#"agent_skills_link_dir = "~/.agents/skills/claude""#,
+    );
+    let err = RegistryCatalog::from_toml(&nested)
+        .expect_err("link dir nested inside install dir must fail");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(reason.contains("neither may nest"), "reason: {reason}");
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+
+    let install_nested = body.replace(
+        r#"agent_skills_install_dir = "~/.agents/skills""#,
+        r#"agent_skills_install_dir = "~/.agents/skills/managed""#,
+    );
+    let err = RegistryCatalog::from_toml(&install_nested)
+        .expect_err("install dir nested inside link dir must fail");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(reason.contains("neither may nest"), "reason: {reason}");
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+
+    let trailing_slash = body.replace(
+        r#"agent_skills_link_dir = "~/.agents/skills""#,
+        r#"agent_skills_link_dir = "~/.agents/skills/""#,
+    );
+    let err = RegistryCatalog::from_toml(&trailing_slash)
+        .expect_err("trailing-slash alias of the install dir must fail");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("must differ from agent_skills_install_dir"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+
+    let double_slash = body.replace(
+        r#"agent_skills_link_dir = "~/.agents/skills""#,
+        r#"agent_skills_link_dir = "~/.agents//skills""#,
+    );
+    let err = RegistryCatalog::from_toml(&double_slash)
+        .expect_err("double-slash alias of the install dir must fail");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("must differ from agent_skills_install_dir"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+
+    let double_slash_nested = body.replace(
+        r#"agent_skills_link_dir = "~/.agents/skills""#,
+        r#"agent_skills_link_dir = "~/.agents//skills/claude""#,
+    );
+    let err = RegistryCatalog::from_toml(&double_slash_nested)
+        .expect_err("double-slash nested spelling must fail");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(reason.contains("neither may nest"), "reason: {reason}");
         }
         other => panic!("expected RegistryLoad, got {other:?}"),
     }

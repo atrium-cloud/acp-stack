@@ -30,7 +30,9 @@ use crate::runtime::install::agent_installer::{
     InstallerSequenceResult, install_resolved_capture, run_installer_capture,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
-use crate::runtime::install::skill_installer::{SkillPortReport, port_agent_skills};
+use crate::runtime::install::skill_installer::{
+    SkillLinkReport, SkillPortReport, link_agent_skills_best_effort, port_agent_skills,
+};
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 use crate::state::InstallerRunInput;

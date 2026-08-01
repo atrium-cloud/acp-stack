@@ -252,6 +252,12 @@ fn print_switch_result(data: &Value) {
     if let Some(skills_port) = data.get("skills_port") {
         print_skills_port(skills_port);
     }
+    if let Some(skills_link) = data.get("skills_link") {
+        print_skills_link(skills_link);
+    }
+    if let Some(skills_link_error) = data.get("skills_link_error").and_then(Value::as_str) {
+        println!("warning: skill link refresh failed: {skills_link_error}");
+    }
     if let Some(cleaned_configs) = data.get("cleaned_configs").and_then(Value::as_array) {
         for cleaned in cleaned_configs {
             let label = cleaned
@@ -304,6 +310,44 @@ fn print_skills_port(skills_port: &Value) {
             println!("skills port: copied {copied}, overwritten {overwritten} -> {target_root}");
         }
         _ => println!("skills port: {status}"),
+    }
+}
+
+fn print_skills_link(skills_link: &Value) {
+    let link_root = skills_link
+        .get("link_root")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let count = |field: &str| {
+        skills_link
+            .get(field)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    let linked = count("linked");
+    let unchanged = count("unchanged");
+    let conflicts = count("conflicts");
+    let pruned = count("pruned");
+    let mut parts = Vec::new();
+    if linked > 0 {
+        parts.push(format!("linked {linked}"));
+    }
+    if unchanged > 0 {
+        parts.push(format!("unchanged {unchanged}"));
+    }
+    if conflicts > 0 {
+        parts.push(format!("kept {conflicts} existing"));
+    }
+    if pruned > 0 {
+        parts.push(format!("pruned {pruned} dangling"));
+    }
+    if !parts.is_empty() {
+        println!("skills link: {} -> {link_root}", parts.join(", "));
+    }
+    if let Some(errors) = skills_link.get("errors").and_then(Value::as_array) {
+        for error in errors.iter().filter_map(Value::as_str) {
+            println!("warning: skill link failed: {error}");
+        }
     }
 }
 

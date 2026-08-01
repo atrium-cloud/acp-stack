@@ -89,6 +89,29 @@ pub enum SkillPortStatus {
     NoneFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillLinkReport {
+    pub install_root: PathBuf,
+    pub link_root: PathBuf,
+    pub linked: Vec<SkillInstallEntry>,
+    pub unchanged: Vec<SkillInstallEntry>,
+    pub conflicts: Vec<SkillInstallEntry>,
+    pub pruned: Vec<SkillInstallEntry>,
+    /// Per-skill failures (`"<skill>: <error>"`) that were skipped so the
+    /// rest of the refresh could continue; empty when every skill linked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// Result of a best-effort link refresh: the report on success, or the
+/// failure reason when the refresh could not run. The error travels
+/// alongside instead of only being logged so API/CLI callers can surface it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillLinkOutcome {
+    pub report: Option<SkillLinkReport>,
+    pub error: Option<String>,
+}
+
 pub fn parse_skill_source(value: &str, catalog: &SkillCatalog) -> Result<SkillSourceSelection> {
     let trimmed = value.trim();
     if let Some(source) = catalog.lookup_alias(trimmed) {
@@ -428,6 +451,322 @@ pub fn port_agent_skills(
     port_skill_directories(&source_root, &target_root).map(Some)
 }
 
+/// Symlink every skill under the agent's install root into its
+/// `agent_skills_link_dir`, for harnesses that only discover skills from
+/// their own directory (e.g. Claude Code reads `~/.claude/skills`, not the
+/// shared `~/.agents/skills`). Linking is a one-way mirror: the managed
+/// install root is the source of truth and the link dir only receives
+/// symlinks. Idempotent: correct links are kept, stale links are repointed,
+/// dangling top-level links into the install root are pruned, and real
+/// files or directories already at a link path are left alone and reported
+/// as conflicts instead of failing.
+pub fn link_agent_skills(home: &Path, entry: &RegistryEntry) -> Result<Option<SkillLinkReport>> {
+    let Some(link_dir) = entry.agent_skills_link_dir.as_deref() else {
+        return Ok(None);
+    };
+    let home = home
+        .canonicalize()
+        .map_err(|source| StackError::SkillInstallFailed {
+            reason: format!("canonicalize home directory `{}`: {source}", home.display()),
+        })?;
+    let Some(install_root) = agent_skill_root(&home, entry)? else {
+        return Ok(None);
+    };
+    // Resolve symlinked ancestors (e.g. a dotfiles-managed `~/.agents`) the
+    // same way the link root is resolved, so linking works there instead of
+    // failing the no-symlink-ancestor check that copy flows require.
+    let install_root = resolve_existing_prefix(&install_root)?;
+    if !install_root.is_dir() {
+        return Ok(None);
+    }
+    let link_root = resolve_existing_prefix(&expand_agent_skills_install_dir(&home, link_dir)?)?;
+    let mut report = SkillLinkReport {
+        install_root: install_root.clone(),
+        link_root: link_root.clone(),
+        linked: Vec::new(),
+        unchanged: Vec::new(),
+        conflicts: Vec::new(),
+        pruned: Vec::new(),
+        errors: Vec::new(),
+    };
+    let mut candidates = Vec::new();
+    collect_link_skill_directories(&install_root, &install_root, &mut candidates)?;
+    if !candidates.is_empty() {
+        ensure_directory_no_symlink_ancestors(&link_root, true)?;
+    }
+    for (skill_name, install_dir) in candidates {
+        // One bad skill must not take down the rest of the refresh: per-skill
+        // failures are collected and reported, linking continues, and the
+        // prune below still runs.
+        match link_one_skill(&link_root, &skill_name, &install_dir) {
+            Ok(SkillLinkDisposition::Linked(entry)) => report.linked.push(entry),
+            Ok(SkillLinkDisposition::Unchanged(entry)) => report.unchanged.push(entry),
+            Ok(SkillLinkDisposition::Conflict(entry)) => report.conflicts.push(entry),
+            Err(error) => {
+                tracing::warn!(skill = %skill_name, error = %error, "skill link failed");
+                report.errors.push(format!("{skill_name}: {error}"));
+            }
+        }
+    }
+    prune_dangling_skill_links(&link_root, &link_root, &install_root, &mut report.pruned)?;
+    report
+        .linked
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    report
+        .unchanged
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    report
+        .conflicts
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    report
+        .pruned
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    report.errors.sort();
+    Ok(Some(report))
+}
+
+enum SkillLinkDisposition {
+    Linked(SkillInstallEntry),
+    Unchanged(SkillInstallEntry),
+    Conflict(SkillInstallEntry),
+}
+
+/// Link one skill into the link root: create the symlink, repoint a stale
+/// one, keep a correct one, or leave a real file/directory in place as a
+/// conflict. Failures are the caller's to downgrade to per-skill errors.
+fn link_one_skill(
+    link_root: &Path,
+    skill_name: &str,
+    install_dir: &Path,
+) -> Result<SkillLinkDisposition> {
+    let link_path = link_root.join(skill_name);
+    let link_parent = link_path
+        .parent()
+        .ok_or_else(|| StackError::SkillInstallFailed {
+            reason: format!("skill link `{}` has no parent", link_path.display()),
+        })?;
+    ensure_directory_no_symlink_ancestors(link_parent, true)?;
+    let link_entry = SkillInstallEntry {
+        name: skill_name.to_owned(),
+        path: link_path.clone(),
+    };
+    match std::fs::symlink_metadata(&link_path) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            create_skill_symlink(install_dir, &link_path)?;
+            Ok(SkillLinkDisposition::Linked(link_entry))
+        }
+        Err(source) => Err(StackError::SkillInstallFailed {
+            reason: format!("stat skill link `{}`: {source}", link_path.display()),
+        }),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = std::fs::read_link(&link_path).map_err(|source| {
+                StackError::SkillInstallFailed {
+                    reason: format!("read skill link `{}`: {source}", link_path.display()),
+                }
+            })?;
+            if target != install_dir {
+                std::fs::remove_file(&link_path).map_err(|source| {
+                    StackError::SkillInstallFailed {
+                        reason: format!(
+                            "remove stale skill link `{}`: {source}",
+                            link_path.display()
+                        ),
+                    }
+                })?;
+                create_skill_symlink(install_dir, &link_path)?;
+                Ok(SkillLinkDisposition::Linked(link_entry))
+            } else {
+                Ok(SkillLinkDisposition::Unchanged(link_entry))
+            }
+        }
+        Ok(_) => {
+            tracing::warn!(
+                path = %link_path.display(),
+                "skill link path already holds a real file or directory; leaving it in place"
+            );
+            Ok(SkillLinkDisposition::Conflict(link_entry))
+        }
+    }
+}
+
+/// Best-effort wrapper for install/switch flows: a failed link refresh must
+/// not abort an otherwise successful operation — the skills stay installed
+/// in the shared root and only harness discovery is degraded, so the
+/// failure is logged and returned for the caller to surface instead of
+/// propagated.
+pub fn link_agent_skills_best_effort(home: &Path, entry: &RegistryEntry) -> SkillLinkOutcome {
+    match link_agent_skills(home, entry) {
+        Ok(report) => SkillLinkOutcome {
+            report,
+            error: None,
+        },
+        Err(error) => {
+            tracing::warn!(agent = %entry.id, error = %error, "skill link refresh failed");
+            SkillLinkOutcome {
+                report: None,
+                error: Some(error.to_string()),
+            }
+        }
+    }
+}
+
+/// Canonicalize the longest existing prefix of `path` and re-append the
+/// missing tail. A dotfiles-managed home commonly symlinks the harness
+/// config directory itself (e.g. `~/.claude` -> `~/dotfiles/claude`);
+/// resolving it up front lets the no-symlink-ancestor checks operate on the
+/// real directory instead of rejecting the whole link step.
+fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut prefix = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match prefix.canonicalize() {
+            Ok(resolved) => {
+                let mut result = resolved;
+                for component in tail.iter().rev() {
+                    result.push(component);
+                }
+                return Ok(result);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                match (prefix.file_name(), prefix.parent()) {
+                    (Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
+                        tail.push(name.to_owned());
+                        prefix = parent.to_path_buf();
+                    }
+                    _ => return Ok(path.to_path_buf()),
+                }
+            }
+            Err(source) => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "resolve skill link directory `{}`: {source}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Remove symlinks under the link root that point into the install root
+/// but whose target no longer exists — the leftover of an uninstalled
+/// skill. Linking is a one-way mirror: symlinks pointing into the managed
+/// install root are ours wherever they sit, so real directories are
+/// recursed into (nested skills live in group directories the linker
+/// created), and a directory left empty by pruning is removed with them.
+/// Everything else — real files, links pointing elsewhere, directories
+/// with any content left — is user-owned and left completely alone.
+fn prune_dangling_skill_links(
+    link_root: &Path,
+    directory: &Path,
+    install_root: &Path,
+    pruned: &mut Vec<SkillInstallEntry>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!(
+                    "read skill link directory `{}`: {source}",
+                    directory.display()
+                ),
+            });
+        }
+    };
+    let pruned_before = pruned.len();
+    for entry in entries {
+        let entry = entry.map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "read skill link directory entry `{}`: {source}",
+                directory.display()
+            ),
+        })?;
+        let entry_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| {
+            StackError::SkillInstallFailed {
+                reason: format!("stat skill link entry `{}`: {source}", entry_path.display()),
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(&entry_path).map_err(|source| {
+                StackError::SkillInstallFailed {
+                    reason: format!("read skill link `{}`: {source}", entry_path.display()),
+                }
+            })?;
+            if !target.starts_with(install_root) {
+                continue;
+            }
+            let dangling = match std::fs::symlink_metadata(&target) {
+                Ok(_) => false,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => true,
+                // A target that cannot be stat'd for another reason (e.g. an
+                // unreadable ancestor) may still exist; keep the link.
+                Err(source) => {
+                    tracing::warn!(
+                        path = %entry_path.display(),
+                        error = %source,
+                        "keeping skill link: could not stat its target"
+                    );
+                    false
+                }
+            };
+            if !dangling {
+                continue;
+            }
+            std::fs::remove_file(&entry_path).map_err(|source| StackError::SkillInstallFailed {
+                reason: format!(
+                    "remove dangling skill link `{}`: {source}",
+                    entry_path.display()
+                ),
+            })?;
+            let name = entry_path
+                .strip_prefix(link_root)
+                .unwrap_or(&entry_path)
+                .to_string_lossy()
+                .into_owned();
+            pruned.push(SkillInstallEntry {
+                name,
+                path: entry_path,
+            });
+        } else if metadata.is_dir() {
+            prune_dangling_skill_links(link_root, &entry_path, install_root, pruned)?;
+        }
+    }
+    // Remove a group directory only when this prune emptied it; without a
+    // prune, or with any content left (user-owned or not), it stays.
+    if directory != link_root && pruned.len() > pruned_before {
+        let mut remaining =
+            std::fs::read_dir(directory).map_err(|source| StackError::SkillInstallFailed {
+                reason: format!(
+                    "re-read skill link directory `{}`: {source}",
+                    directory.display()
+                ),
+            })?;
+        if remaining.next().is_none() {
+            std::fs::remove_dir(directory).map_err(|source| StackError::SkillInstallFailed {
+                reason: format!(
+                    "remove emptied skill link directory `{}`: {source}",
+                    directory.display()
+                ),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn create_skill_symlink(install_dir: &Path, link_path: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(install_dir, link_path).map_err(|source| {
+        StackError::SkillInstallFailed {
+            reason: format!(
+                "create skill link `{}` -> `{}`: {source}",
+                link_path.display(),
+                install_dir.display()
+            ),
+        }
+    })
+}
+
 fn agent_skill_root(home: &Path, entry: &RegistryEntry) -> Result<Option<PathBuf>> {
     if !entry.supports_agent_skills {
         return Ok(None);
@@ -611,6 +950,139 @@ fn collect_port_skill_directories(
             return Err(StackError::SkillInstallFailed {
                 reason: format!("refusing to port special file `{}`", entry_path.display()),
             });
+        }
+    }
+    Ok(())
+}
+
+/// Tolerant variant of `collect_port_skill_directories` for linking. The
+/// port collector's strictness (no symlinks, no special files anywhere in
+/// the tree) exists because copying such entries would be unsafe; linking
+/// copies nothing — it only symlinks the skill dir — so unexpected entries
+/// are skipped with a warning instead of failing the whole refresh. Only a
+/// failure to read the install root itself propagates.
+fn collect_link_skill_directories(
+    install_root: &Path,
+    directory: &Path,
+    candidates: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    let descriptor = directory.join(SKILL_DESCRIPTOR);
+    match std::fs::symlink_metadata(&descriptor) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                tracing::warn!(
+                    path = %descriptor.display(),
+                    "skipping skill: descriptor is not a regular SKILL.md file"
+                );
+                return Ok(());
+            }
+            let relative = directory.strip_prefix(install_root).map_err(|source| {
+                StackError::SkillInstallFailed {
+                    reason: format!(
+                        "resolve source skill path `{}`: {source}",
+                        directory.display()
+                    ),
+                }
+            })?;
+            let skill_name = relative
+                .components()
+                .map(|component| match component {
+                    Component::Normal(value) => value.to_str().map(str::to_owned),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|components| components.join("/"))
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| StackError::SkillInstallFailed {
+                    reason: format!(
+                        "skill descriptor `{}` does not map to a portable skill directory",
+                        descriptor.display()
+                    ),
+                })?;
+            if let Err(error) = validate_install_target_name(&skill_name) {
+                tracing::warn!(
+                    path = %directory.display(),
+                    error = %error,
+                    "skipping skill: directory does not map to a valid link name"
+                );
+                return Ok(());
+            }
+            candidates.push((skill_name, directory.to_path_buf()));
+            return Ok(());
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            if directory == install_root {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!("stat skill descriptor `{}`: {source}", descriptor.display()),
+                });
+            }
+            tracing::warn!(
+                path = %descriptor.display(),
+                error = %source,
+                "skipping skill: could not stat descriptor"
+            );
+            return Ok(());
+        }
+    }
+
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(source) => {
+            if directory == install_root {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!(
+                        "read source skills directory `{}`: {source}",
+                        directory.display()
+                    ),
+                });
+            }
+            tracing::warn!(
+                path = %directory.display(),
+                error = %source,
+                "skipping unreadable skills directory"
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) => {
+                tracing::warn!(
+                    path = %directory.display(),
+                    error = %source,
+                    "skipping unreadable skills directory entry"
+                );
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&entry_path) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                tracing::warn!(
+                    path = %entry_path.display(),
+                    error = %source,
+                    "skipping skills directory entry: could not stat"
+                );
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(
+                path = %entry_path.display(),
+                "skipping symlinked entry in skills directory"
+            );
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_link_skill_directories(install_root, &entry_path, candidates)?;
+        } else if !metadata.is_file() {
+            tracing::warn!(
+                path = %entry_path.display(),
+                "skipping special file in skills directory"
+            );
         }
     }
     Ok(())
