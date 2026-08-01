@@ -29,6 +29,8 @@ use crate::state::{
 const UPDATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const HELP_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const NATIVE_UPDATE_COMMANDS: &[&str] = &["update", "upgrade"];
+const PROBE_FAILURE_OUTPUT_TAIL_BYTES: usize = 200;
+const HELP_PROBE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentUpdateOptions {
@@ -489,13 +491,24 @@ fn run_native_update_step(
             format!("native update command `{command}` did not resolve"),
         );
     };
-    let Some(subcommand) = probe_native_update_subcommand(&path, workspace_root, dest_dir) else {
-        return command_error_row(
-            step,
-            INSTALL_METHOD_NATIVE,
-            started_at,
-            format!("native update command `{command}` did not advertise update or upgrade"),
-        );
+    let subcommand = match probe_native_update_subcommand(&path, workspace_root, dest_dir) {
+        Ok(subcommand) => subcommand,
+        Err(failure) => {
+            let headline = if failure.command_ran {
+                "did not advertise update or upgrade"
+            } else {
+                "could not be probed for update or upgrade"
+            };
+            return command_error_row(
+                step,
+                INSTALL_METHOD_NATIVE,
+                started_at,
+                format!(
+                    "native update command `{command}` {headline} ({})",
+                    failure.detail
+                ),
+            );
+        }
     };
     let context = CommandStepContext {
         workspace_root,
@@ -512,33 +525,107 @@ fn run_native_update_step(
     )
 }
 
+// Distinguishes "the command ran and its help lacks the token" from "the
+// probe never executed" (spawn error, timeout), so the report can avoid
+// asserting anything about a help listing that was never seen.
+struct NativeProbeFailure {
+    command_ran: bool,
+    detail: String,
+}
+
 fn probe_native_update_subcommand(
     path: &Path,
     workspace_root: &Path,
     dest_dir: &Path,
-) -> Option<String> {
+) -> std::result::Result<String, NativeProbeFailure> {
     let context = CommandStepContext {
         workspace_root,
         dest_dir,
         timeout: HELP_PROBE_TIMEOUT,
     };
+    let mut command_ran = false;
+    let mut failures = Vec::new();
     for args in [&["--help"][..], &["help"][..]] {
-        let row = run_command_step_with_started_at(
-            STEP_INSTALL,
-            INSTALL_METHOD_NATIVE,
-            crate::runtime::install::agent_installer::current_timestamp(),
-            path.to_path_buf(),
-            args,
-            &context,
-        );
-        let output = format!("{}\n{}", row.stdout, row.stderr);
-        for candidate in NATIVE_UPDATE_COMMANDS {
-            if help_output_contains_command(&output, candidate) {
-                return Some((*candidate).to_owned());
+        let run_probe = || {
+            run_command_step_with_started_at(
+                STEP_INSTALL,
+                INSTALL_METHOD_NATIVE,
+                crate::runtime::install::agent_installer::current_timestamp(),
+                path.to_path_buf(),
+                args,
+                &context,
+            )
+        };
+        let mut row = run_probe();
+        if let Some(subcommand) = advertised_subcommand(&row) {
+            return Ok(subcommand);
+        }
+        // A spawn error or a timeout with no output means the child stalled
+        // between fork and exec (a known hazard of pre_exec-based spawns in a
+        // heavily threaded process) rather than the command lacking the
+        // subcommand. That stall is transient, so one fresh spawn is retried.
+        if row.status == "error" || row.status == "timeout" {
+            std::thread::sleep(HELP_PROBE_RETRY_DELAY);
+            row = run_probe();
+            if let Some(subcommand) = advertised_subcommand(&row) {
+                return Ok(subcommand);
             }
         }
+        // "ran" and "failed" both mean the command itself executed; "error"
+        // and "timeout" mean the probe never got a real help listing.
+        command_ran |= row.status == "ran" || row.status == "failed";
+        failures.push(probe_failure_detail(args[0], &row));
     }
-    None
+    Err(NativeProbeFailure {
+        command_ran,
+        detail: failures.join("; "),
+    })
+}
+
+fn advertised_subcommand(
+    row: &crate::runtime::install::agent_installer::InstallerRowDraft,
+) -> Option<String> {
+    let output = format!("{}\n{}", row.stdout, row.stderr);
+    NATIVE_UPDATE_COMMANDS
+        .iter()
+        .find(|candidate| help_output_contains_command(&output, candidate))
+        .map(|candidate| (*candidate).to_owned())
+}
+
+// A probe can fail because the command genuinely lacks an update subcommand or
+// because the probe itself could not run (spawn error, timeout). Keep the row's
+// status/exit/output in the detail so the two cases stay distinguishable in
+// the report.
+fn probe_failure_detail(
+    probe_arg: &str,
+    row: &crate::runtime::install::agent_installer::InstallerRowDraft,
+) -> String {
+    let exit = match row.exit_status {
+        Some(code) => code.to_string(),
+        None => "none".to_owned(),
+    };
+    let combined = format!("{} {}", row.stdout, row.stderr);
+    let flattened = combined.split_whitespace().collect::<Vec<_>>().join(" ");
+    let output = if flattened.is_empty() {
+        "no output".to_owned()
+    } else {
+        output_tail(&flattened, PROBE_FAILURE_OUTPUT_TAIL_BYTES).to_owned()
+    };
+    format!(
+        "`{probe_arg}`: status {}, exit {exit}, output: {output}",
+        row.status
+    )
+}
+
+fn output_tail(text: &str, cap: usize) -> &str {
+    if text.len() <= cap {
+        return text;
+    }
+    let mut start = text.len() - cap;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
 }
 
 fn help_output_contains_command(output: &str, command: &str) -> bool {
@@ -903,6 +990,49 @@ creates = "fake-agent"
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].operation, INSTALLER_OPERATION_UPDATE);
         assert_eq!(rows[0].method.as_deref(), Some(INSTALLER_METHOD_NATIVE));
+    }
+
+    #[test]
+    fn native_probe_failure_detail_includes_status_exit_and_output() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let command_path = tempdir.path().join("fake-agent");
+        fs::write(
+            &command_path,
+            "#!/bin/sh\necho 'Commands: doctor'\nexit 3\n",
+        )
+        .expect("fake command");
+        let mut permissions = fs::metadata(&command_path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&command_path, permissions).expect("chmod");
+
+        let failure =
+            super::probe_native_update_subcommand(&command_path, tempdir.path(), tempdir.path())
+                .expect_err("probe should fail");
+
+        assert!(failure.command_ran);
+        let detail = failure.detail;
+        assert!(detail.contains("`--help`"), "{detail}");
+        assert!(detail.contains("`help`"), "{detail}");
+        assert!(detail.contains("status failed"), "{detail}");
+        assert!(detail.contains("exit 3"), "{detail}");
+        assert!(detail.contains("Commands: doctor"), "{detail}");
+    }
+
+    #[test]
+    fn native_probe_spawn_error_is_visible_in_detail() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let command_path = tempdir.path().join("fake-agent");
+        // Not executable, so the spawn itself fails rather than the command.
+        fs::write(&command_path, "#!/bin/sh\nexit 0\n").expect("fake command");
+
+        let failure =
+            super::probe_native_update_subcommand(&command_path, tempdir.path(), tempdir.path())
+                .expect_err("probe should fail");
+
+        assert!(!failure.command_ran);
+        let detail = failure.detail;
+        assert!(detail.contains("status error"), "{detail}");
+        assert!(detail.contains("exit none"), "{detail}");
     }
 
     fn registry_with_shell_npm_and_apt() -> RegistryCatalog {
