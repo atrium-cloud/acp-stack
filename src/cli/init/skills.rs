@@ -5,9 +5,10 @@ use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
-    ResolvedSkillSource, SOURCE_CUSTOM_GITHUB_PREFIX, SkillInstallReport, SkillSourceSelection,
-    all_skills_installed, expand_agent_skills_install_dir, install_from_github,
-    install_target_names_overlap, parse_skill_names, parse_skill_source, resolve_source,
+    ResolvedSkillSource, SOURCE_CUSTOM_GITHUB_PREFIX, SkillInstallReport, SkillLinkOutcome,
+    SkillSourceSelection, all_skills_installed, expand_agent_skills_install_dir,
+    install_from_github, install_target_names_overlap, link_agent_skills_best_effort,
+    parse_skill_names, parse_skill_source, resolve_source,
 };
 use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::state::InitStepRecord;
@@ -277,13 +278,27 @@ pub(super) fn skill_install_postcondition_holds(
     })
 }
 
-pub(super) fn install_init_skills(plan: &InitSkillInstallPlan) -> Result<Vec<SkillInstallReport>> {
-    plan.selections
+pub(super) fn install_init_skills(
+    plan: &InitSkillInstallPlan,
+    home: &Path,
+    config: &Config,
+    registry: &RegistryCatalog,
+) -> Result<(Vec<SkillInstallReport>, SkillLinkOutcome)> {
+    let reports = plan
+        .selections
         .iter()
         .map(|selection| {
             install_from_github(&selection.source, &plan.destination_root, &selection.skills)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let link_outcome = registry
+        .lookup(&config.agent.id)
+        .map(|entry| link_agent_skills_best_effort(home, entry))
+        .unwrap_or(SkillLinkOutcome {
+            report: None,
+            error: None,
+        });
+    Ok((reports, link_outcome))
 }
 
 fn agent_install_dir<'a>(config: &Config, registry: &'a RegistryCatalog) -> Option<&'a str> {

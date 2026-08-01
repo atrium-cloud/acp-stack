@@ -327,6 +327,38 @@ creates = "true"
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
+pub fn write_amp_linked_skills_registry_override(config_dir: &std::path::Path) {
+    let body = r#"
+[[agents]]
+id = "amp"
+name = "Amp Code"
+kind = "adapter"
+headless_compatible = true
+set_provider = false
+set_model = false
+set_mode = true
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+agent_skills_link_dir = "~/.amp/skills"
+support_doc = "docs/agents/amp.md"
+
+[agents.adapter]
+id = "true"
+
+[agents.adapter.install.shell]
+script = "true"
+creates = "true"
+
+[agents.harness]
+id = "true"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "true"
+"#;
+    std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
+}
+
 pub fn write_pi_registry_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]

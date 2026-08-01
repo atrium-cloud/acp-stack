@@ -41,4 +41,4 @@ base_url = "https://api.example.com/anthropic"
 api = "anthropic-messages"
 ```
 
-Agent Skills installation is not managed for Claude Code in this version.
+Managed Agent Skills install into the shared `~/.agents/skills` directory like every other agent, but Claude Code only discovers skills under `~/.claude/skills`, so `acp-stack` symlinks each installed skill into `~/.claude/skills/<name>`. Links are refreshed on install and on `acps agent switch`: dangling links left by removed skills are pruned, a real file or directory already at a link path is left in place and reported as a conflict, and a failed refresh degrades to a warning without failing the operation.

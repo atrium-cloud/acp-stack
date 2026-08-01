@@ -29,7 +29,7 @@ acps subagent disable
 
 `acps subagent set` inherits the main provider when omitted and uses its selected structured credential or compatible legacy `api_key_ref`. `acps subagent free` takes no flags; it routes to `openrouter/free` or `opencode/big-pickle` based on the configured main provider or env, and errors with "Current provider does not support free." otherwise.
 
-`acps agent switch <agent>` rewrites the harness and provider lane through the admin API. It clears any existing model because model ids are agent-specific. After a switch, `acps agent set --model <model-id>` applies the model to the existing provider-backed config. Switch copies installed Agent Skills to the target skills directory when the source and target paths differ. By default, source harness config is preserved; `--drop` removes source agent-owned config only after the target switch succeeds.
+`acps agent switch <agent>` rewrites the harness and provider lane through the admin API. It clears any existing model because model ids are agent-specific. After a switch, `acps agent set --model <model-id>` applies the model to the existing provider-backed config. Switch copies installed Agent Skills to the target skills directory when the source and target paths differ, and refreshes the target's skill symlinks when it declares an `agent_skills_link_dir`. By default, source harness config is preserved; `--drop` removes source agent-owned config only after the target switch succeeds.
 
 ## Config Shape
 

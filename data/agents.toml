@@ -336,7 +336,10 @@ allow_custom_provider = true
 allow_custom_model = true
 set_mode = true # default, acceptEdits, plan, bypassPermissions
 supports_mcp = true
-supports_agent_skills = false
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+# Claude Code only discovers ~/.claude/skills, so managed skills are symlinked there.
+agent_skills_link_dir = "~/.claude/skills"
 stdio_framing = "json-lines"
 website = "https://code.claude.com/docs/"
 support_doc = "docs/agents/claude-code.md"

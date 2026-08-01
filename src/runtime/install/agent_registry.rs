@@ -17,7 +17,7 @@
 mod specs;
 
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -185,11 +185,40 @@ impl RegistryCatalog {
             }
             if entry.supports_agent_skills {
                 match entry.agent_skills_install_dir.as_deref() {
-                    Some(value) => validate_agent_skills_install_dir(&entry.id, value)?,
+                    Some(value) => {
+                        validate_agent_skills_dir(&entry.id, "agent_skills_install_dir", value)?;
+                    }
                     _ => {
                         return Err(StackError::RegistryLoad {
                             reason: format!(
                                 "agent `{}` supports Agent Skills but has no agent_skills_install_dir",
+                                entry.id
+                            ),
+                        });
+                    }
+                }
+            }
+            if let Some(link_dir) = entry.agent_skills_link_dir.as_deref() {
+                if !entry.supports_agent_skills {
+                    return Err(StackError::RegistryLoad {
+                        reason: format!(
+                            "agent `{}` declares agent_skills_link_dir without supports_agent_skills",
+                            entry.id
+                        ),
+                    });
+                }
+                validate_agent_skills_dir(&entry.id, "agent_skills_link_dir", link_dir)?;
+                if let Some(install_dir) = entry.agent_skills_install_dir.as_deref() {
+                    // Compare component-wise so spellings like `~/.agents//skills`
+                    // or a trailing slash cannot disguise an equal or nested path.
+                    let install_path: PathBuf =
+                        Path::new(install_dir.trim()).components().collect();
+                    let link_path: PathBuf = Path::new(link_dir.trim()).components().collect();
+                    if link_path.starts_with(&install_path) || install_path.starts_with(&link_path)
+                    {
+                        return Err(StackError::RegistryLoad {
+                            reason: format!(
+                                "agent `{}` agent_skills_link_dir must differ from agent_skills_install_dir and neither may nest within the other",
                                 entry.id
                             ),
                         });
@@ -257,6 +286,11 @@ pub struct RegistryEntry {
     pub supports_agent_skills: bool,
     #[serde(default)]
     pub agent_skills_install_dir: Option<String>,
+    /// Directory the harness actually discovers skills from when it differs
+    /// from the shared install dir; each installed skill gets a symlink here
+    /// (e.g. Claude Code only reads `~/.claude/skills`).
+    #[serde(default)]
+    pub agent_skills_link_dir: Option<String>,
     #[serde(default)]
     pub subagents: bool,
     #[serde(default)]
@@ -356,17 +390,17 @@ fn validate_testflight_expect_fs(agent_id: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_agent_skills_install_dir(agent_id: &str, value: &str) -> Result<()> {
+fn validate_agent_skills_dir(agent_id: &str, field: &str, value: &str) -> Result<()> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(StackError::RegistryLoad {
-            reason: format!("agent `{agent_id}` agent_skills_install_dir is empty"),
+            reason: format!("agent `{agent_id}` {field} is empty"),
         });
     }
     if !(trimmed.starts_with("~/") || Path::new(trimmed).is_absolute()) {
         return Err(StackError::RegistryLoad {
             reason: format!(
-                "agent `{agent_id}` agent_skills_install_dir `{trimmed}` must be absolute or start with `~/`"
+                "agent `{agent_id}` {field} `{trimmed}` must be absolute or start with `~/`"
             ),
         });
     }
@@ -376,7 +410,7 @@ fn validate_agent_skills_install_dir(agent_id: &str, value: &str) -> Result<()> 
             Component::CurDir | Component::ParentDir => {
                 return Err(StackError::RegistryLoad {
                     reason: format!(
-                        "agent `{agent_id}` agent_skills_install_dir `{trimmed}` contains an unsafe path segment"
+                        "agent `{agent_id}` {field} `{trimmed}` contains an unsafe path segment"
                     ),
                 });
             }
@@ -413,6 +447,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         supports_mcp: true,
         supports_agent_skills: false,
         agent_skills_install_dir: None,
+        agent_skills_link_dir: None,
         subagents: false,
         subagent_alias: None,
         subagent_free_models: Vec::new(),

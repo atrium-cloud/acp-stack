@@ -1045,7 +1045,14 @@ fn run_init_with_output(
                 ))
             },
             || {
-                let reports = install_init_skills(&plan)?;
+                let (reports, link_outcome) =
+                    install_init_skills(&plan, &home, &config, &registry)?;
+                if let Some(link_error) = &link_outcome.error {
+                    init_println!(
+                        output_mode,
+                        "warning: skill link refresh failed: {link_error}"
+                    );
+                }
                 let requested_skills = plan
                     .selections
                     .iter()
@@ -1059,6 +1066,8 @@ fn run_init_with_output(
                 let payload = serde_json::to_string(&serde_json::json!({
                     "request": { "skills": requested_skills },
                     "reports": &reports,
+                    "link": &link_outcome.report,
+                    "link_error": &link_outcome.error,
                 }))
                 .map_err(|source| StackError::SkillInstallFailed {
                     reason: format!("serialize skill install report: {source}"),
