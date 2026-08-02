@@ -64,7 +64,7 @@ mod process_env;
 
 use self::process_env::build_agent_process_env;
 
-pub use self::capabilities::AgentCapabilitiesDto;
+pub use self::capabilities::{AgentCapabilitiesDto, PartitionedMcpServers, SkippedMcpServer};
 pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
 
 // External callers (CLI, supervisor, model_discovery, integration tests) wrote
@@ -749,7 +749,8 @@ impl AcpBridge {
         cwd: PathBuf,
         mcp_servers: Vec<McpServer>,
     ) -> Result<NewSessionResponse> {
-        self.capabilities.validate_mcp_servers(&mcp_servers)?;
+        self.capabilities
+            .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let mut request = NewSessionRequest::new(cwd);
         request.mcp_servers = mcp_servers;
@@ -781,7 +782,8 @@ impl AcpBridge {
                 name: "session/fork.messageId",
             });
         }
-        self.capabilities.validate_mcp_servers(&mcp_servers)?;
+        self.capabilities
+            .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let mut request = ForkSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         if let Some(message_id) = message_id {
@@ -866,7 +868,8 @@ impl AcpBridge {
                 name: "session/load",
             });
         }
-        self.capabilities.validate_mcp_servers(&mcp_servers)?;
+        self.capabilities
+            .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         connection
@@ -894,7 +897,8 @@ impl AcpBridge {
                 name: "session/resume",
             });
         }
-        self.capabilities.validate_mcp_servers(&mcp_servers)?;
+        self.capabilities
+            .reject_unmodeled_mcp_servers(&mcp_servers)?;
         let connection = self.connection().await?;
         let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
         connection

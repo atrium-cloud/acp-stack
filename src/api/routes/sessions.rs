@@ -481,7 +481,6 @@ pub(crate) async fn sessions_create_handler(
     let Json(payload) = body.unwrap_or_default();
     let cwd = resolve_session_cwd(payload.cwd, &state.config.workspace.root)?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
     let target = state
         .session_agent_target(payload.target_id.as_deref())
         .await?;
@@ -493,7 +492,7 @@ pub(crate) async fn sessions_create_handler(
     // a post-restart session would still receive the stale config
     // and silently downgrade to the prior model.
     let agent_for_session = target.live_agent_config.lock().await.clone();
-    let record = target
+    let (record, attached_names) = target
         .supervisor
         .create_session(
             &target.target_id,
@@ -504,7 +503,7 @@ pub(crate) async fn sessions_create_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &server_names).await;
+    persist_mcp_attached(&state, &record.id, &attached_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
@@ -615,8 +614,7 @@ pub(crate) async fn sessions_load_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
-    let record = target
+    let (record, attached_names) = target
         .supervisor
         .load_session(
             &id,
@@ -626,7 +624,7 @@ pub(crate) async fn sessions_load_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &server_names).await;
+    persist_mcp_attached(&state, &record.id, &attached_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
@@ -643,8 +641,7 @@ pub(crate) async fn sessions_resume_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
-    let record = target
+    let (record, attached_names) = target
         .supervisor
         .resume_session(
             &id,
@@ -654,7 +651,7 @@ pub(crate) async fn sessions_resume_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &server_names).await;
+    persist_mcp_attached(&state, &record.id, &attached_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
@@ -681,8 +678,7 @@ pub(crate) async fn sessions_fork_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let server_names = crate::runtime::agent::mcp::server_names(&mcp_servers);
-    let record = target
+    let (record, attached_names) = target
         .supervisor
         .fork_session(
             &id,
@@ -693,7 +689,7 @@ pub(crate) async fn sessions_fork_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &server_names).await;
+    persist_mcp_attached(&state, &record.id, &attached_names).await;
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 

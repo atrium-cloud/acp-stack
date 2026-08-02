@@ -59,7 +59,7 @@ If an agent does not advertise an optional capability, the corresponding runtime
 - `session/resume` requires `supports_resume_session`
 - `session/fork` requires `supports_fork_session`
 
-Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio is the ACP baseline. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio is the ACP baseline. A declaration whose transport the agent does not advertise is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
 ### Prompt Message IDs (local extension)
 
@@ -106,3 +106,5 @@ ACP permission requests flow into the same permission system used by mediated co
 ## MCP Servers
 
 Configured MCP servers are attached to ACP sessions when the agent and SDK support session MCP configuration. Secret refs for MCP env vars and headers are resolved at attach time and are not written to logs or API responses.
+
+Servers whose transport the running agent does not advertise are skipped for that session — create, load, resume, and fork proceed with the remaining servers. Each skip is recorded as a session-scoped `mcp.session_skipped` event at level `warn`, carrying the server name and the capability the agent would have had to advertise.

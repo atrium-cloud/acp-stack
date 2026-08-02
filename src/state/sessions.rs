@@ -42,6 +42,10 @@ pub const EVENT_KIND_PROMPT_STALLED: &str = "prompt.stalled";
 /// status for a non-inference reason. Payload carries `prompt_id` and the
 /// `error_code` string.
 pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
+/// Session-scoped event kind: configured MCP servers were dropped from the
+/// session because the running agent does not advertise their transport.
+/// Payload carries `session_id` and the skipped `name`/`capability` pairs.
+pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {

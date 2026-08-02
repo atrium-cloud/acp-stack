@@ -143,7 +143,7 @@ async fn spawn_rejects_an_incompatible_protocol_version() {
 }
 
 #[tokio::test]
-async fn new_session_rejects_unadvertised_http_mcp_transport() {
+async fn unadvertised_http_mcp_transport_is_skipped_not_fatal() {
     use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
 
     let bridge = AcpBridge::spawn(
@@ -158,22 +158,23 @@ async fn new_session_rejects_unadvertised_http_mcp_transport() {
     )
     .await
     .expect("spawn");
-    let error = bridge
-        .new_session(
-            std::env::temp_dir(),
-            vec![McpServer::Http(McpServerHttp::new(
-                "test-http",
-                "https://example.invalid/mcp",
-            ))],
-        )
+    let partitioned = bridge
+        .capabilities()
+        .partition_mcp_servers(vec![McpServer::Http(McpServerHttp::new(
+            "test-http",
+            "https://example.invalid/mcp",
+        ))])
+        .expect("an unadvertised transport is skipped, not an error");
+    assert!(partitioned.accepted.is_empty());
+    assert_eq!(partitioned.skipped.len(), 1);
+    assert_eq!(partitioned.skipped[0].name, "test-http");
+    assert_eq!(partitioned.skipped[0].capability, "mcpCapabilities.http");
+
+    // The session still gets created from the remaining (empty) set.
+    bridge
+        .new_session(std::env::temp_dir(), partitioned.accepted)
         .await
-        .expect_err("HTTP MCP requires an advertised capability");
-    assert!(matches!(
-        error,
-        acp_stack::error::StackError::AgentUnsupportedCapability {
-            name: "mcpCapabilities.http"
-        }
-    ));
+        .expect("session create survives the skipped server");
     bridge.shutdown().await.expect("shutdown ok");
 }
 
