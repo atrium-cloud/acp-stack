@@ -14,8 +14,10 @@
 # PUBLISH_BASE_URL (service origin), PUBLISH_OIDC_AUDIENCE (OIDC token
 # audience), and PUBLISH_RUNTIME_PROFILE (manifest runtime profile).
 # Publication is idempotent: an identical retry returns the existing session,
-# and finalizing an already-published session returns the existing release, so
-# re-running a failed workflow job is the supported retry path.
+# finalizing an already-published session returns the existing release, and a
+# rerun (a strictly newer run attempt) supersedes a pending session left by a
+# failed upload, so re-running a failed workflow job is the supported retry
+# path.
 
 set -euo pipefail
 
