@@ -28,6 +28,67 @@ async fn start_agent_target(
     target_id: &str,
 ) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
     let _mutation = state.lock_agent_config_mutation().await?;
+    start_agent_target_locked(state, target_id).await
+}
+
+/// Bring the configured agent up for a request that needs the ACP bridge.
+///
+/// Nothing else starts the agent after `acps init`: the process manager that
+/// owns `acps serve` does not own the agent subprocess, so without this a
+/// freshly provisioned host answers every session call with
+/// `agent.not_running` until an operator calls `POST /v1/agent/start`. Same
+/// path recovers from a crash, because the exit monitor leaves the supervisor
+/// in `Stopped`.
+///
+/// A genuinely misconfigured agent still fails: this only spawns, it does not
+/// soften the config, secret, or initialize errors `start` propagates.
+/// `restart = "never"` opts a target out entirely — an operator who forbade
+/// crash restarts does not want request traffic spawning agents either.
+pub(crate) async fn ensure_agent_started(state: &AppState, target_id: &str) -> Result<()> {
+    let target = state.agent_target(target_id)?;
+    match target.supervisor.await_start_readiness().await {
+        AgentStartReadiness::Running => return Ok(()),
+        AgentStartReadiness::NeedsStart => {}
+        AgentStartReadiness::Unavailable => return Err(StackError::AgentNotRunning),
+    }
+    // The live cache, not a fresh disk read: this is the per-request hot path,
+    // and the policy that matters is the one this daemon is running under.
+    if target.live_agent_config.lock().await.restart == AGENT_RESTART_NEVER {
+        return Err(StackError::AgentNotRunning);
+    }
+    let _mutation = state.lock_agent_config_mutation().await?;
+    // Re-check under the config-mutation lock: an explicit start or restart
+    // may have won the race while we waited for it.
+    if target.supervisor.is_running().await {
+        return Ok(());
+    }
+    match start_agent_target_locked(state, target_id).await {
+        Ok(_) => Ok(()),
+        // Lost the Stopped -> Starting race to a spawn that does not take
+        // the config-mutation lock — the crash-exit monitor's restart. A live
+        // bridge is not guaranteed yet: returning Ok here would let the
+        // caller's next `bridge()` call 409 while the winner is still mid-
+        // initialize. Wait that spawn out; only `Running` means success.
+        Err(StackError::AgentAlreadyRunning) => {
+            match target.supervisor.await_start_readiness().await {
+                AgentStartReadiness::Running => Ok(()),
+                // The winning spawn failed (state rolled back to Stopped) or
+                // never settled; the next request can try again.
+                AgentStartReadiness::NeedsStart | AgentStartReadiness::Unavailable => {
+                    Err(StackError::AgentNotRunning)
+                }
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Inner half of `start_agent_target`, for callers already holding the
+/// agent-config mutation lock.
+async fn start_agent_target_locked(
+    state: &AppState,
+    target_id: &str,
+) -> std::result::Result<ApiSuccess<AgentStartResponse>, StackError> {
     // Re-read disk config and resolve env BEFORE invoking the supervisor so
     // `acps agent set` changes made while the daemon is running are honored
     // by the next start. open_agent_env enforces the same allowlist semantics

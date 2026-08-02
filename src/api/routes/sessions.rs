@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::core::AgentTargetRuntime;
 use super::super::core::AppState;
-use super::agent::open_mcp_servers;
+use super::agent::{ensure_agent_started, open_mcp_servers};
 use super::logs::{LogEventJson, MAX_LOGS_LIMIT, default_logs_limit};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
@@ -485,6 +485,7 @@ pub(crate) async fn sessions_create_handler(
     let target = state
         .session_agent_target(payload.target_id.as_deref())
         .await?;
+    ensure_agent_started(&state, &target.target_id).await?;
     // Read the agent block from the live cache instead of the cached
     // `state.config.agent`. After `POST /v1/agent/restart` updates
     // the cache, this is how subsequent session creates see the new
@@ -608,6 +609,7 @@ pub(crate) async fn sessions_load_handler(
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
     let target = target_for_existing_session(&state, &id, payload.target_id.as_deref()).await?;
+    ensure_agent_started(&state, &target.target_id).await?;
     let cwd = payload
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
@@ -635,6 +637,7 @@ pub(crate) async fn sessions_resume_handler(
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
     let target = target_for_existing_session(&state, &id, payload.target_id.as_deref()).await?;
+    ensure_agent_started(&state, &target.target_id).await?;
     let cwd = payload
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
@@ -672,6 +675,7 @@ pub(crate) async fn sessions_fork_handler(
 ) -> std::result::Result<ApiSuccess<SessionResponse>, StackError> {
     let Json(payload) = body.unwrap_or_default();
     let target = target_for_existing_session(&state, &id, payload.target_id.as_deref()).await?;
+    ensure_agent_started(&state, &target.target_id).await?;
     let cwd = payload
         .cwd
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
@@ -740,6 +744,7 @@ pub(crate) async fn sessions_prompt_handler(
         return Err(StackError::PromptBodyEmpty);
     }
     let target = target_for_existing_session(&state, &id, params.target_id.as_deref()).await?;
+    ensure_agent_started(&state, &target.target_id).await?;
     let agent_for_prompt = target.live_agent_config.lock().await.clone();
     state
         .model_catalog

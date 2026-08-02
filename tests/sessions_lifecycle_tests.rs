@@ -304,6 +304,65 @@ async fn fork_session_forwards_message_breakpoint_to_placebo() {
 }
 
 #[tokio::test]
+async fn create_session_lazily_starts_a_never_started_agent() {
+    // Regression: after `acps init` the process manager owns `acps serve` only,
+    // so nothing had ever spawned the agent and every session call answered
+    // `agent.not_running`.
+    let harness = Harness::spawn_without_agent_start(|_| {}).await;
+    assert_eq!(harness.agent_process_state().await, "stopped");
+
+    let session_id = create_session(&harness).await;
+
+    assert!(!session_id.is_empty());
+    assert_eq!(harness.agent_process_state().await, "running");
+}
+
+#[tokio::test]
+async fn restart_never_opts_a_target_out_of_lazy_start() {
+    let harness = Harness::spawn_without_agent_start(|config| {
+        config.agent.restart = "never".to_owned();
+    })
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "agent.not_running");
+    assert_eq!(harness.agent_process_state().await, "stopped");
+}
+
+#[tokio::test]
+async fn prompt_lazily_restarts_an_agent_that_went_away() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    harness.stop_agent().await;
+    assert_eq!(harness.agent_process_state().await, "stopped");
+
+    // The prior agent's session id is gone with the process, so the prompt
+    // itself may fail; what this asserts is that the request brought the agent
+    // back instead of short-circuiting on `agent.not_running`.
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "are you back?" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_ne!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(harness.agent_process_state().await, "running");
+}
+
+#[tokio::test]
 async fn load_and_resume_reject_closed_sessions() {
     let harness = Harness::spawn().await;
     let session_id = create_session(&harness).await;
