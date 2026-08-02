@@ -55,13 +55,14 @@ use self::install::{
     run_install_with_retry, should_install_agent,
 };
 use self::model_mode::{
-    ModelModeAction, configure_model_and_mode_for_init, preflight_model_and_mode_for_init,
+    CapabilityProbeOutcome, ModelModeAction, configure_model_and_mode_for_init,
+    preflight_model_and_mode_for_init, probe_agent_capabilities_for_init,
     verify_agent_acp_connection,
 };
 use self::provider::{
     apply_provider_to_config, collect_declared_secret_refs_for_init,
-    collect_prepared_secret_refs_for_init, configure_provider_for_init,
-    configured_provider_refs_satisfied, preflight_provider_for_init,
+    collect_mcp_secret_refs_for_init, collect_prepared_secret_refs_for_init,
+    configure_provider_for_init, configured_provider_refs_satisfied, preflight_provider_for_init,
 };
 use self::registry_apply::{
     AgentSelection, CustomAgentSpec, apply_custom_agent_to_config, apply_edge_profile_to_config,
@@ -79,12 +80,12 @@ use self::skills::{
 };
 use self::starter_config::{
     AgentEnvCollection, append_agent_env_refs, apply_agent_env_collection,
-    collect_agent_env_refs_for_init, configure_stack_update_for_init,
-    prompt_environment_configuration_if_needed, push_args_deps_to_config,
-    reject_agent_env_refs_for_existing_config, reject_data_source_args_for_existing_config,
-    reject_deps_args_for_existing_config, reject_starter_only_mcp_args_for_existing_config,
-    should_apply_deps_for_init, starter_config, validate_deployment_overrides_match_existing,
-    validate_stack_update_args,
+    collect_agent_env_refs_for_init, configure_stack_update_for_init, mcp_servers_from_prompted,
+    merge_prompted_mcp_servers, prompt_environment_configuration_if_needed, prompt_mcp_servers,
+    push_args_deps_to_config, reject_agent_env_refs_for_existing_config,
+    reject_data_source_args_for_existing_config, reject_deps_args_for_existing_config,
+    reject_starter_only_mcp_args_for_existing_config, should_apply_deps_for_init, starter_config,
+    validate_deployment_overrides_match_existing, validate_stack_update_args,
 };
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
 use super::config as cli_config;

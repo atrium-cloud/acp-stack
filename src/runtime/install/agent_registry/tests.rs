@@ -23,7 +23,6 @@ fn lookup_returns_matching_entry() {
     assert!(opencode.allow_custom_provider);
     assert!(opencode.allow_custom_model);
     assert!(opencode.set_mode);
-    assert!(opencode.supports_mcp);
     assert!(opencode.supports_agent_skills);
     assert_eq!(
         opencode.agent_skills_install_dir.as_deref(),
@@ -124,11 +123,6 @@ fn embedded_registry_advertises_tested_headless_support() {
         .iter()
         .filter(|entry| entry.headless_compatible)
     {
-        assert!(
-            entry.supports_mcp,
-            "{} must advertise MCP support",
-            entry.id
-        );
         assert!(
             entry.supports_agent_skills,
             "{} must advertise Agent Skills support",
@@ -282,7 +276,6 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(claude_code.allow_custom_provider);
     assert!(claude_code.allow_custom_model);
     assert!(claude_code.set_mode);
-    assert!(claude_code.supports_mcp);
     assert!(claude_code.supports_agent_skills);
     assert_eq!(
         claude_code.agent_skills_install_dir.as_deref(),
@@ -340,7 +333,6 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!kimi.allow_custom_provider);
     assert!(!kimi.allow_custom_model);
     assert!(kimi.set_mode);
-    assert!(kimi.supports_mcp);
     assert!(kimi.supports_agent_skills);
     assert_eq!(
         kimi.agent_skills_install_dir.as_deref(),
@@ -428,6 +420,35 @@ creates = "bad"
                 reason.contains("unknown field") || reason.contains("unexpected keys"),
                 "reason: {reason}"
             );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_removed_supports_mcp_field() {
+    // MCP support is determined by the post-install capability probe, never
+    // declared in the registry; the old field must not silently round-trip.
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+supports_mcp = true
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject supports_mcp");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(reason.contains("unknown field"), "reason: {reason}");
         }
         other => panic!("expected RegistryLoad, got {other:?}"),
     }

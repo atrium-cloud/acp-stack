@@ -9,14 +9,14 @@ use agent_client_protocol::schema::v1::{
     CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest, ForkSessionRequest,
     ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
     KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
-    PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionRequest,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionInfo,
-    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TerminalId,
-    TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse,
+    PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigOptionValue, SessionConfigSelectOption, SessionForkCapabilities, SessionId,
+    SessionInfo, SessionListCapabilities, SessionNotification, SessionResumeCapabilities,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    TerminalId, TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
@@ -109,6 +109,10 @@ struct AcpArgs {
     no_cap_fork_session: bool,
     #[arg(long)]
     no_cap_fork_message_id: bool,
+    /// Advertise `mcpCapabilities.http = true`. Without it the placebo
+    /// advertises no MCP capability at all.
+    #[arg(long)]
+    cap_mcp_http: bool,
     #[arg(long)]
     expect_fork_message_id: Option<String>,
     #[arg(long)]
@@ -435,10 +439,13 @@ async fn handle_initialize(
         }
         session_capabilities = session_capabilities.fork(fork);
     }
-    let capabilities = AgentCapabilities::new()
+    let mut capabilities = AgentCapabilities::new()
         .load_session(!state.args.no_cap_load_session)
         .prompt_capabilities(PromptCapabilities::new())
         .session_capabilities(session_capabilities);
+    if state.args.cap_mcp_http {
+        capabilities = capabilities.mcp_capabilities(McpCapabilities::new().http(true));
+    }
     responder.respond(
         InitializeResponse::new(if state.args.initialize_protocol_v0 {
             ProtocolVersion::V0

@@ -46,6 +46,11 @@ pub const EVENT_KIND_PROMPT_ERRORED: &str = "prompt.errored";
 /// session because the running agent does not advertise their transport.
 /// Payload carries `session_id` and the skipped `name`/`capability` pairs.
 pub const EVENT_KIND_MCP_SESSION_SKIPPED: &str = "mcp.session_skipped";
+/// Session-scoped event kind: a configured capability-backed feature (mode,
+/// model) was ignored because the agent does not advertise the capability.
+/// The session proceeds with the agent's default. Payload carries
+/// `session_id` and the ignored `feature`/`target`/`capability` entries.
+pub const EVENT_KIND_SESSION_CAPABILITY_IGNORED: &str = "session.capability_ignored";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {

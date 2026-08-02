@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 pub const DEV_PLACEBO_REGISTRY_ENV: &str = "ACP_STACK_DEV_PLACEBO_REGISTRY";
+pub const FIXTURE_AGENT_CAPABILITIES_ENV: &str = "ACP_STACK_AGENT_CAPABILITIES_PATH";
 pub const FIXTURE_CONFIG_OPTIONS_ENV: &str = "ACP_STACK_AGENT_CONFIG_OPTIONS_PATH";
 pub const FIXTURE_NEW_SESSION_RESPONSE_ENV: &str = "ACP_STACK_AGENT_NEW_SESSION_RESPONSE_PATH";
 pub const GITHUB_API_BASE_ENV: &str = "ACP_STACK_GITHUB_API_BASE";
@@ -57,6 +58,7 @@ mod tests {
         let _guard = EnvGuard::set(GITHUB_API_BASE_ENV, "http://127.0.0.1:1");
         assert_eq!(fixture_string(GITHUB_API_BASE_ENV), None);
         assert_eq!(fixture_path(FIXTURE_CONFIG_OPTIONS_ENV), None);
+        assert_eq!(fixture_path(FIXTURE_AGENT_CAPABILITIES_ENV), None);
         assert!(!fixture_enabled(TEST_INSECURE_HTTPS_ENV));
     }
 

@@ -40,6 +40,8 @@ pub mod step_kind {
     pub const NATIVE_CONFIG_IMPORT: &str = "native_config_import";
     pub const AGENT_SKILLS_INSTALL: &str = "agent_skills_install";
     pub const DEPS_APPLY: &str = "deps_apply";
+    pub const CAPABILITY_PROBE: &str = "capability_probe";
+    pub const MCP_CONFIGURE: &str = "mcp_configure";
     pub const PROVIDER_CONFIGURE: &str = "provider_configure";
     pub const WORKSPACE_MATERIALIZE: &str = "workspace_materialize";
     pub const AGENT_HEADLESS_CONFIG: &str = "agent_headless_config";

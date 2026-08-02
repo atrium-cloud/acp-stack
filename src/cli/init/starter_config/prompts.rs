@@ -235,10 +235,11 @@ fn prompt_standard_setup(
     Ok(())
 }
 
-// Advanced Setup: a clean slate of up to five opt-in prompts. Each is gated on
-// the matching values not already arriving by flag, so flags suppress re-prompts.
-// MCP lives only here on purpose: editing servers through a shell wizard is
-// awkward, and operators can add them later by editing config.
+// Advanced Setup: a clean slate of opt-in prompts. Each is gated on the
+// matching values not already arriving by flag, so flags suppress re-prompts.
+// MCP is deliberately absent here: MCP support is only knowable from the
+// installed agent's ACP advertisement, so those prompts run in the
+// post-install `mcp_configure` step instead.
 fn prompt_advanced_setup(
     interactive: bool,
     args: &mut InitArgs,
@@ -259,14 +260,6 @@ fn prompt_advanced_setup(
     {
         args.prompt_skills = true;
     }
-    if args.mcp_stdio.is_empty()
-        && args.prompt_mcp_stdio.is_empty()
-        && args.mcp_http.is_empty()
-        && args.prompt_mcp_http.is_empty()
-        && prompt::confirm(interactive, "Add MCP servers?", false)?
-    {
-        prompt_mcp_servers(interactive, args)?;
-    }
     if args.agent_env_ref.is_empty()
         && prompt::confirm(interactive, "Add agent environment variables?", false)?
     {
@@ -281,31 +274,35 @@ fn prompt_advanced_setup(
     Ok(())
 }
 
-// "Add MCP servers" is one Advanced step spanning both transports: the operator
-// picks a transport, adds rows for it, and repeats until choosing Done.
-fn prompt_mcp_servers(interactive: bool, args: &mut InitArgs) -> Result<()> {
+// "Add MCP servers" spans both transports: the operator picks a transport,
+// adds rows for it, and repeats until choosing Done. Driven by the post-probe
+// `mcp_configure` step; `offer_http` reflects whether the agent advertised
+// `mcpCapabilities.http`, so the select never offers a transport that would
+// be skipped at session time.
+pub(in crate::cli::init) fn prompt_mcp_servers(
+    interactive: bool,
+    args: &mut InitArgs,
+    offer_http: bool,
+) -> Result<()> {
     loop {
-        let choice = prompt::select(
-            interactive,
-            "MCP transport",
-            &[
-                (
-                    McpTransportChoice::Stdio,
-                    "stdio server".to_owned(),
-                    "Local command, args, env refs".to_owned(),
-                ),
-                (
-                    McpTransportChoice::Http,
-                    "HTTP server".to_owned(),
-                    "Remote URL and header refs".to_owned(),
-                ),
-                (
-                    McpTransportChoice::Done,
-                    "Done".to_owned(),
-                    "Finish adding MCP servers".to_owned(),
-                ),
-            ],
-        )?;
+        let mut items = vec![(
+            McpTransportChoice::Stdio,
+            "stdio server".to_owned(),
+            "Local command, args, env refs".to_owned(),
+        )];
+        if offer_http {
+            items.push((
+                McpTransportChoice::Http,
+                "HTTP server".to_owned(),
+                "Remote URL and header refs".to_owned(),
+            ));
+        }
+        items.push((
+            McpTransportChoice::Done,
+            "Done".to_owned(),
+            "Finish adding MCP servers".to_owned(),
+        ));
+        let choice = prompt::select(interactive, "MCP transport", &items)?;
         match choice {
             Some(McpTransportChoice::Stdio) => prompt_mcp_stdio_servers(interactive, args)?,
             Some(McpTransportChoice::Http) => prompt_mcp_http_servers(interactive, args)?,

@@ -32,6 +32,11 @@ pub(crate) struct SessionResponse {
     cwd: String,
     title: Option<String>,
     metadata_json: String,
+    /// Configured features (mode, model) the agent's advertised capabilities
+    /// could not honor; the session proceeded on agent defaults. Omitted when
+    /// nothing was ignored, so list/read responses are unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ignored: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature>,
 }
 
 impl From<SessionRecord> for SessionResponse {
@@ -47,7 +52,16 @@ impl From<SessionRecord> for SessionResponse {
             cwd: record.cwd,
             title: record.title,
             metadata_json: record.metadata_json,
+            ignored: Vec::new(),
         }
+    }
+}
+
+impl From<crate::runtime::agent::supervisor::SessionAttachOutcome> for SessionResponse {
+    fn from(outcome: crate::runtime::agent::supervisor::SessionAttachOutcome) -> Self {
+        let mut response = Self::from(outcome.record);
+        response.ignored = outcome.ignored;
+        response
     }
 }
 
@@ -492,7 +506,7 @@ pub(crate) async fn sessions_create_handler(
     // a post-restart session would still receive the stale config
     // and silently downgrade to the prior model.
     let agent_for_session = target.live_agent_config.lock().await.clone();
-    let (record, attached_names) = target
+    let outcome = target
         .supervisor
         .create_session(
             &target.target_id,
@@ -503,8 +517,8 @@ pub(crate) async fn sessions_create_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &attached_names).await;
-    Ok(ApiSuccess::new(SessionResponse::from(record)))
+    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
 #[derive(Deserialize, Default)]
@@ -614,7 +628,7 @@ pub(crate) async fn sessions_load_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let (record, attached_names) = target
+    let outcome = target
         .supervisor
         .load_session(
             &id,
@@ -624,8 +638,8 @@ pub(crate) async fn sessions_load_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &attached_names).await;
-    Ok(ApiSuccess::new(SessionResponse::from(record)))
+    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
 pub(crate) async fn sessions_resume_handler(
@@ -641,7 +655,7 @@ pub(crate) async fn sessions_resume_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let (record, attached_names) = target
+    let outcome = target
         .supervisor
         .resume_session(
             &id,
@@ -651,8 +665,8 @@ pub(crate) async fn sessions_resume_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &attached_names).await;
-    Ok(ApiSuccess::new(SessionResponse::from(record)))
+    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
 #[derive(Deserialize, Default)]
@@ -678,7 +692,7 @@ pub(crate) async fn sessions_fork_handler(
         .map(|raw| resolve_session_cwd(Some(raw), &state.config.workspace.root))
         .transpose()?;
     let mcp_servers = open_mcp_servers(&state.config)?;
-    let (record, attached_names) = target
+    let outcome = target
         .supervisor
         .fork_session(
             &id,
@@ -689,8 +703,8 @@ pub(crate) async fn sessions_fork_handler(
             &state.state,
         )
         .await?;
-    persist_mcp_attached(&state, &record.id, &attached_names).await;
-    Ok(ApiSuccess::new(SessionResponse::from(record)))
+    persist_mcp_attached(&state, &outcome.record.id, &outcome.attached_mcp).await;
+    Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
 async fn persist_mcp_attached(state: &AppState, session_id: &str, names: &[String]) {

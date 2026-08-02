@@ -1810,3 +1810,170 @@ fn init_rejects_conflicting_deployment_overrides_for_existing_config() {
             "deployment override applies only when creating a starter config",
         ));
 }
+
+fn write_capabilities_fixture(
+    dir: &std::path::Path,
+    mcp_capabilities: serde_json::Value,
+) -> std::path::PathBuf {
+    let path = dir.join("agent-capabilities.json");
+    let body = serde_json::json!({
+        "protocol_version": 1,
+        "capabilities": { "mcpCapabilities": mcp_capabilities },
+        "agent_name": "placebo",
+        "agent_title": null,
+        "agent_version": null,
+    });
+    fs::write(&path, body.to_string()).expect("capabilities fixture written");
+    path
+}
+
+fn init_step_payload(home: &std::path::Path, kind: &str) -> (String, String) {
+    let store = StateStore::open(default_state_path(home)).expect("state store");
+    let run = store
+        .latest_init_run()
+        .expect("latest init run")
+        .expect("init run exists");
+    let steps = store.query_init_steps(&run.id).expect("init steps");
+    let step = steps
+        .iter()
+        .find(|step| step.kind == kind)
+        .unwrap_or_else(|| panic!("step `{kind}` recorded: {steps:?}"));
+    (step.status.clone(), step.payload_json.clone())
+}
+
+#[test]
+fn init_reports_unsupported_mcp_transport_as_ignored() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let fixture = write_capabilities_fixture(tempdir.path(), serde_json::json!({}));
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .env(
+            acp_stack::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV,
+            &fixture,
+        )
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+            "--mcp-http",
+            "remote=https://mcp.example/mcp",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: serde_json::Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "initialized");
+    let ignored = body["ignored_features"]
+        .as_array()
+        .expect("ignored_features present");
+    assert_eq!(ignored.len(), 1, "{body}");
+    assert_eq!(ignored[0]["feature"], "mcp.server");
+    assert_eq!(ignored[0]["target"], "remote");
+    assert_eq!(ignored[0]["capability"], "mcpCapabilities.http");
+
+    // Keep-in-config contract: the declaration is a faithful record and stays.
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config readable");
+    let config = load_config_from_str(&written).expect("config validates");
+    assert_eq!(config.mcp.servers.len(), 1);
+
+    let (status, payload) = init_step_payload(tempdir.path(), "capability_probe");
+    assert_eq!(status, "succeeded");
+    assert!(payload.contains(r#""probe_status":"ok""#), "{payload}");
+    assert!(payload.contains("mcpCapabilities.http"), "{payload}");
+
+    // Non-interactive runs never record the interactive MCP step: MCP arrives
+    // through flags and the ignored-features report, not prompts.
+    {
+        let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
+        let run = store
+            .latest_init_run()
+            .expect("latest init run")
+            .expect("init run exists");
+        let steps = store.query_init_steps(&run.id).expect("init steps");
+        assert!(
+            steps.iter().all(|step| step.kind != "mcp_configure"),
+            "{steps:?}"
+        );
+    }
+
+    // The probe persists the advertisement so capability routes answer
+    // without the agent ever having been started.
+    let store = StateStore::open(default_state_path(tempdir.path())).expect("state store");
+    let capabilities = store
+        .latest_agent_capabilities("placebo")
+        .expect("capabilities query");
+    assert!(capabilities.is_some(), "agent_capabilities row missing");
+}
+
+#[test]
+fn init_reports_no_ignores_when_transport_is_advertised() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let fixture = write_capabilities_fixture(tempdir.path(), serde_json::json!({ "http": true }));
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .env(
+            acp_stack::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV,
+            &fixture,
+        )
+        .args([
+            "dev",
+            "init",
+            "--handoff-json",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+            "--mcp-http",
+            "remote=https://mcp.example/mcp",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body: serde_json::Value = serde_json::from_slice(&output).expect("handoff json parses");
+    assert_eq!(body["status"], "initialized");
+    assert!(
+        body.get("ignored_features").is_none(),
+        "ignored_features must be omitted when empty: {body}"
+    );
+}
+
+#[test]
+fn init_probe_unavailable_never_fails_init() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    // No capabilities fixture and `--skip-workspace-init` leaves the spawn cwd
+    // unprovisioned, so the probe cannot run. Init must succeed regardless and
+    // record why the probe made no claims.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--skip-workspace-init",
+            "--skip-testflight",
+            "--mcp-http",
+            "remote=https://mcp.example/mcp",
+        ])
+        .assert()
+        .success();
+
+    let (status, payload) = init_step_payload(tempdir.path(), "capability_probe");
+    assert_eq!(status, "succeeded");
+    assert!(
+        payload.contains(r#""probe_status":"unavailable""#),
+        "{payload}"
+    );
+}

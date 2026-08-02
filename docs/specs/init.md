@@ -51,9 +51,9 @@ The operator-facing sequence, in order:
     b. Advanced setup
         - Install custom dependencies (add dependency/skip)
         - Add agent skills (now/later) -(if now)-> search the checked-in reviewed skill sources
-        - Add MCP servers (add MCP/skip)
         - Add agent env (now/later)
         - Add data sources (now/later) -(if now)-> add a local path, HTTPS archive/download, or S3 bucket
+    MCP prompting runs after agent install as its own step (step 12); flag-declared MCP servers (`--mcp-stdio`, `--mcp-http`, `--mcp-preset`) still land in the starter config here.
 5. Config and state.
     - Write a starter config or validate the existing/imported config.
     - Open SQLite state and run migrations.
@@ -86,7 +86,15 @@ The operator-facing sequence, in order:
     - Interactive runs ask for confirmation and show system-scope notes.
     - Non-interactive runs require `--deps-apply --deps-apply-yes`.
     - Failures and unmet system privilege fail init and are recorded under `deps_apply`.
-11. Provider and model.
+11. Capability probe.
+    - Spawn the installed agent for a handshake-only ACP `initialize`, record the advertised capabilities to state, and terminate the process; no session is created. `GET /v1/agent/capabilities` and `acps agent status` answer from this snapshot before the agent's first start.
+    - Configured features the advertisement does not cover are reported as ignored; they stay in config and are skipped at session time.
+    - A failed probe records `probe_status: "unavailable"` and never fails init. The step re-runs on every resume.
+    - The probe runs before provider configuration and harness config provisioning; session-time behavior always follows the live bridge.
+12. MCP configuration (interactive, new config only, skipped when MCP servers were already declared by flag).
+    - Prompts run only when the probe advertised MCP support; the transport picker offers HTTP only when `mcpCapabilities.http` is advertised. Added servers are written to config and their secret refs collected.
+    - Resume never re-drives these prompts.
+13. Provider and model.
     - Supported registry agents:
         - Select or validate provider and required secret refs.
         - Discover ACP-advertised model options with one provisional session.
@@ -97,21 +105,21 @@ The operator-facing sequence, in order:
         - Skip provider/model discovery.
         - Run one ACP connection gate when the launch command and cwd are present.
         - Explicit `--model` is rejected.
-12. `acp-stack` auto-update.
+14. `acp-stack` auto-update.
     - Configure `[updates.acp_stack]` as on, security-only, or off.
     - Frequencies use day/week units, minimum `1d`.
     - Explicit `--stack-update` flags apply on any run.
     - Existing configs skip the prompt when no stack-update flags are supplied.
-13. Agent-owned config.
+15. Agent-owned config.
     - Write supported-agent config files for headless API-key use.
-14. Edge artifacts.
+16. Edge artifacts.
     - For `--edge cloudflare`, write generated tunnel artifacts or provision managed tunnel refs.
-15. Init complete.
+17. Init complete.
     - Record the durable completion event.
-16. Testflight (optional).
+18. Testflight (optional).
     - See Testflight.
 
-After the steps settle, init prints a summary: the config, state, secret-store, and age-key paths, and the auth status.
+After the steps settle, init prints a summary: the config, state, secret-store, and age-key paths, and the auth status. Terminal runs also print one `ignored:` line per feature the probe found unsupported; hosted runs surface these only through the handoff payload's `ignored_features`.
 
 ## Key Handover
 
@@ -150,11 +158,13 @@ The handover prints the two values. The values are never stored in plaintext, ne
 
 `session_key` and `admin_key` appear only when that invocation freshly generated or rotated the keys (rotated keys are reported under `generated_keys`). A later run without `--rotate-keys` preserves the verifier rows and reports `"preserved_keys": ["session", "admin"]` without reprinting either plaintext key. If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"` so automation can capture the one-time keys before retrying.
 
+The payload carries an `ignored_features` array (omitted when empty) listing configured features the capability probe found unsupported: `[{"feature": "mcp.server", "target": "linear", "capability": "mcpCapabilities.http", "reason": "..."}]`.
+
 ## Hosted Streaming Init
 
 `acps init serve` runs a bootstrap-only HTTP/WebSocket server for hosted init. The hosted backend connects to the instance; the web UI does not connect to the instance directly. Bootstrap auth uses a bearer token from `ACP_STACK_INIT_TOKEN`, `--token-env`, or `--token-file`.
 
-The hosted flow follows the same init steps as interactive `acps init`, but only streams the bootstrap prompts needed for agent selection, provider selection, required secret collection, custom-provider fields, model selection, and the simple confirmations on that path. Environment configuration (MCP servers, skills, dependencies, browser-use, data sources) is declared up-front in the session-create request instead of being streamed: the Environment configuration wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce. Secret collection covers the refs those declarations name — MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs; an unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization. Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the streamed set use the same skip/default behavior as non-interactive init unless supplied through initial args.
+The hosted flow follows the same init steps as interactive `acps init`, but only streams the bootstrap prompts needed for agent selection, provider selection, required secret collection, custom-provider fields, model selection, and the simple confirmations on that path. Environment configuration (MCP servers, skills, dependencies, browser-use, data sources) is declared up-front in the session-create request instead of being streamed: the Environment configuration wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce. Secret collection covers the refs those declarations name — MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs; an unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization. Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the streamed set use the same skip/default behavior as non-interactive init unless supplied through initial args. The post-install MCP configuration step is never streamed; MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
 
 A fresh registry-agent session may include one in-memory `native_config` upload. The server inspects it before durable init work and sends a `native_config_review` input containing only the redacted manifest. The response selects compatible managed field ids and acknowledges executable unmanaged categories for that revision. After agent installation, init commits the journaled semantic replacement before provider/model discovery and before the first persistent agent start, so onboarding does not restart an agent. The source document is excluded from recorded init arguments, events, progress, and handoff metadata; the final handoff may include only the sanitized `native_config_import` operation.
 
