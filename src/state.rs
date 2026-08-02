@@ -65,12 +65,12 @@ pub use security_category::SecurityCategory;
 pub use sessions::{
     DEFAULT_SESSION_ACTIVITY_THRESHOLD, DEFAULT_SESSION_STATUS_WINDOW,
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_KIND_PROMPT_STALLED, FailureClass, ListedSessionRecord, ListedSessionUpsertCounts,
-    MAX_SESSION_STATUS_WINDOW_SECS, MIN_SESSION_STATUS_WINDOW_SECS, NewPromptRecord,
-    NewSessionRecord, PromptRecord, PromptStatus, RestartBlockerRecord,
-    SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE,
-    SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionActivityRecord, SessionRecord,
-    SessionStatusPermissionRecord, SessionStatusPromptRecord, SessionStatusRecord,
+    EVENT_KIND_PROMPT_STALLED, EVENT_KIND_SESSION_CAPABILITY_IGNORED, FailureClass,
+    ListedSessionRecord, ListedSessionUpsertCounts, MAX_SESSION_STATUS_WINDOW_SECS,
+    MIN_SESSION_STATUS_WINDOW_SECS, NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus,
+    RestartBlockerRecord, SESSION_ACTIVITY_ACTOR_AGENT, SESSION_ACTIVITY_ACTOR_USER,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionActivityRecord,
+    SessionRecord, SessionStatusPermissionRecord, SessionStatusPromptRecord, SessionStatusRecord,
     SessionUpdateBounds,
 };
 pub use stack_update::{

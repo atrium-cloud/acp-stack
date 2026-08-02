@@ -286,14 +286,7 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
             env: Vec::new(),
         }));
     }
-    for value in &args.prompt_mcp_stdio {
-        servers.push(McpServerConfig::Stdio(McpStdioServer {
-            name: value.name.clone(),
-            command: value.command.clone(),
-            args: value.args.clone(),
-            env: value.env.clone(),
-        }));
-    }
+    servers.extend(mcp_servers_from_prompted(&args.prompt_mcp_stdio, &[])?);
     for value in &args.mcp_http {
         let (name, url) = split_mcp_pair("mcp-http", value)?;
         validate_mcp_https_url(&name, &url)?;
@@ -303,7 +296,31 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
             headers: Vec::new(),
         }));
     }
-    for value in &args.prompt_mcp_http {
+    servers.extend(mcp_servers_from_prompted(&[], &args.prompt_mcp_http)?);
+    apply_mcp_stdio_env_refs(&mut servers, &args.mcp_stdio_env)?;
+    apply_mcp_http_headers(&mut servers, &args.mcp_http_header)?;
+    Ok(McpConfig { servers })
+}
+
+/// Convert prompt-collected MCP rows into config servers. Shared between the
+/// starter-config build (flag lane) and the post-probe `mcp_configure` step
+/// (interactive lane) so validation cannot drift: the lenient config loader
+/// silently drops invalid servers, so a bad URL must be rejected here where
+/// the operator can still see it.
+pub(in crate::cli::init) fn mcp_servers_from_prompted(
+    stdio: &[InitMcpStdioServer],
+    http: &[InitMcpHttpServer],
+) -> Result<Vec<McpServerConfig>> {
+    let mut servers = Vec::new();
+    for value in stdio {
+        servers.push(McpServerConfig::Stdio(McpStdioServer {
+            name: value.name.clone(),
+            command: value.command.clone(),
+            args: value.args.clone(),
+            env: value.env.clone(),
+        }));
+    }
+    for value in http {
         validate_mcp_https_url(&value.name, &value.url)?;
         servers.push(McpServerConfig::Http(McpHttpServer {
             name: value.name.clone(),
@@ -319,9 +336,31 @@ fn mcp_from_args(args: &InitArgs) -> Result<McpConfig> {
                 .collect(),
         }));
     }
-    apply_mcp_stdio_env_refs(&mut servers, &args.mcp_stdio_env)?;
-    apply_mcp_http_headers(&mut servers, &args.mcp_http_header)?;
-    Ok(McpConfig { servers })
+    Ok(servers)
+}
+
+/// Merge interactively-added servers into the config, rejecting names that
+/// collide with an existing or previously-added server. Returns the added
+/// names in order for the step payload.
+pub(in crate::cli::init) fn merge_prompted_mcp_servers(
+    existing: &mut Vec<McpServerConfig>,
+    new_servers: Vec<McpServerConfig>,
+) -> Result<Vec<String>> {
+    let mut added = Vec::new();
+    for server in &new_servers {
+        let name = server.name();
+        if added.iter().any(|existing: &String| existing == name)
+            || existing.iter().any(|server| server.name() == name)
+        {
+            return Err(StackError::InvalidParam {
+                field: "mcp",
+                reason: format!("duplicate MCP server name `{name}`"),
+            });
+        }
+        added.push(name.to_owned());
+    }
+    existing.extend(new_servers);
+    Ok(added)
 }
 
 fn apply_mcp_stdio_env_refs(servers: &mut [McpServerConfig], values: &[String]) -> Result<()> {

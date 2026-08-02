@@ -11,12 +11,14 @@ Registry entries describe:
 - native command or adapter-backed command
 - install steps and post-install executable checks
 - provider/model/mode support flags
-- MCP and Agent Skills support flags
+- Agent Skills support flag
 - Agent Skills install directory when skills are supported
 - optional Agent Skills link directory when the harness discovers skills somewhere other than the install directory (e.g. Claude Code's `~/.claude/skills`); it must not equal the install directory, and neither may nest within the other
 - support documentation path
 
 Only entries marked headless-compatible are offered as supported runtime targets.
+
+The registry carries no MCP or other ACP capability declarations. Those come from the agent's live `initialize` advertisement, captured by the init capability probe and on every agent start.
 
 ## Install Paths
 

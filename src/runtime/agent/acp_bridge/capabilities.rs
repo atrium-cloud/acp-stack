@@ -39,6 +39,27 @@ pub struct PartitionedMcpServers {
     pub skipped: Vec<SkippedMcpServer>,
 }
 
+/// A configured feature the runtime routes around because the agent does not
+/// advertise the capability backing it. The feature stays in config; this
+/// record surfaces the omission through init reports and session events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IgnoredFeature {
+    /// What kind of configured feature was ignored: `mcp.server`,
+    /// `agent.mode`, or `agent.model`.
+    pub feature: &'static str,
+    /// The configured value: the MCP server name, or the mode/model value.
+    pub target: String,
+    /// The capability the agent would have had to advertise
+    /// (`mcpCapabilities.*`), or — for `agent.mode`/`agent.model` — the
+    /// `session/new` config option that would have had to carry the value.
+    pub capability: &'static str,
+    pub reason: String,
+}
+
+pub const IGNORED_FEATURE_MCP_SERVER: &str = "mcp.server";
+pub const IGNORED_FEATURE_AGENT_MODE: &str = "agent.mode";
+pub const IGNORED_FEATURE_AGENT_MODEL: &str = "agent.model";
+
 impl AgentCapabilitiesDto {
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(self).map_err(|err| StackError::AgentInitializeFailed {
@@ -95,7 +116,23 @@ impl AgentCapabilitiesDto {
             .unwrap_or(false)
     }
 
-    fn supports_mcp_capability(&self, name: &str) -> bool {
+    /// Whether the agent advertised any MCP capability at all. Gates both the
+    /// init MCP prompts and session-time stdio attachment: an agent whose
+    /// `mcpCapabilities` is absent or claims nothing gives no evidence MCP
+    /// works, so it is offered no prompts and sent no servers.
+    pub fn advertises_mcp_support(&self) -> bool {
+        self.capabilities
+            .get("mcpCapabilities")
+            .and_then(Value::as_object)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|(_, value)| value.as_bool().unwrap_or(false))
+            })
+    }
+
+    /// Whether the agent advertised a specific MCP capability (`http`/`sse`).
+    pub fn supports_mcp_capability(&self, name: &str) -> bool {
         self.capabilities
             .get("mcpCapabilities")
             .and_then(Value::as_object)
@@ -132,20 +169,26 @@ impl AgentCapabilitiesDto {
     /// when it does not advertise the transport, and `Err` for a transport
     /// variant we do not model — we cannot reason about a shape we don't know,
     /// so that stays a hard failure.
+    ///
+    /// stdio has no dedicated advertisement flag in ACP, so it requires at
+    /// least one advertised MCP capability: some agents reject `session/new`
+    /// outright when handed servers they cannot serve, so an advertisement
+    /// claiming no MCP means no MCP servers of any transport are sent.
     fn unsupported_mcp_capability(&self, server: &McpServer) -> Result<Option<&'static str>> {
-        let required = match server {
-            McpServer::Stdio(_) => None,
-            McpServer::Http(_) => Some(("http", "mcpCapabilities.http")),
-            McpServer::Sse(_) => Some(("sse", "mcpCapabilities.sse")),
-            _ => {
-                return Err(StackError::AgentUnsupportedCapability {
-                    name: "mcpCapabilities.unknown",
-                });
+        match server {
+            McpServer::Stdio(_) => {
+                Ok((!self.advertises_mcp_support()).then_some("mcpCapabilities"))
             }
-        };
-        Ok(required.and_then(|(capability, error_name)| {
-            (!self.supports_mcp_capability(capability)).then_some(error_name)
-        }))
+            McpServer::Http(_) => {
+                Ok((!self.supports_mcp_capability("http")).then_some("mcpCapabilities.http"))
+            }
+            McpServer::Sse(_) => {
+                Ok((!self.supports_mcp_capability("sse")).then_some("mcpCapabilities.sse"))
+            }
+            _ => Err(StackError::AgentUnsupportedCapability {
+                name: "mcpCapabilities.unknown",
+            }),
+        }
     }
 
     /// Split the resolved MCP servers into the ones this agent can accept and
@@ -167,6 +210,23 @@ impl AgentCapabilitiesDto {
             }
         }
         Ok(partitioned)
+    }
+
+    /// Config-level MCP assessment for init reporting. Wraps
+    /// `partition_mcp_servers` so init reports and session-time partitioning
+    /// cannot drift apart.
+    pub fn ignored_mcp_features(&self, servers: Vec<McpServer>) -> Result<Vec<IgnoredFeature>> {
+        let partitioned = self.partition_mcp_servers(servers)?;
+        Ok(partitioned
+            .skipped
+            .into_iter()
+            .map(|skipped| IgnoredFeature {
+                feature: IGNORED_FEATURE_MCP_SERVER,
+                target: skipped.name,
+                capability: skipped.capability,
+                reason: "agent does not advertise this MCP transport".to_owned(),
+            })
+            .collect())
     }
 
     /// Invariant guard on the bridge's own request paths. Transport support is
@@ -260,8 +320,33 @@ mod tests {
     }
 
     #[test]
-    fn partition_drops_servers_whose_transport_is_unadvertised() {
+    fn partition_drops_every_server_when_no_mcp_capability_is_claimed() {
         let capabilities = capabilities_with(json!({ "http": false }));
+        let partitioned = capabilities
+            .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
+            .expect("partition");
+
+        assert!(partitioned.accepted.is_empty());
+        assert_eq!(
+            partitioned.skipped,
+            vec![
+                SkippedMcpServer {
+                    name: "local".to_owned(),
+                    capability: "mcpCapabilities",
+                },
+                SkippedMcpServer {
+                    name: "linear".to_owned(),
+                    capability: "mcpCapabilities.http",
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn partition_keeps_stdio_when_any_mcp_capability_is_claimed() {
+        // sse:true is evidence the agent engages with MCP, so the stdio
+        // baseline rides along even though http stays skipped.
+        let capabilities = capabilities_with(json!({ "sse": true }));
         let partitioned = capabilities
             .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
             .expect("partition");
@@ -271,13 +356,7 @@ mod tests {
             crate::runtime::agent::mcp::server_name(&partitioned.accepted[0]),
             "local"
         );
-        assert_eq!(
-            partitioned.skipped,
-            vec![SkippedMcpServer {
-                name: "linear".to_owned(),
-                capability: "mcpCapabilities.http",
-            }]
-        );
+        assert_eq!(partitioned.skipped.len(), 1);
     }
 
     #[test]
@@ -291,6 +370,45 @@ mod tests {
 
         assert!(partitioned.accepted.is_empty());
         assert_eq!(partitioned.skipped.len(), 1);
+    }
+
+    #[test]
+    fn ignored_mcp_features_reports_all_servers_when_no_mcp_is_claimed() {
+        let capabilities = capabilities_with(json!({ "http": false }));
+        let ignored = capabilities
+            .ignored_mcp_features(vec![stdio_server("local"), http_server("linear")])
+            .expect("assess");
+
+        assert_eq!(ignored.len(), 2);
+        assert_eq!(ignored[0].feature, IGNORED_FEATURE_MCP_SERVER);
+        assert_eq!(ignored[0].target, "local");
+        assert_eq!(ignored[0].capability, "mcpCapabilities");
+        assert_eq!(ignored[1].target, "linear");
+        assert_eq!(ignored[1].capability, "mcpCapabilities.http");
+    }
+
+    #[test]
+    fn ignored_mcp_features_is_empty_when_transports_are_advertised() {
+        let capabilities = capabilities_with(json!({ "http": true }));
+        let ignored = capabilities
+            .ignored_mcp_features(vec![stdio_server("local"), http_server("linear")])
+            .expect("assess");
+        assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn advertises_mcp_support_requires_a_true_capability() {
+        assert!(capabilities_with(json!({ "http": true })).advertises_mcp_support());
+        assert!(!capabilities_with(json!({ "http": false })).advertises_mcp_support());
+        assert!(!capabilities_with(json!({})).advertises_mcp_support());
+        let no_mcp_key = AgentCapabilitiesDto {
+            protocol_version: 1,
+            capabilities: json!({}),
+            agent_name: None,
+            agent_title: None,
+            agent_version: None,
+        };
+        assert!(!no_mcp_key.advertises_mcp_support());
     }
 
     #[test]

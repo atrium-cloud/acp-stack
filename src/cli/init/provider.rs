@@ -270,8 +270,31 @@ pub(super) fn collect_declared_secret_refs_for_init(
             declared_refs.extend(crate::config::env_entry_ref_names_lossy(entry));
         }
     }
+    prompt_missing_declared_refs(interactive, &declared_refs, secret_store)
+}
+
+/// MCP-only variant for the post-probe `mcp_configure` step: servers added
+/// there land after the up-front declared-refs pass above already ran, so
+/// their env/header refs would otherwise never be prompted.
+pub(super) fn collect_mcp_secret_refs_for_init(
+    interactive: bool,
+    config: &Config,
+    secret_store: &mut SecretStore,
+) -> Result<Vec<String>> {
+    if !interactive {
+        return Ok(Vec::new());
+    }
+    let declared_refs = config_mcp_secret_refs(config);
+    prompt_missing_declared_refs(interactive, &declared_refs, secret_store)
+}
+
+fn prompt_missing_declared_refs(
+    interactive: bool,
+    declared_refs: &BTreeSet<String>,
+    secret_store: &mut SecretStore,
+) -> Result<Vec<String>> {
     let mut collected = Vec::new();
-    for env_ref in &declared_refs {
+    for env_ref in declared_refs {
         if secret_store.contains(env_ref) {
             continue;
         }

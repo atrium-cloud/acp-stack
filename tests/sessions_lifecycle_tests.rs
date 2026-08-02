@@ -620,30 +620,74 @@ async fn stored_session_cwd_symlink_escape_is_rejected_before_reuse() {
     assert_eq!(body["error"]["code"], "prompt.body_invalid");
 }
 
+fn declared_mcp_servers() -> Vec<McpServerConfig> {
+    vec![
+        McpServerConfig::Stdio(McpStdioServer {
+            name: "local-stdio".into(),
+            command: "/bin/sh".into(),
+            args: vec![],
+            env: vec![],
+        }),
+        McpServerConfig::Http(McpHttpServer {
+            name: "remote-http".into(),
+            url: "https://example.invalid/mcp".into(),
+            headers: vec![],
+        }),
+    ]
+}
+
 #[tokio::test]
-async fn attached_mcp_event_lists_only_servers_the_agent_accepted() {
-    // The placebo advertises no HTTP MCP transport, so the configured HTTP
-    // server is partitioned out at session create. The durable
-    // `mcp.session_attached` event must list only what was actually sent to
-    // the agent; the skipped server shows up in `mcp.session_skipped` only.
+async fn no_mcp_advertisement_skips_every_server_including_stdio() {
+    // By default the placebo advertises no MCP capability, so nothing is
+    // attached — no `mcp.session_attached` event fires and both servers,
+    // stdio included, land in `mcp.session_skipped`.
     let home = tempfile::tempdir().expect("home tempdir");
     let _home_guard = HomeEnvGuard::set(home.path());
     SecretStore::open_or_create(home.path()).expect("secret store initializes");
 
     let harness = Harness::spawn_with(|config| {
-        config.mcp.servers = vec![
-            McpServerConfig::Stdio(McpStdioServer {
-                name: "local-stdio".into(),
-                command: "/bin/sh".into(),
-                args: vec![],
-                env: vec![],
-            }),
-            McpServerConfig::Http(McpHttpServer {
-                name: "remote-http".into(),
-                url: "https://example.invalid/mcp".into(),
-                headers: vec![],
-            }),
-        ];
+        config.mcp.servers = declared_mcp_servers();
+    })
+    .await;
+
+    let session_id = create_session(&harness).await;
+
+    let events = {
+        let store = harness.state.lock().await;
+        store
+            .query_session_events(&session_id, None, 50)
+            .expect("session events")
+    };
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != "mcp.session_attached"),
+        "{events:?}"
+    );
+    let skipped: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "mcp.session_skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{events:?}");
+    assert!(
+        skipped[0].payload_json.contains("local-stdio")
+            && skipped[0].payload_json.contains("remote-http"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
+    // With `mcpCapabilities.http` advertised, both the stdio baseline and the
+    // HTTP server are sent, and the durable `mcp.session_attached` event
+    // lists exactly what reached the agent.
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _home_guard = HomeEnvGuard::set(home.path());
+    SecretStore::open_or_create(home.path()).expect("secret store initializes");
+
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--cap-mcp-http".to_owned());
+        config.mcp.servers = declared_mcp_servers();
     })
     .await;
 
@@ -662,15 +706,123 @@ async fn attached_mcp_event_lists_only_servers_the_agent_accepted() {
     assert_eq!(attached.len(), 1, "{events:?}");
     let payload: Value =
         serde_json::from_str(&attached[0].payload_json).expect("attached payload json");
-    assert_eq!(payload["server_names"], json!(["local-stdio"]));
-
-    let skipped: Vec<_> = events
-        .iter()
-        .filter(|event| event.kind == "mcp.session_skipped")
-        .collect();
-    assert_eq!(skipped.len(), 1, "{events:?}");
+    assert_eq!(
+        payload["server_names"],
+        json!(["local-stdio", "remote-http"])
+    );
     assert!(
-        skipped[0].payload_json.contains("remote-http"),
+        events
+            .iter()
+            .all(|event| event.kind != "mcp.session_skipped"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn unadvertised_mode_and_model_are_ignored_not_fatal() {
+    // The placebo advertises neither a `mode` nor a `model` config option
+    // unless told to, so a config-declared mode/model used to make every
+    // session create fail with `agent.config_provision`. The session must
+    // instead proceed on the agent's defaults, report what was ignored in
+    // the response, and record a `session.capability_ignored` event.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.mode = Some("plan".to_owned());
+        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+    })
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let ignored = body["data"]["ignored"].as_array().expect("ignored array");
+    let features: Vec<&str> = ignored
+        .iter()
+        .filter_map(|entry| entry["feature"].as_str())
+        .collect();
+    assert_eq!(features, ["agent.mode", "agent.model"], "{body}");
+    assert_eq!(ignored[0]["target"], "plan");
+    assert_eq!(ignored[1]["target"], "deepseek/deepseek-v4-flash");
+
+    let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
+    let events = {
+        let store = harness.state.lock().await;
+        store
+            .query_session_events(&session_id, None, 50)
+            .expect("session events")
+    };
+    let capability_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "session.capability_ignored")
+        .collect();
+    assert_eq!(capability_events.len(), 1, "{events:?}");
+    assert!(
+        capability_events[0].payload_json.contains("agent.mode")
+            && capability_events[0].payload_json.contains("agent.model"),
+        "{events:?}"
+    );
+
+    // The session is usable, not just created.
+    let prompt = http()
+        .post(format!(
+            "{}/v1/sessions/{}/prompt",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "prompt": "still works on agent defaults" }))
+        .send()
+        .await
+        .expect("prompt");
+    assert_eq!(prompt.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn advertised_model_is_still_applied_without_ignore_records() {
+    // Regression guard for the softening: when the agent does advertise the
+    // configured model, the set is issued and nothing is reported ignored.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--model-config-option".to_owned(),
+            "deepseek/deepseek-v4-flash".to_owned(),
+            "--model-config-option-id".to_owned(),
+            "agent-model".to_owned(),
+            "--expect-model-config".to_owned(),
+            "deepseek/deepseek-v4-flash".to_owned(),
+        ]);
+        config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+    })
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    assert!(
+        body["data"].get("ignored").is_none(),
+        "ignored must be omitted when empty: {body}"
+    );
+
+    let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
+    let events = {
+        let store = harness.state.lock().await;
+        store
+            .query_session_events(&session_id, None, 50)
+            .expect("session events")
+    };
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != "session.capability_ignored"),
         "{events:?}"
     );
 }

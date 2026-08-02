@@ -712,6 +712,7 @@ fn run_init_with_output(
         agent_id: config.agent.id.clone(),
         agent_name: config.agent.name.clone(),
         native_config_import: None,
+        ignored_features: Vec::new(),
     };
     key_handover.failure_context = Some(handoff_context.clone());
     init_println!(output_mode, "progress: initializing auth");
@@ -1210,6 +1211,156 @@ fn run_init_with_output(
     }
 
     // -----------------------------------------------------------------
+    // Step 12: capability_probe — handshake-only spawn of the installed
+    // agent to capture its ACP `initialize` advertisement, which feeds the
+    // MCP prompt gate below, the ignored-features report, and (persisted)
+    // `GET /v1/agent/capabilities`. A failed probe never fails init.
+    // -----------------------------------------------------------------
+    init_println!(output_mode, "progress: probing agent capabilities");
+    let mut probed_capabilities: Option<crate::runtime::agent::acp_bridge::AgentCapabilitiesDto> =
+        None;
+    let mut ignored_features: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature> = Vec::new();
+    let result = record_step(
+        &store,
+        &init_run,
+        12,
+        step_kind::CAPABILITY_PROBE,
+        // Always re-probe on resume: a reinstall or update between runs can
+        // change the advertisement, and a stale "supported" is worse than one
+        // redundant short-lived spawn.
+        || Ok(false),
+        || match probe_agent_capabilities_for_init(&home, &config) {
+            CapabilityProbeOutcome::Probed(capabilities) => {
+                store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
+                // The ignore assessment is best-effort: an unresolvable MCP
+                // declaration (missing secret, absent stdio binary) is a
+                // pre-existing config condition surfaced at session time, not
+                // a reason to fail the probe step.
+                match crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &secret_store)
+                    .and_then(|declared| capabilities.ignored_mcp_features(declared))
+                {
+                    Ok(ignored) => ignored_features = ignored,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "skipping MCP capability assessment: declared servers did not resolve"
+                        );
+                    }
+                }
+                let payload = serde_json::json!({
+                    "probe_status": "ok",
+                    "protocol_version": capabilities.protocol_version,
+                    "agent_name": capabilities.agent_name,
+                    "ignored": ignored_features,
+                });
+                probed_capabilities = Some(capabilities);
+                Ok(StepOutcome::with_payload(payload.to_string()))
+            }
+            CapabilityProbeOutcome::Unavailable { reason } => {
+                let payload = serde_json::json!({
+                    "probe_status": "unavailable",
+                    "reason": reason,
+                });
+                Ok(StepOutcome::with_payload(payload.to_string()))
+            }
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&store, &init_run, error);
+    }
+    handoff_context.ignored_features = ignored_features.clone();
+    if let Some(context) = key_handover.failure_context.as_mut() {
+        context.ignored_features = ignored_features.clone();
+    }
+
+    // -----------------------------------------------------------------
+    // Step 13: mcp_configure — interactive MCP prompting. Lives after the
+    // probe (not in the pre-install wizard) because MCP support is only
+    // knowable from the installed agent's advertisement. Flag-driven runs
+    // declare MCP in the starter config and are covered by the
+    // ignored-features report; these prompts never reach hosted streams.
+    // -----------------------------------------------------------------
+    let mcp_interactive = prompts_enabled(&args) && !prompt::hosted_driver_active();
+    let mcp_prompting_active =
+        creating_config && !args.resume && mcp_interactive && config.mcp.servers.is_empty();
+    // `step_needs_resume`: a resumed run must still settle a prior failed
+    // `mcp_configure` row even though prompting is gated off on resume — the
+    // body then settles it without prompts (the confirm gate below is
+    // `mcp_prompting_active`, false on every resume path).
+    if mcp_prompting_active || step_needs_resume(&prior_init_steps, step_kind::MCP_CONFIGURE) {
+        let result = record_step(
+            &store,
+            &init_run,
+            13,
+            step_kind::MCP_CONFIGURE,
+            // Interactively-collected answers cannot be replayed; a prior
+            // succeeded row skips instead of re-driving prompts on resume.
+            || Ok(true),
+            || {
+                let Some(capabilities) = probed_capabilities.as_ref() else {
+                    if output_mode.is_text() {
+                        println!("mcp: skipped (agent capabilities unavailable)");
+                    }
+                    return Ok(StepOutcome::with_payload(
+                        r#"{"prompted":false,"reason":"probe_unavailable"}"#,
+                    ));
+                };
+                if !capabilities.advertises_mcp_support() {
+                    if output_mode.is_text() {
+                        println!("mcp: skipped (agent does not advertise MCP support)");
+                    }
+                    return Ok(StepOutcome::with_payload(
+                        r#"{"prompted":false,"reason":"no_mcp_transports"}"#,
+                    ));
+                }
+                let offer_http = capabilities.supports_mcp_capability("http");
+                let mut transports_offered = vec!["stdio"];
+                if offer_http {
+                    transports_offered.push("http");
+                }
+                // Prompt calls must be skipped outright here, not just
+                // flagged non-interactive: `prompt::confirm` consults the
+                // hosted driver before the interactive flag, and the
+                // mcp_configure prompts must never reach hosted streams
+                // (docs/specs/init.md).
+                if mcp_prompting_active
+                    && prompt::confirm(mcp_prompting_active, "Add MCP servers?", false)?
+                {
+                    prompt_mcp_servers(mcp_prompting_active, &mut args, offer_http)?;
+                }
+                let new_servers =
+                    mcp_servers_from_prompted(&args.prompt_mcp_stdio, &args.prompt_mcp_http)?;
+                let added = merge_prompted_mcp_servers(&mut config.mcp.servers, new_servers)?;
+                if !added.is_empty() {
+                    let canonical = config.to_canonical_toml()?;
+                    // The reassignment is what makes provider_configure and
+                    // agent_headless_config see the servers: later steps read
+                    // the in-memory config, not the file.
+                    config = config::load_config_from_str(&canonical)?;
+                    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+                    let stored = collect_mcp_secret_refs_for_init(
+                        mcp_prompting_active,
+                        &config,
+                        &mut secret_store,
+                    )?;
+                    if output_mode.is_text() && !stored.is_empty() {
+                        println!("declared secrets: set ({})", stored.join(", "));
+                    }
+                }
+                let payload = serde_json::json!({
+                    "prompted": mcp_prompting_active,
+                    "added": added,
+                    "transports_offered": transports_offered,
+                });
+                Ok(StepOutcome::with_payload(payload.to_string()))
+            },
+        );
+        if let Err(error) = result {
+            return finalize_with_error(&store, &init_run, error);
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Step 4: provider_configure — write provider/model into the config
     // and persist canonical TOML if anything changed.
     // -----------------------------------------------------------------
@@ -1534,6 +1685,23 @@ fn run_init_with_output(
                 "data source ({:?}): {}",
                 entry.outcome,
                 entry.destination.display()
+            );
+        }
+    }
+
+    // Ignored-feature notices are text-lane only, deliberately bypassing
+    // `init_println!`: hosted progress frames reach end users, who must not
+    // see them — the platform reads `ignored_features` from the handoff
+    // payload instead.
+    if output_mode.is_text() {
+        for ignored in &ignored_features {
+            let label = match ignored.feature {
+                crate::runtime::agent::acp_bridge::IGNORED_FEATURE_MCP_SERVER => "mcp server",
+                other => other,
+            };
+            println!(
+                "ignored: {label} \"{}\" ({}) — not supported by this agent's adapter/harness; left in acps-config.toml and skipped at runtime",
+                ignored.target, ignored.capability
             );
         }
     }

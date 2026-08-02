@@ -74,6 +74,8 @@ Status and event replay never include plaintext session/admin keys or secret inp
 
 WebSocket server frames are `hello`, `progress`, `input_required`, `input_accepted`, `result`, and `error`. Client frames are `input`, `cancel`, `replay_result`, `ack_result`, `replay_error`, and `ack_error`. The final `result` frame carries the platform handoff payload and always includes plaintext `session_key` and `admin_key`: hosted init generates them on a fresh instance and rotates them over pre-existing state, so a keyless result cannot occur.
 
+Environment declarations the installed agent's capabilities do not cover do not fail the session: they are written to config, skipped at runtime, and reported only through the result payload's `ignored_features` (see [init.md](../init.md#platform-handoff-json)), never through `progress` frames.
+
 After `result`, the session remains `completed_awaiting_ack`. If the WebSocket drops before acknowledgement, the backend reconnects and sends `replay_result`; the server does not replay keys through status or generic events. `ack_result` is terminal: the server clears the in-memory handoff payload, closes the session, and exits successfully.
 
 A failure after key handover still delivers a `result` frame (with `"status": "failed"` and any freshly generated keys) through the normal result/ack path above. A failure with no result payload to deliver — before key handover completed — parks symmetrically instead: the session enters `errored` and the server stays up so the backend can learn the typed failure instead of a dead port. The `error` payload is available through the status route, the reconnect `hello` frame, and `replay_error`; `ack_error` releases the server, which exits non-zero. `cancel` is a no-op on a parked failure, like on an un-acked result. `POST /v1/init/sessions` returns `409 init.session_active` while a failure is parked. If no `ack_error` arrives within a 2-minute grace (enforced regardless of `--idle-timeout` and of connected WebSockets), the server expires the error with reason `error_ack_timeout` and exits non-zero on its own.
@@ -116,6 +118,8 @@ Secret values are never returned by the API. Auth keys are not secret-store entr
 | `GET /v1/agent/capabilities` | session | returns the latest ACP capability snapshot when available     |
 | `GET /v1/providers`          | session | lists provider ids available for the configured agent         |
 | `GET /v1/models`             | session | lists model and mode choices from the provider catalog or ACP discovery |
+
+`GET /v1/agent/capabilities` is populated by the init capability probe as well as by agent start; `404 agent.not_initialized` occurs only when neither has run.
 
 `GET /v1/models` returns `{ "agent_id", "source", "models": [{ "value", "display_name"? }], "modes": [...], "catalog_error"? }`. `source` is `"provider_catalog"` when models come from the provider's live model listing (`models_url` in the embedded provider metadata, fetched with the stored API key and cached at `~/.config/acp-stack/provider-models.json`) and `"acp_advertised"` when they come from the agent's ACP `session/new` config options. The catalog serves only mapped providers of agents whose harness takes the model verbatim from on-disk config (Claude Code profiled providers, Codex with OpenRouter); custom providers have no listing endpoint, and agents with real ACP discovery keep their advertised list. `catalog_error` is present when the provider declares a model listing endpoint but the catalog is unavailable (fetch failed and nothing cached); the response then falls back to ACP-advertised values. On the catalog path an ACP discovery failure degrades to `modes: []` instead of failing the request.
 
@@ -164,6 +168,8 @@ The `/v1/agent/*` routes operate on the Array `primary_target`. Session routes a
 Before a prompt row is created, media-bearing prompts are checked against the selected target model's known input modalities from `models.dev`. Confidently unsupported image, audio, or video input returns HTTP 400 `prompt.unsupported_modality`; unknown models, unavailable catalog data, PDFs, and generic files are allowed through.
 
 Session create, load, resume, and fork accept an optional `cwd`. Session `cwd` values must be existing directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before reuse. Explicit load/resume CWDs are stored after the agent accepts the call. Closed sessions cannot be loaded, resumed, forked, or prompted.
+
+A configured `agent.mode` or model the agent's `session/new` config options do not advertise does not fail session creation: the session proceeds on the agent's default, the response carries an `ignored` array (`[{ "feature": "agent.mode"|"agent.model", "target", "capability", "reason" }]`, omitted when empty), and a warn-level `session.capability_ignored` session event records the omission. A failure from setting an advertised option is still an error.
 
 Session close is history-preserving: the runtime calls ACP `session/close` when supported, marks the local row `closed`, and keeps durable events/query history. Permanent deletion is deferred until product semantics are defined.
 

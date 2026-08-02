@@ -40,6 +40,7 @@ mod prompts;
 // list) escape `starter_config`, so they are declared `pub(crate)` in their
 // sibling and re-exported here.
 pub(super) use self::builders::{
+    mcp_servers_from_prompted, merge_prompted_mcp_servers,
     reject_data_source_args_for_existing_config, reject_starter_only_mcp_args_for_existing_config,
     starter_config, validate_deployment_overrides_match_existing,
 };
@@ -51,7 +52,7 @@ pub(super) use self::deps::{
 };
 pub(super) use self::prompts::{
     configure_stack_update_for_init, prompt_environment_configuration_if_needed,
-    validate_stack_update_args,
+    prompt_mcp_servers, validate_stack_update_args,
 };
 
 // Plain (non-re-exporting) globs make each sibling's `pub(super)` items private
@@ -269,6 +270,7 @@ mod tests {
         selects: Mutex<VecDeque<Option<usize>>>,
         confirms: Mutex<VecDeque<bool>>,
         passwords: Mutex<VecDeque<Option<String>>>,
+        requests: Mutex<Vec<prompt::HostedPromptRequest>>,
     }
 
     impl ScriptedPromptDriver {
@@ -285,6 +287,7 @@ mod tests {
                 selects: Mutex::new(VecDeque::from(selects)),
                 confirms: Mutex::new(VecDeque::from(confirms)),
                 passwords: Mutex::new(VecDeque::from(passwords)),
+                requests: Mutex::new(Vec::new()),
             }
         }
     }
@@ -292,8 +295,9 @@ mod tests {
     impl prompt::HostedPromptDriver for ScriptedPromptDriver {
         fn select(
             &self,
-            _request: prompt::HostedPromptRequest,
+            request: prompt::HostedPromptRequest,
         ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+            self.requests.lock().expect("requests lock").push(request);
             Ok(prompt::HostedPromptOutcome::Handled(
                 self.selects
                     .lock()
@@ -469,15 +473,16 @@ mod tests {
         assert!(!args.essential_skills);
     }
 
-    // Advanced Setup (path index 1) with a non-skills agent: deps off, MCP off,
-    // agent env on, data off. `placebo` is absent from the embedded registry, so
-    // `agent_supports_skills` is false and the skills prompt is skipped — hence
-    // four confirms, not five.
+    // Advanced Setup (path index 1) with a non-skills agent: deps off, agent
+    // env on, data off. `placebo` is absent from the embedded registry, so
+    // `agent_supports_skills` is false and the skills prompt is skipped —
+    // hence three confirms. MCP prompting is not part of the wizard: it runs
+    // in the post-probe `mcp_configure` init step.
     #[test]
     fn advanced_setup_routes_agent_env_without_standard_fields() {
         let driver = Arc::new(ScriptedPromptDriver::new(
             vec![Some(1)],
-            vec![false, false, true, false],
+            vec![false, true, false],
         ));
         let mut args = parse_init_args(&["--agent", "placebo"]);
 
@@ -495,7 +500,7 @@ mod tests {
     fn advanced_setup_routes_agent_skills_for_skills_capable_agent() {
         let driver = Arc::new(ScriptedPromptDriver::new(
             vec![Some(1)],
-            vec![false, true, false, false, false],
+            vec![false, true, false, false],
         ));
         let mut args = parse_init_args(&["--agent", "opencode"]);
 
@@ -518,6 +523,131 @@ mod tests {
         assert!(!args.browser_use_profile);
         assert!(!args.prompt_skills);
         assert!(!args.prompt_agent_env_refs);
+    }
+
+    // Drives the post-probe `mcp_configure` transport loop headlessly; the
+    // caller keeps a driver clone to inspect the recorded select requests.
+    fn run_mcp_prompt(
+        driver: Arc<ScriptedPromptDriver>,
+        args: &mut InitArgs,
+        offer_http: bool,
+    ) -> Result<()> {
+        let hosted: Arc<dyn prompt::HostedPromptDriver> = driver;
+        prompt::with_hosted_driver(hosted, || prompt_mcp_servers(true, args, offer_http))
+    }
+
+    fn select_labels(driver: &ScriptedPromptDriver, index: usize) -> Vec<String> {
+        let requests = driver.requests.lock().expect("requests lock");
+        requests[index]
+            .items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect()
+    }
+
+    // The HTTP transport is offered only when the agent advertised
+    // `mcpCapabilities.http`; without the advertisement the select is stdio
+    // plus Done.
+    #[test]
+    fn mcp_prompt_omits_http_transport_when_not_advertised() {
+        let driver = Arc::new(ScriptedPromptDriver::new(vec![Some(1)], Vec::new()));
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_mcp_prompt(driver.clone(), &mut args, false).expect("mcp prompt");
+
+        assert_eq!(driver.requests.lock().expect("requests lock").len(), 1);
+        assert_eq!(select_labels(&driver, 0), ["stdio server", "Done"]);
+        assert!(args.prompt_mcp_stdio.is_empty());
+        assert!(args.prompt_mcp_http.is_empty());
+    }
+
+    #[test]
+    fn mcp_prompt_offers_http_transport_when_advertised() {
+        let driver = Arc::new(ScriptedPromptDriver::new(vec![Some(2)], Vec::new()));
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_mcp_prompt(driver.clone(), &mut args, true).expect("mcp prompt");
+
+        assert_eq!(driver.requests.lock().expect("requests lock").len(), 1);
+        assert_eq!(
+            select_labels(&driver, 0),
+            ["stdio server", "HTTP server", "Done"]
+        );
+        assert!(args.prompt_mcp_stdio.is_empty());
+        assert!(args.prompt_mcp_http.is_empty());
+    }
+
+    // Choosing stdio enters the row loop (the driver's text prompts return
+    // None, so the loop ends immediately with no rows) and control returns to
+    // the transport select, where Done exits.
+    #[test]
+    fn mcp_prompt_stdio_choice_returns_to_transport_select() {
+        let driver = Arc::new(ScriptedPromptDriver::new(
+            vec![Some(0), Some(1)],
+            Vec::new(),
+        ));
+        let mut args = parse_init_args(&["--agent", "placebo"]);
+
+        run_mcp_prompt(driver.clone(), &mut args, false).expect("mcp prompt");
+
+        assert_eq!(driver.requests.lock().expect("requests lock").len(), 2);
+        assert!(args.prompt_mcp_stdio.is_empty());
+        assert!(args.prompt_mcp_http.is_empty());
+    }
+
+    fn prompted_stdio(name: &str) -> InitMcpStdioServer {
+        InitMcpStdioServer {
+            name: name.to_owned(),
+            command: format!("mcp-{name}"),
+            args: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn merge_prompted_mcp_servers_appends_and_reports_added_names() {
+        let mut existing =
+            mcp_servers_from_prompted(&[prompted_stdio("files")], &[]).expect("valid servers");
+        let batch =
+            mcp_servers_from_prompted(&[prompted_stdio("search")], &[]).expect("valid servers");
+
+        let added = merge_prompted_mcp_servers(&mut existing, batch).expect("merge");
+
+        assert_eq!(added, ["search".to_owned()]);
+        assert_eq!(existing.len(), 2);
+        assert_eq!(existing[1].name(), "search");
+    }
+
+    #[test]
+    fn merge_prompted_mcp_servers_rejects_duplicate_within_batch() {
+        let mut existing = Vec::new();
+        let batch =
+            mcp_servers_from_prompted(&[prompted_stdio("files"), prompted_stdio("files")], &[])
+                .expect("valid servers");
+
+        match merge_prompted_mcp_servers(&mut existing, batch) {
+            Err(StackError::InvalidParam { reason, .. }) => {
+                assert!(reason.contains("`files`"), "{reason}");
+            }
+            other => panic!("expected InvalidParam, got {other:?}"),
+        }
+        assert!(existing.is_empty(), "rejected batch must not append");
+    }
+
+    #[test]
+    fn merge_prompted_mcp_servers_rejects_name_already_in_config() {
+        let mut existing =
+            mcp_servers_from_prompted(&[prompted_stdio("files")], &[]).expect("valid servers");
+        let batch =
+            mcp_servers_from_prompted(&[prompted_stdio("files")], &[]).expect("valid servers");
+
+        match merge_prompted_mcp_servers(&mut existing, batch) {
+            Err(StackError::InvalidParam { reason, .. }) => {
+                assert!(reason.contains("`files`"), "{reason}");
+            }
+            other => panic!("expected InvalidParam, got {other:?}"),
+        }
+        assert_eq!(existing.len(), 1, "rejected batch must not append");
     }
 
     // Builds the config a hosted request with one stdio env ref, one HTTP

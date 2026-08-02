@@ -341,6 +341,45 @@ pub(super) fn configure_model_and_mode_for_init(
     }
 }
 
+/// Shared precondition check before spawning the configured agent from init.
+/// Both preconditions mirror what the bridge itself needs: the command must
+/// resolve on PATH (exec would ENOENT) and the spawn cwd must exist
+/// (`current_dir(&cwd)` fails otherwise). Fixture discovery bypasses both
+/// because no process is spawned.
+pub(super) enum AgentSpawnPreflight {
+    Ready,
+    Fixture,
+    CwdMissing(PathBuf),
+    BinaryMissing,
+}
+
+pub(super) fn agent_spawn_preflight(config: &Config, fixture_envs: &[&str]) -> AgentSpawnPreflight {
+    // `fixture_enabled` (not raw env reads) so a stray fixture var in a build
+    // without `test-fixtures` cannot skip the preflight while the consumer
+    // ignores the fixture and really spawns.
+    if fixture_envs
+        .iter()
+        .any(|name| crate::dev_gates::fixture_enabled(name))
+    {
+        return AgentSpawnPreflight::Fixture;
+    }
+    let spawn_cwd: PathBuf = config
+        .agent
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
+    if !spawn_cwd.is_dir() {
+        return AgentSpawnPreflight::CwdMissing(spawn_cwd);
+    }
+    if crate::runtime::agent::acp_bridge::resolve_command_path(&config.agent.command, &spawn_cwd)
+        .is_none()
+    {
+        return AgentSpawnPreflight::BinaryMissing;
+    }
+    AgentSpawnPreflight::Ready
+}
+
 /// Connection gate: confirm the configured agent launches and completes an ACP
 /// session. Registry agents are verified implicitly by model discovery,
 /// which spawns the same provisional session; this gate exists for agents that
@@ -354,16 +393,12 @@ pub(super) fn verify_agent_acp_connection(
     config: &Config,
     print_progress: bool,
 ) -> Result<()> {
-    let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
-        || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
-    let spawn_cwd: PathBuf = config
-        .agent
-        .cwd
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
-    if !fixture_discovery {
-        if !spawn_cwd.is_dir() {
+    match agent_spawn_preflight(
+        config,
+        &[FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV],
+    ) {
+        AgentSpawnPreflight::Ready | AgentSpawnPreflight::Fixture => {}
+        AgentSpawnPreflight::CwdMissing(spawn_cwd) => {
             if print_progress {
                 println!(
                     "acp connection check skipped: spawn cwd `{}` is not yet provisioned",
@@ -372,12 +407,7 @@ pub(super) fn verify_agent_acp_connection(
             }
             return Ok(());
         }
-        if crate::runtime::agent::acp_bridge::resolve_command_path(
-            &config.agent.command,
-            &spawn_cwd,
-        )
-        .is_none()
-        {
+        AgentSpawnPreflight::BinaryMissing => {
             if crate::dev_gates::fixture_enabled(TEST_SKIP_AGENT_INSTALL_ENV) {
                 if print_progress {
                     println!(
@@ -403,6 +433,47 @@ pub(super) fn verify_agent_acp_connection(
                 config.agent.command,
             ),
         })
+}
+
+/// Handshake-only capability probe for the `capability_probe` init step.
+/// Never fails: init must not die because a probe could not run — an
+/// unavailable probe just means no ignore claims are made and MCP prompting
+/// is not offered.
+pub(super) enum CapabilityProbeOutcome {
+    Probed(crate::runtime::agent::acp_bridge::AgentCapabilitiesDto),
+    Unavailable { reason: String },
+}
+
+pub(super) fn probe_agent_capabilities_for_init(
+    home: &Path,
+    config: &Config,
+) -> CapabilityProbeOutcome {
+    match agent_spawn_preflight(config, &[crate::dev_gates::FIXTURE_AGENT_CAPABILITIES_ENV]) {
+        AgentSpawnPreflight::Ready | AgentSpawnPreflight::Fixture => {}
+        AgentSpawnPreflight::CwdMissing(spawn_cwd) => {
+            return CapabilityProbeOutcome::Unavailable {
+                reason: format!("spawn cwd `{}` is not provisioned", spawn_cwd.display()),
+            };
+        }
+        AgentSpawnPreflight::BinaryMissing => {
+            return CapabilityProbeOutcome::Unavailable {
+                reason: format!("agent command `{}` not found on PATH", config.agent.command),
+            };
+        }
+    }
+    match crate::runtime::agent::model_discovery::fetch_agent_capabilities(home, config) {
+        Ok(capabilities) => CapabilityProbeOutcome::Probed(capabilities),
+        Err(error) => {
+            tracing::warn!(
+                agent = %config.agent.id,
+                %error,
+                "capability probe failed; continuing without capability evidence"
+            );
+            CapabilityProbeOutcome::Unavailable {
+                reason: format!("capability probe failed: {error}"),
+            }
+        }
+    }
 }
 
 fn configure_model_for_init(

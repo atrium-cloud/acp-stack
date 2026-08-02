@@ -37,6 +37,10 @@ pub(super) struct InitHandoffContext {
     pub(super) agent_name: String,
     pub(super) native_config_import:
         Option<crate::runtime::agent::native_config_import::NativeConfigOperation>,
+    /// Configured features the capability probe determined the agent cannot
+    /// honor. Machine lanes surface these so the platform knows what was
+    /// routed around; hosted end users never see them.
+    pub(super) ignored_features: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature>,
 }
 
 /// Drop guard that performs the session/admin key handover as the very last
@@ -219,6 +223,15 @@ fn init_handoff_payload(
         object.insert(
             "native_config_import".to_owned(),
             serde_json::json!(operation),
+        );
+    }
+    if !context.ignored_features.is_empty() {
+        let object = payload
+            .as_object_mut()
+            .expect("init handoff payload is an object");
+        object.insert(
+            "ignored_features".to_owned(),
+            serde_json::json!(context.ignored_features),
         );
     }
     payload

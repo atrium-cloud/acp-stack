@@ -6,6 +6,8 @@
 
 When the agent starts, the bridge initializes ACP v1 with `clientInfo.name = "acp-stack"` and the running package version, then records the advertised capabilities. The agent must return protocol version 1; any other version closes the provisional connection before the agent becomes ready. Capability snapshots are exposed through the API and used to decide which session operations are available.
 
+The advertisement is also captured session-free: the init capability probe spawns the agent, completes only the `initialize` handshake, persists the capability snapshot to state, and terminates the process.
+
 Initialization failure prevents the agent from becoming ready and is reported in agent status.
 
 For Kimi Code, the bridge converts the encrypted `KIMI_API_KEY` ref into Kimi's process-only model API key, selected model, and first-party coding endpoint before launching `kimi acp`. Those derived values are never persisted to canonical config.
@@ -59,7 +61,7 @@ If an agent does not advertise an optional capability, the corresponding runtime
 - `session/resume` requires `supports_resume_session`
 - `session/fork` requires `supports_fork_session`
 
-Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio is the ACP baseline. A declaration whose transport the agent does not advertise is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio has no dedicated flag and requires at least one advertised MCP capability. A declaration the advertisement does not cover is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
 ### Prompt Message IDs (local extension)
 
@@ -108,3 +110,5 @@ ACP permission requests flow into the same permission system used by mediated co
 Configured MCP servers are attached to ACP sessions when the agent and SDK support session MCP configuration. Secret refs for MCP env vars and headers are resolved at attach time and are not written to logs or API responses.
 
 Servers whose transport the running agent does not advertise are skipped for that session — create, load, resume, and fork proceed with the remaining servers. Each skip is recorded as a session-scoped `mcp.session_skipped` event at level `warn`, carrying the server name and the capability the agent would have had to advertise.
+
+Session create applies the same routing to `agent.mode` and the configured model: when the agent's `session/new` config options do not advertise the configured value, the set is skipped, the session proceeds on the agent's default, and a `session.capability_ignored` event (level `warn`) records the omission. A failure from setting an option the agent did advertise remains a hard error.

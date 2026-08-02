@@ -82,10 +82,10 @@ use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpBridgeExit, AcpBridgeExitReason, AgentCapabilitiesDto,
-    AgentSessionConfigCategory, AgentSessionModelSelection, PartitionedMcpServers,
-    SessionEventSink, SkippedMcpServer, StateStoreSessionSink, meta_message_id,
-    prompt_message_id_meta, resolve_command_path, session_config_id_for_value,
-    session_model_selection_for_value,
+    AgentSessionConfigCategory, AgentSessionModelSelection, IGNORED_FEATURE_AGENT_MODE,
+    IGNORED_FEATURE_AGENT_MODEL, IgnoredFeature, PartitionedMcpServers, SessionEventSink,
+    SkippedMcpServer, StateStoreSessionSink, meta_message_id, prompt_message_id_meta,
+    resolve_command_path, session_config_id_for_value, session_model_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
@@ -93,9 +93,10 @@ use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::secrets::SecretStore;
 use crate::state::{
     EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
-    EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
-    PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord,
-    StateStore, next_prompt_id, next_prompt_message_id, next_session_id,
+    EVENT_KIND_SESSION_CAPABILITY_IGNORED, EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord,
+    NewPromptRecord, NewSessionRecord, PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE,
+    SESSION_STATUS_CLOSED, SessionRecord, StateStore, next_prompt_id, next_prompt_message_id,
+    next_session_id,
 };
 
 use self::bridge::*;
@@ -265,6 +266,47 @@ fn append_mcp_skipped_event(
         &payload,
     )?;
     Ok(())
+}
+
+/// Record configured features (mode, model) ignored for a session because the
+/// agent does not advertise the backing capability. Silent when nothing was
+/// ignored so the common path adds no rows.
+fn append_capability_ignored_event(
+    store: &StateStore,
+    session_id: &str,
+    ignored: &[IgnoredFeature],
+) -> Result<()> {
+    if ignored.is_empty() {
+        return Ok(());
+    }
+    tracing::warn!(
+        session_id,
+        ignored = ignored.len(),
+        "ignoring configured features the agent's capabilities cannot honor"
+    );
+    let payload = json!({
+        "session_id": session_id,
+        "ignored": ignored,
+    })
+    .to_string();
+    store.append_session_event(
+        session_id,
+        "warn",
+        EVENT_KIND_SESSION_CAPABILITY_IGNORED,
+        "configured capabilities ignored for session",
+        &payload,
+    )?;
+    Ok(())
+}
+
+/// Session attach result shared by create/load/resume/fork: the durable row,
+/// the MCP server names actually sent to the agent, and the configured
+/// features that were ignored for capability reasons.
+#[derive(Debug)]
+pub struct SessionAttachOutcome {
+    pub record: SessionRecord,
+    pub attached_mcp: Vec<String>,
+    pub ignored: Vec<IgnoredFeature>,
 }
 
 /// `None` means "still transitioning, poll again". `Stopping` and `Updating`
@@ -776,10 +818,13 @@ impl AgentSupervisor {
     }
 
     /// `POST /v1/sessions`. Dispatches ACP `session/new`, persists a new
-    /// `sessions` row, and returns it along with the names of the MCP servers
-    /// actually sent to the agent (after transport partitioning), so the
-    /// caller's `mcp.session_attached` event cannot claim skipped servers.
-    /// `cwd` defaults to `workspace.root` when the client omits it.
+    /// `sessions` row, and returns a `SessionAttachOutcome`: the record, the
+    /// names of the MCP servers actually sent to the agent (after transport
+    /// partitioning, so the caller's `mcp.session_attached` event cannot
+    /// claim skipped servers), and an `ignored` list of configured mode/model
+    /// values the agent did not advertise — those sessions proceed on the
+    /// agent's default. `cwd` defaults to `workspace.root` when the client
+    /// omits it.
     pub async fn create_session(
         &self,
         target_id: &str,
@@ -788,7 +833,7 @@ impl AgentSupervisor {
         cwd: Option<String>,
         mcp_servers: Vec<McpServer>,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<(SessionRecord, Vec<String>)> {
+    ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
         let resolved_cwd = resolve_session_cwd(cwd, workspace_root)?;
         let cwd_path = PathBuf::from(&resolved_cwd);
@@ -797,15 +842,34 @@ impl AgentSupervisor {
         let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
         let response = bridge.new_session(cwd_path, accepted).await?;
         let agent_session_id = response.session_id.0.to_string();
+        // Mode/model provisioning must not make sessions uncreatable when the
+        // agent simply does not advertise the option: the session proceeds on
+        // the agent's default and the omission is recorded. Only the
+        // `AgentConfigProvision` lookup failure is softened — an error from
+        // `set_session_config_option` itself means the agent advertised the
+        // option and then failed the RPC, which stays a hard failure.
+        let mut ignored: Vec<IgnoredFeature> = Vec::new();
         if let Some(mode) = agent.mode.as_deref() {
-            let config_id = session_config_id_for_value(
+            match session_config_id_for_value(
                 response.config_options.as_deref(),
                 AgentSessionConfigCategory::Mode,
                 mode,
-            )?;
-            bridge
-                .set_session_config_option(response.session_id.clone(), &config_id, mode)
-                .await?;
+            ) {
+                Ok(config_id) => {
+                    bridge
+                        .set_session_config_option(response.session_id.clone(), &config_id, mode)
+                        .await?;
+                }
+                Err(StackError::AgentConfigProvision { reason, .. }) => {
+                    ignored.push(IgnoredFeature {
+                        feature: IGNORED_FEATURE_AGENT_MODE,
+                        target: mode.to_owned(),
+                        capability: "sessionConfig.mode",
+                        reason,
+                    });
+                }
+                Err(other) => return Err(other),
+            }
         }
         if let Some(model) = agent.model.as_deref().or_else(|| {
             agent
@@ -823,11 +887,26 @@ impl AgentSupervisor {
                     "model provisioned on disk; skipping session/set_config_option"
                 );
             } else {
-                let AgentSessionModelSelection::ConfigOption { config_id } =
-                    session_model_selection_for_value(&response, model)?;
-                bridge
-                    .set_session_config_option(response.session_id.clone(), &config_id, model)
-                    .await?;
+                match session_model_selection_for_value(&response, model) {
+                    Ok(AgentSessionModelSelection::ConfigOption { config_id }) => {
+                        bridge
+                            .set_session_config_option(
+                                response.session_id.clone(),
+                                &config_id,
+                                model,
+                            )
+                            .await?;
+                    }
+                    Err(StackError::AgentConfigProvision { reason, .. }) => {
+                        ignored.push(IgnoredFeature {
+                            feature: IGNORED_FEATURE_AGENT_MODEL,
+                            target: model.to_owned(),
+                            capability: "sessionConfig.model",
+                            reason,
+                        });
+                    }
+                    Err(other) => return Err(other),
+                }
             }
         }
 
@@ -858,11 +937,18 @@ impl AgentSupervisor {
             .to_string(),
         )?;
         append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
-        Ok((inserted, accepted_names))
+        append_capability_ignored_event(&guard, &inserted.id, &ignored)?;
+        Ok(SessionAttachOutcome {
+            record: inserted,
+            attached_mcp: accepted_names,
+            ignored,
+        })
     }
 
     /// `POST /v1/sessions/{id}/load`. Capability-gated by the bridge. Returns
-    /// the session record plus the MCP server names actually sent to the agent.
+    /// the session record plus the MCP server names actually sent to the
+    /// agent. `ignored` is always empty: mode/model provisioning happens only
+    /// at create.
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -870,7 +956,7 @@ impl AgentSupervisor {
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<(SessionRecord, Vec<String>)> {
+    ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
         let record = {
             let guard = state.lock().await;
@@ -918,11 +1004,16 @@ impl AgentSupervisor {
             .ok_or_else(|| StackError::SessionNotFound {
                 id: session_id.to_owned(),
             })?;
-        Ok((record, accepted_names))
+        Ok(SessionAttachOutcome {
+            record,
+            attached_mcp: accepted_names,
+            ignored: Vec::new(),
+        })
     }
 
     /// `POST /v1/sessions/{id}/resume`. Returns the session record plus the
-    /// MCP server names actually sent to the agent.
+    /// MCP server names actually sent to the agent. `ignored` is always
+    /// empty: mode/model provisioning happens only at create.
     pub async fn resume_session(
         &self,
         session_id: &str,
@@ -930,7 +1021,7 @@ impl AgentSupervisor {
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<(SessionRecord, Vec<String>)> {
+    ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
         // Confirm session exists before we hit the agent: returning 404 for
         // an unknown id beats letting the agent reject with an opaque error.
@@ -980,11 +1071,16 @@ impl AgentSupervisor {
             .ok_or_else(|| StackError::SessionNotFound {
                 id: session_id.to_owned(),
             })?;
-        Ok((record, accepted_names))
+        Ok(SessionAttachOutcome {
+            record,
+            attached_mcp: accepted_names,
+            ignored: Vec::new(),
+        })
     }
 
     /// `POST /v1/sessions/{id}/fork`. Returns the child session record plus
-    /// the MCP server names actually sent to the agent.
+    /// the MCP server names actually sent to the agent. `ignored` is always
+    /// empty: mode/model provisioning happens only at create.
     pub async fn fork_session(
         &self,
         parent_session_id: &str,
@@ -993,7 +1089,7 @@ impl AgentSupervisor {
         workspace_root: &str,
         message_id: Option<String>,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<(SessionRecord, Vec<String>)> {
+    ) -> Result<SessionAttachOutcome> {
         let bridge = self.bridge().await?;
         let parent = {
             let guard = state.lock().await;
@@ -1091,7 +1187,11 @@ impl AgentSupervisor {
             &payload,
         )?;
         append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
-        Ok((inserted, accepted_names))
+        Ok(SessionAttachOutcome {
+            record: inserted,
+            attached_mcp: accepted_names,
+            ignored: Vec::new(),
+        })
     }
 
     /// `DELETE /v1/sessions/{id}`. Closes the agent-side session and marks

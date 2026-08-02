@@ -500,6 +500,35 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
 
+    // The supervisor's create_session softens exactly the
+    // `AgentConfigProvision` variant from these lookups into an
+    // ignored-feature record. If a future change makes them construct any
+    // other variant, that error would become a session-creation hard failure
+    // again — these tests exist to make that change loud.
+    #[test]
+    fn mode_lookup_only_constructs_agent_config_provision() {
+        let missing = session_config_id_for_value(None, AgentSessionConfigCategory::Mode, "plan");
+        assert!(matches!(
+            missing,
+            Err(crate::error::StackError::AgentConfigProvision { .. })
+        ));
+        let unadvertised =
+            session_config_id_for_value(Some(&[]), AgentSessionConfigCategory::Mode, "plan");
+        assert!(matches!(
+            unadvertised,
+            Err(crate::error::StackError::AgentConfigProvision { .. })
+        ));
+    }
+
+    #[test]
+    fn model_lookup_only_constructs_agent_config_provision() {
+        let response = agent_client_protocol::schema::v1::NewSessionResponse::new("session");
+        assert!(matches!(
+            session_model_selection_for_value(&response, "some-model"),
+            Err(crate::error::StackError::AgentConfigProvision { .. })
+        ));
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<(String, String, String)>>,

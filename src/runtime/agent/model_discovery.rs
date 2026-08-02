@@ -19,12 +19,13 @@ use agent_client_protocol::schema::v1::{NewSessionResponse, SessionConfigOption}
 
 use crate::config::{AgentConfig, Config};
 use crate::dev_gates::{
-    FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV, fixture_path,
+    FIXTURE_AGENT_CAPABILITIES_ENV, FIXTURE_CONFIG_OPTIONS_ENV, FIXTURE_NEW_SESSION_RESPONSE_ENV,
+    fixture_path,
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::{
-    AcpBridge, AcpPermissionPolicy, AgentSessionConfigCategory, KIMI_CODE_AGENT_ID,
-    SessionEventSink, session_config_id_for_value, session_config_values,
+    AcpBridge, AcpPermissionPolicy, AgentCapabilitiesDto, AgentSessionConfigCategory,
+    KIMI_CODE_AGENT_ID, SessionEventSink, session_config_id_for_value, session_config_values,
     session_model_selection_for_value, session_model_values,
 };
 use crate::runtime::agent::agent_headless_config::CODEX_OPENROUTER_PROVIDER_ID;
@@ -140,6 +141,68 @@ pub async fn fetch_session_config_with_timeout(
             ),
         }),
     }
+}
+
+/// Spawn the configured agent for its `initialize` handshake only, capture
+/// the advertised capabilities, and tear the process down. No session is
+/// created; this is the cheapest definitive answer to "what does this
+/// harness/adapter actually support".
+pub fn fetch_agent_capabilities(home: &Path, config: &Config) -> Result<AgentCapabilitiesDto> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| StackError::ServeIo { source })?;
+    runtime.block_on(fetch_agent_capabilities_async(home, config))
+}
+
+/// Async variant of [`fetch_agent_capabilities`]. No extra timeout wraps the
+/// spawn: `AcpBridge::spawn` owns the `initialize` exchange and already bounds
+/// it with its cold-host-tolerant handshake timeout; wrapping the future here
+/// would leak the child process on expiry instead of reaping it.
+pub async fn fetch_agent_capabilities_async(
+    home: &Path,
+    config: &Config,
+) -> Result<AgentCapabilitiesDto> {
+    if let Some(path) = fixture_path(FIXTURE_AGENT_CAPABILITIES_ENV) {
+        let body = std::fs::read_to_string(&path).map_err(|source| StackError::ConfigRead {
+            path: path.clone(),
+            source,
+        })?;
+        return serde_json::from_str(&body).map_err(|source| StackError::AgentInitializeFailed {
+            reason: format!(
+                "agent capabilities fixture at {} is invalid: {source}",
+                path.display()
+            ),
+        });
+    }
+
+    let env = resolve_agent_env(home, config)?;
+    let cwd = config
+        .agent
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.workspace.root));
+
+    let bridge = AcpBridge::spawn(
+        &config.agent,
+        env,
+        cwd,
+        Arc::new(NoopSink),
+        AcpPermissionPolicy::Cancel,
+        &config.workspace.sandbox,
+        crate::extensions::resolve_network_provider(config).as_ref(),
+        None,
+    )
+    .await?;
+    let capabilities = bridge.capabilities().clone();
+    // The handshake already succeeded, so the captured advertisement is good
+    // even when teardown misbehaves; discarding it would turn a working agent
+    // into "no capability evidence". Teardown failure is logged, not fatal.
+    if let Err(error) = bridge.terminate_probe().await {
+        tracing::warn!(%error, "capability probe teardown failed after a successful handshake");
+    }
+    Ok(capabilities)
 }
 
 /// Convenience for callers that just want the advertised string values

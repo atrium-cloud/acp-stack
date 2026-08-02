@@ -281,8 +281,6 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_mode: bool,
     #[serde(default)]
-    pub supports_mcp: bool,
-    #[serde(default)]
     pub supports_agent_skills: bool,
     #[serde(default)]
     pub agent_skills_install_dir: Option<String>,
@@ -444,7 +442,6 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         allow_custom_provider: false,
         allow_custom_model: false,
         set_mode: false,
-        supports_mcp: true,
         supports_agent_skills: false,
         agent_skills_install_dir: None,
         agent_skills_link_dir: None,

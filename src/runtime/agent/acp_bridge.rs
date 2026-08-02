@@ -64,7 +64,10 @@ mod process_env;
 
 use self::process_env::build_agent_process_env;
 
-pub use self::capabilities::{AgentCapabilitiesDto, PartitionedMcpServers, SkippedMcpServer};
+pub use self::capabilities::{
+    AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL,
+    IGNORED_FEATURE_MCP_SERVER, IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
+};
 pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
 
 // External callers (CLI, supervisor, model_discovery, integration tests) wrote
