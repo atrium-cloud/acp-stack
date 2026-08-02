@@ -54,6 +54,19 @@ const AGENT_CRASH_RESTART_BACKOFF: Duration = Duration::from_millis(250);
 /// observes the subprocess directly.
 const AGENT_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a lazy start will ride out a spawn that is already in flight. The
+/// initialize handshake takes seconds on a cold box (adapter spawn plus the
+/// harness reading its own config), and a request that lands mid-spawn should
+/// use that agent rather than fail on a transient state.
+const AGENT_LAZY_START_WAIT: Duration = Duration::from_secs(30);
+
+/// Poll cadence while waiting out an in-flight `Starting` transition.
+const AGENT_LAZY_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// `[agent].restart` value that opts the target out of every runtime-initiated
+/// spawn: no crash restart, and no lazy start on a request either.
+pub const AGENT_RESTART_NEVER: &str = "never";
+
 use agent_client_protocol::schema::v1::{
     ContentBlock, McpServer, PromptRequest, PromptResponse, SessionId as AcpSessionId, StopReason,
 };
@@ -204,6 +217,34 @@ pub struct AgentSnapshot {
     pub latest_capabilities: Option<AgentCapabilitiesDto>,
     pub pid: Option<u32>,
     pub loaded_providers: Option<Vec<ResolvedProviderSnapshot>>,
+}
+
+/// What a lazy-start caller should do next. Decided by
+/// [`AgentSupervisor::await_start_readiness`] so the spawn decision stays
+/// inside the supervisor's state machine instead of being re-derived from a
+/// racy `snapshot()` by every request handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStartReadiness {
+    /// A bridge is live; the request can proceed.
+    Running,
+    /// The supervisor is idle, so the caller may spawn the configured agent.
+    NeedsStart,
+    /// The supervisor is mid-stop or updating, or a concurrent spawn did not
+    /// settle within `AGENT_LAZY_START_WAIT`. Callers keep surfacing
+    /// `agent.not_running`.
+    Unavailable,
+}
+
+/// `None` means "still transitioning, poll again". `Stopping` and `Updating`
+/// are deliberate operator transitions, so they resolve immediately: spawning
+/// under them would fight the operator that asked for the agent to go away.
+fn readiness_for_state(state: &AgentState) -> Option<AgentStartReadiness> {
+    match state {
+        AgentState::Running(_) => Some(AgentStartReadiness::Running),
+        AgentState::Stopped => Some(AgentStartReadiness::NeedsStart),
+        AgentState::Stopping | AgentState::Updating => Some(AgentStartReadiness::Unavailable),
+        AgentState::Starting => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -570,6 +611,23 @@ impl AgentSupervisor {
 
     pub async fn is_running(&self) -> bool {
         matches!(*self.state.lock().await, AgentState::Running(_))
+    }
+
+    /// Classify the supervisor for a caller that needs a live bridge and is
+    /// willing to spawn one. Waits out an in-flight `Starting` up to
+    /// `AGENT_LAZY_START_WAIT`; the state lock is released between polls so
+    /// the spawn it is waiting on can make progress.
+    pub async fn await_start_readiness(&self) -> AgentStartReadiness {
+        let deadline = tokio::time::Instant::now() + AGENT_LAZY_START_WAIT;
+        loop {
+            if let Some(readiness) = readiness_for_state(&*self.state.lock().await) {
+                return readiness;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return AgentStartReadiness::Unavailable;
+            }
+            tokio::time::sleep(AGENT_LAZY_START_POLL_INTERVAL).await;
+        }
     }
 
     pub async fn try_begin_update(&self) -> bool {
@@ -1303,6 +1361,45 @@ mod tests {
         let event = terminal.session_event.expect("errored event");
         assert_eq!(event.kind, EVENT_KIND_PROMPT_ERRORED);
         assert!(event.payload_json.contains("prm_process"));
+    }
+
+    #[test]
+    fn stopped_state_asks_the_caller_to_spawn() {
+        assert_eq!(
+            readiness_for_state(&AgentState::Stopped),
+            Some(AgentStartReadiness::NeedsStart)
+        );
+    }
+
+    #[test]
+    fn operator_driven_transitions_never_become_a_spawn() {
+        for state in [AgentState::Stopping, AgentState::Updating] {
+            assert_eq!(
+                readiness_for_state(&state),
+                Some(AgentStartReadiness::Unavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn in_flight_start_is_waited_out_rather_than_classified() {
+        assert_eq!(readiness_for_state(&AgentState::Starting), None);
+    }
+
+    #[tokio::test]
+    async fn readiness_waits_for_an_in_flight_start_to_settle() {
+        let supervisor = AgentSupervisor::new();
+        *supervisor.state.lock().await = AgentState::Starting;
+        let state = Arc::clone(&supervisor.state);
+        tokio::spawn(async move {
+            tokio::time::sleep(AGENT_LAZY_START_POLL_INTERVAL * 2).await;
+            *state.lock().await = AgentState::Stopped;
+        });
+
+        assert_eq!(
+            supervisor.await_start_readiness().await,
+            AgentStartReadiness::NeedsStart
+        );
     }
 
     #[test]

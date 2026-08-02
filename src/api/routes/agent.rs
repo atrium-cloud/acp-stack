@@ -21,7 +21,9 @@ use crate::runtime::agent::model_discovery::{
 use crate::runtime::agent::provider_keys::{
     ResolvedAgentEnvironment, resolve_agent_environment, resolve_agent_environment_without_secrets,
 };
-use crate::runtime::agent::supervisor::{AgentSnapshot, AgentStartRequest};
+use crate::runtime::agent::supervisor::{
+    AGENT_RESTART_NEVER, AgentSnapshot, AgentStartReadiness, AgentStartRequest,
+};
 use crate::runtime::agent::switch::{
     AgentSwitchRequest as PlannedAgentSwitchRequest, AgentSwitchSecretMigration,
     adapter_from_registry_entry, plan_agent_switch,
@@ -46,7 +48,7 @@ mod switch;
 pub(crate) use self::lifecycle::{
     agent_restart_blockers_handler, agent_restart_handler, agent_start_handler, agent_stop_handler,
     array_agent_restart_handler, array_agent_start_handler, array_agent_stop_handler,
-    cancel_pending_acp_permissions_for_target,
+    cancel_pending_acp_permissions_for_target, ensure_agent_started,
 };
 pub(crate) use self::switch::agent_switch_handler;
 

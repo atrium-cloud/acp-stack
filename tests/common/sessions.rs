@@ -39,14 +39,24 @@ impl Harness {
     }
 
     pub async fn spawn_with(mutate: impl FnOnce(&mut Config)) -> Self {
-        Self::spawn_inner(mutate, None).await
+        Self::spawn_inner(mutate, None, true).await
+    }
+
+    /// Harness that never calls `POST /v1/agent/start`, mirroring a freshly
+    /// initialized host where the process manager owns `acps serve` only.
+    pub async fn spawn_without_agent_start(mutate: impl FnOnce(&mut Config)) -> Self {
+        Self::spawn_inner(mutate, None, false).await
     }
 
     pub async fn spawn_with_models_cache(mutate: impl FnOnce(&mut Config), models: Value) -> Self {
-        Self::spawn_inner(mutate, Some(models)).await
+        Self::spawn_inner(mutate, Some(models), true).await
     }
 
-    async fn spawn_inner(mutate: impl FnOnce(&mut Config), models: Option<Value>) -> Self {
+    async fn spawn_inner(
+        mutate: impl FnOnce(&mut Config),
+        models: Option<Value>,
+        start_agent: bool,
+    ) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let path = tempdir.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("state open");
@@ -95,8 +105,36 @@ impl Harness {
             state,
             join,
         };
-        harness.start_agent().await;
+        if start_agent {
+            harness.start_agent().await;
+        }
         harness
+    }
+
+    pub async fn agent_process_state(&self) -> String {
+        let body: Value = http()
+            .get(format!("{}/v1/status/agent", self.base_url))
+            .header("Authorization", session_bearer())
+            .send()
+            .await
+            .expect("agent status")
+            .json()
+            .await
+            .expect("agent status json");
+        body["data"]["process_state"]
+            .as_str()
+            .unwrap_or_else(|| panic!("process_state present in {body}"))
+            .to_owned()
+    }
+
+    pub async fn stop_agent(&self) {
+        let response = http()
+            .post(format!("{}/v1/agent/stop", self.base_url))
+            .header("Authorization", admin_bearer())
+            .send()
+            .await
+            .expect("stop request");
+        assert_eq!(response.status(), StatusCode::OK, "agent stop failed");
     }
 
     async fn start_agent(&self) {
