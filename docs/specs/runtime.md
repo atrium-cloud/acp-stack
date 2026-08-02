@@ -103,6 +103,8 @@ Persisted output chunks are command-scoped events with stream name, sequence num
 
 While a command is running, the gateway emits `command.progress` events every `[commands].progress_interval` when no output has reset the quiet timer. Cancellation produces a terminal `command.canceled` event after the child process is settled.
 
+A command that reaches a terminal status while its permission request is still pending cancels that permission with a reason naming the cause (see the reason table in `docs/specs/state-logging.md`); a permission request never outlives its command. The startup command sweep upholds the same invariant by canceling dependent pending permissions in the transaction that fails the orphaned commands.
+
 Only environment variables in `[commands].env_allowlist` are forwarded from the request. Secrets are not injected into command children unless another explicit runtime mechanism provides them.
 
 ## Prompts

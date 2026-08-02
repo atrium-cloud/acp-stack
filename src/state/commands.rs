@@ -5,9 +5,13 @@ use rusqlite::{OptionalExtension, params};
 
 use super::core::StateStore;
 use super::events::{EVENT_SOURCE_COMMAND, Event};
-use super::ids::{current_timestamp, next_command_id};
+use super::ids::{current_timestamp, next_command_id, next_permission_decision_id};
 use super::records::CommandFilter;
 use super::rows::validate_json_payload;
+
+/// Decision reason recorded when the startup sweep cancels a permission whose
+/// command it just reconciled to `failed`.
+pub const COMMAND_RECONCILED_REASON: &str = "command-reconciled";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRecord {
@@ -438,22 +442,17 @@ impl StateStore {
     /// permanently stuck and a CLI/HTTP poll would never see them settle.
     /// Unlike prompts, `commands` has no error-message column, so no reason
     /// text is recorded; the caller logs it instead.
-    /// Returns the number of rows transitioned to `failed`.
-    pub fn reconcile_orphaned_commands(&self) -> Result<usize> {
+    ///
+    /// Any pending command-source permission tied to a reconciled command is
+    /// canceled inside the same transaction (decision reason
+    /// `command-reconciled`), so a failed command can never leave its
+    /// permission request approvable — even if the separate permission sweep
+    /// never runs.
+    /// Returns the ids of the commands transitioned to `failed` and the
+    /// number of dependent permissions canceled alongside them.
+    pub fn reconcile_orphaned_commands(&self) -> Result<(Vec<String>, usize)> {
         let now = current_timestamp();
-        if !self.external_logging_enabled() {
-            let affected = self.connection().execute(
-                r#"
-                UPDATE commands
-                SET status = 'failed',
-                    updated_at = ?1,
-                    finished_at = COALESCE(finished_at, ?1)
-                WHERE status IN ('pending', 'running')
-                "#,
-                params![now],
-            )?;
-            return Ok(affected);
-        }
+        let external = self.external_logging_enabled();
         let tx = rusqlite::Transaction::new_unchecked(
             self.connection(),
             rusqlite::TransactionBehavior::Immediate,
@@ -464,7 +463,7 @@ impl StateStore {
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let affected = tx.execute(
+        tx.execute(
             r#"
             UPDATE commands
             SET status = 'failed',
@@ -474,10 +473,44 @@ impl StateStore {
             "#,
             params![now],
         )?;
-        for id in &ids {
-            super::sink_outbox::enqueue(&tx, "commands", id, &now)?;
+        let mut permissions_canceled = 0usize;
+        for command_id in &ids {
+            let permission_ids: Vec<String> = {
+                let mut statement = tx.prepare(
+                    r#"
+                    SELECT id FROM permission_requests
+                    WHERE status = 'pending' AND source = 'command' AND subject_id = ?1
+                    "#,
+                )?;
+                let rows =
+                    statement.query_map(params![command_id], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            permissions_canceled += permission_ids.len();
+            for permission_id in &permission_ids {
+                tx.execute(
+                    "UPDATE permission_requests SET status = 'canceled', updated_at = ?1 WHERE id = ?2",
+                    params![now, permission_id],
+                )?;
+                let decision_id = next_permission_decision_id();
+                tx.execute(
+                    r#"
+                    INSERT INTO permission_decisions
+                        (id, request_id, created_at, decision, deciding_principal, reason)
+                    VALUES (?1, ?2, ?3, 'canceled', 'system', ?4)
+                    "#,
+                    params![decision_id, permission_id, now, COMMAND_RECONCILED_REASON],
+                )?;
+                if external {
+                    super::sink_outbox::enqueue(&tx, "permission_requests", permission_id, &now)?;
+                    super::sink_outbox::enqueue(&tx, "permission_decisions", &decision_id, &now)?;
+                }
+            }
+            if external {
+                super::sink_outbox::enqueue(&tx, "commands", command_id, &now)?;
+            }
         }
         tx.commit()?;
-        Ok(affected)
+        Ok((ids, permissions_canceled))
     }
 }

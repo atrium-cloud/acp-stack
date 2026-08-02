@@ -54,8 +54,11 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         PermissionNotFound { .. } => StatusCode::NOT_FOUND,
-        InvalidPermissionTransition { .. }
-        | InvalidTimeoutAction
+        // The request is well-formed; the resource is already in a terminal
+        // state. 409 tells the client "the decision race is lost / the
+        // command is gone" rather than "your request was malformed".
+        InvalidPermissionTransition { .. } => StatusCode::CONFLICT,
+        InvalidTimeoutAction
         | InvalidTrustedProxy { .. }
         | InvalidMcpServer { .. }
         | DuplicateMcpServer { .. }

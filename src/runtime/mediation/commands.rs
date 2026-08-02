@@ -43,6 +43,19 @@ use crate::state::{CommandRecord, NewCommandRecord, StateStore};
 use self::policy::{PolicyDecision, evaluate_policy, resolve_cwd_under_workspace};
 use self::supervisor::SupervisorTask;
 
+/// Decision reasons recorded when command teardown settles a permission row
+/// that is still pending. Only `PERMISSION_REASON_WAITER_LOST` names a real
+/// anomaly (the in-memory waiter vanished without a durable decision); the
+/// rest are race-safe no-ops on the corresponding path and exist so a genuine
+/// orphan always records the true cause.
+pub(crate) const PERMISSION_REASON_COMMAND_CANCELED: &str = "command-canceled";
+pub(crate) const PERMISSION_REASON_DENIED: &str = "command-permission-denied";
+pub(crate) const PERMISSION_REASON_WAITER_LOST: &str = "command-permission-waiter-lost";
+pub(crate) const PERMISSION_REASON_START_FAILED: &str = "command-start-failed";
+pub(crate) const PERMISSION_REASON_SPAWN_FAILED: &str = "command-spawn-failed";
+pub(crate) const PERMISSION_REASON_PERSISTENCE_FAILED: &str = "command-persistence-failed";
+pub(crate) const PERMISSION_REASON_COMMAND_FINISHED: &str = "command-finished";
+
 /// Inputs for `CommandGateway::submit`. Mirror the HTTP request body shape
 /// (`docs/specs/api/api.md#commands`), pre-parsed by the handler.
 #[derive(Debug, Clone)]
@@ -243,6 +256,7 @@ impl CommandGateway {
             event_hub: self.event_hub.clone(),
             running: self.running.clone(),
             awaiting_permission: self.awaiting_permission.clone(),
+            permissions: self.permissions.clone(),
             command_id: record.id.clone(),
             shell: self.config.workspace.default_shell.clone(),
             command: request.command.clone(),
@@ -288,9 +302,17 @@ impl CommandGateway {
         // Cancel the permission row first if any — the supervisor's select!
         // on perm_rx will resolve as Canceled and finalize the command row
         // without ever spawning a child.
-        let perm_id = self.awaiting_permission.lock().await.remove(id);
+        // `cancel_if_pending` because the map entry now lives until the
+        // supervisor deregisters: cancelling a command whose permission was
+        // already approved must not log a spurious transition error. Read,
+        // don't take — the supervisor's deregister owns removal, and taking
+        // the entry here would orphan the row if this cancel errors out.
+        let perm_id = self.awaiting_permission.lock().await.get(id).cloned();
         if let Some(perm_id) = perm_id
-            && let Err(error) = self.permissions.cancel(&perm_id, "command-canceled").await
+            && let Err(error) = self
+                .permissions
+                .cancel_if_pending(&perm_id, PERMISSION_REASON_COMMAND_CANCELED)
+                .await
         {
             tracing::warn!(
                 error = %error,
