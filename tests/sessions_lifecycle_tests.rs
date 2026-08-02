@@ -11,8 +11,12 @@ mod common;
 
 use std::time::Duration;
 
-use acp_stack::config::{ArrayTargetConfig, Config};
+use acp_stack::config::{
+    ArrayTargetConfig, Config, McpHttpServer, McpServerConfig, McpStdioServer,
+};
+use acp_stack::secrets::SecretStore;
 use acp_stack::state::{NewPromptRecord, NewSessionRecord};
+use common::HomeEnvGuard;
 use common::sessions::{Harness, admin_bearer, create_session, http, session_bearer};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -614,4 +618,59 @@ async fn stored_session_cwd_symlink_escape_is_rejected_before_reuse() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["error"]["code"], "prompt.body_invalid");
+}
+
+#[tokio::test]
+async fn attached_mcp_event_lists_only_servers_the_agent_accepted() {
+    // The placebo advertises no HTTP MCP transport, so the configured HTTP
+    // server is partitioned out at session create. The durable
+    // `mcp.session_attached` event must list only what was actually sent to
+    // the agent; the skipped server shows up in `mcp.session_skipped` only.
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _home_guard = HomeEnvGuard::set(home.path());
+    SecretStore::open_or_create(home.path()).expect("secret store initializes");
+
+    let harness = Harness::spawn_with(|config| {
+        config.mcp.servers = vec![
+            McpServerConfig::Stdio(McpStdioServer {
+                name: "local-stdio".into(),
+                command: "/bin/sh".into(),
+                args: vec![],
+                env: vec![],
+            }),
+            McpServerConfig::Http(McpHttpServer {
+                name: "remote-http".into(),
+                url: "https://example.invalid/mcp".into(),
+                headers: vec![],
+            }),
+        ];
+    })
+    .await;
+
+    let session_id = create_session(&harness).await;
+
+    let events = {
+        let store = harness.state.lock().await;
+        store
+            .query_session_events(&session_id, None, 50)
+            .expect("session events")
+    };
+    let attached: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "mcp.session_attached")
+        .collect();
+    assert_eq!(attached.len(), 1, "{events:?}");
+    let payload: Value =
+        serde_json::from_str(&attached[0].payload_json).expect("attached payload json");
+    assert_eq!(payload["server_names"], json!(["local-stdio"]));
+
+    let skipped: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "mcp.session_skipped")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{events:?}");
+    assert!(
+        skipped[0].payload_json.contains("remote-http"),
+        "{events:?}"
+    );
 }

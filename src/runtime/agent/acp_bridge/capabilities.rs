@@ -23,6 +23,22 @@ pub struct AgentCapabilitiesDto {
     pub agent_version: Option<String>,
 }
 
+/// A configured MCP server the running agent cannot be given, plus the
+/// capability it would have had to advertise. Recorded per session so the
+/// degraded set is visible in durable logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedMcpServer {
+    pub name: String,
+    pub capability: &'static str,
+}
+
+/// Resolved MCP servers split against the agent's advertised transports.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PartitionedMcpServers {
+    pub accepted: Vec<McpServer>,
+    pub skipped: Vec<SkippedMcpServer>,
+}
+
 impl AgentCapabilitiesDto {
     pub fn to_json(&self) -> Result<String> {
         serde_json::to_string(self).map_err(|err| StackError::AgentInitializeFailed {
@@ -112,23 +128,53 @@ impl AgentCapabilitiesDto {
         Ok(())
     }
 
-    pub(super) fn validate_mcp_servers(&self, servers: &[McpServer]) -> Result<()> {
-        for server in servers {
-            let required = match server {
-                McpServer::Stdio(_) => None,
-                McpServer::Http(_) => Some(("http", "mcpCapabilities.http")),
-                McpServer::Sse(_) => Some(("sse", "mcpCapabilities.sse")),
-                _ => {
-                    return Err(StackError::AgentUnsupportedCapability {
-                        name: "mcpCapabilities.unknown",
-                    });
-                }
-            };
-            if let Some((capability, error_name)) = required
-                && !self.supports_mcp_capability(capability)
-            {
-                return Err(StackError::AgentUnsupportedCapability { name: error_name });
+    /// `Ok(None)` when the agent can accept this server, `Ok(Some(capability))`
+    /// when it does not advertise the transport, and `Err` for a transport
+    /// variant we do not model — we cannot reason about a shape we don't know,
+    /// so that stays a hard failure.
+    fn unsupported_mcp_capability(&self, server: &McpServer) -> Result<Option<&'static str>> {
+        let required = match server {
+            McpServer::Stdio(_) => None,
+            McpServer::Http(_) => Some(("http", "mcpCapabilities.http")),
+            McpServer::Sse(_) => Some(("sse", "mcpCapabilities.sse")),
+            _ => {
+                return Err(StackError::AgentUnsupportedCapability {
+                    name: "mcpCapabilities.unknown",
+                });
             }
+        };
+        Ok(required.and_then(|(capability, error_name)| {
+            (!self.supports_mcp_capability(capability)).then_some(error_name)
+        }))
+    }
+
+    /// Split the resolved MCP servers into the ones this agent can accept and
+    /// the ones whose transport it does not advertise.
+    ///
+    /// One undeliverable integration must not make sessions uncreatable: an
+    /// operator declaring an HTTP MCP server against an adapter that only
+    /// speaks stdio still gets a working session, minus that server. Callers
+    /// are responsible for recording the skipped set.
+    pub fn partition_mcp_servers(&self, servers: Vec<McpServer>) -> Result<PartitionedMcpServers> {
+        let mut partitioned = PartitionedMcpServers::default();
+        for server in servers {
+            match self.unsupported_mcp_capability(&server)? {
+                Some(capability) => partitioned.skipped.push(SkippedMcpServer {
+                    name: crate::runtime::agent::mcp::server_name(&server).to_owned(),
+                    capability,
+                }),
+                None => partitioned.accepted.push(server),
+            }
+        }
+        Ok(partitioned)
+    }
+
+    /// Invariant guard on the bridge's own request paths. Transport support is
+    /// decided upstream by `partition_mcp_servers`; what must never reach the
+    /// wire is a variant we cannot classify at all.
+    pub(super) fn reject_unmodeled_mcp_servers(&self, servers: &[McpServer]) -> Result<()> {
+        for server in servers {
+            self.unsupported_mcp_capability(server)?;
         }
         Ok(())
     }
@@ -171,5 +217,87 @@ impl AgentCapabilitiesDto {
             agent_title,
             agent_version,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use agent_client_protocol::schema::v1::{McpServerHttp, McpServerStdio};
+    use serde_json::json;
+
+    fn capabilities_with(mcp: Value) -> AgentCapabilitiesDto {
+        AgentCapabilitiesDto {
+            protocol_version: 1,
+            capabilities: json!({ "mcpCapabilities": mcp }),
+            agent_name: None,
+            agent_title: None,
+            agent_version: None,
+        }
+    }
+
+    fn http_server(name: &str) -> McpServer {
+        McpServer::Http(McpServerHttp::new(name, "https://example.invalid/mcp"))
+    }
+
+    fn stdio_server(name: &str) -> McpServer {
+        McpServer::Stdio(McpServerStdio::new(
+            name,
+            std::path::PathBuf::from("/bin/sh"),
+        ))
+    }
+
+    #[test]
+    fn partition_keeps_servers_the_agent_advertises() {
+        let capabilities = capabilities_with(json!({ "http": true }));
+        let partitioned = capabilities
+            .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
+            .expect("partition");
+
+        assert_eq!(partitioned.accepted.len(), 2);
+        assert!(partitioned.skipped.is_empty());
+    }
+
+    #[test]
+    fn partition_drops_servers_whose_transport_is_unadvertised() {
+        let capabilities = capabilities_with(json!({ "http": false }));
+        let partitioned = capabilities
+            .partition_mcp_servers(vec![stdio_server("local"), http_server("linear")])
+            .expect("partition");
+
+        assert_eq!(partitioned.accepted.len(), 1);
+        assert_eq!(
+            crate::runtime::agent::mcp::server_name(&partitioned.accepted[0]),
+            "local"
+        );
+        assert_eq!(
+            partitioned.skipped,
+            vec![SkippedMcpServer {
+                name: "linear".to_owned(),
+                capability: "mcpCapabilities.http",
+            }]
+        );
+    }
+
+    #[test]
+    fn unadvertised_transport_no_longer_fails_the_whole_session() {
+        // Regression: a `[[mcp.servers]] type = "http"` declaration against an
+        // adapter that only speaks stdio used to make session create impossible.
+        let capabilities = capabilities_with(json!({}));
+        let partitioned = capabilities
+            .partition_mcp_servers(vec![http_server("linear")])
+            .expect("partition must not error on an unadvertised transport");
+
+        assert!(partitioned.accepted.is_empty());
+        assert_eq!(partitioned.skipped.len(), 1);
+    }
+
+    #[test]
+    fn modeled_transports_pass_the_bridge_invariant_guard() {
+        let capabilities = capabilities_with(json!({ "http": false }));
+        capabilities
+            .reject_unmodeled_mcp_servers(&[stdio_server("local"), http_server("linear")])
+            .expect("both variants are modeled");
     }
 }

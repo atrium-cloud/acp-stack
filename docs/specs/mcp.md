@@ -63,7 +63,7 @@ Config validation rejects duplicate server names, empty stdio commands, empty HT
 
 At daemon startup a server declaration that fails these per-server rules is skipped with a startup warning rather than failing the boot — the daemon degrades instead of bricking on one bad declaration. Declaration and config-write paths (init flags, API config writes, candidate-config validation) still reject. Cross-source rules (a whole-value ref duplicated against `agent.env`, Supabase, or workspace sources) are config-level conflicts and still fail startup. Reloads of a hand-edited config while the daemon runs drop bad declarations quietly — the warning fires at startup (or after a restart), not per reload — so a broken declaration introduced at runtime surfaces through the strict config endpoints (`/v1/config/export`, `/v1/config/validate`) until then.
 
-Native-config import validates secret references without requiring stdio executables to be installed yet. Session attachment resolves each stdio command and fails with `config.invalid` before dispatch when it is missing or not executable. HTTP attachment additionally requires the agent to advertise `mcpCapabilities.http`.
+Native-config import validates secret references without requiring stdio executables to be installed yet. Session attachment resolves each stdio command and fails with `config.invalid` before dispatch when it is missing or not executable. HTTP and SSE servers are attached only when the agent advertises `mcpCapabilities.http` / `mcpCapabilities.sse`; when it does not, that server is skipped for the session (recorded as an `mcp.session_skipped` session event) and the session is still created with the remaining servers.
 
 `GET /v1/health/ready` reports MCP declaration health:
 

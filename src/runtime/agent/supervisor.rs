@@ -82,19 +82,20 @@ use crate::error::{Result, StackError};
 use crate::events::EventHub;
 use crate::runtime::agent::acp_bridge::{
     AcpBridge, AcpBridgeExit, AcpBridgeExitReason, AgentCapabilitiesDto,
-    AgentSessionConfigCategory, AgentSessionModelSelection, SessionEventSink,
-    StateStoreSessionSink, meta_message_id, prompt_message_id_meta, resolve_command_path,
-    session_config_id_for_value, session_model_selection_for_value,
+    AgentSessionConfigCategory, AgentSessionModelSelection, PartitionedMcpServers,
+    SessionEventSink, SkippedMcpServer, StateStoreSessionSink, meta_message_id,
+    prompt_message_id_meta, resolve_command_path, session_config_id_for_value,
+    session_model_selection_for_value,
 };
 use crate::runtime::agent::model_discovery::model_value_is_explicit_without_discovery;
 use crate::runtime::agent::provider_keys::ResolvedProviderSnapshot;
 use crate::runtime::agent::session_changes::SessionChangesHandle;
 use crate::secrets::SecretStore;
 use crate::state::{
-    EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED, EVENT_SOURCE_SYSTEM,
-    FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord, PromptRecord,
-    PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord, StateStore,
-    next_prompt_id, next_prompt_message_id, next_session_id,
+    EVENT_KIND_MCP_SESSION_SKIPPED, EVENT_KIND_PROMPT_ERRORED, EVENT_KIND_PROMPT_INFERENCE_FAILED,
+    EVENT_SOURCE_SYSTEM, FailureClass, ListedSessionRecord, NewPromptRecord, NewSessionRecord,
+    PromptRecord, PromptStatus, SESSION_STATUS_ACTIVE, SESSION_STATUS_CLOSED, SessionRecord,
+    StateStore, next_prompt_id, next_prompt_message_id, next_session_id,
 };
 
 use self::bridge::*;
@@ -233,6 +234,37 @@ pub enum AgentStartReadiness {
     /// settle within `AGENT_LAZY_START_WAIT`. Callers keep surfacing
     /// `agent.not_running`.
     Unavailable,
+}
+
+/// Record the MCP servers that were dropped from a session because the running
+/// agent does not advertise their transport. Silent when nothing was dropped so
+/// the common path adds no rows.
+fn append_mcp_skipped_event(
+    store: &StateStore,
+    session_id: &str,
+    skipped: &[SkippedMcpServer],
+) -> Result<()> {
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    tracing::warn!(
+        session_id,
+        skipped = skipped.len(),
+        "dropping MCP servers whose transport the agent does not advertise"
+    );
+    let payload = json!({
+        "session_id": session_id,
+        "skipped": skipped,
+    })
+    .to_string();
+    store.append_session_event(
+        session_id,
+        "warn",
+        EVENT_KIND_MCP_SESSION_SKIPPED,
+        "mcp servers skipped for session",
+        &payload,
+    )?;
+    Ok(())
 }
 
 /// `None` means "still transitioning, poll again". `Stopping` and `Updating`
@@ -744,8 +776,10 @@ impl AgentSupervisor {
     }
 
     /// `POST /v1/sessions`. Dispatches ACP `session/new`, persists a new
-    /// `sessions` row, and returns it. `cwd` defaults to `workspace.root`
-    /// when the client omits it.
+    /// `sessions` row, and returns it along with the names of the MCP servers
+    /// actually sent to the agent (after transport partitioning), so the
+    /// caller's `mcp.session_attached` event cannot claim skipped servers.
+    /// `cwd` defaults to `workspace.root` when the client omits it.
     pub async fn create_session(
         &self,
         target_id: &str,
@@ -754,11 +788,14 @@ impl AgentSupervisor {
         cwd: Option<String>,
         mcp_servers: Vec<McpServer>,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<SessionRecord> {
+    ) -> Result<(SessionRecord, Vec<String>)> {
         let bridge = self.bridge().await?;
         let resolved_cwd = resolve_session_cwd(cwd, workspace_root)?;
         let cwd_path = PathBuf::from(&resolved_cwd);
-        let response = bridge.new_session(cwd_path, mcp_servers).await?;
+        let PartitionedMcpServers { accepted, skipped } =
+            bridge.capabilities().partition_mcp_servers(mcp_servers)?;
+        let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
+        let response = bridge.new_session(cwd_path, accepted).await?;
         let agent_session_id = response.session_id.0.to_string();
         if let Some(mode) = agent.mode.as_deref() {
             let config_id = session_config_id_for_value(
@@ -820,10 +857,12 @@ impl AgentSupervisor {
             })
             .to_string(),
         )?;
-        Ok(inserted)
+        append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
+        Ok((inserted, accepted_names))
     }
 
-    /// `POST /v1/sessions/{id}/load`. Capability-gated by the bridge.
+    /// `POST /v1/sessions/{id}/load`. Capability-gated by the bridge. Returns
+    /// the session record plus the MCP server names actually sent to the agent.
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -831,7 +870,7 @@ impl AgentSupervisor {
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<SessionRecord> {
+    ) -> Result<(SessionRecord, Vec<String>)> {
         let bridge = self.bridge().await?;
         let record = {
             let guard = state.lock().await;
@@ -845,14 +884,18 @@ impl AgentSupervisor {
         let requested_cwd =
             cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root));
         let resolved_cwd = resolve_session_cwd(Some(requested_cwd), workspace_root)?;
+        let PartitionedMcpServers { accepted, skipped } =
+            bridge.capabilities().partition_mcp_servers(mcp_servers)?;
+        let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
         bridge
             .load_session(
                 AcpSessionId::new(record.agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
-                mcp_servers,
+                accepted,
             )
             .await?;
         let guard = state.lock().await;
+        append_mcp_skipped_event(&guard, session_id, &skipped)?;
         if explicit_cwd {
             guard.update_session_status_and_cwd(
                 session_id,
@@ -870,14 +913,16 @@ impl AgentSupervisor {
             &json!({ "agent_session_id": record.agent_session_id, "cwd": resolved_cwd })
                 .to_string(),
         )?;
-        guard
+        let record = guard
             .get_session(session_id)?
             .ok_or_else(|| StackError::SessionNotFound {
                 id: session_id.to_owned(),
-            })
+            })?;
+        Ok((record, accepted_names))
     }
 
-    /// `POST /v1/sessions/{id}/resume`.
+    /// `POST /v1/sessions/{id}/resume`. Returns the session record plus the
+    /// MCP server names actually sent to the agent.
     pub async fn resume_session(
         &self,
         session_id: &str,
@@ -885,7 +930,7 @@ impl AgentSupervisor {
         mcp_servers: Vec<McpServer>,
         workspace_root: &str,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<SessionRecord> {
+    ) -> Result<(SessionRecord, Vec<String>)> {
         let bridge = self.bridge().await?;
         // Confirm session exists before we hit the agent: returning 404 for
         // an unknown id beats letting the agent reject with an opaque error.
@@ -901,14 +946,18 @@ impl AgentSupervisor {
         let requested_cwd =
             cwd.unwrap_or_else(|| stored_or_workspace_cwd(&record.cwd, workspace_root));
         let resolved_cwd = resolve_session_cwd(Some(requested_cwd), workspace_root)?;
+        let PartitionedMcpServers { accepted, skipped } =
+            bridge.capabilities().partition_mcp_servers(mcp_servers)?;
+        let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
         bridge
             .resume_session(
                 AcpSessionId::new(record.agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
-                mcp_servers,
+                accepted,
             )
             .await?;
         let guard = state.lock().await;
+        append_mcp_skipped_event(&guard, session_id, &skipped)?;
         if explicit_cwd {
             guard.update_session_status_and_cwd(
                 session_id,
@@ -926,13 +975,16 @@ impl AgentSupervisor {
             &json!({ "agent_session_id": record.agent_session_id, "cwd": resolved_cwd })
                 .to_string(),
         )?;
-        guard
+        let record = guard
             .get_session(session_id)?
             .ok_or_else(|| StackError::SessionNotFound {
                 id: session_id.to_owned(),
-            })
+            })?;
+        Ok((record, accepted_names))
     }
 
+    /// `POST /v1/sessions/{id}/fork`. Returns the child session record plus
+    /// the MCP server names actually sent to the agent.
     pub async fn fork_session(
         &self,
         parent_session_id: &str,
@@ -941,7 +993,7 @@ impl AgentSupervisor {
         workspace_root: &str,
         message_id: Option<String>,
         state: &Arc<TokioMutex<StateStore>>,
-    ) -> Result<SessionRecord> {
+    ) -> Result<(SessionRecord, Vec<String>)> {
         let bridge = self.bridge().await?;
         let parent = {
             let guard = state.lock().await;
@@ -977,11 +1029,14 @@ impl AgentSupervisor {
             workspace_root,
         )?;
         let parent_agent_session_id = parent.agent_session_id.clone();
+        let PartitionedMcpServers { accepted, skipped } =
+            bridge.capabilities().partition_mcp_servers(mcp_servers)?;
+        let accepted_names = crate::runtime::agent::mcp::server_names(&accepted);
         let response = bridge
             .fork_session(
                 AcpSessionId::new(parent_agent_session_id.clone()),
                 PathBuf::from(&resolved_cwd),
-                mcp_servers,
+                accepted,
                 breakpoint_message_id.clone(),
             )
             .await?;
@@ -1035,7 +1090,8 @@ impl AgentSupervisor {
             "session fork child created",
             &payload,
         )?;
-        Ok(inserted)
+        append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
+        Ok((inserted, accepted_names))
     }
 
     /// `DELETE /v1/sessions/{id}`. Closes the agent-side session and marks
@@ -1361,6 +1417,53 @@ mod tests {
         let event = terminal.session_event.expect("errored event");
         assert_eq!(event.kind, EVENT_KIND_PROMPT_ERRORED);
         assert!(event.payload_json.contains("prm_process"));
+    }
+
+    #[test]
+    fn skipped_mcp_servers_are_recorded_only_when_something_was_dropped() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        store
+            .insert_session(NewSessionRecord {
+                id: "sess_skip".to_owned(),
+                agent_id: "fake".to_owned(),
+                cwd: "/tmp/sess_skip".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+
+        append_mcp_skipped_event(&store, "sess_skip", &[]).expect("empty skip writes nothing");
+        assert!(skipped_events(&store).is_empty());
+
+        append_mcp_skipped_event(
+            &store,
+            "sess_skip",
+            &[SkippedMcpServer {
+                name: "linear".to_owned(),
+                capability: "mcpCapabilities.http",
+            }],
+        )
+        .expect("skip recorded");
+
+        let events = skipped_events(&store);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].level, "warn");
+        assert!(events[0].payload_json.contains("linear"), "{events:?}");
+        assert!(
+            events[0].payload_json.contains("mcpCapabilities.http"),
+            "{events:?}"
+        );
+    }
+
+    fn skipped_events(store: &StateStore) -> Vec<crate::state::Event> {
+        store
+            .query_events(crate::state::LogFilter {
+                kind: Some(EVENT_KIND_MCP_SESSION_SKIPPED),
+                ..crate::state::LogFilter::with_limit(10)
+            })
+            .expect("query events")
     }
 
     #[test]
