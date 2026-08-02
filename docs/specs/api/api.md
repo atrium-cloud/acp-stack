@@ -263,6 +263,8 @@ The reconnect flow is: read `GET /v1/commands/{id}`, subscribe to `commands.{id}
 
 Cancellation is not an HTTP operation: pending requests are cancelled internally when their owning flow ends (session close, mediated-command cancel).
 
+Deciding a request that is already terminal — including approving a permission whose command has since died — returns `409` with `permission.invalid_transition`. Clients should treat it as "the request was already settled" (the decision event names the cause), not as a retryable error.
+
 Permission requests are created by ACP permission callbacks and by mediated commands when policy requires review. Composed mediated commands using shell control operators, command substitution, or process substitution require review before execution, including in `permissions.mode = "auto"`. Policy matching considers shell-word-normalized command words, so constructed spellings such as quoted or escaped command names can be denied or routed to review.
 
 ## Dependencies

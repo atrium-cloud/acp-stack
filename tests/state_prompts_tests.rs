@@ -1,6 +1,6 @@
 use acp_stack::state::{
-    FailureClass, NewPermissionRequest, NewPromptRecord, NewSessionRecord, PermissionStatus,
-    PromptStatus, SESSION_STATUS_CLOSED, StateStore,
+    CommandOrigin, FailureClass, NewCommandRecord, NewPermissionRequest, NewPromptRecord,
+    NewSessionRecord, PermissionStatus, PromptStatus, SESSION_STATUS_CLOSED, StateStore,
 };
 use rusqlite::Connection;
 use rusqlite::params;
@@ -410,6 +410,91 @@ fn permission_reconcile_orphans_categorizes_by_source() {
     // same contract `decide_permission` upholds during normal operation.
     let counts = store.counts().expect("counts");
     assert_eq!(counts.permission_decisions, 2, "expected 2 decision rows");
+}
+
+#[test]
+fn reconcile_orphaned_commands_settles_dependent_permissions() {
+    let (_dir, store) = fresh_state("cmd_reconcile.sqlite");
+    let command = store
+        .append_command(NewCommandRecord {
+            command: "sudo true",
+            cwd: None,
+            env_json: None,
+            origin: CommandOrigin::Operator,
+            session_id: None,
+        })
+        .expect("command row");
+    let requester = format!("command:{}", command.id);
+    let dependent = store
+        .append_permission_request(NewPermissionRequest {
+            source: "command",
+            requester: Some(&requester),
+            subject_id: Some(&command.id),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("dependent permission");
+    // An ACP-source pending row belongs to the permission sweep, not the
+    // command sweep — it must survive untouched.
+    let acp_pending = store
+        .append_permission_request(NewPermissionRequest {
+            source: "acp",
+            requester: Some("sess_a"),
+            subject_id: Some("sess_a"),
+            detail_json: "{}",
+            expires_at: None,
+        })
+        .expect("acp permission");
+
+    let (reconciled, permissions_canceled) =
+        store.reconcile_orphaned_commands().expect("reconcile");
+    assert_eq!(reconciled, vec![command.id.clone()]);
+    assert_eq!(permissions_canceled, 1);
+
+    let command_row = store
+        .get_command(&command.id)
+        .expect("get command")
+        .expect("command row");
+    assert_eq!(command_row.status, "failed");
+
+    let dependent_row = store
+        .get_permission_request(&dependent.id)
+        .expect("get")
+        .expect("row");
+    assert_eq!(dependent_row.status, "canceled");
+
+    let acp_row = store
+        .get_permission_request(&acp_pending.id)
+        .expect("get")
+        .expect("row");
+    assert_eq!(acp_row.status, "pending");
+
+    let connection = Connection::open(store.path()).expect("open sqlite directly");
+    let reason: String = connection
+        .query_row(
+            "SELECT reason FROM permission_decisions WHERE request_id = ?1",
+            params![dependent.id],
+            |row| row.get(0),
+        )
+        .expect("decision row");
+    assert_eq!(reason, "command-reconciled");
+
+    // Invariant the incident violated: after the command sweep alone (no
+    // permission sweep), no failed command may leave an approvable
+    // command-source permission behind.
+    let orphaned: i64 = connection
+        .query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM commands c
+            JOIN permission_requests p ON p.subject_id = c.id AND p.source = 'command'
+            WHERE c.status = 'failed' AND p.status = 'pending'
+            "#,
+            [],
+            |row| row.get(0),
+        )
+        .expect("invariant query");
+    assert_eq!(orphaned, 0);
 }
 
 #[test]

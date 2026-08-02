@@ -106,6 +106,40 @@ Session-scoped events that mirror terminal prompt transitions:
 
 The `prompt.inference_failed` payload is intentionally sanitized. Only `status_code` and a `reason_category` drawn from a fixed static enum (`rate_limit`, `internal_server_error`, `bad_gateway`, `service_unavailable`, `gateway_timeout`, `server_overloaded`, `client_error`, `unknown`) reach SQLite. Upstream URLs, request headers, response bodies, and any secret material embedded in the SDK's rendered error string never flow into the persisted event or row. The classifier (`src/runtime/agent/inference_failure.rs`) is the only code path allowed to inspect the raw error string, and it returns only a `&'static str` category plus the parsed status code.
 
+### Permission Decision Events
+
+Every permission decision event (`permission.approved`, `permission.denied`, `permission.canceled`, `permission.expired`) carries the request's `source` and `subject_id` in its payload, plus a `command_id` field when the request is command-source (`subject_id` is the command id there; ACP-source `subject_id` is a session id and is never presented as a command id). This makes a decision visible through `GET /v1/logs/events?command_id=` alongside the command's own events.
+
+The `reason` field in a decision payload (and in `permission_decisions.reason`) is a machine-readable kebab-case string naming the cause:
+
+| Reason | Meaning |
+| ------ | ------- |
+| `timeout` | The `[permissions].request_timeout` timer fired |
+| `command-canceled` | The command was canceled while awaiting approval |
+| `command-permission-denied` | Settled alongside an operator deny (normally a no-op) |
+| `command-permission-waiter-lost` | The in-memory waiter vanished without a durable decision; teardown settled the row |
+| `command-start-failed` | The command could not transition to `running` |
+| `command-spawn-failed` | The child process failed to spawn |
+| `command-persistence-failed` | The command died on a persistence error |
+| `command-finished` | Settled at normal command teardown (normally a no-op) |
+| `command-reconciled` | The startup sweep failed the command and canceled its permission in the same transaction |
+| `daemon-restart` | The startup permission sweep settled a row orphaned by a restart |
+| `agent-stopped` / `agent-restarted` | Agent lifecycle canceled pending ACP-source rows |
+| `native-config-import` | A native agent config import canceled pending ACP-source rows |
+| `acp-request-cancelled` | The agent cancelled its own ACP permission request |
+
+A command that reaches a terminal status while its permission request is still `pending` cancels that permission with one of the reasons above — a permission request never outlives its command.
+
+### Startup Reconcile Event
+
+The startup sweeps (orphaned prompts, permissions, commands) are individually best-effort: a failing sweep is logged and skipped rather than aborting startup, and the permission sweep runs before the command sweep so a partial run cannot leave a failed command with an approvable permission. When any sweep settled rows, the daemon records one aggregate event after startup:
+
+| Kind                | Level | Source   | Payload |
+| ------------------- | ----- | -------- | ------- |
+| `server.reconciled` | info  | `system` | `{ "prompts", "commands", "permissions_canceled", "permissions_expired", "command_ids": [...], "command_ids_truncated": <bool>, "reason": "daemon-restart" }` |
+
+`command_ids` is capped at 50 entries; `command_ids_truncated` is `true` when the sweep settled more. `permissions_canceled` includes permissions canceled by the command sweep's in-transaction settle, not just the permission sweep's own cancellations.
+
 ## Logs API
 
 `GET /v1/logs/events` and `acps logs query` return newest-first durable events by default. Filters include level, kind or kind prefix, source, session id, command id, permission id, security category, time bounds, sort direction, and keyset cursor. `order=desc` (the default) returns newest-first; `order=asc` returns oldest-first and is the direction used by `acps logs query --follow` for its backfill.

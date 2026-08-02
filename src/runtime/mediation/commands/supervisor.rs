@@ -23,7 +23,7 @@ use tokio::time::{Instant, sleep};
 
 use crate::error::Result;
 use crate::events::EventHub;
-use crate::runtime::mediation::permissions::PermissionOutcome;
+use crate::runtime::mediation::permissions::{PermissionOutcome, PermissionService};
 use crate::state::{CommandStatus, StateStore};
 
 use super::RunningCommand;
@@ -40,6 +40,7 @@ pub(super) struct SupervisorTask {
     pub(super) event_hub: EventHub,
     pub(super) running: Arc<TokioMutex<HashMap<String, RunningCommand>>>,
     pub(super) awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
+    pub(super) permissions: PermissionService,
     pub(super) command_id: String,
     pub(super) shell: String,
     pub(super) command: String,
@@ -71,16 +72,14 @@ impl SupervisorTask {
                 },
                 changed = self.cancel_rx.changed() => {
                     if changed.is_ok() && *self.cancel_rx.borrow() {
-                        PermissionOutcome::Canceled { reason: "command-canceled".to_owned() }
+                        PermissionOutcome::Canceled {
+                            reason: super::PERMISSION_REASON_COMMAND_CANCELED.to_owned(),
+                        }
                     } else {
                         PermissionOutcome::Expired
                     }
                 }
             };
-            self.awaiting_permission
-                .lock()
-                .await
-                .remove(&self.command_id);
             match outcome {
                 PermissionOutcome::Approved { .. } => {
                     // fallthrough to spawn
@@ -92,7 +91,7 @@ impl SupervisorTask {
                         json!({"command_id": self.command_id, "reason": "permission denied"}),
                     )
                     .await;
-                    self.deregister().await;
+                    self.deregister(super::PERMISSION_REASON_DENIED).await;
                     return;
                 }
                 PermissionOutcome::Canceled { reason } => {
@@ -102,7 +101,7 @@ impl SupervisorTask {
                         json!({"command_id": self.command_id, "reason": reason}),
                     )
                     .await;
-                    self.deregister().await;
+                    self.deregister(&reason).await;
                     return;
                 }
                 PermissionOutcome::Expired => {
@@ -112,7 +111,7 @@ impl SupervisorTask {
                         json!({"command_id": self.command_id}),
                     )
                     .await;
-                    self.deregister().await;
+                    self.deregister(super::PERMISSION_REASON_WAITER_LOST).await;
                     return;
                 }
             }
@@ -120,7 +119,7 @@ impl SupervisorTask {
         let started = Instant::now();
         if let Err(error) = self.mark_running().await {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to mark command running before spawn");
-            self.deregister().await;
+            self.deregister(super::PERMISSION_REASON_START_FAILED).await;
             return;
         }
         let spawn_result = self.spawn_child();
@@ -128,7 +127,7 @@ impl SupervisorTask {
             Ok(child) => child,
             Err(error) => {
                 self.record_spawn_failure(error).await;
-                self.deregister().await;
+                self.deregister(super::PERMISSION_REASON_SPAWN_FAILED).await;
                 return;
             }
         };
@@ -145,7 +144,8 @@ impl SupervisorTask {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command started event");
             break_for_persistence_error(&mut child).await;
             self.finish_after_persistence_error(started).await;
-            self.deregister().await;
+            self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
+                .await;
             return;
         }
         if self.review_flagged
@@ -159,7 +159,8 @@ impl SupervisorTask {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist command review event");
             break_for_persistence_error(&mut child).await;
             self.finish_after_persistence_error(started).await;
-            self.deregister().await;
+            self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
+                .await;
             return;
         }
 
@@ -321,7 +322,8 @@ impl SupervisorTask {
             )
         } {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to finalize command row");
-            self.deregister().await;
+            self.deregister(super::PERMISSION_REASON_PERSISTENCE_FAILED)
+                .await;
             return;
         }
 
@@ -340,7 +342,8 @@ impl SupervisorTask {
             tracing::warn!(error = %error, command_id = %self.command_id, "failed to persist terminal command event");
         }
 
-        self.deregister().await;
+        self.deregister(super::PERMISSION_REASON_COMMAND_FINISHED)
+            .await;
     }
 
     fn spawn_child(&self) -> std::result::Result<tokio::process::Child, std::io::Error> {
@@ -512,9 +515,49 @@ impl SupervisorTask {
         Ok(())
     }
 
-    async fn deregister(&self) {
-        let mut running = self.running.lock().await;
-        running.remove(&self.command_id);
+    /// Remove this command from the live registries and settle any dependent
+    /// permission that is still pending. Every exit path of `run()` funnels
+    /// through here, so a command can never reach a terminal status while its
+    /// permission row stays approvable. `permission_reason` names the cause
+    /// recorded in `permission_decisions.reason`; on the normal paths the row
+    /// was already decided and the cancel is a race-safe no-op.
+    async fn deregister(&self, permission_reason: &str) {
+        {
+            let mut running = self.running.lock().await;
+            running.remove(&self.command_id);
+        }
+        let permission_id = self
+            .awaiting_permission
+            .lock()
+            .await
+            .remove(&self.command_id);
+        let Some(permission_id) = permission_id else {
+            return;
+        };
+        match self
+            .permissions
+            .cancel_if_pending(&permission_id, permission_reason)
+            .await
+        {
+            Ok(true) => {
+                tracing::warn!(
+                    command_id = %self.command_id,
+                    permission_id = %permission_id,
+                    reason = permission_reason,
+                    "canceled permission left pending by command teardown",
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    command_id = %self.command_id,
+                    permission_id = %permission_id,
+                    reason = permission_reason,
+                    "failed to settle pending permission during command teardown",
+                );
+            }
+        }
     }
 
     /// Settle a command row that never reached the spawn step. Sets the
@@ -565,44 +608,205 @@ async fn break_for_persistence_error(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PermissionTimeoutAction;
     use crate::runtime::mediation::commands::policy::resolve_cwd_under_workspace;
+    use crate::runtime::mediation::permissions::{NewPermission, PermissionSource};
+    use crate::state::{CommandOrigin, NewCommandRecord};
 
-    #[tokio::test]
-    async fn failed_running_transition_prevents_spawn() {
+    struct Fixture {
+        tempdir: tempfile::TempDir,
+        state: Arc<TokioMutex<StateStore>>,
+        permissions: PermissionService,
+        awaiting_permission: Arc<TokioMutex<HashMap<String, String>>>,
+    }
+
+    fn fixture() -> Fixture {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let state_path = tempdir.path().join("state.sqlite");
-        let state = StateStore::open(&state_path).expect("state open");
-        state.migrate().expect("migrate");
-        let marker = tempdir.path().join("spawned");
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let store = StateStore::open(&state_path).expect("state open");
+        store.migrate().expect("migrate");
+        let state = Arc::new(TokioMutex::new(store));
+        let permissions = PermissionService::new(
+            state.clone(),
+            EventHub::new(),
+            Duration::from_secs(60),
+            PermissionTimeoutAction::Deny,
+        );
+        Fixture {
+            tempdir,
+            state,
+            permissions,
+            awaiting_permission: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+
+    fn task(
+        fixture: &Fixture,
+        command_id: &str,
+        command: &str,
+    ) -> (watch::Sender<bool>, SupervisorTask) {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
         let task = SupervisorTask {
-            state: Arc::new(TokioMutex::new(state)),
+            state: fixture.state.clone(),
             event_hub: EventHub::new(),
             running: Arc::new(TokioMutex::new(HashMap::new())),
-            awaiting_permission: Arc::new(TokioMutex::new(HashMap::new())),
-            command_id: "cmd_missing".to_owned(),
+            awaiting_permission: fixture.awaiting_permission.clone(),
+            permissions: fixture.permissions.clone(),
+            command_id: command_id.to_owned(),
             shell: "/bin/sh".to_owned(),
-            command: format!("printf spawned > {}", marker.to_string_lossy()),
+            command: command.to_owned(),
             sandbox: Default::default(),
             network_provider: None,
-            workspace_root: tempdir.path().to_path_buf(),
-            cwd: resolve_cwd_under_workspace(tempdir.path(), &tempdir.path().to_string_lossy())
-                .expect("resolved cwd"),
+            workspace_root: fixture.tempdir.path().to_path_buf(),
+            cwd: resolve_cwd_under_workspace(
+                fixture.tempdir.path(),
+                &fixture.tempdir.path().to_string_lossy(),
+            )
+            .expect("resolved cwd"),
             env: None,
-            timeout_duration: Duration::from_secs(1),
+            timeout_duration: Duration::from_secs(5),
             cancel_grace: Duration::from_millis(50),
-            progress_interval: Duration::from_secs(1),
+            progress_interval: Duration::from_secs(5),
             cancel_rx,
             max_output_bytes: 1024,
             review_flagged: false,
             permission_rx: None,
         };
+        (cancel_tx, task)
+    }
+
+    async fn insert_command(fixture: &Fixture, command: &str) -> String {
+        let store = fixture.state.lock().await;
+        store
+            .append_command(NewCommandRecord {
+                command,
+                cwd: None,
+                env_json: None,
+                origin: CommandOrigin::Operator,
+                session_id: None,
+            })
+            .expect("append command")
+            .id
+    }
+
+    #[tokio::test]
+    async fn failed_running_transition_prevents_spawn() {
+        let fixture = fixture();
+        let marker = fixture.tempdir.path().join("spawned");
+        let command = format!("printf spawned > {}", marker.to_string_lossy());
+        let (_cancel_tx, task) = task(&fixture, "cmd_missing", &command);
 
         task.run().await;
 
         assert!(
             !marker.exists(),
             "command must not spawn when durable running transition fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn waiter_drop_cancels_dependent_permission() {
+        let fixture = fixture();
+        let command_id = insert_command(&fixture, "sudo true").await;
+        let (record, _service_rx) = fixture
+            .permissions
+            .request(NewPermission {
+                source: PermissionSource::Command,
+                requester: Some(format!("command:{command_id}")),
+                subject_id: Some(command_id.clone()),
+                detail: json!({"command": "sudo true"}),
+            })
+            .await
+            .expect("permission request");
+        fixture
+            .awaiting_permission
+            .lock()
+            .await
+            .insert(command_id.clone(), record.id.clone());
+
+        // Hand the supervisor a receiver whose sender is already gone — the
+        // in-memory waiter vanished without a durable decision.
+        let (tx, rx) = oneshot::channel::<PermissionOutcome>();
+        drop(tx);
+        let (_cancel_tx, mut task) = task(&fixture, &command_id, "sudo true");
+        task.permission_rx = Some(rx);
+        task.run().await;
+
+        let command = {
+            let store = fixture.state.lock().await;
+            store
+                .get_command(&command_id)
+                .expect("get command")
+                .expect("command row")
+        };
+        assert_eq!(command.status, "failed");
+
+        let permission = fixture.permissions.get(&record.id).await.expect("get");
+        assert_eq!(permission.status, "canceled");
+
+        let events = {
+            let store = fixture.state.lock().await;
+            store
+                .query_permission_events(crate::state::EventFilter {
+                    limit: 10,
+                    permission_id: Some(&record.id),
+                    ..crate::state::EventFilter::default()
+                })
+                .expect("query events")
+        };
+        let canceled = events
+            .iter()
+            .find(|event| event.kind == "permission.canceled")
+            .expect("canceled event");
+        let payload: Value = serde_json::from_str(&canceled.payload_json).expect("payload");
+        assert_eq!(
+            payload["reason"],
+            super::super::PERMISSION_REASON_WAITER_LOST
+        );
+        assert_eq!(payload["command_id"], command_id);
+    }
+
+    #[tokio::test]
+    async fn approved_command_leaves_permission_approved_on_exit() {
+        let fixture = fixture();
+        let command_id = insert_command(&fixture, "true").await;
+        let (record, rx) = fixture
+            .permissions
+            .request(NewPermission {
+                source: PermissionSource::Command,
+                requester: Some(format!("command:{command_id}")),
+                subject_id: Some(command_id.clone()),
+                detail: json!({"command": "true"}),
+            })
+            .await
+            .expect("permission request");
+        fixture
+            .awaiting_permission
+            .lock()
+            .await
+            .insert(command_id.clone(), record.id.clone());
+        fixture
+            .permissions
+            .approve(&record.id, None, None, "session-key")
+            .await
+            .expect("approve");
+
+        let (_cancel_tx, mut task) = task(&fixture, &command_id, "true");
+        task.permission_rx = Some(rx);
+        task.run().await;
+
+        // Teardown must not clobber the operator's decision: the map entry
+        // now lives until deregister, so this exercises the cancel_if_pending
+        // no-op on the normal path.
+        let permission = fixture.permissions.get(&record.id).await.expect("get");
+        assert_eq!(permission.status, "approved");
+        assert!(
+            !fixture
+                .awaiting_permission
+                .lock()
+                .await
+                .contains_key(&command_id),
+            "deregister must clear the awaiting-permission entry"
         );
     }
 }

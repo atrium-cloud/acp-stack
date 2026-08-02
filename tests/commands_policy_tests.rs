@@ -354,6 +354,94 @@ async fn review_pattern_enqueues_permission_in_supervised_mode() {
 }
 
 #[tokio::test]
+async fn canceling_command_awaiting_permission_settles_both_rows() {
+    let permissions = PermissionsConfig {
+        mode: "supervised".to_owned(),
+        review: vec!["sudo *".to_owned()],
+        deny: vec![],
+        ..PermissionsConfig::default()
+    };
+    let harness = Harness::spawn_with(HarnessOverrides {
+        permissions: Some(permissions),
+        commands: None,
+    })
+    .await;
+    let response = submit(&harness, serde_json::json!({"command": "sudo apt update"})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let command_id = body["data"]["id"].as_str().expect("command id").to_owned();
+    let permission = pending_permission_for_command(&harness, &command_id).await;
+    let permission_id = permission["id"].as_str().expect("permission id").to_owned();
+
+    let cancel_response = auth(session_client().post(format!(
+        "{}/v1/commands/{}/cancel",
+        harness.base_url, command_id
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(cancel_response.status(), StatusCode::OK);
+
+    let final_body = wait_for_terminal(&harness, &command_id).await;
+    assert_eq!(final_body["data"]["status"], "canceled");
+
+    // No orphan: the permission row settles with the command...
+    let permission_response = auth(session_client().get(format!(
+        "{}/v1/permissions/{}",
+        harness.base_url, permission_id
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(permission_response.status(), StatusCode::OK);
+    let permission_body: Value = permission_response.json().await.expect("json");
+    assert_eq!(permission_body["data"]["status"], "canceled");
+
+    // ...and approving it afterwards is a state conflict, not a bad request.
+    let approve_response = auth(session_client().post(format!(
+        "{}/v1/permissions/{}/approve",
+        harness.base_url, permission_id
+    )))
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(approve_response.status(), StatusCode::CONFLICT);
+    let approve_body: Value = approve_response.json().await.expect("json");
+    assert_eq!(
+        approve_body["error"]["code"],
+        "permission.invalid_transition"
+    );
+
+    // The cancellation is visible in the command's own event stream, with a
+    // reason naming the cause.
+    let events_response = auth(session_client().get(format!(
+        "{}/v1/logs/events?command_id={}&limit=50",
+        harness.base_url, command_id
+    )))
+    .send()
+    .await
+    .expect("send");
+    assert_eq!(events_response.status(), StatusCode::OK);
+    let events_body: Value = events_response.json().await.expect("json");
+    let events = events_body["data"]["events"]
+        .as_array()
+        .expect("events array");
+    let canceled_event = events
+        .iter()
+        .find(|event| event["kind"] == "permission.canceled")
+        .expect("permission.canceled event in command stream");
+    let payload: Value = serde_json::from_str(
+        canceled_event["payload_json"]
+            .as_str()
+            .expect("payload_json"),
+    )
+    .expect("payload json");
+    assert_eq!(payload["reason"], "command-canceled");
+    assert_eq!(payload["command_id"], command_id);
+}
+
+#[tokio::test]
 async fn review_pattern_matches_shell_constructed_command_word() {
     let permissions = PermissionsConfig {
         mode: "supervised".to_owned(),

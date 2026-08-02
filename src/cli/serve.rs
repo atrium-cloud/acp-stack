@@ -35,6 +35,10 @@ pub(super) enum ServeMode {
 
 const ALLOW_ROOT_ENV: &str = "ACP_STACK_ALLOW_ROOT";
 
+/// Cap on the command-id list embedded in the `server.reconciled` event so a
+/// huge sweep cannot bloat a single payload row.
+const RECONCILED_COMMAND_IDS_CAP: usize = 50;
+
 fn allow_root_env_enabled() -> bool {
     std::env::var(ALLOW_ROOT_ENV).is_ok_and(|value| value == "1")
 }
@@ -183,42 +187,78 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         None
     };
 
+    // Startup reconcile sweeps. Each is independently best-effort: a
+    // transient failure (e.g. SQLITE_BUSY from a concurrent writer) must not
+    // abort startup with the earlier sweeps already applied — the missed rows
+    // settle on the next restart instead. Permissions are swept BEFORE
+    // commands so a partial run can only strand a command in `pending`
+    // (visible, poll keeps going), never fail a command while leaving its
+    // permission approvable.
+
     // Reconcile any prompts left in-flight by a previous crash/restart.
     // The in-memory task registry is empty at startup, so a `pending` or
     // `running` row from before would never get a terminal status without
     // this sweep, leaving CLI/HTTP clients polling forever.
-    let reconciled = store.reconcile_orphaned_prompts("daemon restart")?;
-    if reconciled > 0 {
-        tracing::info!(
-            reconciled,
-            "marked orphaned in-flight prompts as errored on startup"
-        );
-    }
-
-    // Same sweep for the command gateway: a daemon restart kills any
-    // mediated subprocesses via `kill_on_drop`, but their `commands` rows
-    // are not finalized along the way. Mark them `failed` so polling
-    // clients see them settle.
-    let reconciled_commands = store.reconcile_orphaned_commands()?;
-    if reconciled_commands > 0 {
-        tracing::info!(
-            reconciled = reconciled_commands,
-            "marked orphaned in-flight commands as failed on startup"
-        );
-    }
+    let reconciled_prompts = match store.reconcile_orphaned_prompts("daemon restart") {
+        Ok(reconciled) => {
+            if reconciled > 0 {
+                tracing::info!(
+                    reconciled,
+                    "marked orphaned in-flight prompts as errored on startup"
+                );
+            }
+            reconciled
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "startup prompt reconcile failed; rows will settle on the next restart");
+            0
+        }
+    };
 
     // Reconcile pending permission rows. ACP-source rows are canceled (the
     // request channel is gone after restart); command-source rows are
     // expired so the spec's "clients never see them stay pending forever"
     // promise holds across restart.
-    let (perm_canceled, perm_expired) = store.reconcile_orphaned_permissions()?;
-    if perm_canceled > 0 || perm_expired > 0 {
-        tracing::info!(
-            canceled = perm_canceled,
-            expired = perm_expired,
-            "settled orphaned permission requests on startup"
-        );
-    }
+    let (perm_canceled, perm_expired) = match store.reconcile_orphaned_permissions() {
+        Ok((canceled, expired)) => {
+            if canceled > 0 || expired > 0 {
+                tracing::info!(
+                    canceled,
+                    expired,
+                    "settled orphaned permission requests on startup"
+                );
+            }
+            (canceled, expired)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "startup permission reconcile failed; rows will settle on the next restart");
+            (0, 0)
+        }
+    };
+
+    // Same sweep for the command gateway: a daemon restart kills any
+    // mediated subprocesses via `kill_on_drop`, but their `commands` rows
+    // are not finalized along the way. Mark them `failed` so polling
+    // clients see them settle. Dependent pending permissions are canceled in
+    // the same transaction.
+    let (reconciled_command_ids, command_permissions_canceled) = match store
+        .reconcile_orphaned_commands()
+    {
+        Ok((ids, permissions_canceled)) => {
+            if !ids.is_empty() {
+                tracing::info!(
+                    reconciled = ids.len(),
+                    permissions_canceled,
+                    "marked orphaned in-flight commands as failed on startup"
+                );
+            }
+            (ids, permissions_canceled)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "startup command reconcile failed; rows will settle on the next restart");
+            (Vec::new(), 0)
+        }
+    };
 
     let bind = args.bind.unwrap_or_else(|| config.api.bind.clone());
 
@@ -270,6 +310,43 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
         let state_handle = app_state.state.clone();
         let event_hub = app_state.event_hub.clone();
         lifecycle.started(&state_handle, &event_hub, &local).await?;
+
+        // Durable trace of the startup sweeps. Without this a client sees
+        // rows flip to terminal states across a restart with nothing in the
+        // event log explaining why. Emitted here — after the hub is attached
+        // to the store — so it also fans out live on the `logs` topic.
+        if reconciled_prompts > 0
+            || perm_canceled > 0
+            || perm_expired > 0
+            || !reconciled_command_ids.is_empty()
+        {
+            let command_ids_truncated = reconciled_command_ids.len() > RECONCILED_COMMAND_IDS_CAP;
+            let command_ids: Vec<&String> = reconciled_command_ids
+                .iter()
+                .take(RECONCILED_COMMAND_IDS_CAP)
+                .collect();
+            let payload = serde_json::json!({
+                "prompts": reconciled_prompts,
+                "commands": reconciled_command_ids.len(),
+                "permissions_canceled": perm_canceled + command_permissions_canceled,
+                "permissions_expired": perm_expired,
+                "command_ids": command_ids,
+                "command_ids_truncated": command_ids_truncated,
+                "reason": "daemon-restart",
+            });
+            let appended = {
+                let store = state_handle.lock().await;
+                store.append_event(
+                    "info",
+                    "server.reconciled",
+                    "settled orphaned rows on startup",
+                    &payload.to_string(),
+                )
+            };
+            if let Err(error) = appended {
+                tracing::warn!(error = %error, "failed to record server.reconciled event");
+            }
+        }
         eprintln!("acps serve: listening on {local}");
         eprintln!("acps serve: local socket at {}", socket_path.display());
         let agent_supervisor = app_state.agent_supervisor.clone();

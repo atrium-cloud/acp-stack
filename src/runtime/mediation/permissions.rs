@@ -321,19 +321,16 @@ impl PermissionService {
             PermissionOutcome::Canceled { .. } => "permission.canceled",
             PermissionOutcome::Expired => "permission.expired",
         };
-        self.publish_event(
-            id,
-            &decision.created_at,
-            kind,
-            json!({
-                "id": id,
-                "permission_id": id,
-                "decision": decision.decision,
-                "deciding_principal": decision.deciding_principal,
-                "reason": decision.reason,
-            }),
-        )
-        .await;
+        let mut payload = json!({
+            "id": id,
+            "permission_id": id,
+            "decision": decision.decision,
+            "deciding_principal": decision.deciding_principal,
+            "reason": decision.reason,
+        });
+        link_request_subject(&self.state, id, &mut payload).await;
+        self.publish_event(id, &decision.created_at, kind, payload)
+            .await;
 
         Ok(PermissionDecisionView {
             id: decision.id,
@@ -408,27 +405,55 @@ impl PermissionService {
                 let _ = op.waiter.send(outcome_for_waiter);
             }
 
-            persist_and_publish_permission_event(
-                &state,
-                &events,
-                &id,
-                &now,
-                kind,
-                json!({
-                    "id": id,
-                    "permission_id": id,
-                    "decision": new_status.as_str(),
-                    "deciding_principal": "system",
-                    "reason": "timeout",
-                }),
-            )
-            .await;
+            let mut payload = json!({
+                "id": id,
+                "permission_id": id,
+                "decision": new_status.as_str(),
+                "deciding_principal": "system",
+                "reason": "timeout",
+            });
+            link_request_subject(&state, &id, &mut payload).await;
+            persist_and_publish_permission_event(&state, &events, &id, &now, kind, payload).await;
         });
     }
 
     async fn publish_event(&self, id: &str, created_at: &str, kind: &str, data: Value) {
         persist_and_publish_permission_event(&self.state, &self.events, id, created_at, kind, data)
             .await;
+    }
+}
+
+/// Extend a decision-event payload with the request's `source` / `subject_id`
+/// and, for command-source rows, a `command_id` field. Log filters resolve
+/// `command_id` via `json_extract(payload_json, '$.command_id')`, so without
+/// this a client watching a command's event stream never sees why its
+/// permission settled. ACP-source `subject_id` is a session id and must not
+/// be presented as a command id. Best-effort: a failed read keeps the base
+/// payload and logs.
+async fn link_request_subject(state: &Arc<TokioMutex<StateStore>>, id: &str, payload: &mut Value) {
+    let record = {
+        let store = state.lock().await;
+        store.get_permission_request(id)
+    };
+    match record {
+        Ok(Some(record)) => {
+            payload["source"] = json!(record.source);
+            payload["subject_id"] = json!(record.subject_id);
+            if record.source == PermissionSource::Command.as_str()
+                && let Some(subject_id) = record.subject_id
+            {
+                payload["command_id"] = json!(subject_id);
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(
+                perm_id = id,
+                "permission row missing while enriching decision event"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, perm_id = id, "failed to read permission row while enriching decision event");
+        }
     }
 }
 
@@ -631,6 +656,104 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&expired.payload_json).expect("payload json");
         assert_eq!(payload["permission_id"], record.id);
+    }
+
+    #[tokio::test]
+    async fn canceled_event_payload_carries_command_id_for_command_source() {
+        let (_dir, service) = fresh_service(PermissionTimeoutAction::Deny);
+        let (record, _rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Command,
+                requester: Some("command:cmd_x".to_owned()),
+                subject_id: Some("cmd_x".to_owned()),
+                detail: json!({ "command": "sudo true" }),
+            })
+            .await
+            .expect("request");
+        service
+            .cancel(&record.id, "command-permission-waiter-lost")
+            .await
+            .expect("cancel");
+
+        let rows = {
+            let state = service.state.lock().await;
+            state
+                .query_permission_events(crate::state::EventFilter {
+                    limit: 10,
+                    permission_id: Some(&record.id),
+                    ..crate::state::EventFilter::default()
+                })
+                .expect("query permission events")
+        };
+        let canceled = rows
+            .iter()
+            .find(|row| row.kind == "permission.canceled")
+            .expect("canceled event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&canceled.payload_json).expect("payload json");
+        assert_eq!(payload["command_id"], "cmd_x");
+        assert_eq!(payload["source"], "command");
+        assert_eq!(payload["subject_id"], "cmd_x");
+        assert_eq!(payload["reason"], "command-permission-waiter-lost");
+
+        // The `command_id` link must make the event visible to a client
+        // filtering the log by the command, not just by the permission.
+        let by_command = {
+            let state = service.state.lock().await;
+            state
+                .query_permission_events(crate::state::EventFilter {
+                    limit: 10,
+                    command_id: Some("cmd_x"),
+                    ..crate::state::EventFilter::default()
+                })
+                .expect("query by command id")
+        };
+        assert!(
+            by_command
+                .iter()
+                .any(|row| row.kind == "permission.canceled"),
+            "cancellation must be filterable by command_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_source_cancel_payload_omits_command_id() {
+        let (_dir, service) = fresh_service(PermissionTimeoutAction::Deny);
+        let (record, _rx) = service
+            .request(NewPermission {
+                source: PermissionSource::Acp,
+                requester: Some("sess_a".to_owned()),
+                subject_id: Some("sess_a".to_owned()),
+                detail: json!({}),
+            })
+            .await
+            .expect("request");
+        service
+            .cancel(&record.id, "agent-stopped")
+            .await
+            .expect("cancel");
+
+        let rows = {
+            let state = service.state.lock().await;
+            state
+                .query_permission_events(crate::state::EventFilter {
+                    limit: 10,
+                    permission_id: Some(&record.id),
+                    ..crate::state::EventFilter::default()
+                })
+                .expect("query permission events")
+        };
+        let canceled = rows
+            .iter()
+            .find(|row| row.kind == "permission.canceled")
+            .expect("canceled event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&canceled.payload_json).expect("payload json");
+        // An ACP subject is a session id — presenting it as a command id
+        // would corrupt command-scoped log queries.
+        assert!(payload.get("command_id").is_none());
+        assert_eq!(payload["source"], "acp");
+        assert_eq!(payload["subject_id"], "sess_a");
     }
 
     #[tokio::test]
