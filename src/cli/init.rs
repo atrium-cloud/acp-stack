@@ -33,7 +33,9 @@ use crate::runtime::agent::native_config_import::{
     validate_native_config_selection,
 };
 use crate::runtime::dependencies::deps_apply::{
-    DepApplyOutcome, apply_dependencies_with_progress, pending_candidates,
+    DepApplyOutcome, PrivilegeEscalation, apply_dependencies_with_escalation,
+    manual_privileged_command, pending_candidates, pending_system_candidates,
+    probe_privilege_escalation,
 };
 use crate::runtime::init_runner::{StepDisposition, StepOutcome, record_step, step_kind};
 use crate::runtime::install::agent_installer::InstallerOutcome;

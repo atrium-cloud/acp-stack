@@ -459,6 +459,19 @@ pub enum StackError {
     #[error("init run state is corrupted: {reason}")]
     InitRunCorrupted { reason: String },
 
+    #[error(
+        "dependency apply produced failing actions: {summary}; inspect `acps installer history --agent deps_apply` (apply_run_id={apply_run_id})"
+    )]
+    DepsApplyFailed {
+        summary: String,
+        apply_run_id: String,
+        /// Retry command for the CLI surface that raised the error —
+        /// `acps deps apply` and init resume have different re-run
+        /// invocations, so the remediation hint cannot be one static
+        /// string.
+        retry_command: &'static str,
+    },
+
     #[error("{name} is not currently supported. Please try a different agent.")]
     AgentUnsupported { name: String },
 
@@ -866,6 +879,11 @@ impl StackError {
     }
 
     pub fn remediation_hint(&self) -> Option<String> {
+        if let StackError::DepsApplyFailed { retry_command, .. } = self {
+            return Some(format!(
+                "inspect `acps installer history --agent deps_apply`, fix the failing install action, then re-run `{retry_command}`"
+            ));
+        }
         Some(match self {
             StackError::ConfigRead { .. } => {
                 "verify the config path and file permissions, then retry the command"
@@ -892,6 +910,11 @@ impl StackError {
             }
             StackError::AgentTestFailed { .. } | StackError::AgentInitializeFailed { .. } => {
                 "verify agent install, provider secrets, and model selection, then retry the testflight"
+            }
+            // Unreachable: the early return above handles this variant so
+            // the hint can name the surface-specific retry command.
+            StackError::DepsApplyFailed { .. } => {
+                "inspect `acps installer history --agent deps_apply` and fix the failing install action"
             }
             StackError::InvalidParam { .. }
             | StackError::InvalidSocketAddress { .. }

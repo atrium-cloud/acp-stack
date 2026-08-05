@@ -1,7 +1,8 @@
 //! Agent install/registry/release-asset error helpers.
 //!
 //! Covers the install-time half of the `agent.*` namespace plus `init.*` (the
-//! init-run state which exists to coordinate installation).
+//! init-run state which exists to coordinate installation) and `deps.*` for
+//! the dependency-apply init step.
 
 use http::StatusCode;
 
@@ -21,6 +22,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentRegistryMissing { .. } => "agent.registry_missing",
         AgentPlaceholderConfigured => "agent.placeholder_configured",
         InitRunCorrupted { .. } => "init.run_corrupted",
+        DepsApplyFailed { .. } => "deps.apply_failed",
         AgentUnsupported { .. } => "agent.unsupported",
         AgentCheckStale => "agent.check_stale",
         RegistryLoad { .. } => "agent.registry_load_failed",
@@ -82,6 +84,11 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             "config has legacy placeholder agent; select a real supported agent before starting the runtime".to_owned()
         }
         InitRunCorrupted { reason } => format!("init run state is corrupted: {reason}"),
+        // Deliberately omits `summary`: it can carry operator shell text and
+        // exit detail that should not leave the host over the API.
+        DepsApplyFailed { apply_run_id, .. } => {
+            format!("dependency apply produced failing actions (apply_run_id={apply_run_id})")
+        }
         AgentUnsupported { name } => {
             format!("{name} is not currently supported. Please try a different agent.")
         }
@@ -169,6 +176,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | AgentInstallerLogPersist { .. }
         | AgentRegistryMissing { .. }
         | InitRunCorrupted { .. }
+        | DepsApplyFailed { .. }
         | RegistryLoad { .. }
         | SkillInstallSourceMissing { .. }
         | SkillInstallFailed { .. }

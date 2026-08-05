@@ -793,8 +793,9 @@ fn default_dependency_required() -> bool {
 /// Operator-declared install action for one dependency. Intentionally
 /// minimal: a single shell snippet, an optional `creates` postcheck,
 /// and a scope marker that distinguishes "runs as the runtime user"
-/// from "needs OS-wide privilege" so the apply runner can refuse to
-/// silently execute privileged work behind the operator's back.
+/// from "needs OS-wide privilege" so the apply runner knows when to
+/// escalate — and never silently downgrades privileged work to user
+/// scope behind the operator's back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyInstallAction {
@@ -829,10 +830,12 @@ pub enum DependencyInstallScope {
     /// $HOME, etc.
     #[default]
     User,
-    /// Action needs OS-wide privilege (sudo, system package manager).
-    /// The apply runner refuses to fall back to user scope; if the
-    /// daemon isn't running as root the action fails early with a
-    /// clear "privilege required" message.
+    /// Action needs OS-wide privilege (system package manager, writes
+    /// under /usr or /opt). Runs directly when the process is root,
+    /// escalates through passwordless `sudo -n` when it isn't (never a
+    /// password prompt), and otherwise refuses early with a clear
+    /// "privilege required" outcome — the runner never falls back to
+    /// user scope.
     System,
 }
 

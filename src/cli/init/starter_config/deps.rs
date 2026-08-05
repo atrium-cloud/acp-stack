@@ -520,14 +520,31 @@ pub(crate) fn reject_deps_args_for_existing_config(args: &InitArgs) -> Result<()
 /// require `--deps-apply --deps-apply-yes`; interactive runs summarize the
 /// pending actions and confirm (default no). Returns false when there is
 /// nothing actionable.
+///
+/// The prompt stays offered even when escalation is unavailable: the apply
+/// still runs every user-scope action and records `privilege_required` audit
+/// rows for the skipped system-scope ones, which health and `acps installer
+/// history` need. Declining silently on the operator's behalf would lose both.
 pub(crate) fn should_apply_deps_for_init(
     args: &InitArgs,
     candidates: &[DepApplyCandidate],
     interactive: bool,
+    escalation: &PrivilegeEscalation,
+    shell_program: &str,
+    // Output-mode-aware line sink (init_println! at the call site).
+    // Printing directly here would corrupt `--handoff-json`, whose stdout
+    // must stay a single JSON object.
+    emit_notice: &mut dyn FnMut(&str),
 ) -> Result<bool> {
     if candidates.is_empty() {
         return Ok(false);
     }
+    let system_candidates: Vec<DepApplyCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.scope == DependencyInstallScope::System)
+        .cloned()
+        .collect();
+    let notice_lines = escalation_notice_lines(escalation, shell_program, &system_candidates);
     if !interactive {
         if args.deps_apply && !args.deps_apply_yes {
             return Err(StackError::InvalidParam {
@@ -535,18 +552,27 @@ pub(crate) fn should_apply_deps_for_init(
                 reason: "non-interactive dependency apply requires --deps-apply-yes".to_owned(),
             });
         }
-        return Ok(args.deps_apply && args.deps_apply_yes);
+        let requested = args.deps_apply && args.deps_apply_yes;
+        if requested {
+            for line in &notice_lines {
+                emit_notice(line);
+            }
+        }
+        return Ok(requested);
     }
     if args.deps_apply && args.deps_apply_yes {
+        for line in &notice_lines {
+            emit_notice(line);
+        }
         return Ok(true);
     }
-    let (count, any_system) = summarize_candidates(candidates);
+    let count = candidates.len();
     println!("dependencies with install actions ({count}):");
     for candidate in candidates {
         println!("  - {}", candidate_summary_line(candidate));
     }
-    if any_system {
-        println!("note: one or more actions declare scope=system and require root privilege.");
+    for line in &notice_lines {
+        emit_notice(line);
     }
     prompt::confirm(interactive, "Apply these dependencies now?", false)
 }

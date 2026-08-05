@@ -12,7 +12,7 @@ use crate::config::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps_apply::{
-    DepApplyCandidate, candidate_summary_line, summarize_candidates,
+    DepApplyCandidate, PrivilegeEscalation, candidate_summary_line, escalation_notice_lines,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_registry::SkillCatalog;
