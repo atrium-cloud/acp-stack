@@ -131,14 +131,19 @@ pub(super) fn install_retry_backoff(attempt: u32) -> Duration {
 
 /// Whether an install failure is worth retrying. Deterministic failures — a
 /// hash mismatch, a missing `creates` target, missing prerequisites, an
-/// unconfigured agent, or a corrupt registry — will fail identically on every
-/// attempt, so retrying them just makes the operator wait. Ambiguous failures
-/// (a failed install command, a spawn error) may be transient (network mid
-/// install), so those stay retryable.
+/// unconfigured agent, a corrupt registry, or a binary the spawn gate proved
+/// unrunnable — will fail identically on every attempt, so retrying them just
+/// makes the operator wait. The gate failure is deterministic given the same
+/// recipe and host (stub bytes, wrong arch, missing interpreter); the rare
+/// transient fork failure (EAGAIN/ENOMEM) self-heals on the next init run
+/// because the resume verifier treats the broken binary as absent and
+/// reinstalls. Ambiguous failures (a failed install command, a spawn error)
+/// may be transient (network mid install), so those stay retryable.
 fn install_error_is_retryable(error: &StackError) -> bool {
     !matches!(
         error,
         StackError::AgentNotConfigured
+            | StackError::AgentInstallerBinaryUnrunnable { .. }
             | StackError::AgentInstallerCreatesMissing { .. }
             | StackError::AgentInstallerPrerequisitesMissing { .. }
             | StackError::AgentInstallerWorkingDirectoryMissing { .. }
@@ -219,6 +224,18 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(attempts.get(), 1, "should fail on the first attempt");
+    }
+
+    #[test]
+    fn spawn_gate_failure_is_not_retried() {
+        let error = StackError::AgentInstallerBinaryUnrunnable {
+            path: PathBuf::from("/tmp/stub-agent"),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, "no executable header"),
+        };
+        assert!(
+            !install_error_is_retryable(&error),
+            "an unrunnable binary fails identically on every attempt",
+        );
     }
 
     #[test]

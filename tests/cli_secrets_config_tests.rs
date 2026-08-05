@@ -266,7 +266,7 @@ fn init_install_agent_runs_selected_registry_install() {
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config");
     let script = format!(
-        "mkdir -p {bin} && printf init > {binary} && chmod 755 {binary}",
+        "mkdir -p {bin} && printf '#!/bin/sh\\n' > {binary} && chmod 755 {binary}",
         bin = shell_quote_path(managed_binary.parent().expect("binary has parent")),
         binary = shell_quote_path(&managed_binary),
     );

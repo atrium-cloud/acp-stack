@@ -45,7 +45,7 @@ async fn registry_install_does_not_require_runtime_secret_store() {
         .join("bin")
         .join("registry-agent");
     let script = format!(
-        "mkdir -p {bin} && printf registry > {binary} && chmod 755 {binary}",
+        "mkdir -p {bin} && printf '#!/bin/sh\\n' > {binary} && chmod 755 {binary}",
         bin = shell_quote_path(binary_path.parent().expect("binary has parent")),
         binary = shell_quote_path(&binary_path),
     );

@@ -5,7 +5,8 @@
 //! GitHub API, matches the asset name against a glob pattern with `{arch}`
 //! substituted from the runtime architecture, downloads + optionally
 //! checksum-verifies + extracts, then drops the binary into `dest_dir` with
-//! `chmod +x` so it can satisfy the existing `creates` postcheck.
+//! `chmod +x`. The caller runs the `creates` resolution and spawn gate on
+//! the dropped binary afterwards.
 //!
 //! No shell is spawned for this install type; everything happens in-process.
 //! That keeps the timeout/output-cap/process-group hardening from

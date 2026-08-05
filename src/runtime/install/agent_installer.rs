@@ -235,19 +235,38 @@ pub fn run_installer_capture(
     };
     let started_at = current_timestamp();
 
+    // A present binary that fails the spawn gate is treated as absent so the
+    // recipe re-runs and can replace it, instead of skipping past a file
+    // nothing can execute. Integrity first: the gate executes the file, and a
+    // binary failing the operator's sha256 pin must never run.
     if let Some(path) = resolve_creates(&install.creates, workspace_root, &[]) {
-        let outcome = (|| {
+        let integrity = (|| {
             let sha256 = sha256_of_file(&path)?;
             verify_expected_sha256(expected_sha256, &sha256)?;
-            Ok(InstallerOutcome::AlreadyPresent {
-                path: path.clone(),
-                sha256,
-            })
+            Ok(sha256)
         })();
-        return InstallerResult {
-            outcome,
-            row: InstallerRowDraft::skipped(STEP_INSTALL, &started_at),
-        };
+        match integrity {
+            Err(err) => {
+                return InstallerResult {
+                    outcome: Err(err),
+                    row: InstallerRowDraft::skipped(STEP_INSTALL, &started_at),
+                };
+            }
+            Ok(sha256) => match verify_binary_spawns(&path, workspace_root, &[]) {
+                Ok(()) => {
+                    return InstallerResult {
+                        outcome: Ok(InstallerOutcome::AlreadyPresent {
+                            path: path.clone(),
+                            sha256,
+                        }),
+                        row: InstallerRowDraft::skipped(STEP_INSTALL, &started_at),
+                    };
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "existing agent binary failed the spawn gate; re-running installer");
+                }
+            },
+        }
     }
 
     let run_result = run_shell_install(shell, &agent_env, workspace_root, &[]);
@@ -320,6 +339,7 @@ pub(super) fn final_verification(
             })?;
         let sha256 = sha256_of_file(&path)?;
         verify_expected_sha256(agent.expected_sha256.as_deref(), &sha256)?;
+        verify_binary_spawns(&path, workspace_root, &[dest_dir])?;
         Ok(InstallerOutcome::Installed { path, sha256 })
     })();
 
@@ -368,13 +388,162 @@ pub(super) enum ResolvedInstallSpec {
 /// It intentionally delegates to the same resolver used by the installer:
 /// absolute paths are checked directly, slash-containing paths are resolved
 /// under `workspace_root`, and bare names are checked in the managed local
-/// bin directory before falling back to the process PATH.
+/// bin directory before falling back to the process PATH. A resolved binary
+/// that fails the spawn gate reads as absent so the resumed run re-installs
+/// instead of skipping past a file nothing can execute.
+///
+/// Integrity keeps its usual priority over the probe: when
+/// `expected_sha256` is declared, a binary that fails the pin (or cannot be
+/// hashed) also reads as absent — never executed — and the resumed install's
+/// final verification is where a still-mismatching pin surfaces as an error.
 pub fn resolve_creates_for_init_resume(
     name: &str,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
+    expected_sha256: Option<&str>,
 ) -> Option<PathBuf> {
-    resolve_creates(name, workspace_root, extra_path_dirs)
+    let path = resolve_creates(name, workspace_root, extra_path_dirs)?;
+    if expected_sha256.is_some() {
+        let pinned = sha256_of_file(&path)
+            .and_then(|sha256| verify_expected_sha256(expected_sha256, &sha256));
+        if let Err(error) = pinned {
+            tracing::warn!(%error, "installed agent binary failed the integrity pin; re-running installer");
+            return None;
+        }
+    }
+    if let Err(error) = verify_binary_spawns(&path, workspace_root, extra_path_dirs) {
+        tracing::warn!(%error, "installed agent binary failed the spawn gate; re-running installer");
+        return None;
+    }
+    Some(path)
+}
+
+/// Spawn gate for installed binaries: `creates` resolving to an executable
+/// file is not proof the file can run. A package manager that blocks
+/// postinstall scripts leaves a shebang-less stub behind, and a wrong-arch
+/// download is a valid file too; both otherwise surface only as ENOEXEC at
+/// the first real agent spawn.
+///
+/// Two layers, both cheap: a header check that rejects files with no
+/// executable format at all (the deployment target is Linux, whose exec has
+/// no shell fallback for shebang-less text — macOS dev hosts do fall back,
+/// so a spawn probe alone would pass the stub there), then a spawn probe
+/// that catches host-specific failures like a wrong-arch ELF or a missing
+/// interpreter. Only spawnability is judged — the child is killed
+/// immediately, so a binary that ignores `--version` or hangs still passes.
+///
+/// Callers must run integrity checks (`expected_sha256`) BEFORE this gate:
+/// the probe executes the file, and a binary that fails the operator's pin
+/// must never run. Step-level gates therefore run only
+/// [`verify_executable_header`] (which never executes the file) when a pin is
+/// declared, and `final_verification` owns the pin check followed by this
+/// probe. The probe gets the same scrubbed environment as installer
+/// steps (no provider keys, non-interactive hints) and a PATH built from
+/// `extra_path_dirs` so a `#!/usr/bin/env`-style interpreter in the managed
+/// bin dir resolves the way the real agent spawn would resolve it.
+pub(crate) fn verify_binary_spawns(
+    path: &Path,
+    workspace_root: &Path,
+    extra_path_dirs: &[&Path],
+) -> Result<()> {
+    use crate::runtime::process_runner::{
+        apply_non_interactive_env, detach_into_new_session, forward_host_env, kill_process_group,
+        path_env_with_extra_dirs,
+    };
+    verify_executable_header(path)?;
+    // `resolve_creates` judges with cwd-relative `is_file()` semantics, but
+    // the probe changes cwd to `workspace_root`, so a relative `path` would
+    // resolve differently between the check and the spawn.
+    let exec_path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut command = std::process::Command::new(&exec_path);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .env_clear();
+    if workspace_root.is_dir() {
+        command.current_dir(workspace_root);
+    }
+    if let Some(path_env) = path_env_with_extra_dirs(extra_path_dirs) {
+        command.env("PATH", path_env);
+    }
+    forward_host_env(&mut command, "HOME");
+    forward_host_env(&mut command, "LANG");
+    apply_non_interactive_env(&mut command);
+    detach_into_new_session(&mut command);
+    match command.spawn() {
+        Ok(mut child) => {
+            // The probe proved spawnability; the group kill reaches whatever
+            // the binary already forked, and the wait reaps the leader.
+            kill_process_group(&mut child);
+            if let Err(error) = child.wait() {
+                tracing::debug!(%error, path = %path.display(), "spawn-gate child reap failed");
+            }
+            Ok(())
+        }
+        Err(source) => Err(StackError::AgentInstallerBinaryUnrunnable {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Executable formats the runtime can actually spawn: shebang scripts, ELF
+/// (Linux deployment), and Mach-O incl. fat binaries (macOS dev hosts).
+const EXECUTABLE_MAGICS: &[&[u8]] = &[
+    b"#!",
+    b"\x7fELF",
+    &[0xfe, 0xed, 0xfa, 0xce],
+    &[0xfe, 0xed, 0xfa, 0xcf],
+    &[0xce, 0xfa, 0xed, 0xfe],
+    &[0xcf, 0xfa, 0xed, 0xfe],
+    &[0xca, 0xfe, 0xba, 0xbe],
+    &[0xbe, 0xba, 0xfe, 0xca],
+    // 64-bit fat (universal) Mach-O variants of the two magics above.
+    &[0xca, 0xfe, 0xba, 0xbf],
+    &[0xbf, 0xba, 0xfe, 0xca],
+];
+
+pub(crate) fn verify_executable_header(path: &Path) -> Result<()> {
+    use std::io::Read;
+    // An unreadable file (exec-only mode, transient IO error) is not evidence
+    // of a bad format — let the spawn probe be the judge instead of hard-
+    // failing a binary the kernel might exec fine without read access here.
+    let mut header = [0u8; 4];
+    let mut read_total = 0;
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            while read_total < header.len() {
+                match file.read(&mut header[read_total..]) {
+                    Ok(0) => break,
+                    Ok(n) => read_total += n,
+                    Err(error) => {
+                        tracing::debug!(%error, path = %path.display(), "skipping executable header check: read failed");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::debug!(%error, path = %path.display(), "skipping executable header check: open failed");
+            return Ok(());
+        }
+    }
+    let header = &header[..read_total];
+    if EXECUTABLE_MAGICS
+        .iter()
+        .any(|magic| header.starts_with(magic))
+    {
+        return Ok(());
+    }
+    Err(StackError::AgentInstallerBinaryUnrunnable {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "no executable header (ELF, Mach-O, or `#!` interpreter line)",
+        ),
+    })
 }
 
 /// Resolve `[agent.install].creates` to a real path. Matches the documented
