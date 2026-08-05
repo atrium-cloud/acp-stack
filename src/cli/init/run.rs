@@ -1854,8 +1854,11 @@ fn run_init_with_output(
             key_handover.emit_handoff_payload("initialized", &handoff_context);
         }
     } else {
-        key_handover.print_and_record(&store, &init_run.id)?;
+        // Finalize before printing so a state-store failure here surfaces as a
+        // failed run (keys still reach the operator via the Drop guard) instead
+        // of a success handover followed by a nonzero exit.
         crate::runtime::init_runner::finalize_run(&store, &init_run.id, INIT_RUN_SUCCEEDED)?;
+        key_handover.print_and_record(&store, &init_run.id)?;
     }
     Ok(())
 }

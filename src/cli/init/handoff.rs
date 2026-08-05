@@ -1,6 +1,8 @@
 use super::*;
 
 const KEY_HANDOVER_PRINTED_EVENT: &str = "auth.keys_handover_printed";
+const NEXT_STEP_HINT: &str =
+    "next: start the runtime with `acps serve`, then create sessions with `acps sessions new`.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitOutputMode {
@@ -95,6 +97,9 @@ impl KeyHandover {
             self.record(store, run_id)?;
             self.print_text();
         }
+        // Success-only hint: the Drop guard also renders keys on failed runs,
+        // where pointing the operator at `acps serve` would be misleading.
+        println!("{NEXT_STEP_HINT}");
         Ok(())
     }
 

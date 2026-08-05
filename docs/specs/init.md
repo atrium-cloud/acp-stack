@@ -129,7 +129,7 @@ When no auth verifier rows exist, init generates two API keys and shows their pl
 - Session key — session-driving and prompt-driving API calls.
 - Admin key — secrets, config import, agent process control, and other elevated operations.
 
-The handover prints the two values. The values are never stored in plaintext, never returned through the API, and never reprinted on a later run: a re-run or `--resume` over existing verifier rows takes the preserved path and shows nothing. Save them when shown.
+The handover prints the two values. The values are never stored in plaintext, never returned through the API, and never reprinted on a later run: a re-run or `--resume` over existing verifier rows takes the preserved path and shows nothing. Save them when shown. Successful text-mode runs end with a next-step hint pointing at `acps serve` and `acps sessions new`, since init itself leaves no daemon running; the hint prints on the preserved path too, but not when a failed run renders keys through the drop guard.
 
 `acps init --rotate-keys` regenerates both keys in place over existing verifier rows and shows the new plaintexts once, exactly like a fresh generation; the retired keys stop verifying immediately. A running daemon caches the verifier pair at startup, so it must be restarted before the rotated keys are accepted. Without `--rotate-keys`, `acps reset --yes` remains the only rotation path.
 
