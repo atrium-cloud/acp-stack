@@ -348,6 +348,51 @@ fn init_prints_session_and_admin_keys_on_first_run() {
     assert!(stdout.contains("session key: acps_"));
     assert!(stdout.contains("admin key: acps_"));
     assert!(stdout.contains("save both keys now"));
+    assert!(stdout.contains("next: start the runtime with `acps serve`"));
+}
+
+#[test]
+fn init_text_rerun_prints_next_step_hint_without_keys() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    run_init_with_home(tempdir.path());
+
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args(["dev", "init", "--agent", "placebo", "--skip-workspace-init"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(!stdout.contains("session key:"));
+    assert!(!stdout.contains("admin key:"));
+    assert!(stdout.contains("next: start the runtime with `acps serve`"));
+}
+
+#[test]
+fn init_text_failure_prints_keys_without_next_step_hint() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "placebo",
+            "--supabase-url",
+            "https://project-ref.supabase.co",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(stdout.contains("session key: acps_"));
+    assert!(stdout.contains("admin key: acps_"));
+    assert!(!stdout.contains("next: start the runtime with `acps serve`"));
 }
 
 #[test]
