@@ -53,5 +53,8 @@ name fails the switch. Switches among agents that share
 | Pi Agent   | `~/.agents/skills`             |
 | Goose      | `~/.agents/skills`             |
 | Kimi Code  | `~/.agents/skills`             |
+| Hermes Agent | `~/.agents/skills`           |
+
+Hermes only discovers `~/.hermes/skills`, so installed skills are additionally symlinked there via the registry link directory.
 
 Claude Code is not a managed Agent Skills install target in this version.

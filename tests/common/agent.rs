@@ -227,6 +227,26 @@ pub fn add_kimi_placebo_target(config: &mut Config) {
     });
 }
 
+pub fn add_hermes_placebo_target(config: &mut Config) {
+    let mut secondary = config.agent.clone();
+    secondary.id = "hermes".to_owned();
+    secondary.name = "Hermes Agent".to_owned();
+    secondary.command = env!("CARGO_BIN_EXE_placebo-agent").to_owned();
+    secondary.args = vec!["acp".into()];
+    secondary.env = vec!["OPENROUTER_API_KEY".to_owned()];
+    secondary.cwd = Some(std::env::temp_dir().to_string_lossy().into_owned());
+    secondary.expected_sha256 = None;
+    secondary.install = Some(acp_stack::config::AgentInstallConfig {
+        install_type: "shell".into(),
+        creates: "true".into(),
+        shell: Some("true".into()),
+    });
+    config.array.targets.push(ArrayTargetConfig {
+        id: "hermes".to_owned(),
+        agent: secondary,
+    });
+}
+
 pub async fn http() -> reqwest::Client {
     reqwest::Client::builder().build().expect("reqwest client")
 }

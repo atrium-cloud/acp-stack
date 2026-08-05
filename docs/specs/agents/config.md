@@ -95,5 +95,6 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 | Codex       | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY`                  |
 | Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
 | Kimi Code   | model-only setup; runtime derives Kimi's process environment from `KIMI_API_KEY`        |
+| Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane in Hermes' `provider:model` id form |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

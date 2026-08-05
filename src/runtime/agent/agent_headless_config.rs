@@ -28,16 +28,19 @@ use crate::runtime::agent::provider_keys::{
 mod claude_code;
 mod codex;
 mod goose;
+mod hermes;
 mod opencode;
 mod pi;
 
 use self::claude_code::*;
 use self::codex::*;
 use self::goose::*;
+use self::hermes::*;
 use self::opencode::*;
 use self::pi::*;
 
 pub(crate) use self::codex::CODEX_OPENROUTER_PROVIDER_ID;
+pub(crate) use self::hermes::HERMES_AGENT_ID;
 pub(crate) use self::opencode::{OPENCODE_AGENT_ID, OPENCODE_DISABLED_SMALL_MODEL};
 
 pub(crate) const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
@@ -292,6 +295,15 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
+        HERMES_AGENT_ID => provision_hermes_config(config, home).map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| ProvisionedAgentConfig {
+                    label: "Hermes config",
+                    path,
+                })
+                .collect()
+        }),
         _ => Ok(Vec::new()),
     }
 }
@@ -306,6 +318,7 @@ pub fn cleanup_agent_headless_config(
         "codex" => cleanup_codex_config(config, home),
         CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, home),
         "pi" => cleanup_pi_config(config, home),
+        HERMES_AGENT_ID => cleanup_hermes_config(config, home),
         _ => Ok(Vec::new()),
     }
 }
