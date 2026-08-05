@@ -119,6 +119,8 @@ Production deployments should:
 - terminate TLS at a reverse proxy or Cloudflare Tunnel
 - keep runtime auth and origin checks enabled behind the edge
 
+Dependency apply is the one path that escalates privilege: only for `scope = "system"` install actions, only through passwordless `sudo -n` (never a password prompt or a tty), and only for operator-declared snippets the operator confirmed.
+
 ## Sandbox
 
 By default the agent harness and mediated shells run in the same process tree and OS user as the daemon, which holds the runtime's secrets, config, and control socket. For an untrusted workload this means in-runtime policy is bypassable and the on-disk secrets are directly readable. `[workspace.sandbox]` wraps every harness and mediated-shell spawn in an isolation backend so the workload cannot read the daemon's sensitive paths or reach its socket. The default is `off`, which preserves single-process behavior unchanged.

@@ -54,8 +54,10 @@ pub(crate) struct DepsApplyResponse {
 
 /// Admin-tier (declared at the router): runs operator-declared shell
 /// snippets, including `scope = "system"` actions, so the blast radius
-/// is far beyond what a session-tier caller should have. The CLI route
-/// (`acps deps apply`) uses the same runner.
+/// is far beyond what a session-tier caller should have — and when the
+/// daemon is non-root with passwordless sudo configured, system-scope
+/// actions escalate through `sudo -n`. The CLI route (`acps deps apply`)
+/// uses the same runner.
 pub(crate) async fn deps_apply_handler(
     State(state): State<AppState>,
     body: Option<Json<DepsApplyBody>>,

@@ -12,15 +12,17 @@
 //!   Missing-but-declared deps without an install action surface as
 //!   "no install action declared" — the runtime never guesses an
 //!   apt/brew/yum invocation.
-//! - System-scoped actions (`scope = "system"`) refuse to run when
-//!   the daemon isn't root, so OS package managers don't get invoked
-//!   from a stale CLI by mistake.
+//! - System-scoped actions (`scope = "system"`) run directly as root,
+//!   escalate through passwordless `sudo -n` when the process is
+//!   non-root, and refuse (recording `privilege_required`) when
+//!   neither applies — the runner never prompts for a password and
+//!   never downgrades a system action to user scope.
 //! - Caller must confirm before any action runs (`--yes` flag on the
 //!   CLI, `confirmation: true` body field on the API).
 
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -31,8 +33,8 @@ use crate::config::{Config, DependencyEntry, DependencyInstallScope};
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::{DepStatus, check_dependencies};
 use crate::runtime::process_runner::{
-    STDERR_TAIL_BYTES, apply_non_interactive_env, detach_into_new_session, join_reader_bounded,
-    kill_process_group, read_to_cap, read_to_cap_with_tail,
+    NON_INTERACTIVE_ENV, STDERR_TAIL_BYTES, apply_non_interactive_env, detach_into_new_session,
+    join_reader_bounded, kill_process_group, read_to_cap, read_to_cap_with_tail, wait_with_timeout,
 };
 use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
@@ -46,6 +48,24 @@ pub const DEPS_APPLY_AGENT_ID: &str = "deps_apply";
 pub const DEPS_APPLY_STEP: &str = "deps_apply";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// `sudo -n` never prompts: it exits non-zero immediately when a password
+/// would be required, so neither the probe nor an escalated run can block
+/// on stdin or a controlling terminal.
+const SUDO_PROGRAM: &str = "sudo";
+const SUDO_NON_INTERACTIVE_FLAG: &str = "-n";
+/// Upper bound on the `sudo -n true` probe. A healthy probe returns in
+/// milliseconds; the bound exists so a wedged sudoers backend (LDAP/SSSD)
+/// cannot stall an apply before a single dep has run.
+const SUDO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Grace period for reaping a killed action. An escalated action runs as
+/// root, so a non-root parent's SIGKILL is refused with EPERM; an unbounded
+/// `wait()` there would hang the whole apply.
+const KILL_REAP_GRACE: Duration = Duration::from_secs(5);
+/// Provenance line prepended to the persisted stdout of an escalated
+/// action. Keeps `installer_runs.method` stable at `shell` (health and
+/// `acps status` pivot on it) while `acps installer history` still shows
+/// sudo was used.
+const ESCALATED_STDOUT_MARKER: &str = "[acps] escalated via `sudo -n`";
 /// Per-stream cap on captured output before we start dropping bytes.
 /// Reuses the state-layer constant so a future bump in installer_runs
 /// row size automatically applies to deps_apply too.
@@ -80,8 +100,8 @@ pub enum DepApplyOutcome {
     /// was skipped entirely. Mirrors the agent installer's
     /// "already_present" semantics.
     AlreadyPresent,
-    /// Action declared `scope = "system"` but the daemon isn't root.
-    /// No subprocess was spawned.
+    /// Action declared `scope = "system"` but the process isn't root
+    /// and passwordless sudo is unavailable. No subprocess was spawned.
     PrivilegeRequired { uid: u32 },
     /// Action ran but `creates` did not resolve afterwards, OR the
     /// action exited non-zero. Tail of stderr included for context.
@@ -97,6 +117,96 @@ pub struct DepsApplyReport {
     pub before: Vec<DepStatus>,
     pub after: Vec<DepStatus>,
     pub results: Vec<DepApplyResult>,
+}
+
+/// How the apply runner reaches root for `scope = "system"` actions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivilegeEscalation {
+    /// euid == 0 — system-scope actions run directly.
+    NotNeeded,
+    /// euid != 0 but `sudo -n true` succeeded. `sudo_path` is resolved
+    /// once at probe time so the probe and the actual run cannot pick
+    /// different binaries.
+    Sudo { sudo_path: PathBuf, uid: u32 },
+    /// euid != 0 and passwordless sudo is unavailable (missing binary,
+    /// password required, or probe timeout).
+    Unavailable { uid: u32 },
+}
+
+impl PrivilegeEscalation {
+    pub fn is_available(&self) -> bool {
+        !matches!(self, PrivilegeEscalation::Unavailable { .. })
+    }
+
+    pub fn uid(&self) -> u32 {
+        match self {
+            PrivilegeEscalation::NotNeeded => 0,
+            PrivilegeEscalation::Sudo { uid, .. } | PrivilegeEscalation::Unavailable { uid } => {
+                *uid
+            }
+        }
+    }
+}
+
+/// Probe how system-scope actions can reach root. Never returns Err: a
+/// missing `sudo`, a password-gated sudoers rule, and a hung probe are all
+/// environment facts, not acps failures — they collapse to `Unavailable`.
+/// Not cached process-wide: a long-lived daemon must not pin sudoers state
+/// across a config change, so callers probe once per apply invocation.
+pub fn probe_privilege_escalation() -> PrivilegeEscalation {
+    probe_privilege_escalation_with(current_uid(), resolve_command(SUDO_PROGRAM))
+}
+
+/// Testable core of [`probe_privilege_escalation`]: uid and resolved sudo
+/// path are injected so tests don't have to mutate the process-global PATH
+/// (which races with parallel tests spawning shells).
+fn probe_privilege_escalation_with(uid: u32, sudo_path: Option<PathBuf>) -> PrivilegeEscalation {
+    if uid == 0 {
+        return PrivilegeEscalation::NotNeeded;
+    }
+    let Some(sudo_path) = sudo_path else {
+        return PrivilegeEscalation::Unavailable { uid };
+    };
+    let mut command = Command::new(&sudo_path);
+    command
+        .arg(SUDO_NON_INTERACTIVE_FLAG)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env_clear()
+        .envs(scrubbed_env());
+    apply_non_interactive_env(&mut command);
+    detach_into_new_session(&mut command);
+    let Ok(mut child) = command.spawn() else {
+        return PrivilegeEscalation::Unavailable { uid };
+    };
+    match wait_with_timeout(&mut child, Instant::now() + SUDO_PROBE_TIMEOUT) {
+        Ok(Some(status)) if status.success() => PrivilegeEscalation::Sudo { sudo_path, uid },
+        Ok(Some(_)) => PrivilegeEscalation::Unavailable { uid },
+        Ok(None) | Err(_) => {
+            // Timed out or wait failed — the probe child may still be
+            // alive; reap the group so it cannot outlive the probe.
+            kill_process_group(&mut child);
+            if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
+                tracing::warn!(
+                    "sudo probe outlived its timeout kill and was abandoned unreaped (pid={})",
+                    child.id(),
+                );
+            }
+            PrivilegeEscalation::Unavailable { uid }
+        }
+    }
+}
+
+/// Probe only when a pending system-scope action exists, so a satisfied
+/// config never shells out to sudo.
+fn escalation_for(config: &Config, feature: Option<&str>) -> PrivilegeEscalation {
+    if pending_system_candidates(config, feature).is_empty() {
+        PrivilegeEscalation::NotNeeded
+    } else {
+        probe_privilege_escalation()
+    }
 }
 
 /// Filter declared command deps down to those that:
@@ -137,6 +247,15 @@ pub fn pending_candidates(config: &Config, feature: Option<&str>) -> Vec<DepAppl
         .collect()
 }
 
+/// Pending candidates whose install action declares `scope = "system"`.
+/// Drives the escalation probe, the preflight notice, and the skip warning.
+pub fn pending_system_candidates(config: &Config, feature: Option<&str>) -> Vec<DepApplyCandidate> {
+    pending_candidates(config, feature)
+        .into_iter()
+        .filter(|candidate| candidate.scope == DependencyInstallScope::System)
+        .collect()
+}
+
 /// Run every eligible install action and return a structured report
 /// containing the before-state, after-state, and per-action outcome.
 /// The caller is responsible for confirming with the operator before
@@ -147,14 +266,27 @@ pub fn apply_dependencies(
     state: Option<&StateStore>,
     shell_program: &str,
 ) -> Result<DepsApplyReport> {
-    apply_dependencies_with_progress(config, feature, state, shell_program, |_, _, _| Ok(()))
+    let escalation = escalation_for(config, feature);
+    apply_dependencies_with_escalation(
+        config,
+        feature,
+        state,
+        shell_program,
+        &escalation,
+        |_, _, _| Ok(()),
+    )
 }
 
-pub fn apply_dependencies_with_progress(
+/// Explicit-escalation entry point. Callers that already probed for their
+/// confirmation prompt (init's preflight, `acps deps apply`) pass the
+/// decision in so one invocation performs exactly one probe; it is also
+/// the seam that lets tests inject a fake escalation.
+pub fn apply_dependencies_with_escalation(
     config: &Config,
     feature: Option<&str>,
     state: Option<&StateStore>,
     shell_program: &str,
+    escalation: &PrivilegeEscalation,
     mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
 ) -> Result<DepsApplyReport> {
     // before/after must honor each dep's `install.creates` (which may
@@ -190,6 +322,7 @@ pub fn apply_dependencies_with_progress(
             state,
             shell_program,
             &apply_run_id,
+            escalation,
         )?);
     }
     let after = compute_before_after_report(config);
@@ -224,6 +357,7 @@ fn apply_one(
     state: Option<&StateStore>,
     shell_program: &str,
     apply_run_id: &str,
+    escalation: &PrivilegeEscalation,
 ) -> Result<DepApplyResult> {
     let creates = install
         .creates
@@ -263,47 +397,77 @@ fn apply_one(
         });
     }
 
-    if install.scope == DependencyInstallScope::System {
-        let uid = current_uid();
-        if uid != 0 {
-            let finished_at = current_timestamp();
-            let stderr_message = format!(
-                "dep `{name}` declares scope=system but the runtime is uid={uid}; \
-                 re-run the install action through sudo or root",
-                name = entry.name,
-            );
-            if let Some(store) = state {
-                store.append_installer_run(InstallerRunInput {
-                    agent_id: DEPS_APPLY_AGENT_ID,
-                    started_at: &started_at,
-                    finished_at: Some(&finished_at),
-                    status: "privilege_required",
-                    stdout: "",
-                    stderr: &stderr_message,
-                    exit_status: None,
-                    step: DEPS_APPLY_STEP,
-                    version: None,
-                    operation: crate::state::INSTALLER_OPERATION_INSTALL,
-                    method: Some(crate::state::INSTALLER_METHOD_SHELL),
-                    log_dir: None,
-                    apply_run_id: Some(apply_run_id),
-                })?;
+    // Re-derive the decision at the execution point: `NotNeeded` also
+    // stands in for "nothing was pending at probe time, so no probe ran".
+    // If a system-scope action became pending between probe and apply
+    // (operator think-time at the confirm prompt, or an earlier action
+    // changing PATH), trusting the stale value would run a root-intended
+    // script as the unprivileged user — the downgrade this module promises
+    // never happens. A non-root euid under `NotNeeded` therefore refuses.
+    let effective_escalation = match escalation {
+        PrivilegeEscalation::NotNeeded => {
+            let uid = current_uid();
+            if uid == 0 {
+                PrivilegeEscalation::NotNeeded
+            } else {
+                PrivilegeEscalation::Unavailable { uid }
             }
-            let post_status = check_one(entry);
-            return Ok(DepApplyResult {
-                name: entry.name.clone(),
-                outcome: DepApplyOutcome::PrivilegeRequired { uid },
-                post_status,
-            });
         }
-    }
+        other => other.clone(),
+    };
+    let sudo = if install.scope == DependencyInstallScope::System {
+        match &effective_escalation {
+            PrivilegeEscalation::NotNeeded => None,
+            PrivilegeEscalation::Sudo { sudo_path, .. } => Some(sudo_path.as_path()),
+            PrivilegeEscalation::Unavailable { uid } => {
+                let uid = *uid;
+                let finished_at = current_timestamp();
+                let candidate = DepApplyCandidate {
+                    name: entry.name.clone(),
+                    scope: install.scope,
+                    shell: install.shell.clone(),
+                    creates: creates.clone(),
+                };
+                let stderr_message = format!(
+                    "dep `{name}` declares scope=system but the runtime is uid={uid} and passwordless sudo is unavailable (`sudo -n true` failed); run it manually: {manual}",
+                    name = entry.name,
+                    manual = manual_privileged_command(shell_program, &candidate),
+                );
+                if let Some(store) = state {
+                    store.append_installer_run(InstallerRunInput {
+                        agent_id: DEPS_APPLY_AGENT_ID,
+                        started_at: &started_at,
+                        finished_at: Some(&finished_at),
+                        status: "privilege_required",
+                        stdout: "",
+                        stderr: &cap_stream(&stderr_message),
+                        exit_status: None,
+                        step: DEPS_APPLY_STEP,
+                        version: None,
+                        operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                        method: Some(crate::state::INSTALLER_METHOD_SHELL),
+                        log_dir: None,
+                        apply_run_id: Some(apply_run_id),
+                    })?;
+                }
+                let post_status = check_one(entry);
+                return Ok(DepApplyResult {
+                    name: entry.name.clone(),
+                    outcome: DepApplyOutcome::PrivilegeRequired { uid },
+                    post_status,
+                });
+            }
+        }
+    } else {
+        None
+    };
 
     let timeout = install
         .timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_TIMEOUT);
     let (exit_code, stdout, stderr, timed_out, stderr_tail) =
-        run_shell(shell_program, &install.shell, timeout)?;
+        run_shell(shell_program, &install.shell, timeout, sudo)?;
     let finished_at = current_timestamp();
     let _elapsed = started_instant.elapsed();
 
@@ -344,12 +508,17 @@ fn apply_one(
         // the operator-facing outcome which reports timeout as
         // `exit_code: None`. Match the outcome contract instead.
         let persisted_exit = if timed_out { None } else { exit_code };
+        let persisted_stdout = if sudo.is_some() {
+            cap_stream(&format!("{ESCALATED_STDOUT_MARKER}\n{stdout}"))
+        } else {
+            cap_stream(&stdout)
+        };
         store.append_installer_run(InstallerRunInput {
             agent_id: DEPS_APPLY_AGENT_ID,
             started_at: &started_at,
             finished_at: Some(&finished_at),
             status: status_label,
-            stdout: &cap_stream(&stdout),
+            stdout: &persisted_stdout,
             stderr: &cap_stream(&stderr),
             exit_status: persisted_exit,
             step: DEPS_APPLY_STEP,
@@ -408,11 +577,25 @@ fn run_shell(
     shell_program: &str,
     script: &str,
     timeout: Duration,
+    sudo: Option<&Path>,
 ) -> Result<(Option<i32>, String, String, bool, String)> {
-    let mut command = Command::new(shell_program);
+    let mut command = match sudo {
+        Some(sudo_path) => {
+            let mut command = Command::new(sudo_path);
+            command
+                .arg(SUDO_NON_INTERACTIVE_FLAG)
+                .arg(shell_program)
+                .arg("-c")
+                .arg(escalated_script(script));
+            command
+        }
+        None => {
+            let mut command = Command::new(shell_program);
+            command.arg("-c").arg(script);
+            command
+        }
+    };
     command
-        .arg("-c")
-        .arg(script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -444,9 +627,22 @@ fn run_shell(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    // On escalated runs the child is root-owned, so our
+                    // SIGKILL is refused with EPERM and an unbounded
+                    // `wait()` would hang the apply; the bounded reap
+                    // (plus the bounded reader joins below) keeps the
+                    // outcome reported as a timeout Failed either way.
                     kill_process_group(&mut child);
                     timed_out = true;
-                    let _ = child.wait();
+                    if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
+                        // Root-owned (escalated) children ignore our SIGKILL,
+                        // so the unreaped child lingers as a zombie until the
+                        // process exits. Surface it rather than leak silently.
+                        tracing::warn!(
+                            "dep install action outlived its timeout kill and was abandoned unreaped (pid={})",
+                            child.id(),
+                        );
+                    }
                     break std::process::ExitStatus::default();
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -475,6 +671,97 @@ fn run_shell(
         join_reader_bounded(stderr_thread).unwrap_or((String::new(), String::new()));
     let exit_code = status.code();
     Ok((exit_code, stdout, stderr, timed_out, stderr_tail))
+}
+
+/// sudo resets the environment (`env_reset` in sudoers), so the
+/// non-interactive vars set on the child are dropped before the operator's
+/// script runs — `apt-get` would go back to prompting. Re-export them inside
+/// the escalated shell instead of asking sudoers for `setenv`/`--preserve-env`
+/// permission we may not have. Names and values come from the compile-time
+/// [`NON_INTERACTIVE_ENV`] table (never operator input), so no quoting is
+/// needed; the operator's script is appended verbatim.
+fn escalated_script(script: &str) -> String {
+    let mut out = String::new();
+    for (name, value) in NON_INTERACTIVE_ENV {
+        writeln!(&mut out, "export {name}={value}").expect("write to String");
+    }
+    out.push_str(script);
+    out
+}
+
+/// Bounded reap after a group kill. A root-owned (escalated) child cannot be
+/// signalled by a non-root parent, so a plain `wait()` would block forever.
+/// Returns `None` when the child outlives the grace; callers already treat
+/// that as a timeout and the pipe-reader joins are separately bounded.
+fn reap_with_grace(
+    child: &mut std::process::Child,
+    grace: Duration,
+) -> Option<std::process::ExitStatus> {
+    wait_with_timeout(child, Instant::now() + grace)
+        .ok()
+        .flatten()
+}
+
+/// Copy-pasteable command that reproduces exactly what the runner would have
+/// run for a system-scope action, for hosts where acps cannot escalate.
+pub fn manual_privileged_command(shell_program: &str, candidate: &DepApplyCandidate) -> String {
+    format!(
+        "sudo {shell_program} -c {script}",
+        script = shell_single_quote(&candidate.shell),
+    )
+}
+
+/// POSIX single-quote escaping: wrap in `'…'` with embedded `'` rendered as
+/// `'\''`.
+fn shell_single_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Operator-facing escalation notice shared by `acps init` and `acps deps
+/// apply` so the two confirmation prompts cannot drift. Empty when no
+/// system-scope candidate is pending.
+pub fn escalation_notice_lines(
+    escalation: &PrivilegeEscalation,
+    shell_program: &str,
+    system_candidates: &[DepApplyCandidate],
+) -> Vec<String> {
+    if system_candidates.is_empty() {
+        return Vec::new();
+    }
+    let count = system_candidates.len();
+    match escalation {
+        PrivilegeEscalation::NotNeeded => vec![format!(
+            "note: {count} action(s) declare scope=system; the runtime is root and will run them directly."
+        )],
+        PrivilegeEscalation::Sudo { uid, .. } => vec![format!(
+            "note: {count} action(s) declare scope=system; passwordless sudo is available (uid={uid}), so they run through `sudo -n`."
+        )],
+        PrivilegeEscalation::Unavailable { uid } => {
+            let mut lines = vec![format!(
+                "warning: {count} action(s) declare scope=system but this host is uid={uid} with no passwordless sudo; they will be skipped and recorded as privilege_required."
+            )];
+            for candidate in system_candidates {
+                lines.push(format!(
+                    "  - {name}: {manual}",
+                    name = candidate.name,
+                    manual = manual_privileged_command(shell_program, candidate),
+                ));
+            }
+            // The follow-up instruction (resume vs re-run) is
+            // caller-specific; init and `acps deps apply` append their own.
+            lines
+        }
+    }
 }
 
 fn cap_stream(value: &str) -> String {
@@ -547,18 +834,6 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
-}
-
-/// Convenience used by the CLI to print a confirmation summary before
-/// invoking the runner. Returns the same candidate set the runner will
-/// process, plus a flag indicating whether any `system`-scoped action
-/// is present (so the prompt can warn the operator).
-pub fn summarize_candidates(candidates: &[DepApplyCandidate]) -> (usize, bool) {
-    let count = candidates.len();
-    let any_system = candidates
-        .iter()
-        .any(|c| c.scope == DependencyInstallScope::System);
-    (count, any_system)
 }
 
 pub fn candidate_summary_line(candidate: &DepApplyCandidate) -> String {
@@ -747,42 +1022,375 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_refuses_system_scope_when_not_root() {
-        // Test runs as a non-root user (CI + dev shells), so a
-        // scope=system dep that's actually missing must short-circuit
-        // to PrivilegeRequired without spawning anything.
-        let config = config_with_dep(DependencyEntry {
-            name: "definitely-not-installed-acps-priv-check".into(),
+    fn system_dep(name: &str, shell: &str, creates: &str) -> DependencyEntry {
+        DependencyEntry {
+            name: name.into(),
             required: true,
             feature: None,
             install: Some(DependencyInstallAction {
-                // Shell is intentionally destructive-looking to make it
-                // obvious if the test bug let it actually run.
-                shell: "echo SHOULD NOT EXECUTE >&2; exit 99".into(),
-                creates: Some("definitely-not-installed-acps-priv-check".into()),
+                shell: shell.into(),
+                creates: Some(creates.into()),
                 scope: DependencyInstallScope::System,
                 timeout_secs: None,
             }),
-        });
-        let report = apply_dependencies(&config, None, None, "/bin/sh").expect("apply");
-        if current_uid() == 0 {
-            // Test was inexplicably run as root; outcome reflects
-            // that the shell DID execute and failed.
-            assert!(matches!(
+        }
+    }
+
+    #[test]
+    fn escalation_unavailable_still_refuses_system_scope() {
+        // Injected Unavailable escalation must short-circuit to
+        // PrivilegeRequired without spawning anything, regardless of the
+        // uid the test actually runs under.
+        let config = config_with_dep(system_dep(
+            "definitely-not-installed-acps-priv-check",
+            // Shell is intentionally destructive-looking to make it
+            // obvious if a test bug let it actually run.
+            "echo SHOULD NOT EXECUTE >&2; exit 99",
+            "definitely-not-installed-acps-priv-check",
+        ));
+        let report = apply_dependencies_with_escalation(
+            &config,
+            None,
+            None,
+            "/bin/sh",
+            &PrivilegeEscalation::Unavailable { uid: 1001 },
+            |_, _, _| Ok(()),
+        )
+        .expect("apply");
+        assert!(
+            matches!(
                 report.results[0].outcome,
-                DepApplyOutcome::Failed { .. }
-            ));
+                DepApplyOutcome::PrivilegeRequired { uid: 1001 }
+            ),
+            "unavailable escalation must short-circuit to PrivilegeRequired; got {:?}",
+            report.results[0].outcome,
+        );
+    }
+
+    #[test]
+    fn not_needed_escalation_is_revalidated_against_euid_at_apply_time() {
+        // `NotNeeded` doubles as "nothing was pending at probe time, so no
+        // probe ran". If a system-scope action becomes pending afterwards,
+        // apply_one must re-derive the decision from the live euid instead
+        // of running a root-intended script unprivileged. As non-root that
+        // means PrivilegeRequired; as actual root it runs directly.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let bin = tempdir.path().join("system-direct-marker");
+        let bin_str = bin.to_string_lossy().into_owned();
+        let config = config_with_dep(system_dep(
+            "system-direct-marker",
+            &format!("printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}"),
+            &bin_str,
+        ));
+        let report = apply_dependencies_with_escalation(
+            &config,
+            None,
+            None,
+            "/bin/sh",
+            &PrivilegeEscalation::NotNeeded,
+            |_, _, _| Ok(()),
+        )
+        .expect("apply");
+        if current_uid() == 0 {
+            assert!(
+                matches!(report.results[0].outcome, DepApplyOutcome::Installed),
+                "root must run system scope directly; got {:?}",
+                report.results[0].outcome,
+            );
         } else {
             assert!(
                 matches!(
                     report.results[0].outcome,
                     DepApplyOutcome::PrivilegeRequired { .. }
                 ),
-                "non-root test must short-circuit to PrivilegeRequired; got {:?}",
+                "stale NotNeeded must not run system scope unprivileged; got {:?}",
                 report.results[0].outcome,
             );
+            assert!(!bin.exists(), "script must not have executed");
         }
+    }
+
+    /// Fake `sudo` that records its argv (one per line) and then execs the
+    /// remaining command, skipping the `-n` flag. Lets the escalated code
+    /// path run end to end without real privileges.
+    fn write_fake_sudo(dir: &Path, argv_log: &Path) -> PathBuf {
+        let path = dir.join("sudo");
+        let script = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> {log}; done\nshift\nexec \"$@\"\n",
+            log = argv_log.to_string_lossy(),
+        );
+        std::fs::write(&path, script).expect("write fake sudo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake sudo");
+        }
+        path
+    }
+
+    #[test]
+    fn sudo_escalation_wraps_shell_invocation() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let argv_log = tempdir.path().join("sudo-argv.log");
+        let fake_sudo = write_fake_sudo(tempdir.path(), &argv_log);
+        let bin = tempdir.path().join("sudo-escalated-marker");
+        let bin_str = bin.to_string_lossy().into_owned();
+        let script = format!("printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}");
+        let config = config_with_dep(system_dep("sudo-escalated-marker", &script, &bin_str));
+        let report = apply_dependencies_with_escalation(
+            &config,
+            None,
+            None,
+            "/bin/sh",
+            &PrivilegeEscalation::Sudo {
+                sudo_path: fake_sudo,
+                uid: 1001,
+            },
+            |_, _, _| Ok(()),
+        )
+        .expect("apply");
+        assert!(
+            matches!(report.results[0].outcome, DepApplyOutcome::Installed),
+            "expected Installed through fake sudo; got {:?}",
+            report.results[0].outcome,
+        );
+        let argv = std::fs::read_to_string(&argv_log).expect("argv log");
+        let lines: Vec<&str> = argv.lines().collect();
+        assert_eq!(&lines[..3], &[SUDO_NON_INTERACTIVE_FLAG, "/bin/sh", "-c"]);
+        let escalated = lines[3..].join("\n");
+        assert!(
+            escalated.ends_with(&script),
+            "operator script must be verbatim and last: {escalated:?}",
+        );
+        assert!(
+            escalated.contains("export DEBIAN_FRONTEND=noninteractive"),
+            "non-interactive env must be re-exported inside the escalated shell: {escalated:?}",
+        );
+    }
+
+    #[test]
+    fn escalated_run_records_sudo_marker_in_stdout() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let argv_log = tempdir.path().join("sudo-argv.log");
+        let fake_sudo = write_fake_sudo(tempdir.path(), &argv_log);
+        let bin = tempdir.path().join("sudo-marker-audit");
+        let bin_str = bin.to_string_lossy().into_owned();
+        let config = config_with_dep(system_dep(
+            "sudo-marker-audit",
+            &format!("printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}"),
+            &bin_str,
+        ));
+        let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+        store.migrate().expect("migrate");
+        apply_dependencies_with_escalation(
+            &config,
+            None,
+            Some(&store),
+            "/bin/sh",
+            &PrivilegeEscalation::Sudo {
+                sudo_path: fake_sudo,
+                uid: 1001,
+            },
+            |_, _, _| Ok(()),
+        )
+        .expect("apply");
+        let rows = store
+            .query_installer_runs_filtered(Some(DEPS_APPLY_AGENT_ID), 10)
+            .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "installed");
+        assert_eq!(rows[0].method.as_deref(), Some("shell"));
+        assert!(
+            rows[0].stdout.starts_with(ESCALATED_STDOUT_MARKER),
+            "persisted stdout must lead with the escalation marker: {:?}",
+            rows[0].stdout,
+        );
+    }
+
+    #[test]
+    fn escalated_script_reexports_non_interactive_env() {
+        let script = escalated_script("apt-get install -y jq");
+        for (name, value) in NON_INTERACTIVE_ENV {
+            assert!(
+                script.contains(&format!("export {name}={value}")),
+                "missing export for {name}: {script:?}",
+            );
+        }
+        assert!(
+            script.ends_with("apt-get install -y jq"),
+            "operator script must be appended verbatim and last: {script:?}",
+        );
+    }
+
+    #[test]
+    fn manual_privileged_command_quotes_embedded_single_quotes() {
+        let candidate = DepApplyCandidate {
+            name: "quoted".into(),
+            scope: DependencyInstallScope::System,
+            shell: "echo 'hi'".into(),
+            creates: "quoted".into(),
+        };
+        assert_eq!(
+            manual_privileged_command("/bin/sh", &candidate),
+            r"sudo /bin/sh -c 'echo '\''hi'\'''",
+        );
+    }
+
+    /// Write an executable script that exits with `code`, standing in for
+    /// sudo in probe tests.
+    fn write_exit_stub(dir: &Path, name: &str, code: i32) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub");
+        }
+        path
+    }
+
+    #[test]
+    fn probe_collapses_missing_and_denied_sudo_to_unavailable() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            probe_privilege_escalation_with(1001, None),
+            PrivilegeEscalation::Unavailable { uid: 1001 },
+        );
+        // A "sudo" that exits non-zero (password required) is Unavailable.
+        let denied_sudo = write_exit_stub(tempdir.path(), "sudo-denied", 1);
+        assert_eq!(
+            probe_privilege_escalation_with(1001, Some(denied_sudo)),
+            PrivilegeEscalation::Unavailable { uid: 1001 },
+        );
+        // A "sudo" that exits zero advertises escalation with its path.
+        // The probe deliberately collapses transient spawn errors (e.g.
+        // fork EAGAIN when the whole suite runs in parallel) to
+        // Unavailable, so give the load-sensitive granted case a couple
+        // of retries before declaring the logic wrong.
+        let granted_sudo = write_exit_stub(tempdir.path(), "sudo-granted", 0);
+        let mut granted = probe_privilege_escalation_with(1001, Some(granted_sudo.clone()));
+        for _ in 0..2 {
+            if matches!(granted, PrivilegeEscalation::Sudo { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            granted = probe_privilege_escalation_with(1001, Some(granted_sudo.clone()));
+        }
+        assert_eq!(
+            granted,
+            PrivilegeEscalation::Sudo {
+                sudo_path: granted_sudo,
+                uid: 1001,
+            },
+        );
+        // Root short-circuits without touching the candidate path at all.
+        assert_eq!(
+            probe_privilege_escalation_with(0, None),
+            PrivilegeEscalation::NotNeeded,
+        );
+    }
+
+    #[test]
+    fn escalation_notice_lines_cover_all_modes() {
+        let candidate = DepApplyCandidate {
+            name: "acpstack-system-dep".into(),
+            scope: DependencyInstallScope::System,
+            shell: "apt-get install -y jq".into(),
+            creates: "jq".into(),
+        };
+        let candidates = vec![candidate];
+        assert!(
+            escalation_notice_lines(&PrivilegeEscalation::NotNeeded, "/bin/sh", &[]).is_empty(),
+            "no system candidates must yield no notice",
+        );
+        let root = escalation_notice_lines(&PrivilegeEscalation::NotNeeded, "/bin/sh", &candidates);
+        assert_eq!(root.len(), 1);
+        assert!(root[0].contains("run them directly"), "{root:?}");
+        let sudo = escalation_notice_lines(
+            &PrivilegeEscalation::Sudo {
+                sudo_path: PathBuf::from("/usr/bin/sudo"),
+                uid: 1001,
+            },
+            "/bin/sh",
+            &candidates,
+        );
+        assert_eq!(sudo.len(), 1);
+        assert!(sudo[0].contains("`sudo -n`"), "{sudo:?}");
+        let unavailable = escalation_notice_lines(
+            &PrivilegeEscalation::Unavailable { uid: 1001 },
+            "/bin/sh",
+            &candidates,
+        );
+        assert!(
+            unavailable[0].contains("skipped and recorded as privilege_required"),
+            "{unavailable:?}",
+        );
+        assert!(
+            unavailable
+                .iter()
+                .any(|line| line.contains("sudo /bin/sh -c 'apt-get install -y jq'")),
+            "manual command must be listed per candidate: {unavailable:?}",
+        );
+    }
+
+    #[test]
+    fn pending_system_candidates_filters_scope_and_presence() {
+        let mut config = config_with_dep(system_dep(
+            "definitely-not-installed-acps-system-pending",
+            "true",
+            "definitely-not-installed-acps-system-pending",
+        ));
+        // Present system dep (creates resolves) — excluded.
+        config
+            .dependencies
+            .commands
+            .push(system_dep("sh-present", "true", "sh"));
+        // Pending user dep — excluded by scope.
+        config.dependencies.commands.push(DependencyEntry {
+            name: "definitely-not-installed-acps-user-pending".into(),
+            required: true,
+            feature: None,
+            install: Some(DependencyInstallAction {
+                shell: "true".into(),
+                creates: Some("definitely-not-installed-acps-user-pending".into()),
+                scope: DependencyInstallScope::User,
+                timeout_secs: None,
+            }),
+        });
+        let pending = pending_system_candidates(&config, None);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].name,
+            "definitely-not-installed-acps-system-pending"
+        );
+    }
+
+    #[test]
+    fn reap_with_grace_bounds_wait_and_reaps_exited_children() {
+        let mut exited = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn");
+        let status = reap_with_grace(&mut exited, Duration::from_secs(5));
+        assert!(status.is_some(), "exited child must reap within grace");
+
+        let mut running = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .expect("spawn");
+        let started = Instant::now();
+        let status = reap_with_grace(&mut running, Duration::from_millis(200));
+        assert!(status.is_none(), "running child must return None");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "grace must bound the wait",
+        );
+        let _ = running.kill();
+        let _ = running.wait();
     }
 
     #[test]

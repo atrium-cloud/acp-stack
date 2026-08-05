@@ -44,7 +44,11 @@ const SINK_FAILURE_FAIL_THRESHOLD: i64 = 1;
 // `installer_runs.status` values written by `acps deps apply` (mirroring
 // `runtime/dependencies/deps_apply.rs::DepApplyOutcome::status_label`). Rows tagged
 // `installed` or `skipped` are healthy; `failed` and `privilege_required`
-// mean the last apply attempt did not deliver the dependency. Made `pub`
+// mean the last apply attempt did not deliver the dependency
+// (`privilege_required` is reachable only when the runner is non-root and
+// passwordless sudo is unavailable — the dep genuinely is missing, so it
+// must keep counting as a failure even though init continues past it).
+// Made `pub`
 // so `cli::status` can apply the same cluster heuristic with identical
 // constants — duplicating these in the CLI led to drift in earlier passes.
 pub const DEPS_STATUS_FAILED: &str = "failed";

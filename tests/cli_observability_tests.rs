@@ -1134,6 +1134,79 @@ fn deps_apply_prints_before_and_after_status() {
 }
 
 #[test]
+fn deps_apply_exits_nonzero_and_prints_manual_commands_on_privilege_skip() {
+    // SAFETY: `geteuid()` is always safe — no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        // As root the escalation probe short-circuits to "run directly"
+        // and the skip path under test is unreachable.
+        return;
+    }
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+
+    // Deterministic "no passwordless sudo": a fake sudo that exits 1, first
+    // on PATH, collapses the escalation probe to Unavailable.
+    let fake_bin = tempdir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).expect("fake bin dir");
+    let fake_sudo = fake_bin.join("sudo");
+    fs::write(&fake_sudo, "#!/bin/sh\nexit 1\n").expect("fake sudo");
+    fs::set_permissions(&fake_sudo, fs::Permissions::from_mode(0o755)).expect("chmod fake sudo");
+    let host_path = std::env::var("PATH").expect("PATH should be set");
+    let path_with_fake_sudo = format!("{}:{host_path}", fake_bin.to_string_lossy());
+
+    let dependency_name = "deps-apply-privilege-skip-marker";
+    let config = VALID_CONFIG.replace(
+        "[agent]",
+        &format!(
+            r#"[[dependencies.commands]]
+	name = "{dependency_name}"
+	required = true
+
+	[dependencies.commands.install]
+	shell = "exit 0"
+	creates = "{dependency_name}"
+	scope = "system"
+
+	[agent]"#,
+        ),
+    );
+    fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
+
+    let state_path = default_state_path(tempdir.path());
+    fs::create_dir_all(state_path.parent().expect("state parent dir"))
+        .expect("state dir should be created");
+    let store = StateStore::open(&state_path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+    seed_auth_verifiers(tempdir.path(), SESSION_KEY, ADMIN_KEY);
+
+    // Unlike init (which skips and continues), the explicit imperative
+    // command must exit non-zero and hand the operator the manual commands.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .env("PATH", path_with_fake_sudo)
+        .args(["deps", "apply", "--yes", "--admin-key", ADMIN_KEY])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains(
+            "no passwordless sudo; they will be skipped and recorded as privilege_required",
+        ))
+        .stdout(predicates::str::contains(format!(
+            "privreq     {dependency_name}"
+        )))
+        .stdout(predicates::str::contains("sudo /bin/bash -c 'exit 0'"))
+        .stderr(predicates::str::contains("need root privilege"));
+
+    let store = StateStore::open(&state_path).expect("state should reopen");
+    let rows = store
+        .query_installer_runs_filtered(Some("deps_apply"), 10)
+        .expect("installer history should query");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].status, "privilege_required");
+}
+
+#[test]
 fn deps_apply_requires_admin_key() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
 

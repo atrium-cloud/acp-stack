@@ -1142,14 +1142,27 @@ fn run_init_with_output(
     // `--deps-apply --deps-apply-yes` non-interactively.
     // -----------------------------------------------------------------
     let deps_candidates = pending_candidates(&config, None);
+    // Probe escalation once and reuse it for the preflight notice and the
+    // apply itself, so the prompt cannot promise a mode the apply won't use.
+    let deps_escalation = if pending_system_candidates(&config, None).is_empty() {
+        PrivilegeEscalation::NotNeeded
+    } else {
+        probe_privilege_escalation()
+    };
     // Wrap in finalize_with_error so a confirmation error (e.g. `--deps-apply`
     // without `--deps-apply-yes`) marks the run terminal instead of leaving it
     // pending after the earlier steps already succeeded.
-    let deps_apply_requested =
-        match should_apply_deps_for_init(&args, &deps_candidates, prompts_enabled(&args)) {
-            Ok(requested) => requested,
-            Err(error) => return finalize_with_error(&store, &init_run, error),
-        };
+    let deps_apply_requested = match should_apply_deps_for_init(
+        &args,
+        &deps_candidates,
+        prompts_enabled(&args),
+        &deps_escalation,
+        &config.workspace.default_shell,
+        &mut |line| init_println!(output_mode, "{line}"),
+    ) {
+        Ok(requested) => requested,
+        Err(error) => return finalize_with_error(&store, &init_run, error),
+    };
     if deps_apply_requested || step_needs_resume(&prior_init_steps, step_kind::DEPS_APPLY) {
         init_println!(output_mode, "progress: applying dependencies");
         let result = record_step(
@@ -1159,11 +1172,12 @@ fn run_init_with_output(
             step_kind::DEPS_APPLY,
             || Ok(pending_candidates(&config, None).is_empty()),
             || {
-                let report = apply_dependencies_with_progress(
+                let report = apply_dependencies_with_escalation(
                     &config,
                     None,
                     Some(&store),
                     &config.workspace.default_shell,
+                    &deps_escalation,
                     |current, total, name| {
                         init_println!(
                             output_mode,
@@ -1172,7 +1186,17 @@ fn run_init_with_output(
                         Ok(())
                     },
                 )?;
+                // Genuine action failures fail init: the operator confirmed
+                // an apply that then broke. Privilege skips do not — an
+                // un-escalatable host is a host property, so init degrades
+                // and continues to provider/auth collection; the skipped
+                // deps stay visible via `privilege_required` audit rows and
+                // health, and a later resume re-runs them because the step
+                // verifier (`pending_candidates(...).is_empty()`) is still
+                // false for them.
                 let mut failures = Vec::new();
+                let mut skipped_privileged = Vec::new();
+                let mut skipped_privilege_uid: Option<u32> = None;
                 for entry in &report.results {
                     match &entry.outcome {
                         DepApplyOutcome::Failed { exit_code, .. } => {
@@ -1182,26 +1206,63 @@ fn run_init_with_output(
                             failures.push(format!("{} failed (exit={code})", entry.name));
                         }
                         DepApplyOutcome::PrivilegeRequired { uid } => {
-                            failures
-                                .push(format!("{} needs root privilege (uid={uid})", entry.name));
+                            skipped_privileged.push(entry.name.clone());
+                            skipped_privilege_uid = Some(*uid);
                         }
                         DepApplyOutcome::Installed | DepApplyOutcome::AlreadyPresent => {}
                     }
                 }
                 if !failures.is_empty() {
-                    return Err(StackError::InvalidParam {
-                        field: "deps",
-                        reason: format!(
-                            "dependency apply produced non-success outcomes: {}; inspect `acps installer history --agent deps_apply` (apply_run_id={})",
-                            failures.join("; "),
-                            report.apply_run_id,
-                        ),
+                    if !skipped_privileged.is_empty() {
+                        failures.push(format!(
+                            "{} action(s) skipped on privilege",
+                            skipped_privileged.len(),
+                        ));
+                    }
+                    return Err(StackError::DepsApplyFailed {
+                        summary: failures.join("; "),
+                        apply_run_id: report.apply_run_id.clone(),
+                        retry_command: "acps init --resume --deps-apply --deps-apply-yes",
                     });
                 }
+                if !skipped_privileged.is_empty() {
+                    init_println!(
+                        output_mode,
+                        "warning: {count} dependency install action(s) need root and were skipped (uid={uid}, no passwordless sudo)",
+                        count = skipped_privileged.len(),
+                        // The outcome carries the real euid;
+                        // `deps_escalation.uid()` reports 0 under
+                        // `NotNeeded`, which can still reach
+                        // PrivilegeRequired when a system dep turned
+                        // pending between probe and apply.
+                        uid = skipped_privilege_uid.unwrap_or_default(),
+                    );
+                    for candidate in pending_system_candidates(&config, None) {
+                        init_println!(
+                            output_mode,
+                            "  - {name}: {manual}",
+                            name = candidate.name,
+                            manual = manual_privileged_command(
+                                &config.workspace.default_shell,
+                                &candidate,
+                            ),
+                        );
+                    }
+                    init_println!(
+                        output_mode,
+                        "recorded as privilege_required under `acps installer history --agent deps_apply` (apply_run_id={})",
+                        report.apply_run_id,
+                    );
+                    init_println!(
+                        output_mode,
+                        "after installing them manually (or granting passwordless sudo), resume with: acps init --resume --deps-apply --deps-apply-yes"
+                    );
+                }
                 Ok(StepOutcome::with_payload(format!(
-                    r#"{{"apply_run_id":"{}","applied":{}}}"#,
+                    r#"{{"apply_run_id":"{}","applied":{},"skipped_privileged":{}}}"#,
                     report.apply_run_id,
                     report.results.len(),
+                    skipped_privileged.len(),
                 )))
             },
         );

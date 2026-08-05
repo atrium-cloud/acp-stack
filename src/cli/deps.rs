@@ -6,8 +6,9 @@ use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::dependencies::deps_apply::{
-    DepApplyOutcome, apply_dependencies, apply_dependencies_with_progress, candidate_summary_line,
-    candidates_for, summarize_candidates,
+    DepApplyOutcome, PrivilegeEscalation, apply_dependencies_with_escalation,
+    candidate_summary_line, candidates_for, escalation_notice_lines, manual_privileged_command,
+    pending_system_candidates, probe_privilege_escalation,
 };
 use crate::state::{StateStore, default_state_path};
 
@@ -103,16 +104,21 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         return Ok(());
     }
 
-    let (count, any_system) = summarize_candidates(&candidates);
+    let shell = &config.workspace.default_shell;
+    let system_candidates = pending_system_candidates(&config, args.feature.as_deref());
+    let escalation = if system_candidates.is_empty() {
+        PrivilegeEscalation::NotNeeded
+    } else {
+        probe_privilege_escalation()
+    };
     if !output.is_json() {
+        let count = candidates.len();
         println!("`acps deps apply` will run {count} install action(s):");
         for candidate in &candidates {
             println!("  - {}", candidate_summary_line(candidate));
         }
-        if any_system {
-            println!(
-                "WARNING: one or more actions declare scope=system; they require root privilege."
-            );
+        for line in escalation_notice_lines(&escalation, shell, &system_candidates) {
+            println!("{line}");
         }
     }
 
@@ -149,16 +155,23 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     // keeps "no audit row recorded" from coexisting with "side
     // effects committed".
     store.migrate()?;
-    let shell = &config.workspace.default_shell;
     let report = if output.is_json() {
-        apply_dependencies(&config, args.feature.as_deref(), Some(&store), shell)?
-    } else {
-        let mut stdout = std::io::stdout();
-        apply_dependencies_with_progress(
+        apply_dependencies_with_escalation(
             &config,
             args.feature.as_deref(),
             Some(&store),
             shell,
+            &escalation,
+            |_, _, _| Ok(()),
+        )?
+    } else {
+        let mut stdout = std::io::stdout();
+        apply_dependencies_with_escalation(
+            &config,
+            args.feature.as_deref(),
+            Some(&store),
+            shell,
+            &escalation,
             |current, total, name| {
                 writeln!(
                     stdout,
@@ -211,34 +224,55 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
         println!("audit run: {}", report.apply_run_id);
     }
 
-    // Surface any non-success as a non-zero exit so automation can
-    // gate on it. Without this, `acps deps apply --yes` in a CI
-    // script would report success even when a required install
-    // failed or was blocked on privilege. Use the worst-case across
-    // every result.
-    let mut bad: Vec<String> = Vec::new();
+    // Surface any non-success as a non-zero exit so automation can gate
+    // on it — unlike init, `acps deps apply` is an explicit imperative
+    // command, so "could not do what you asked" must fail even when the
+    // cause is an un-escalatable host rather than a broken action.
+    let mut failures: Vec<String> = Vec::new();
+    let mut skipped_privileged = 0usize;
+    let mut skipped_privilege_uid: Option<u32> = None;
     for result in &report.results {
         match &result.outcome {
             DepApplyOutcome::Failed { exit_code, .. } => {
                 let code = exit_code
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "?".into());
-                bad.push(format!("{} failed (exit={code})", result.name));
+                failures.push(format!("{} failed (exit={code})", result.name));
             }
             DepApplyOutcome::PrivilegeRequired { uid } => {
-                bad.push(format!("{} needs root privilege (uid={uid})", result.name,));
+                skipped_privileged += 1;
+                skipped_privilege_uid = Some(*uid);
             }
             DepApplyOutcome::Installed | DepApplyOutcome::AlreadyPresent => {}
         }
     }
-    if !bad.is_empty() {
-        return Err(StackError::InvalidParam {
-            field: "deps",
-            reason: format!(
-                "deps apply produced non-success outcomes: {}; inspect audit rows with `acps installer history --agent deps_apply` (apply_run_id={})",
-                bad.join("; "),
-                report.apply_run_id,
-            ),
+    if skipped_privileged > 0 {
+        if !output.is_json() {
+            println!(
+                "skipped: {skipped_privileged} action(s) need root privilege (no passwordless sudo); run them manually:"
+            );
+            for candidate in &system_candidates {
+                println!(
+                    "  - {name}: {manual}",
+                    name = candidate.name,
+                    manual = manual_privileged_command(shell, candidate),
+                );
+            }
+        }
+        failures.push(format!(
+            "{skipped_privileged} action(s) need root privilege (uid={uid}, no passwordless sudo)",
+            // The outcome carries the real euid; `escalation.uid()`
+            // reports 0 under `NotNeeded`, which can still reach
+            // PrivilegeRequired when a system dep turned pending
+            // between probe and apply.
+            uid = skipped_privilege_uid.unwrap_or_default(),
+        ));
+    }
+    if !failures.is_empty() {
+        return Err(StackError::DepsApplyFailed {
+            summary: failures.join("; "),
+            apply_run_id: report.apply_run_id.clone(),
+            retry_command: "acps deps apply --yes",
         });
     }
     Ok(())

@@ -85,7 +85,8 @@ The operator-facing sequence, in order:
     - Pending actions are `[dependencies.commands]` entries whose `creates` target does not resolve.
     - Interactive runs ask for confirmation and show system-scope notes.
     - Non-interactive runs require `--deps-apply --deps-apply-yes`.
-    - Failures and unmet system privilege fail init and are recorded under `deps_apply`.
+    - System-scope actions run directly as root, through `sudo -n` when the process is non-root and passwordless sudo is available, and are otherwise skipped with a warning listing the manual `sudo <shell> -c '…'` command per action and the `acps init --resume --deps-apply --deps-apply-yes` follow-up.
+    - Privilege skips are recorded as `privilege_required` under `deps_apply`, surface in status/health, and do not fail init; genuine action failures still fail init.
 11. Capability probe.
     - Spawn the installed agent for a handshake-only ACP `initialize`, record the advertised capabilities to state, and terminate the process; no session is created. `GET /v1/agent/capabilities` and `acps agent status` answer from this snapshot before the agent's first start.
     - Configured features the advertisement does not cover are reported as ignored; they stay in config and are skipped at session time.
