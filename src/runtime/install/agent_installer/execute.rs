@@ -20,6 +20,10 @@ pub fn install_resolved_capture(
 ) -> InstallerSequenceResult {
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
+    // A declared sha256 pin downgrades step-level spawn gates to the header
+    // check (which never executes the file); `final_verification` then owns
+    // the pin check followed by the probe.
+    let pin_declared = agent.expected_sha256.is_some();
     if let Err(err) = entry.ensure_supported() {
         return InstallerSequenceResult {
             outcome: Err(err),
@@ -71,6 +75,7 @@ pub fn install_resolved_capture(
                 &installer_env,
                 workspace_root,
                 dest_dir,
+                pin_declared,
             );
             rows.extend(adapter_chain.rows);
             if let Some(err) = adapter_chain.terminal_error {
@@ -111,6 +116,7 @@ pub fn install_resolved_capture(
                 &harness_env,
                 &harness_workspace,
                 &harness_dest,
+                pin_declared,
             )
         });
         let adapter_thread = std::thread::spawn(move || {
@@ -124,6 +130,7 @@ pub fn install_resolved_capture(
                 &adapter_env,
                 &adapter_workspace,
                 &adapter_dest,
+                pin_declared,
             )
         });
         let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
@@ -166,6 +173,7 @@ pub fn install_resolved_capture(
         &installer_env,
         workspace_root,
         dest_dir,
+        pin_declared,
     );
     rows.extend(chain.rows);
     if let Some(err) = chain.terminal_error {
@@ -232,6 +240,7 @@ pub(crate) fn install_one_with_fallback(
     env: &HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
+    pin_declared: bool,
 ) -> FallbackChain {
     let mut remaining = install.clone();
     let mut rows = Vec::new();
@@ -300,7 +309,14 @@ pub(crate) fn install_one_with_fallback(
             }
             continue;
         }
-        let step = run_install_step(step_label, spec, env, workspace_root, dest_dir);
+        let step = run_install_step(
+            step_label,
+            spec,
+            env,
+            workspace_root,
+            dest_dir,
+            pin_declared,
+        );
         rows.push(step.row);
         match step.outcome {
             Ok(_) => {

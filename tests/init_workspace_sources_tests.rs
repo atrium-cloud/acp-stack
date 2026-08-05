@@ -163,7 +163,7 @@ fn write_test_agent_registry(home: &Path) {
     std::fs::create_dir_all(&config_dir).expect("config dir");
     let binary = home.join(".local/bin/workspace-test-agent");
     let script = format!(
-        "mkdir -p {bin} && printf workspace-test > {binary} && chmod 755 {binary}",
+        "mkdir -p {bin} && printf '#!/bin/sh\\n' > {binary} && chmod 755 {binary}",
         bin = shell_quote(binary.parent().expect("binary parent")),
         binary = shell_quote(&binary),
     );

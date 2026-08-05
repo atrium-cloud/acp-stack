@@ -428,6 +428,13 @@ pub enum StackError {
     #[error("agent installer ran but `creates = {name}` did not resolve afterwards")]
     AgentInstallerCreatesMissing { name: String },
 
+    #[error("agent installer produced `{path}` but it cannot be spawned on this host: {source}")]
+    AgentInstallerBinaryUnrunnable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("agent installer prerequisites missing for `{agent_id}` {step}: {tools:?}")]
     AgentInstallerPrerequisitesMissing {
         agent_id: String,
@@ -897,6 +904,7 @@ impl StackError {
             StackError::ResetNotConfirmed => "re-run with `--yes` to confirm reset",
             StackError::AgentInstallerFailed { .. }
             | StackError::AgentInstallerCreatesMissing { .. }
+            | StackError::AgentInstallerBinaryUnrunnable { .. }
             | StackError::AgentInstallerPrerequisitesMissing { .. }
             | StackError::AgentInstallerWorkingDirectoryMissing { .. }
             | StackError::AgentInstallerTimeout => {

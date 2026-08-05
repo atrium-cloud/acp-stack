@@ -15,6 +15,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentNotConfigured => "agent.not_configured",
         AgentInstallerFailed { .. } => "agent.installer_failed",
         AgentInstallerCreatesMissing { .. } => "agent.installer_creates_missing",
+        AgentInstallerBinaryUnrunnable { .. } => "agent.installer_binary_unrunnable",
         AgentInstallerPrerequisitesMissing { .. } => "agent.installer_prerequisites_missing",
         AgentInstallerTimeout => "agent.installer_timeout",
         AgentInstallerWorkingDirectoryMissing { .. } => "agent.installer_working_directory_missing",
@@ -61,6 +62,9 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         },
         AgentInstallerCreatesMissing { name } => {
             format!("agent installer ran but `creates = {name}` did not resolve afterwards")
+        }
+        AgentInstallerBinaryUnrunnable { source, .. } => {
+            format!("agent installer produced a binary that cannot be spawned on this host: {source}")
         }
         AgentInstallerPrerequisitesMissing {
             agent_id,
@@ -170,6 +174,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         DomainRateLimited { .. } => StatusCode::SERVICE_UNAVAILABLE,
         AgentInstallerFailed { .. }
         | AgentInstallerCreatesMissing { .. }
+        | AgentInstallerBinaryUnrunnable { .. }
         | AgentInstallerPrerequisitesMissing { .. }
         | AgentInstallerTimeout
         | AgentInstallerWorkingDirectoryMissing { .. }

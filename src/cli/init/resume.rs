@@ -335,6 +335,7 @@ pub(super) fn installer_postcondition_holds(
         target,
         workspace_root,
         &extra_path_dirs,
+        config.agent.expected_sha256.as_deref(),
     )
     .is_some()
 }

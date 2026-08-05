@@ -20,7 +20,8 @@ use crate::runtime::process_runner::{
 use super::{
     INSTALL_METHOD_GITHUB, INSTALL_METHOD_NPM, INSTALL_METHOD_SHELL, InstallerOutcome,
     InstallerResult, InstallerRowDraft, MAX_INSTALLER_STREAM_BYTES, ResolvedInstallSpec,
-    StepResult, current_timestamp, resolve_creates, sha256_of_file, verify_expected_sha256,
+    StepResult, current_timestamp, resolve_creates, sha256_of_file, verify_binary_spawns,
+    verify_executable_header, verify_expected_sha256,
 };
 
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -141,6 +142,7 @@ pub(super) fn run_install_step(
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
+    pin_declared: bool,
 ) -> StepResult {
     let started_at = current_timestamp();
     match spec {
@@ -158,6 +160,7 @@ pub(super) fn run_install_step(
                     creates: &creates,
                     workspace_root,
                     extra_path_dirs: &[dest_dir],
+                    pin_declared,
                 },
                 Some(INSTALL_METHOD_SHELL.to_owned()),
                 None,
@@ -192,6 +195,7 @@ pub(super) fn run_install_step(
                     creates: &creates,
                     workspace_root,
                     extra_path_dirs: &[dest_dir],
+                    pin_declared,
                 },
                 Some(INSTALL_METHOD_NPM.to_owned()),
                 Some(version),
@@ -220,7 +224,9 @@ pub(super) fn run_install_step(
                 install,
                 version_pin.as_deref(),
                 agent_env,
+                workspace_root,
                 dest_dir,
+                pin_declared,
             )
         }
     }
@@ -230,6 +236,7 @@ pub(super) struct CreatesCheck<'a> {
     creates: &'a str,
     workspace_root: &'a Path,
     extra_path_dirs: &'a [&'a Path],
+    pin_declared: bool,
 }
 
 pub(super) fn shell_step_with_creates(
@@ -270,9 +277,24 @@ pub(super) fn shell_step_with_creates(
                 creates_check.workspace_root,
                 creates_check.extra_path_dirs,
             )
-            .map(|_| ())
             .ok_or_else(|| StackError::AgentInstallerCreatesMissing {
                 name: creates_check.creates.to_owned(),
+            })
+            .and_then(|path| {
+                // A declared sha256 pin is only checked in `final_verification`,
+                // after all steps — executing the binary here would run it
+                // before its integrity is proven. The header check never
+                // executes the file, so it still rejects format-less stubs at
+                // the step level and lets the fallback chain advance.
+                if creates_check.pin_declared {
+                    verify_executable_header(&path)
+                } else {
+                    verify_binary_spawns(
+                        &path,
+                        creates_check.workspace_root,
+                        creates_check.extra_path_dirs,
+                    )
+                }
             });
             if let Err(err) = &outcome {
                 row.status = "failed".to_owned();
@@ -313,20 +335,35 @@ pub(super) fn shell_step_with_creates(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn github_release_step(
     step_label: &'static str,
     started_at: String,
     install: GithubReleaseInstall<'_>,
     version_pin: Option<&str>,
     agent_env: &HashMap<String, String>,
+    workspace_root: &Path,
     dest_dir: &Path,
+    pin_declared: bool,
 ) -> StepResult {
+    let binary_path = dest_dir.join(install.binary_name);
     let result = github_release::install(install, version_pin, dest_dir, agent_env);
     let finished_at = current_timestamp();
     match result {
-        Ok(outcome) => StepResult {
-            outcome: Ok(()),
-            row: InstallerRowDraft {
+        Ok(outcome) => {
+            // A wrong-arch asset extracts fine and only fails at first spawn;
+            // gate here so the fallback chain can move on to another path.
+            // Asset checksum verification already ran inside the download, so
+            // executing the binary here does not precede integrity checks —
+            // unless the operator declared an `expected_sha256` pin, which
+            // only `final_verification` checks; then the probe must wait for
+            // it and this gate stays header-only.
+            let gate = if pin_declared {
+                verify_executable_header(&binary_path)
+            } else {
+                verify_binary_spawns(&binary_path, workspace_root, &[dest_dir])
+            };
+            let mut row = InstallerRowDraft {
                 started_at,
                 finished_at: Some(finished_at),
                 status: "ran".into(),
@@ -337,8 +374,13 @@ pub(super) fn github_release_step(
                 method: Some(INSTALL_METHOD_GITHUB.to_owned()),
                 version: Some(outcome.release_tag),
                 log_dir: None,
-            },
-        },
+            };
+            if let Err(err) = &gate {
+                row.status = "failed".to_owned();
+                row.stderr = append_stderr_detail(&row.stderr, err);
+            }
+            StepResult { outcome: gate, row }
+        }
         Err(err) => {
             let stderr = err.to_string();
             StepResult {
@@ -401,6 +443,7 @@ pub(super) fn finalize_shell_step(
                 })?;
                 let sha256 = sha256_of_file(&resolved)?;
                 verify_expected_sha256(expected_sha256, &sha256)?;
+                verify_binary_spawns(&resolved, workspace_root, &[])?;
                 Ok(InstallerOutcome::Installed {
                     path: resolved,
                     sha256,

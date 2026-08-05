@@ -2604,7 +2604,7 @@ fn agent_install_registry_path_prepares_workspace_root_without_secret_store() {
         .join("bin")
         .join("cli-registry-agent");
     let script = format!(
-        "test \"$(pwd -P)\" = \"$(cd {workspace} && pwd -P)\" && mkdir -p {bin} && printf registry > {binary} && chmod 755 {binary}",
+        "test \"$(pwd -P)\" = \"$(cd {workspace} && pwd -P)\" && mkdir -p {bin} && printf '#!/bin/sh\\n' > {binary} && chmod 755 {binary}",
         workspace = shell_quote_path(&workspace_root),
         bin = shell_quote_path(binary_path.parent().expect("binary has parent")),
         binary = shell_quote_path(&binary_path),

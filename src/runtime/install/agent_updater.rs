@@ -175,6 +175,9 @@ fn update_component(
                 &HashMap::new(),
                 context.workspace_root,
                 context.dest_dir,
+                // The update path has no `expected_sha256` verification step,
+                // so the step-level spawn probe must keep running here.
+                false,
             );
             if let Some(err) = chain.terminal_error {
                 let mut rows = chain.rows;
