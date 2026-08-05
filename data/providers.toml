@@ -6,7 +6,8 @@
 # [Amp manual](https://ampcode.com/manual)
 # [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-08-01
+# [Hermes Agent configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
+# Last updated on 2026-08-05
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
@@ -36,7 +37,7 @@ agents = ["pi"]
 [[providers]]
 id = ["openai"]
 name = "OpenAI"
-agents = ["pi", "opencode", "goose", "codex"]
+agents = ["pi", "opencode", "goose", "codex", "hermes"]
 
 [[providers]]
 id = ["deepseek"]
@@ -96,7 +97,7 @@ agents = ["pi", "opencode", "goose"]
 [[providers]]
 id = ["openrouter"]
 name = "OpenRouter"
-agents = ["pi", "opencode", "goose", "codex"]
+agents = ["pi", "opencode", "goose", "codex", "hermes"]
 models_url = "https://openrouter.ai/api/v1/models"
 
 [[providers]]

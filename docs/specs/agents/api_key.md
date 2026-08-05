@@ -16,12 +16,15 @@ How each harness reads resolved provider credentials:
 | Codex       | Codex-native OpenAI auth, or env refs for non-OpenAI mapped providers                  |
 | Claude Code | provider env refs exposed through Claude settings, or native cloud provider credentials |
 | Kimi Code   | stored as `KIMI_API_KEY`, translated to Kimi's process-only `KIMI_MODEL_*` contract      |
+| Hermes Agent | provider-native env refs, with the model lane written to `~/.hermes/config.yaml`        |
 
 Codex requires a Responses-API-compatible upstream for any non-OpenAI provider. OpenRouter's OpenResponses (beta) endpoint is the mapped option `acps` supports today.
 
 Claude Code custom providers require Anthropic Messages-compatible endpoints. Google Vertex and Amazon Bedrock use Claude Code's native cloud-provider auth flow; Microsoft Foundry uses Foundry-specific Claude env refs.
 
 Kimi Code does not read `KIMI_API_KEY` directly. `acp-stack` keeps that canonical ref in encrypted storage and exposes the value to `kimi acp` as `KIMI_MODEL_API_KEY`, together with the selected model and the Kimi Code service endpoint.
+
+Hermes Agent maps only API-key providers; Hermes' OAuth-only providers are deliberately absent from the provider mapping. The non-secret `model` block of `~/.hermes/config.yaml` is written by headless provisioning; the key itself reaches the process only through `[agent].env`.
 
 ## Provider Concept
 

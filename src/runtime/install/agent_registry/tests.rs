@@ -115,7 +115,8 @@ fn embedded_registry_advertises_tested_headless_support() {
             "goose",
             "codex",
             "claude-code",
-            "kimi"
+            "kimi",
+            "hermes"
         ]
     );
     for entry in catalog
@@ -139,15 +140,19 @@ fn embedded_registry_advertises_tested_headless_support() {
             "{} must declare the documented Agent Skills install directory",
             entry.id
         );
-        // Claude Code only discovers `~/.claude/skills`, so it is the one
-        // agent whose installed skills get symlinked out of the shared dir.
-        if entry.id == "claude-code" {
-            assert_eq!(
+        // Claude Code only discovers `~/.claude/skills` and Hermes only
+        // discovers `~/.hermes/skills`, so they are the agents whose installed
+        // skills get symlinked out of the shared dir.
+        match entry.id.as_str() {
+            "claude-code" => assert_eq!(
                 entry.agent_skills_link_dir.as_deref(),
                 Some("~/.claude/skills")
-            );
-        } else {
-            assert!(entry.agent_skills_link_dir.is_none());
+            ),
+            "hermes" => assert_eq!(
+                entry.agent_skills_link_dir.as_deref(),
+                Some("~/.hermes/skills")
+            ),
+            _ => assert!(entry.agent_skills_link_dir.is_none()),
         }
         assert_eq!(
             entry.testflight_expect_fs.as_deref(),
@@ -185,7 +190,8 @@ fn embedded_registry_contains_only_curated_examples() {
             "goose",
             "codex",
             "claude-code",
-            "kimi"
+            "kimi",
+            "hermes"
         ]
     );
     let cursor = catalog.lookup("cursor").expect("cursor entry exists");
@@ -359,6 +365,48 @@ fn embedded_registry_contains_only_curated_examples() {
     );
     assert!(kimi_shell.script.contains("KIMI_INSTALL_DIR"));
     assert!(kimi_shell.script.contains("KIMI_NO_MODIFY_PATH=1"));
+    let hermes = catalog.lookup("hermes").expect("Hermes Agent entry exists");
+    assert_eq!(hermes.name, "Hermes Agent");
+    assert_eq!(hermes.kind, RegistryKind::Native);
+    assert!(hermes.headless_compatible);
+    assert!(hermes.set_provider);
+    assert!(hermes.set_model);
+    assert!(hermes.allow_custom_provider);
+    assert!(hermes.allow_custom_model);
+    assert!(hermes.supports_agent_skills);
+    assert_eq!(
+        hermes.agent_skills_install_dir.as_deref(),
+        Some("~/.agents/skills")
+    );
+    assert!(!hermes.subagents);
+    assert_eq!(hermes.support_doc.as_deref(), Some("docs/agents/hermes.md"));
+    assert!(hermes.sync_exempt);
+    let hermes_harness = hermes.harness.as_ref().expect("Hermes Agent harness");
+    assert_eq!(hermes_harness.id, "hermes");
+    assert!(
+        hermes_harness.install.npm.is_none(),
+        "shell installer is Hermes Agent's only official channel"
+    );
+    let hermes_shell = hermes_harness
+        .install
+        .shell
+        .as_ref()
+        .expect("Hermes Agent shell install");
+    assert!(
+        hermes_shell
+            .script
+            .contains("https://hermes-agent.nousresearch.com/install.sh")
+    );
+    assert!(hermes_shell.script.contains("--skip-browser"));
+    assert!(hermes_shell.script.contains("'.[acp]'"));
+    for entry in catalog.entries() {
+        assert_eq!(
+            entry.sync_exempt,
+            entry.id == "hermes",
+            "sync_exempt is a narrow escape hatch; `{}` must not carry it",
+            entry.id
+        );
+    }
 }
 
 #[test]

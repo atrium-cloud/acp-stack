@@ -28,7 +28,7 @@ Shell install paths declare `required_tools` for external commands they invoke. 
 
 The installer verifies declared executables after each managed step. Provider secrets are never passed to install steps.
 
-Adapter `sync_id` is a maintainer-only ACP registry comparison alias for adapters whose upstream registry id differs from the local launch command.
+Adapter `sync_id` is a maintainer-only ACP registry comparison alias for adapters whose upstream registry id differs from the local launch command. Entry-level `sync_exempt` is a maintainer-only flag for agents the ACP project documents but the upstream registry index does not list yet; `sync-registry-check` skips the upstream-existence requirement for exempt entries while reporting them, and the flag has no runtime effect. Remove it once the upstream index carries the id.
 
 ## Operator Override
 

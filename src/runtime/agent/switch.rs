@@ -631,6 +631,46 @@ mod tests {
     }
 
     #[test]
+    fn switch_to_hermes_selects_provider_lane() {
+        let mut config = valid_config();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "hermes".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect("switch planned");
+
+        assert_eq!(plan.target_agent_id, "hermes");
+        // Hermes is provider-backed, unlike Kimi's direct agent secret.
+        assert_eq!(
+            plan.provider_status,
+            AgentSwitchProviderStatus::Reused {
+                provider_id: "openrouter".to_owned(),
+                api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            }
+        );
+        assert!(
+            plan.config
+                .agent
+                .env
+                .iter()
+                .any(|entry| entry == "OPENROUTER_API_KEY")
+        );
+    }
+
+    #[test]
     fn migrates_provider_secret_when_target_default_ref_differs() {
         let mut config = valid_config();
         config.agent.provider = Some(AgentProviderConfig {

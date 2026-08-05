@@ -18,8 +18,8 @@ use tempfile::TempDir;
 mod common;
 use common::HomeEnvGuard;
 use common::agent::{
-    AgentHarness, EnvVarGuard, add_codex_placebo_target, add_kimi_placebo_target, admin_bearer,
-    http, session_bearer, switch_mcp_config, test_config,
+    AgentHarness, EnvVarGuard, add_codex_placebo_target, add_hermes_placebo_target,
+    add_kimi_placebo_target, admin_bearer, http, session_bearer, switch_mcp_config, test_config,
     write_amp_linked_skills_registry_override, write_amp_registry_override,
     write_config_options_fixture, write_cursor_registry_override, write_installed_skill,
     write_pi_registry_override,
@@ -776,6 +776,41 @@ async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
     assert_eq!(body["data"]["agent_id"], "kimi");
     assert_eq!(body["data"]["provider_status"], "selected");
     assert_eq!(body["data"]["required_env_refs"], json!(["KIMI_API_KEY"]));
+}
+
+#[tokio::test]
+async fn agent_switch_existing_hermes_target_reports_required_env_refs() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let mut secrets =
+        acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    secrets
+        .set_many([("OPENROUTER_API_KEY", "hermes-secret")])
+        .expect("hermes secret");
+
+    let mut config = test_config();
+    config.array.enabled = true;
+    add_hermes_placebo_target(&mut config);
+    let harness = AgentHarness::spawn_with_config(config).await;
+
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "hermes" }))
+        .send()
+        .await
+        .expect("switch target");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["agent_id"], "hermes");
+    assert_eq!(body["data"]["provider_status"], "selected");
+    assert_eq!(
+        body["data"]["required_env_refs"],
+        json!(["OPENROUTER_API_KEY"])
+    );
 }
 
 #[tokio::test]

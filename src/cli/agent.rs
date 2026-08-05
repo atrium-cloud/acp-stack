@@ -332,7 +332,7 @@ pub struct AgentProviderCredentialDeleteArgs {
 
 #[derive(Debug, Args)]
 pub struct AgentSwitchArgs {
-    /// Target agent id, such as opencode, pi, goose, codex, cursor, amp, or kimi.
+    /// Target agent id, such as opencode, pi, goose, codex, cursor, amp, kimi, or hermes.
     pub(super) agent: String,
     /// Drop source agent-owned config after a successful switch.
     #[arg(long = "drop")]

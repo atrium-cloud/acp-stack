@@ -4,8 +4,8 @@
 //! `acps agent install`. It supersedes the upstream
 //! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
 //! runtime can make conservative support claims. The embedded catalog includes
-//! Goose, OpenCode, Cursor CLI, Amp, Pi, Codex, Claude Code, and Kimi Code as
-//! curated headless targets.
+//! Goose, OpenCode, Cursor CLI, Amp, Pi, Codex, Claude Code, Kimi Code, and
+//! Hermes Agent as curated headless targets.
 //! The schema supports entries that need both an ACP adapter and the upstream
 //! harness it wraps.
 //!
@@ -299,6 +299,12 @@ pub struct RegistryEntry {
     /// or main api_key_ref directly matches.
     #[serde(default)]
     pub subagent_free_models: Vec<SubagentFreeModel>,
+    /// The upstream ACP registry index does not list this agent yet even
+    /// though the ACP project documents it as an ACP agent. Maintainer-only
+    /// escape hatch for `sync-registry-check`; it has no runtime effect.
+    /// Remove the flag once the upstream index carries the id.
+    #[serde(default)]
+    pub sync_exempt: bool,
     #[serde(default)]
     pub stdio_framing: RegistryStdioFraming,
     #[serde(default)]
@@ -448,6 +454,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         subagents: false,
         subagent_alias: None,
         subagent_free_models: Vec::new(),
+        sync_exempt: false,
         stdio_framing: RegistryStdioFraming::JsonLines,
         website: None,
         github: None,

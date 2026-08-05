@@ -353,6 +353,24 @@ fn direct_agent_env_refs_are_data_driven() {
     assert_eq!(env_refs_for_agent_id("cursor"), ["CURSOR_API_KEY"]);
     assert_eq!(env_refs_for_agent_id("kimi"), ["KIMI_API_KEY"]);
     assert!(env_refs_for_agent_id("opencode").is_empty());
+    // Hermes is provider-backed, not a direct-secret agent.
+    assert!(env_refs_for_agent_id("hermes").is_empty());
+}
+
+#[test]
+fn hermes_maps_api_key_providers_only() {
+    assert!(provider_id_supports_agent("openrouter", "hermes"));
+    assert!(provider_id_supports_agent("openai", "hermes"));
+    assert_eq!(
+        env_var_for_agent_provider_id("hermes", "openrouter"),
+        Some("OPENROUTER_API_KEY")
+    );
+    assert_eq!(
+        agent_provider_id_for_provider_id("hermes", "openrouter"),
+        Some("openrouter")
+    );
+    // OAuth-only Hermes providers are deliberately unmapped.
+    assert!(!provider_id_supports_agent("anthropic", "hermes"));
 }
 
 #[test]

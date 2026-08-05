@@ -11,7 +11,9 @@
 //! The embedded registry is intentionally a small curated subset. Every
 //! embedded sync id (`adapter.sync_id`, `adapter.id`, or `id`) must still exist
 //! upstream; upstream entries that are not embedded are reported for awareness
-//! but do not fail the check.
+//! but do not fail the check. Entries flagged `sync_exempt` in the catalog are
+//! excluded from the requirement but printed in their own report section so
+//! the exemption stays visible on every run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
@@ -19,7 +21,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use acp_stack::runtime::install::agent_registry::RegistryCatalog;
+use acp_stack::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
 
 const UPSTREAM_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -90,6 +92,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
+    let exempt = exempt_sync_ids(&embedded);
+    if exempt.is_empty() {
+        println!("[embedded entries exempt from upstream sync] none");
+    } else {
+        println!(
+            "[embedded entries exempt from upstream sync] {} entries:",
+            exempt.len()
+        );
+        for id in &exempt {
+            println!("  - {id}");
+        }
+    }
+    println!();
+
     if drift.has_embedded_unknown_ids() {
         return Err("embedded registry contains ids missing from upstream registry".into());
     }
@@ -132,14 +148,26 @@ fn embedded_sync_ids(catalog: &RegistryCatalog) -> Vec<&str> {
     catalog
         .entries()
         .iter()
-        .map(|entry| {
-            entry
-                .adapter
-                .as_ref()
-                .map(|adapter| adapter.sync_id.as_deref().unwrap_or(adapter.id.as_str()))
-                .unwrap_or(entry.id.as_str())
-        })
+        .filter(|entry| !entry.sync_exempt)
+        .map(sync_id_for_entry)
         .collect()
+}
+
+fn exempt_sync_ids(catalog: &RegistryCatalog) -> Vec<&str> {
+    catalog
+        .entries()
+        .iter()
+        .filter(|entry| entry.sync_exempt)
+        .map(sync_id_for_entry)
+        .collect()
+}
+
+fn sync_id_for_entry(entry: &RegistryEntry) -> &str {
+    entry
+        .adapter
+        .as_ref()
+        .map(|adapter| adapter.sync_id.as_deref().unwrap_or(adapter.id.as_str()))
+        .unwrap_or(entry.id.as_str())
 }
 
 fn fetch_upstream() -> Result<UpstreamIndex, Box<dyn std::error::Error>> {
@@ -201,5 +229,12 @@ mod tests {
         assert!(embedded_sync_ids(&catalog).contains(&"claude-acp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"amp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"claude-agent-acp"));
+    }
+
+    #[test]
+    fn sync_exempt_entries_are_not_required_upstream() {
+        let catalog = RegistryCatalog::load_embedded().expect("embedded registry");
+        assert!(!embedded_sync_ids(&catalog).contains(&"hermes"));
+        assert_eq!(exempt_sync_ids(&catalog), vec!["hermes"]);
     }
 }

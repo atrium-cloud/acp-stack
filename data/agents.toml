@@ -392,3 +392,58 @@ test -x "${managed_kimi}"
 '''
 creates = "kimi"
 required_tools = ["curl", "bash"]
+
+# Hermes Agent
+
+[[agents]]
+id = "hermes"
+name = "Hermes Agent"
+kind = "native"
+headless_compatible = true
+# Documented on the ACP agents page but absent from the upstream registry
+# index; remove once upstream lists it.
+sync_exempt = true
+set_provider = true
+set_model = true
+allow_custom_provider = true
+allow_custom_model = true
+set_mode = false
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+# Hermes only discovers ~/.hermes/skills, so managed skills are symlinked there.
+agent_skills_link_dir = "~/.hermes/skills"
+stdio_framing = "json-lines"
+website = "https://hermes-agent.nousresearch.com"
+support_doc = "docs/agents/hermes.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
+
+[agents.harness]
+id = "hermes"
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+managed_bin="${HOME}/.local/bin"
+managed_hermes="${managed_bin}/hermes"
+hermes_src="${HOME}/.hermes/hermes-agent"
+mkdir -p "$managed_bin"
+# Fetch to a file rather than piping into bash so the installer keeps the
+# runtime's empty stdin (no prompt can consume the script body) and a curl
+# failure is fatal without pipefail.
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT INT TERM
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$installer"
+test -s "$installer"
+bash "$installer" --skip-browser </dev/null
+test -x "$managed_hermes"
+# `hermes acp` only exists with the optional ACP extra installed into the
+# checkout's venv.
+test -d "$hermes_src"
+uv_bin="$(command -v uv || printf '%s' "${HOME}/.local/bin/uv")"
+test -x "$uv_bin"
+(cd "$hermes_src" && "$uv_bin" pip install -e '.[acp]')
+"$managed_hermes" acp --version </dev/null >/dev/null
+'''
+creates = "hermes"
+required_tools = ["curl", "bash", "git"]
