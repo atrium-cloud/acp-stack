@@ -76,7 +76,7 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 - Model edits require the configured agent to support model selection.
 - Mode edits require the configured agent to advertise mode choices.
 - Root `agent.model` must be omitted when `[agent.provider].model` is set.
-- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile and Kimi Code model ids are accepted as supplied. Kimi requires its model before ACP discovery can start.
+- Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile, Kimi Code, and Hermes Agent model ids are accepted as supplied. Kimi requires its model before ACP discovery can start; Hermes advertises models only through the pre-1.0 session state this runtime does not read.
 - Custom-provider model ids are accepted as supplied.
 - Custom providers use `chat-completions` by default, `responses` for Codex, and `anthropic-messages` for Claude Code.
 - Credential aliases and source refs must be valid secret-ref identifiers.
@@ -95,6 +95,6 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 | Codex       | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY`                  |
 | Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
 | Kimi Code   | model-only setup; runtime derives Kimi's process environment from `KIMI_API_KEY`        |
-| Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane in Hermes' `provider:model` id form |
+| Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

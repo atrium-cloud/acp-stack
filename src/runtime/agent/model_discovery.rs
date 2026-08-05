@@ -28,7 +28,7 @@ use crate::runtime::agent::acp_bridge::{
     KIMI_CODE_AGENT_ID, SessionEventSink, session_config_id_for_value, session_config_values,
     session_model_selection_for_value, session_model_values,
 };
-use crate::runtime::agent::agent_headless_config::CODEX_OPENROUTER_PROVIDER_ID;
+use crate::runtime::agent::agent_headless_config::{CODEX_OPENROUTER_PROVIDER_ID, HERMES_AGENT_ID};
 use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, is_claude_code_profiled_provider,
     resolve_agent_environment, resolve_agent_environment_without_secrets,
@@ -55,6 +55,11 @@ pub fn model_value_is_explicit_without_discovery(agent: &AgentConfig) -> bool {
             && agent.provider.as_ref().is_some_and(|provider| {
                 provider.custom.is_some() || provider.id == CODEX_OPENROUTER_PROVIDER_ID
             }))
+        // Hermes advertises the pre-1.0 `models`/`modes` session state rather
+        // than ACP v1 `configOptions`, so the advertised list is empty from
+        // this runtime's perspective; the model id is applied through the
+        // provisioned `~/.hermes/config.yaml` instead.
+        || agent.id == HERMES_AGENT_ID
 }
 
 /// Spawn the configured agent, open one provisional ACP session, and
@@ -407,6 +412,17 @@ mod tests {
         assert!(model_value_is_explicit_without_discovery(&agent(
             "claude-code",
             custom_provider()
+        )));
+    }
+
+    #[test]
+    fn hermes_skips_discovery_validation() {
+        assert!(model_value_is_explicit_without_discovery(&agent(
+            "hermes",
+            mapped_provider("openrouter")
+        )));
+        assert!(model_value_is_explicit_without_discovery(&agent(
+            "hermes", None
         )));
     }
 

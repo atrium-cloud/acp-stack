@@ -373,6 +373,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(hermes.set_model);
     assert!(hermes.allow_custom_provider);
     assert!(hermes.allow_custom_model);
+    assert!(!hermes.set_mode);
     assert!(hermes.supports_agent_skills);
     assert_eq!(
         hermes.agent_skills_install_dir.as_deref(),

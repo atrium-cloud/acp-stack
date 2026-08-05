@@ -2748,6 +2748,65 @@ creates = "opencode"
         )
 }
 
+fn hermes_config() -> String {
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "hermes""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Hermes Agent""#)
+        .replace(r#"command = "opencode""#, r#"command = "hermes""#)
+        .replace(
+            r#"env = ["OPENCODE_API_KEY"]"#,
+            r#"env = ["OPENROUTER_API_KEY"]"#,
+        )
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    format!(
+        "{config}\n\n[agent.provider]\nid = \"openrouter\"\nmodel = \"deepseek/deepseek-v4-flash\"\napi_key_ref = \"OPENROUTER_API_KEY\"\n"
+    )
+}
+
+#[test]
+fn agent_set_hermes_accepts_exact_model_and_updates_hermes_yaml() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), hermes_config())
+        .expect("config should be written");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+
+    // No ACP config-options fixture: Hermes advertises only the pre-1.0
+    // models/modes session state, so the model is taken verbatim and the
+    // command must succeed without spawning the agent.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--model", "z-ai/glm-5.1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: hermes"))
+        .stdout(predicates::str::contains("model: z-ai/glm-5.1"));
+
+    let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(config.contains(r#"model = "z-ai/glm-5.1""#));
+    assert!(!config.contains("test-openrouter-key"));
+
+    let hermes_yaml = fs::read_to_string(tempdir.path().join(".hermes/config.yaml"))
+        .expect("hermes config should be readable");
+    let hermes: serde_norway::Value =
+        serde_norway::from_str(&hermes_yaml).expect("hermes config parses");
+    assert_eq!(hermes["model"]["provider"], "openrouter");
+    assert_eq!(hermes["model"]["default"], "z-ai/glm-5.1");
+    assert!(!hermes_yaml.contains("test-openrouter-key"));
+}
+
 #[test]
 fn agent_provider_use_codex_openrouter_accepts_custom_model_without_discovery() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
