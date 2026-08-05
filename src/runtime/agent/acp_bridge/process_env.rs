@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
+
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
 pub(super) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
 pub(super) const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
@@ -16,10 +18,33 @@ pub(crate) const KIMI_CODE_DEFAULT_MODEL: &str = "kimi-for-coding";
 // scoped to Kimi Code rather than exposing an undeclared custom-provider lane.
 pub(super) const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
 
+// acps owns MCP composition: this opt-out keeps Hermes' own config.yaml MCP
+// servers from launching into acps-managed sessions. The value must be
+// exactly "1"; Hermes ignores anything else.
+pub(super) const HERMES_SKIP_CONFIGURED_MCP_ENV: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
+
 pub(super) fn build_agent_process_env(
     agent: &AgentConfig,
     mut env: HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
+    if agent.id == HERMES_AGENT_ID {
+        if env.contains_key(HERMES_SKIP_CONFIGURED_MCP_ENV) {
+            return Err(StackError::AgentInitializeFailed {
+                reason: format!(
+                    "Hermes launch env `{HERMES_SKIP_CONFIGURED_MCP_ENV}` is runtime-managed; remove it from [agent].env"
+                ),
+            });
+        }
+        // Keep the degradation visible: combined with Hermes not advertising
+        // `mcpCapabilities`, this means Hermes sessions currently run with no
+        // MCP servers from either side.
+        tracing::info!(
+            "disabling Hermes global MCP startup ({HERMES_SKIP_CONFIGURED_MCP_ENV}=1); acps owns MCP composition"
+        );
+        env.insert(HERMES_SKIP_CONFIGURED_MCP_ENV.to_owned(), "1".to_owned());
+        return Ok(env);
+    }
+
     if agent.id != KIMI_CODE_AGENT_ID {
         return Ok(env);
     }

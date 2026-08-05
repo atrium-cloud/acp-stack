@@ -188,10 +188,21 @@ pub(crate) async fn models_handler(
 
     let response =
         fetch_session_config_with_timeout(&home, &config, DEFAULT_MODELS_DISCOVERY_TIMEOUT).await?;
-    // Surface a malformed/missing `model` advertisement as an error
-    // so the operator knows discovery failed rather than silently
-    // rendering an empty picker. `mode` is genuinely optional.
-    let models = advertised_values_for_category(&response, AgentSessionConfigCategory::Model)?;
+    // Surface a malformed/missing `model` advertisement as an error for
+    // discovery-backed agents so the operator knows discovery failed rather
+    // than silently rendering an empty picker. `mode` is genuinely optional.
+    let models = match advertised_values_for_category(&response, AgentSessionConfigCategory::Model)
+    {
+        Ok(values) => values,
+        // Explicit-model agents (Hermes Agent) advertise no ACP model options,
+        // so a catalog outage would otherwise fail a request the degraded
+        // empty list can still serve alongside `catalog_error`.
+        Err(error) if model_value_is_explicit_without_discovery(&config.agent) => {
+            tracing::warn!(error = %error, "no ACP model advertisement; serving empty model list");
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
     let modes = advertised_values_for_category(&response, AgentSessionConfigCategory::Mode)
         .unwrap_or_default();
 

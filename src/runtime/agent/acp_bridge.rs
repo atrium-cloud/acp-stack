@@ -1232,8 +1232,9 @@ fn command_search_paths() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::process_env::{
-        KIMI_API_KEY_ENV, KIMI_CODE_BASE_URL, KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV,
-        KIMI_MODEL_NAME_ENV, build_agent_process_env,
+        HERMES_SKIP_CONFIGURED_MCP_ENV, KIMI_API_KEY_ENV, KIMI_CODE_BASE_URL,
+        KIMI_MODEL_API_KEY_ENV, KIMI_MODEL_BASE_URL_ENV, KIMI_MODEL_NAME_ENV,
+        build_agent_process_env,
     };
     use super::{KIMI_CODE_AGENT_ID, NotificationDrain};
     use crate::config::AgentConfig;
@@ -1331,6 +1332,40 @@ mod tests {
                 .expect_err("managed Kimi env must fail");
             assert!(error.to_string().contains(name), "{error}");
         }
+    }
+
+    #[test]
+    fn hermes_process_env_scopes_out_configured_mcp() {
+        let mut agent = kimi_agent(None);
+        agent.id = "hermes".to_owned();
+        agent.env = vec!["OPENROUTER_API_KEY".to_owned()];
+        let env = HashMap::from([("OPENROUTER_API_KEY".to_owned(), "secret".to_owned())]);
+
+        let prepared = build_agent_process_env(&agent, env).expect("Hermes env");
+
+        assert_eq!(
+            prepared
+                .get(HERMES_SKIP_CONFIGURED_MCP_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            prepared.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn hermes_process_env_rejects_operator_declared_mcp_skip() {
+        let mut agent = kimi_agent(None);
+        agent.id = "hermes".to_owned();
+        let env = HashMap::from([(HERMES_SKIP_CONFIGURED_MCP_ENV.to_owned(), "0".to_owned())]);
+
+        let error = build_agent_process_env(&agent, env).expect_err("managed Hermes env must fail");
+        assert!(
+            error.to_string().contains(HERMES_SKIP_CONFIGURED_MCP_ENV),
+            "{error}"
+        );
     }
 
     #[test]

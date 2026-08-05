@@ -407,6 +407,9 @@ set_provider = true
 set_model = true
 allow_custom_provider = true
 allow_custom_model = true
+# Hermes exposes modes only through the pre-1.0 `modes` session state, which
+# this runtime does not read (ACP v1 configOptions only), so mode selection
+# stays off until upstream advertises configOptions.
 set_mode = false
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
@@ -437,12 +440,16 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$installer"
 test -s "$installer"
 bash "$installer" --skip-browser </dev/null
 test -x "$managed_hermes"
-# `hermes acp` only exists with the optional ACP extra installed into the
-# checkout's venv.
-test -d "$hermes_src"
-uv_bin="$(command -v uv || printf '%s' "${HOME}/.local/bin/uv")"
-test -x "$uv_bin"
-(cd "$hermes_src" && "$uv_bin" pip install -e '.[acp]')
+# Current installers bundle ACP mode; older ones need the optional extra
+# installed into the checkout's venv, so only reach for uv when the ACP
+# entry point is missing.
+if ! "$managed_hermes" acp --version </dev/null >/dev/null 2>&1; then
+    echo "hermes acp entry point missing; installing the optional .[acp] extra" >&2
+    test -d "$hermes_src"
+    uv_bin="$(command -v uv || printf '%s' "${HOME}/.hermes/bin/uv")"
+    test -x "$uv_bin"
+    (cd "$hermes_src" && VIRTUAL_ENV="${hermes_src}/venv" "$uv_bin" pip install -e '.[acp]')
+fi
 "$managed_hermes" acp --version </dev/null >/dev/null
 '''
 creates = "hermes"

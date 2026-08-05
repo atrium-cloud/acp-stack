@@ -12,11 +12,17 @@ fn hermes_config_path(home: &Path) -> PathBuf {
     home.join(".hermes").join("config.yaml")
 }
 
-/// Hermes model ids are `provider:model` on the wire and in `model.default`,
-/// unlike the `provider/model` form the canonical config keeps split across
-/// `[agent.provider] id` and `model`.
-fn hermes_default_model(provider_id: &str, model: &str) -> String {
-    format!("{provider_id}:{model}")
+/// `model.default` carries the bare provider-native model id: Hermes composes
+/// its ACP `provider:model` ids itself, so a prefixed default would come back
+/// double-prefixed (`openrouter:openrouter:...`) in session model lists.
+/// Canonical config may hold the ACP-advertised `provider:model` form (model
+/// resolution mirrors advertised ids), so the provider prefix is stripped
+/// here.
+fn hermes_native_model<'a>(provider_id: &str, model: &'a str) -> &'a str {
+    model
+        .strip_prefix(provider_id)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .unwrap_or(model)
 }
 
 pub(super) fn provision_hermes_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
@@ -48,7 +54,9 @@ pub(super) fn provision_hermes_config(config: &Config, home: &Path) -> Result<Ve
             Some(configured) => {
                 model.insert(
                     YamlValue::String(HERMES_MODEL_DEFAULT_KEY.to_owned()),
-                    YamlValue::String(hermes_default_model(HERMES_CUSTOM_PROVIDER_ID, configured)),
+                    YamlValue::String(
+                        hermes_native_model(HERMES_CUSTOM_PROVIDER_ID, configured).to_owned(),
+                    ),
                 );
             }
             None => {
@@ -105,7 +113,7 @@ pub(super) fn provision_hermes_config(config: &Config, home: &Path) -> Result<Ve
         Some(configured) => {
             model.insert(
                 YamlValue::String(HERMES_MODEL_DEFAULT_KEY.to_owned()),
-                YamlValue::String(hermes_default_model(agent_provider_id, configured)),
+                YamlValue::String(hermes_native_model(agent_provider_id, configured).to_owned()),
             );
         }
         None => {
@@ -176,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn hermes_config_writes_native_provider_and_composed_default() {
+    fn hermes_config_writes_native_provider_and_bare_default() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
         config.agent.provider = Some(crate::config::AgentProviderConfig {
@@ -197,10 +205,49 @@ mod tests {
         )
         .expect("hermes config yaml parses");
         assert_eq!(value["model"]["provider"], "openrouter");
+        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
+    fn hermes_native_model_strips_only_colon_qualified_provider_prefix() {
         assert_eq!(
-            value["model"]["default"],
-            "openrouter:deepseek/deepseek-v4-flash"
+            hermes_native_model("openrouter", "openrouter:deepseek/deepseek-v4-flash"),
+            "deepseek/deepseek-v4-flash"
         );
+        // A model that merely starts with the provider id keeps its name.
+        assert_eq!(
+            hermes_native_model("openrouter", "openrouter-tuned/model"),
+            "openrouter-tuned/model"
+        );
+        assert_eq!(
+            hermes_native_model("openrouter", "openrouter"),
+            "openrouter"
+        );
+        assert_eq!(
+            hermes_native_model("openrouter", "deepseek/deepseek-v4-flash"),
+            "deepseek/deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn hermes_config_strips_advertised_provider_prefix_from_default() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("hermes", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("openrouter:deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let path = tempdir.path().join(".hermes").join("config.yaml");
+        let value: serde_norway::Value = serde_norway::from_str(
+            &std::fs::read_to_string(&path).expect("hermes config should be readable"),
+        )
+        .expect("hermes config yaml parses");
+        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
     }
 
     #[test]
@@ -221,7 +268,7 @@ mod tests {
             value["model"]["base_url"],
             "https://api.myprovider.example/v1"
         );
-        assert_eq!(value["model"]["default"], "custom:my-model");
+        assert_eq!(value["model"]["default"], "my-model");
     }
 
     #[test]
@@ -248,10 +295,7 @@ mod tests {
             serde_norway::from_str(&std::fs::read_to_string(&path).expect("hermes readable"))
                 .expect("hermes yaml parses");
         assert_eq!(value["model"]["provider"], "openrouter");
-        assert_eq!(
-            value["model"]["default"],
-            "openrouter:deepseek/deepseek-v4-flash"
-        );
+        assert_eq!(value["model"]["default"], "deepseek/deepseek-v4-flash");
         assert!(
             value["model"]
                 .as_mapping()
@@ -283,7 +327,7 @@ mod tests {
             value["model"]["base_url"],
             "https://api.myprovider.example/v1"
         );
-        assert_eq!(value["model"]["default"], "custom:my-model");
+        assert_eq!(value["model"]["default"], "my-model");
     }
 
     #[test]

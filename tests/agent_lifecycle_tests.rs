@@ -461,6 +461,16 @@ fn codex_openrouter_config() -> Config {
     config
 }
 
+/// Hermes takes the model verbatim like Codex/OpenRouter but advertises no
+/// ACP v1 `configOptions`, so the catalog-outage fallback cannot serve an
+/// advertised model list.
+fn hermes_openrouter_config() -> Config {
+    let mut config = codex_openrouter_config();
+    config.agent.id = "hermes".to_owned();
+    config.agent.name = "Hermes Agent".to_owned();
+    config
+}
+
 /// Config-options fixture with `model` and `mode` categories: the catalog
 /// path reads only the modes, the ACP fallback reads both.
 fn write_models_mode_fixture(root: &std::path::Path) -> std::path::PathBuf {
@@ -638,6 +648,65 @@ async fn models_falls_back_to_acp_with_catalog_error() {
             .count(),
         1,
         "stored reason must not double the error prefix: {backed_off_error}"
+    );
+}
+
+#[tokio::test]
+async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let home = tempdir.path().join("home");
+    seed_provider_credential(&home, "openrouter", &["OPENROUTER_API_KEY"]);
+    // Hermes advertises no v1 `configOptions`; the fixture carries only modes.
+    let fixture_path = tempdir.path().join("config-options.json");
+    std::fs::write(
+        &fixture_path,
+        serde_json::json!([
+            {
+                "id": "mode",
+                "name": "Mode",
+                "category": "mode",
+                "type": "select",
+                "currentValue": "default",
+                "options": [{ "value": "default", "name": "default" }]
+            }
+        ])
+        .to_string(),
+    )
+    .expect("write fixture");
+    // Dead port: with no cache and no ACP model advertisement, the handler
+    // must degrade to an empty model list instead of failing the request.
+    let _guards = catalog_fixture_env(&home, "http://127.0.0.1:1", fixture_path);
+
+    let harness = AgentHarness::spawn_with_config(hermes_openrouter_config()).await;
+    let response = http()
+        .await
+        .get(format!("{}/v1/models", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("models json");
+    assert_eq!(body["data"]["source"], "acp_advertised");
+    let catalog_error = body["data"]["catalog_error"]
+        .as_str()
+        .expect("catalog_error should be a string");
+    assert!(
+        !catalog_error.is_empty(),
+        "catalog_error should describe the failure"
+    );
+    assert_eq!(
+        body["data"]["models"].as_array().expect("models array"),
+        &Vec::<Value>::new(),
+        "hermes has no ACP-advertised models to fall back to: {body}"
+    );
+    let modes = body["data"]["modes"].as_array().expect("modes array");
+    assert!(
+        modes.iter().any(|mode| mode.as_str() == Some("default")),
+        "fixture mode values missing: {modes:?}",
     );
 }
 

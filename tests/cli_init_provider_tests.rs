@@ -1261,6 +1261,62 @@ fn init_kimi_explicit_model_skips_acp_discovery_and_persists_canonical_secret_re
 }
 
 #[test]
+fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "hermes",
+            "--provider",
+            "openrouter",
+            "--api-key-ref",
+            "OPENROUTER_API_KEY",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Hermes Agent (hermes)"));
+
+    let config_text = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(!config_text.contains("test-openrouter-key"));
+    let config = load_config_from_str(&config_text).expect("canonical config parses");
+    assert_eq!(config.agent.id, "hermes");
+    assert_eq!(config.agent.command, "hermes");
+    assert_eq!(config.agent.args, ["acp"]);
+    assert_eq!(config.agent.env, ["OPENROUTER_API_KEY"]);
+    let provider = config.agent.provider.as_ref().expect("provider configured");
+    assert_eq!(provider.id, "openrouter");
+    assert_eq!(
+        provider.model.as_deref(),
+        Some("deepseek/deepseek-v4-flash")
+    );
+    assert_eq!(provider.api_key_ref.as_deref(), Some("OPENROUTER_API_KEY"));
+    assert!(config.agent.model.is_none());
+
+    let hermes_yaml = fs::read_to_string(tempdir.path().join(".hermes/config.yaml"))
+        .expect("hermes config should be readable");
+    let hermes: serde_norway::Value =
+        serde_norway::from_str(&hermes_yaml).expect("hermes config parses");
+    assert_eq!(hermes["model"]["provider"], "openrouter");
+    assert_eq!(hermes["model"]["default"], "deepseek/deepseek-v4-flash");
+    assert!(!hermes_yaml.contains("test-openrouter-key"));
+}
+
+#[test]
 fn init_kimi_without_model_pins_default_and_keeps_operator_selection_on_rerun() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());

@@ -4,13 +4,17 @@ Hermes Agent is a native ACP target. `acp-stack` launches `hermes acp`.
 
 ## Support status
 
-The real-prompt smoke has not passed end-to-end yet, so Hermes Agent is not listed as a supported agent. The registry entry, install path, and headless provisioning below are in place pending that verification.
+The acps-driven end-to-end smoke (`acps agent test` against a real install) has not passed yet, so Hermes Agent is not listed as a supported agent. A hand-driven ACP session against Hermes v0.20.0 (install, initialize, session/new, real prompt writing the testflight file, permission round trip) passed on 2026-08-05.
+
+## Known limitation
+
+Hermes advertises session models and modes through the pre-1.0 `models`/`modes` session state instead of ACP v1 `configOptions`, and its `initialize` response carries no `mcpCapabilities`. Until upstream adopts the v1 shapes: model ids are accepted as supplied without ACP discovery, mode selection is unavailable (`set_mode = false`), and configured MCP servers are recorded as ignored features for Hermes sessions rather than delivered.
 
 ## Setup
 
 ```sh
 acps secrets set OPENROUTER_API_KEY
-acps init --agent hermes --provider openrouter --model <model-id>
+acps init --agent hermes --provider openrouter --model deepseek/deepseek-v4-flash
 ```
 
 Agent config shape:
@@ -30,10 +34,12 @@ model = "deepseek/deepseek-v4-flash"
 api_key_ref = "OPENROUTER_API_KEY"
 ```
 
-Hermes is provider-backed: the API key stays in the encrypted secret store and reaches the process only through `[agent].env`. `acp-stack` writes the non-secret `model` block of `~/.hermes/config.yaml` (`model.provider` plus `model.default` composed in Hermes' `provider:model` id form); the rest of that file is user-owned and preserved. A custom OpenAI-compatible endpoint maps to `model.provider = "custom"` with `model.base_url`.
+Hermes is provider-backed: the API key stays in the encrypted secret store and reaches the process only through `[agent].env` (Hermes reads provider keys from its process environment; no `~/.hermes/.env` entry is needed or written). `acp-stack` writes the non-secret `model` block of `~/.hermes/config.yaml` — `model.provider` plus `model.default` carrying the bare provider-native model id, since Hermes composes its `provider:model` ACP ids itself; the rest of that file is user-owned and preserved. A custom OpenAI-compatible endpoint maps to `model.provider = "custom"` with `model.base_url`.
 
-The install step runs the upstream installer with `--skip-browser` and then installs the optional ACP extra (`uv pip install -e '.[acp]'`) into the Hermes checkout, because `hermes acp` does not exist without it.
+The install step runs the upstream installer with `--skip-browser`; current installers bundle ACP mode, and the optional `.[acp]` extra is installed into the Hermes checkout only when the `hermes acp` entry point is missing. The installed launcher is a `#!` shell wrapper, which satisfies the executable-format and spawn gates.
+
+At launch, `acp-stack` sets `HERMES_ACP_SKIP_CONFIGURED_MCP=1` so MCP servers declared in Hermes' own `config.yaml` do not leak into acps-managed sessions; acps owns MCP composition. Do not add that variable to `[agent].env`.
 
 Managed Agent Skills are installed into `~/.agents/skills` and symlinked into `~/.hermes/skills`, the directory Hermes discovers.
 
-Session and MCP capabilities are gated by the live `initialize` response, as with every agent.
+The native ACP implementation advertises `loadSession` and session list, resume, and fork support at initialize. Capability-dependent operations remain gated by the live `initialize` response.
