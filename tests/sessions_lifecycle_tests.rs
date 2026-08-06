@@ -219,6 +219,80 @@ async fn full_lifecycle_create_list_get_prompt_poll_close() {
 }
 
 #[tokio::test]
+async fn delete_session_removes_the_row_and_repeats_silently() {
+    let harness = Harness::spawn().await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    let delete = client
+        .post(format!(
+            "{}/v1/sessions/{}/delete",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(delete.status(), StatusCode::OK);
+    let delete_body: Value = delete.json().await.expect("delete json");
+    assert_eq!(delete_body["data"]["session_id"], session_id.as_str());
+    assert_eq!(delete_body["data"]["deleted"], true);
+
+    let get = client
+        .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(get.status(), StatusCode::NOT_FOUND);
+
+    // Repeats and unknown ids succeed silently per ACP session/delete.
+    let repeat = client
+        .post(format!(
+            "{}/v1/sessions/{}/delete",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("repeat delete");
+    assert_eq!(repeat.status(), StatusCode::OK);
+    let repeat_body: Value = repeat.json().await.expect("repeat json");
+    assert_eq!(repeat_body["data"]["deleted"], false);
+}
+
+#[tokio::test]
+async fn delete_session_reports_unsupported_capability_and_keeps_the_row() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-delete-session".to_owned());
+    })
+    .await;
+    let client = http();
+    let session_id = create_session(&harness).await;
+
+    let delete = client
+        .post(format!(
+            "{}/v1/sessions/{}/delete",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(delete.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: Value = delete.json().await.expect("delete json");
+    assert_eq!(body["error"]["code"], "agent.unsupported_capability");
+
+    let get = client
+        .get(format!("{}/v1/sessions/{}", harness.base_url, session_id))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(get.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn fork_session_records_parent_lineage() {
     let harness = Harness::spawn().await;
     let client = http();

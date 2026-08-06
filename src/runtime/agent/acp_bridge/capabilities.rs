@@ -88,6 +88,10 @@ impl AgentCapabilitiesDto {
         self.supports_session_capability("close")
     }
 
+    pub fn supports_delete_session(&self) -> bool {
+        self.supports_session_capability("delete")
+    }
+
     pub fn supports_fork_session(&self) -> bool {
         self.supports_session_capability("fork")
     }

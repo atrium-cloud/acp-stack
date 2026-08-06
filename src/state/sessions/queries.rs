@@ -767,6 +767,26 @@ impl StateStore {
         Ok(ids.len())
     }
 
+    /// `POST /v1/sessions/{id}/delete`. Hard-deletes the session row together
+    /// with its prompts and per-session events. Returns the deleted record,
+    /// or `None` when the id is unknown — repeat deletes succeed silently per
+    /// ACP `session/delete`. Permission rows stay: they belong to the durable
+    /// security log, not session history. The external log mirror is
+    /// upsert-only, so the enqueued outbox row hydrates to a no-op there.
+    pub fn delete_session(&self, id: &str) -> Result<Option<SessionRecord>> {
+        let Some(record) = self.get_session(id)? else {
+            return Ok(None);
+        };
+        let now = current_timestamp();
+        self.persist_with_outbox("sessions", id, &now, |conn| {
+            conn.execute("DELETE FROM prompts WHERE session_id = ?1", params![id])?;
+            conn.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
+            conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+            Ok(())
+        })?;
+        Ok(Some(record))
+    }
+
     pub fn update_session_status(&self, id: &str, status: &str) -> Result<()> {
         let now = current_timestamp();
         self.persist_with_outbox("sessions", id, &now, |conn| {
