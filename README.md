@@ -15,7 +15,7 @@
 
 ## Supported Agents
 
-`acp-stack` speaks ACP protocol v1 via the [agent-client-protocol](https://crates.io/crates/agent-client-protocol) Rust SDK, currently declared at 1.2.0 in `Cargo.toml`.
+`acp-stack` speaks ACP protocol v1 via the [agent-client-protocol](https://crates.io/crates/agent-client-protocol) Rust SDK, currently declared at 1.3.0 in `Cargo.toml`.
 
 These harnesses are currently supported:
 
