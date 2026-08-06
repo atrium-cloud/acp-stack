@@ -6,17 +6,18 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
-    CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest, ForkSessionRequest,
-    ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
-    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse,
-    PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionConfigSelectOption, SessionForkCapabilities, SessionId,
-    SessionInfo, SessionListCapabilities, SessionNotification, SessionResumeCapabilities,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    TerminalId, TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+    CloseSessionResponse, ContentBlock, ContentChunk, CreateTerminalRequest, DeleteSessionRequest,
+    DeleteSessionResponse, ForkSessionRequest, ForkSessionResponse, Implementation,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities,
+    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
+    ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
+    SessionDeleteCapabilities, SessionForkCapabilities, SessionId, SessionInfo,
+    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TerminalId,
+    TerminalOutputRequest, TextContent, ToolCallUpdate, ToolCallUpdateFields,
     WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::schema::v1::{PermissionOption, PermissionOptionKind};
@@ -105,6 +106,8 @@ struct AcpArgs {
     no_cap_resume_session: bool,
     #[arg(long)]
     no_cap_close_session: bool,
+    #[arg(long)]
+    no_cap_delete_session: bool,
     #[arg(long)]
     no_cap_fork_session: bool,
     #[arg(long)]
@@ -352,6 +355,15 @@ async fn run_acp(args: AcpArgs) -> agent_client_protocol::Result<()> {
             {
                 let state = Arc::clone(&state);
                 async move |request, responder, connection| {
+                    handle_delete_session(Arc::clone(&state), request, responder, connection).await
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = Arc::clone(&state);
+                async move |request, responder, connection| {
                     handle_fork_session(Arc::clone(&state), request, responder, connection).await
                 }
             },
@@ -427,6 +439,9 @@ async fn handle_initialize(
     }
     if !state.args.no_cap_close_session {
         session_capabilities = session_capabilities.close(SessionCloseCapabilities::new());
+    }
+    if !state.args.no_cap_delete_session {
+        session_capabilities = session_capabilities.delete(SessionDeleteCapabilities::new());
     }
     if !state.args.no_cap_fork_session {
         let mut fork = SessionForkCapabilities::new();
@@ -591,6 +606,15 @@ async fn handle_close_session(
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     responder.respond(CloseSessionResponse::new())
+}
+
+async fn handle_delete_session(
+    _state: SharedState,
+    _request: DeleteSessionRequest,
+    responder: Responder<DeleteSessionResponse>,
+    _connection: ConnectionTo<Client>,
+) -> agent_client_protocol::Result<()> {
+    responder.respond(DeleteSessionResponse::new())
 }
 
 async fn handle_fork_session(

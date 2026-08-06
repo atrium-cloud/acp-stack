@@ -75,10 +75,10 @@ use super::routes::security::{
 };
 use super::routes::sessions::{
     sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
-    sessions_create_handler, sessions_events_handler, sessions_fork_handler, sessions_get_handler,
-    sessions_list_handler, sessions_load_handler, sessions_prompt_handler,
-    sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
-    sessions_status_handler,
+    sessions_create_handler, sessions_delete_handler, sessions_events_handler,
+    sessions_fork_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
+    sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
+    sessions_snapshot_handler, sessions_status_handler,
 };
 use super::routes::status::{
     health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
@@ -602,6 +602,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/sessions/{id}/fork", post(sessions_fork_handler))
         .route("/v1/sessions/{id}/prompt", post(sessions_prompt_handler))
         .route("/v1/sessions/{id}/cancel", post(sessions_cancel_handler))
+        .route("/v1/sessions/{id}/delete", post(sessions_delete_handler))
         .route(
             "/v1/sessions/{id}/prompts/{prompt_id}",
             get(sessions_prompt_status_handler),

@@ -52,6 +52,7 @@ The bridge maps runtime session operations to ACP methods where supported:
 - resume
 - fork
 - close
+- delete
 - prompt
 - cancel
 - set model or mode config options
@@ -62,8 +63,9 @@ If an agent does not advertise an optional capability, the corresponding runtime
 - `session/load` requires `supports_load_session`
 - `session/resume` requires `supports_resume_session`
 - `session/fork` requires `supports_fork_session`
+- `session/delete` requires `supports_delete_session`
 
-Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio has no dedicated flag and requires at least one advertised MCP capability. A declaration the advertisement does not cover is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
+Capability flags are read from the ACP `initialize` response — `loadSession` on the top-level capabilities object, and `sessionCapabilities.{list,resume,fork,close,delete}` for the rest. Image, audio, and embedded-resource prompt blocks require the matching `promptCapabilities` flag. HTTP and SSE MCP declarations require `mcpCapabilities.http` and `mcpCapabilities.sse`; stdio has no dedicated flag and requires at least one advertised MCP capability. A declaration the advertisement does not cover is dropped from the session rather than failing it (see [MCP Servers](#mcp-servers)); an MCP transport variant the runtime does not model is still a hard failure. Forking at a prompt breakpoint also requires explicit `_meta.acpStack.messageId` support under `sessionCapabilities.fork`; otherwise only current-head fork is allowed. Unsupported combinations fail locally before a request is dispatched. The bridge code lives in `src/runtime/agent/acp_bridge.rs`.
 
 ### Prompt Message IDs (local extension)
 
@@ -79,7 +81,7 @@ Sessions learned from `session/list` are persisted only when their CWD is an exi
 
 ACP session lifecycle calls pass CWDs as paths because ACP has no directory-handle transport; the runtime revalidates those paths immediately before each call.
 
-`session/close` is surfaced as history-preserving close in `acp-stack`; it does not permanently delete local session history.
+`session/close` is surfaced as history-preserving close in `acp-stack`; it does not permanently delete local session history. `session/delete` (`POST /v1/sessions/{id}/delete`) is the destructive counterpart: the agent removes the session from its own history, and the runtime then hard-deletes the local session row together with its prompts and per-session events. Permission log rows stay in the durable security log, and the external log mirror is upsert-only, so mirrored rows are not retracted. Repeat deletes and unknown ids succeed silently, matching ACP's idempotency requirement.
 
 ### Session Resume Capability Matrix
 

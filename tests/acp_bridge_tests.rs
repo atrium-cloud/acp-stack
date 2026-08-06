@@ -731,6 +731,66 @@ async fn close_session_returns_unsupported_capability_when_agent_disables_flag()
 }
 
 #[tokio::test]
+async fn delete_session_returns_unsupported_capability_when_agent_disables_flag() {
+    let mut config = fake_agent_config();
+    config.args.push("--no-cap-delete-session".into());
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &Default::default(),
+        None,
+        None,
+    )
+    .await
+    .expect("spawn");
+    assert!(!bridge.capabilities().supports_delete_session());
+
+    let err = bridge
+        .delete_session(agent_client_protocol::schema::v1::SessionId::new(
+            "sess_does_not_exist",
+        ))
+        .await
+        .expect_err("must report unsupported capability");
+    assert!(matches!(
+        err,
+        acp_stack::error::StackError::AgentUnsupportedCapability {
+            name: "session/delete"
+        }
+    ));
+
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
+async fn delete_session_round_trips_when_the_agent_advertises_the_capability() {
+    let bridge = AcpBridge::spawn(
+        &fake_agent_config(),
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &Default::default(),
+        None,
+        None,
+    )
+    .await
+    .expect("spawn");
+    assert!(bridge.capabilities().supports_delete_session());
+
+    bridge
+        .delete_session(agent_client_protocol::schema::v1::SessionId::new(
+            "sess_fake_1",
+        ))
+        .await
+        .expect("delete session");
+
+    bridge.shutdown().await.expect("shutdown ok");
+}
+
+#[tokio::test]
 async fn fork_session_returns_child_session() {
     let bridge = AcpBridge::spawn(
         &fake_agent_config(),

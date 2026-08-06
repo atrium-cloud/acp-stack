@@ -829,3 +829,77 @@ fn session_status_window_includes_pending_acp_permission() {
     );
     assert_eq!(rows[0].last_activity_from, SESSION_ACTIVITY_ACTOR_AGENT);
 }
+
+#[test]
+fn delete_session_removes_row_prompts_and_events_and_repeats_silently() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_doomed".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp/doomed".to_owned(),
+            title: None,
+            metadata_json: "{}".to_owned(),
+        })
+        .expect("session inserted");
+    store
+        .insert_prompt(NewPromptRecord {
+            id: "prm_doomed".to_owned(),
+            session_id: "sess_doomed".to_owned(),
+            prompt_json: "[]".to_owned(),
+        })
+        .expect("prompt inserted");
+    store
+        .append_session_event_with_source(
+            "sess_doomed",
+            "info",
+            "session.update",
+            EVENT_SOURCE_ACP,
+            "ACP session update",
+            "{}",
+        )
+        .expect("event appended");
+
+    let deleted = store
+        .delete_session("sess_doomed")
+        .expect("delete succeeds")
+        .expect("record returned");
+    assert_eq!(deleted.id, "sess_doomed");
+
+    assert!(
+        store
+            .get_session("sess_doomed")
+            .expect("lookup succeeds")
+            .is_none()
+    );
+    assert!(
+        store
+            .get_prompt("prm_doomed")
+            .expect("prompt lookup succeeds")
+            .is_none()
+    );
+    assert!(
+        store
+            .latest_session_events("sess_doomed", 10)
+            .expect("events lookup succeeds")
+            .is_empty()
+    );
+
+    // Unknown and already-deleted ids succeed silently.
+    assert!(
+        store
+            .delete_session("sess_doomed")
+            .expect("repeat")
+            .is_none()
+    );
+    assert!(
+        store
+            .delete_session("sess_never")
+            .expect("unknown")
+            .is_none()
+    );
+}

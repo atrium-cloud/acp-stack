@@ -158,12 +158,15 @@ The `/v1/agent/*` routes operate on the Array `primary_target`. Session routes a
 | `POST /v1/sessions/{id}/prompt`             | session | enqueues a prompt and returns a prompt id                      |
 | `POST /v1/sessions/{id}/cancel`             | session | cancels an in-flight prompt                                    |
 | `DELETE /v1/sessions/{id}`                  | session | closes the agent-side session and preserves local history      |
+| `POST /v1/sessions/{id}/delete`             | session | forwards ACP `session/delete` and hard-deletes local history   |
 | `GET /v1/sessions/{id}/prompts/{prompt_id}` | session | returns prompt status                                          |
 | `GET /v1/sessions/{id}/events`              | session | returns durable session events                                 |
 | `GET /v1/sessions/{id}/changes`             | session | returns the process-local ACP file-diff snapshot               |
 | `GET /v1/sessions/{id}/snapshot`            | session | returns session row, in-flight prompts, and recent events      |
 
 `POST /v1/sessions/{id}/prompt` is asynchronous. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
+
+`POST /v1/sessions/{id}/delete` is idempotent: an unknown or already-deleted id returns success with `deleted: false` and never dials the agent. When the agent does not advertise `sessionCapabilities.delete`, the route returns HTTP 501 `agent.unsupported_capability` and the local row is kept.
 
 Before a prompt row is created, media-bearing prompts are checked against the selected target model's known input modalities from `models.dev`. Confidently unsupported image, audio, or video input returns HTTP 400 `prompt.unsupported_modality`; unknown models, unavailable catalog data, PDFs, and generic files are allowed through.
 

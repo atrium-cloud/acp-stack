@@ -1238,6 +1238,35 @@ impl AgentSupervisor {
             })
     }
 
+    /// `POST /v1/sessions/{id}/delete`. Forwards ACP `session/delete` to the
+    /// agent, then hard-deletes the local session row with its prompts and
+    /// events. An unknown id returns `Ok(None)` without touching the agent —
+    /// ACP specifies repeat deletes succeed silently.
+    ///
+    /// Same ordering rule as close: the agent confirms the delete first, and
+    /// only then is local state settled. A failed bridge call must not strand
+    /// a session the agent still lists without any local record of it.
+    pub async fn delete_session(
+        &self,
+        session_id: &str,
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<Option<SessionRecord>> {
+        let agent_session_id = {
+            let guard = state.lock().await;
+            match guard.get_session(session_id)? {
+                Some(record) => record.agent_session_id,
+                None => return Ok(None),
+            }
+        };
+        let bridge = self.bridge().await?;
+        bridge
+            .delete_session(AcpSessionId::new(agent_session_id))
+            .await?;
+        self.cancel_prompts_for_session(session_id).await;
+        let guard = state.lock().await;
+        guard.delete_session(session_id)
+    }
+
     /// `POST /v1/sessions/{id}/prompt`. Fire-and-forget: inserts a row in
     /// `prompts` with status `pending`, spawns a background task that drives
     /// the ACP `session/prompt` to completion, and returns the prompt id

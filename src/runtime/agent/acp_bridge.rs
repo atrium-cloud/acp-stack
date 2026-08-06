@@ -27,8 +27,8 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentNotification, CancelNotification, ClientCapabilities, ClientSessionCapabilities,
-    CloseSessionRequest, CreateTerminalRequest, FileSystemCapabilities, ForkSessionRequest,
-    ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
+    CloseSessionRequest, CreateTerminalRequest, DeleteSessionRequest, FileSystemCapabilities,
+    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
     KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
     NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
@@ -931,6 +931,28 @@ impl AcpBridge {
             .await
             .map_err(|err| StackError::AgentRequestFailed {
                 method: "session/close",
+                message: err.to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// `session/delete`. Requires the `sessionCapabilities.delete`
+    /// capability. Unlike close, the agent removes the session from its own
+    /// history; repeat deletes are specified to succeed silently.
+    pub async fn delete_session(&self, session_id: SessionId) -> Result<()> {
+        if !self.capabilities.supports_delete_session() {
+            return Err(StackError::AgentUnsupportedCapability {
+                name: "session/delete",
+            });
+        }
+        let connection = self.connection().await?;
+        let request = DeleteSessionRequest::new(session_id);
+        connection
+            .send_request(request)
+            .block_task()
+            .await
+            .map_err(|err| StackError::AgentRequestFailed {
+                method: "session/delete",
                 message: err.to_string(),
             })?;
         Ok(())
