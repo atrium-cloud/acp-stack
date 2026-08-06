@@ -25,6 +25,7 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | Codex CLI   | adapter | `codex-acp`        | yes          |
 | Claude Code | adapter | `claude-agent-acp` | yes          |
 | Kimi Code   | native  |                    | yes          |
+| Hermes Agent | native |                    | yes          |
 
 MCP support is determined per install from the agent's ACP `initialize` advertisement (see [registry.md](registry.md)); servers the advertisement does not cover are ignored at runtime.
 

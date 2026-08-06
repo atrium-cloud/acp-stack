@@ -2,10 +2,6 @@
 
 Hermes Agent is a native ACP target. `acp-stack` launches `hermes acp`.
 
-## Support status
-
-The acps-driven end-to-end smoke (`acps agent test` against a real install) has not passed yet, so Hermes Agent is not listed as a supported agent. A hand-driven ACP session against Hermes v0.20.0 (install, initialize, session/new, real prompt writing the testflight file, permission round trip) passed on 2026-08-05.
-
 ## Known limitation
 
 Hermes advertises session models and modes through the pre-1.0 `models`/`modes` session state instead of ACP v1 `configOptions`, and its `initialize` response carries no `mcpCapabilities`. Until upstream adopts the v1 shapes: model ids are accepted as supplied without ACP discovery, mode selection is unavailable (`set_mode = false`), and configured MCP servers are recorded as ignored features for Hermes sessions rather than delivered.
