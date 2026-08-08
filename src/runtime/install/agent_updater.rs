@@ -32,6 +32,13 @@ const NATIVE_UPDATE_COMMANDS: &[&str] = &["update", "upgrade"];
 const PROBE_FAILURE_OUTPUT_TAIL_BYTES: usize = 200;
 const HELP_PROBE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
+/// Skip reason recorded when an update is requested for a non-registry
+/// (escape-hatch) agent. The updater resolves and reinstalls from registry
+/// metadata, so a custom agent has nothing to update; callers skip rather than
+/// error so a custom agent never produces a recurring `agent.update.failed`.
+pub const NON_REGISTRY_SKIP_REASON: &str =
+    "agent is not a managed registry agent; auto-update is unavailable for escape-hatch installs";
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentUpdateOptions {
     pub force: bool,
@@ -49,6 +56,18 @@ pub struct AgentUpdateReport {
 }
 
 impl AgentUpdateReport {
+    /// A no-op report for an update that never ran (agent busy, or a
+    /// non-registry agent with nothing to update).
+    pub fn skipped(agent: String, reason: impl Into<String>) -> Self {
+        Self {
+            agent,
+            updated: false,
+            skipped: true,
+            reason: Some(reason.into()),
+            steps: Vec::new(),
+        }
+    }
+
     pub fn has_failed_steps(&self) -> bool {
         self.steps
             .iter()
@@ -89,13 +108,10 @@ pub fn update_agent_for_config(
     options: AgentUpdateOptions,
 ) -> Result<AgentUpdateReport> {
     if options.agent_running {
-        return Ok(AgentUpdateReport {
-            agent: config.agent.id.clone(),
-            updated: false,
-            skipped: true,
-            reason: Some("agent is running".to_owned()),
-            steps: Vec::new(),
-        });
+        return Ok(AgentUpdateReport::skipped(
+            config.agent.id.clone(),
+            "agent is running",
+        ));
     }
 
     entry.ensure_supported()?;

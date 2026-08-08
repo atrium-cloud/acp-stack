@@ -613,6 +613,8 @@ fn empty_init_args() -> InitArgs {
         deps_apply_yes: false,
         stack_update: None,
         stack_update_frequency: None,
+        agent_update: None,
+        agent_update_frequency: None,
         non_interactive: false,
         handoff_json: false,
         from_file: None,

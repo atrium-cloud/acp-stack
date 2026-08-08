@@ -4,11 +4,13 @@ use std::path::Path;
 use http::header::HeaderName;
 
 use crate::config::{
-    self, AgentConfig, AgentInstallConfig, ApiConfig, CodeSourceConfig, Config, DataSourceConfig,
-    DependencyEntry, DependencyInstallAction, DependencyInstallScope, EdgeConfig, HttpHeaderRef,
-    LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer, SandboxConfig,
-    SandboxMode, SecurityConfig, SecurityHttpConfig, StackUpdatePolicy, SupabaseLoggingConfig,
-    WorkspaceConfig, is_valid_secret_ref_name, normalize_day_or_week_duration,
+    self, AGENT_UPDATE_FREQUENCY_LIMITS, AgentAutoUpdateConfig, AgentConfig, AgentInstallConfig,
+    ApiConfig, CodeSourceConfig, Config, DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY, DataSourceConfig,
+    DependencyEntry, DependencyInstallAction, DependencyInstallScope, DurationLimits, EdgeConfig,
+    HttpHeaderRef, LoggingConfig, McpConfig, McpHttpServer, McpServerConfig, McpStdioServer,
+    STACK_UPDATE_FREQUENCY_LIMITS, SandboxConfig, SandboxMode, SecurityConfig, SecurityHttpConfig,
+    StackUpdatePolicy, SupabaseLoggingConfig, WorkspaceConfig, is_valid_secret_ref_name,
+    normalize_duration,
 };
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps_apply::{
@@ -51,8 +53,9 @@ pub(super) use self::deps::{
     should_apply_deps_for_init,
 };
 pub(super) use self::prompts::{
-    configure_stack_update_for_init, prompt_environment_configuration_if_needed,
-    prompt_mcp_servers, validate_stack_update_args,
+    configure_agent_update_for_init, configure_stack_update_for_init,
+    prompt_environment_configuration_if_needed, prompt_mcp_servers, validate_agent_update_args,
+    validate_stack_update_args,
 };
 
 // Plain (non-re-exporting) globs make each sibling's `pub(super)` items private

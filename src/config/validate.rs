@@ -296,10 +296,22 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
     Ok(())
 }
 
+/// Stack self-update polls GitHub Releases, so a day is the finest cadence
+/// worth allowing. Shared with init's `--stack-update-frequency` handling.
+pub(crate) const STACK_UPDATE_FREQUENCY_LIMITS: primitives::DurationLimits =
+    primitives::DurationLimits::new(
+        &[
+            primitives::DurationUnit::Day,
+            primitives::DurationUnit::Week,
+        ],
+        std::time::Duration::from_secs(86_400),
+    );
+
 fn validate_stack_updates(config: &Config) -> Result<()> {
-    self::primitives::normalize_day_or_week_duration(
+    self::primitives::normalize_duration(
         "updates.acp_stack.frequency",
         &config.updates.acp_stack.frequency,
+        &STACK_UPDATE_FREQUENCY_LIMITS,
     )?;
     Ok(())
 }

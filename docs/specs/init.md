@@ -58,7 +58,7 @@ The operator-facing sequence, in order:
     - Write a starter config or validate the existing/imported config.
     - Open SQLite state and run migrations.
     - For supported registry agents:
-        - New selections get `[agent.auto_update] enabled = true`, `frequency = "1d"`.
+        - New selections default to `[agent.auto_update] enabled = true`, `frequency = "1d"`; `--agent-update <on|off>` / `--agent-update-frequency <freq>` (or the interactive prompt) override it, so auto-update can be declined at init instead of only afterward via `acps agent update set --auto-off`. Custom (non-registry) agents cannot auto-update, so `--agent-update on` is rejected.
         - Re-confirming the same agent preserves policy.
         - Switching agents resets to the supported-agent default.
 6. Agent Skills selection (interactive, when selected).
