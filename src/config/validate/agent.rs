@@ -6,8 +6,8 @@ use crate::config::schema::{
     AgentProvidersConfig, AgentSubagentConfig, CustomProviderApi,
 };
 use crate::config::validate::primitives::{
-    require_present, validate_duration_field, validate_non_empty_trimmed, validate_nonempty,
-    validate_secret_ref_name_value,
+    DurationLimits, DurationUnit, normalize_duration, require_present, validate_non_empty_trimmed,
+    validate_nonempty, validate_secret_ref_name_value,
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
@@ -138,14 +138,20 @@ fn validate_mapped_provider_id(
     Ok(())
 }
 
+/// Managed agent updates poll upstream package registries; an hour is the
+/// finest cadence worth allowing, so eager operators can still run e.g. `12h`.
+/// Shared with init's `--agent-update-frequency` handling.
+pub(crate) const AGENT_UPDATE_FREQUENCY_LIMITS: DurationLimits = DurationLimits::new(
+    &[DurationUnit::Hour, DurationUnit::Day, DurationUnit::Week],
+    std::time::Duration::from_secs(3_600),
+);
+
 pub(crate) fn validate_agent_auto_update(auto_update: &AgentAutoUpdateConfig) -> Result<()> {
-    let frequency = validate_duration_field("agent.auto_update.frequency", &auto_update.frequency)?;
-    if frequency.is_zero() {
-        return Err(StackError::InvalidParam {
-            field: "agent.auto_update.frequency",
-            reason: "must be greater than zero".to_owned(),
-        });
-    }
+    normalize_duration(
+        "agent.auto_update.frequency",
+        &auto_update.frequency,
+        &AGENT_UPDATE_FREQUENCY_LIMITS,
+    )?;
     Ok(())
 }
 

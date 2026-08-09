@@ -139,6 +139,18 @@ pub struct InitArgs {
         requires = "stack_update"
     )]
     pub(super) stack_update_frequency: Option<String>,
+    /// Managed agent auto-update: on (daemon updates the harness/adapter when
+    /// stopped) or off (updates stay manual via `acps agent update`).
+    #[arg(long = "agent-update", value_name = "on|off")]
+    pub(super) agent_update: Option<String>,
+    /// Managed agent auto-update frequency (hour/day/week units, e.g. 12h, 1d,
+    /// 3w; minimum 1 hour). Ignored when auto-update is off.
+    #[arg(
+        long = "agent-update-frequency",
+        value_name = "FREQ",
+        requires = "agent_update"
+    )]
+    pub(super) agent_update_frequency: Option<String>,
     /// Confirm that init is running without prompts. Non-interactive first
     /// runs must also pass `--agent <id>`.
     #[arg(long)]

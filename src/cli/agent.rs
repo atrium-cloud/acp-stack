@@ -198,7 +198,8 @@ pub struct AgentUpdateSetArgs {
     /// Disable periodic agent auto-update.
     #[arg(long = "auto-off")]
     pub(super) auto_off: bool,
-    /// Set the auto-update frequency, such as 1d, 3d, or 4w.
+    /// Set the auto-update frequency, such as 12h, 1d, 3d, or 4w (minimum 1
+    /// hour).
     #[arg(long)]
     pub(super) frequency: Option<String>,
 }

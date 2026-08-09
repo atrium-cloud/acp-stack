@@ -38,13 +38,14 @@ pub use self::secret_template::{
     env_entry_var_name, parse_env_entry, ref_names_lossy, resolve_env_entry, screen_env_entry,
     screen_ref_name, screen_template, template_pieces_lossy,
 };
+pub(crate) use self::validate::agent::AGENT_UPDATE_FREQUENCY_LIMITS;
 pub(crate) use self::validate::mcp::validate_mcp_http_url;
-pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
 pub(crate) use self::validate::primitives::{
-    normalize_day_or_week_duration, validate_secret_ref_name_value,
+    DurationLimits, normalize_duration, validate_secret_ref_name_value,
 };
+pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
-pub(crate) use self::validate::validate_supabase_identifiers;
+pub(crate) use self::validate::{STACK_UPDATE_FREQUENCY_LIMITS, validate_supabase_identifiers};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

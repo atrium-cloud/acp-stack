@@ -15,7 +15,7 @@ use crate::fs_util::{
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::agent_updater::{
-    AgentUpdateOptions, AgentUpdateReport, update_agent_for_config,
+    AgentUpdateOptions, AgentUpdateReport, NON_REGISTRY_SKIP_REASON, update_agent_for_config,
 };
 use crate::state::{StateStore, default_installer_log_base, default_state_path};
 
@@ -49,20 +49,25 @@ fn run_agent_update_set(args: AgentUpdateSetArgs) -> Result<()> {
     let config_path = crate::config::default_config_path()?;
     let mut config = Config::load_from_path(&config_path)?;
     // Auto-update drives registry-managed harness/adapter steps. An escape-hatch
-    // agent (`[agent.install]`, no registry entry) has nothing to update, so the
-    // daemon loop would only ever record `agent.update.failed`. Reject up front.
-    if args.auto_on {
-        let home = home_dir()?;
-        let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-        if registry.lookup(&config.agent.id).is_none() {
+    // agent (`[agent.install]`, no registry entry) has nothing to update, so none
+    // of --auto-on/--auto-off/--frequency apply — reject up front rather than
+    // writing an `[agent.auto_update]` block the daemon would only ever skip.
+    // A placeholder id keeps its own "select a real agent" error, matching
+    // `agent check`/`agent update`.
+    let home = home_dir()?;
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    match registry.lookup_required(&config.agent.id) {
+        Ok(_) => {}
+        Err(StackError::AgentRegistryMissing { .. }) => {
             return Err(StackError::InvalidParam {
-                field: "agent.auto_update.enabled",
+                field: "agent.auto_update",
                 reason: format!(
                     "agent `{}` is not a managed registry agent; auto-update is unavailable for escape-hatch installs",
                     config.agent.id
                 ),
             });
         }
+        Err(error) => return Err(error),
     }
     let existing = config.agent.auto_update.take();
     let mut auto_update = existing.unwrap_or_else(|| AgentAutoUpdateConfig {
@@ -106,11 +111,25 @@ fn run_agent_update_execute(
     admin_key: Option<String>,
     output: OutputFormat,
 ) -> Result<()> {
+    let home = home_dir()?;
+    let config = Config::load_from_default_path()?;
+    // A custom (non-registry) agent has nothing to update. Resolve membership
+    // before any daemon interaction so --restart never stops and restarts a
+    // running agent for a guaranteed no-op (and never prompts for the admin key).
+    // A placeholder id keeps its own error rather than degrading to a skip.
+    let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
+    match registry.lookup_required(&config.agent.id) {
+        Ok(_) => {}
+        Err(StackError::AgentRegistryMissing { .. }) => {
+            let report =
+                AgentUpdateReport::skipped(config.agent.id.clone(), NON_REGISTRY_SKIP_REASON);
+            return emit_update_report(&report, output);
+        }
+        Err(error) => return Err(error),
+    }
     if !output.is_json() {
         println!("progress: preparing agent update");
     }
-    let home = home_dir()?;
-    let config = Config::load_from_default_path()?;
     let daemon = query_daemon_agent_state(&config)?;
     // `updating` counts as busy: a concurrent daemon-side auto-update must not
     // race a second offline update against the same install destination.
@@ -175,16 +194,22 @@ fn run_agent_update_execute(
         }
     };
 
+    emit_update_report(&report, output)
+}
+
+/// Print an update report (JSON or text) and map any failed step to an error so
+/// the exit code reflects it. A skipped report has no steps, so it exits 0.
+fn emit_update_report(report: &AgentUpdateReport, output: OutputFormat) -> Result<()> {
     if output.is_json() {
-        print_json(&serde_json::to_value(&report).map_err(|err| {
+        print_json(&serde_json::to_value(report).map_err(|err| {
             StackError::AgentInitializeFailed {
                 reason: format!("agent update report was not JSON-serializable: {err}"),
             }
         })?)?;
-        return report_failed_error(&report).map_or(Ok(()), Err);
+        return report_failed_error(report).map_or(Ok(()), Err);
     }
-    print_update_report(&report);
-    if let Some(err) = report_failed_error(&report) {
+    print_update_report(report);
+    if let Some(err) = report_failed_error(report) {
         return Err(err);
     }
     Ok(())
@@ -204,6 +229,8 @@ fn update_agent_offline(
     set_owner_only_file(&state_path)?;
 
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(home))?;
+    // `run_agent_update_execute` filters non-registry agents before calling here,
+    // so this only resolves registry agents; a placeholder id still errors.
     let entry = registry.lookup_required(&config.agent.id)?;
     let workspace_root = PathBuf::from(config.workspace.root.clone());
     let local_bin = local_bin_dir(home);
