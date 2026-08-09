@@ -291,6 +291,9 @@ pub fn write_installed_skill(root: &std::path::Path, name: &str, descriptor: &st
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), descriptor).expect("descriptor");
     std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
+    // Mirrors the marker acp-stack writes at install time; removal refuses
+    // directories without it.
+    std::fs::write(skill_dir.join(".acp-stack-managed"), "test-source\n").expect("marker");
 }
 
 pub fn write_cursor_registry_override(config_dir: &std::path::Path) {

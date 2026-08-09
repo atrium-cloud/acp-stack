@@ -307,7 +307,16 @@ fn print_skills_port(skills_port: &Value) {
                 .get("overwritten")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
+            let kept_unmanaged = skills_port
+                .get("kept_unmanaged")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
             println!("skills port: copied {copied}, overwritten {overwritten} -> {target_root}");
+            if kept_unmanaged > 0 {
+                println!(
+                    "skills port: kept {kept_unmanaged} target skill(s) not installed by acp-stack"
+                );
+            }
         }
         _ => println!("skills port: {status}"),
     }

@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod permissions;
 pub mod primitives;
 pub mod prompts;
+pub mod skills;
 pub mod sources;
 
 use std::collections::HashSet;
@@ -145,6 +146,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_trusted_proxies(&config.security.http)?;
     validate_edge(&config.edge)?;
     validate_dependencies(&config.dependencies)?;
+    self::skills::validate_skills(&config.skills)?;
     // The screening sweep must run before any name-shape validation
     // (validate_mcp included): a screening rejection redacts the offending
     // value, a name-shape rejection echoes it, and secret-shaped strings

@@ -15,6 +15,7 @@ mod secrets;
 mod security;
 mod serve;
 mod sessions;
+mod skill;
 mod status;
 mod subagent;
 #[cfg(feature = "stack-self-update")]

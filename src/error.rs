@@ -508,6 +508,12 @@ pub enum StackError {
     #[error("skill install failed: {reason}")]
     SkillInstallFailed { reason: String },
 
+    #[error("skill `{skill}` is not installed")]
+    SkillNotInstalled { skill: String },
+
+    #[error("skill source `{alias}` is not configured")]
+    SkillSourceNotConfigured { alias: String },
+
     #[error("all install paths failed — {summary}")]
     AgentInstallAllPathsFailed { summary: String },
 

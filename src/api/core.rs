@@ -80,6 +80,10 @@ use super::routes::sessions::{
     sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
     sessions_snapshot_handler, sessions_status_handler,
 };
+use super::routes::skills::{
+    skills_add_handler, skills_catalog_handler, skills_list_handler, skills_remove_handler,
+    skills_source_add_handler, skills_source_get_handler, skills_source_remove_handler,
+};
 use super::routes::status::{
     health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
     status_handler,
@@ -574,6 +578,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route("/v1/agent/skills", get(skills_list_handler))
+        .route("/v1/agent/skills/catalog", get(skills_catalog_handler))
+        .route("/v1/agent/skills/source", get(skills_source_get_handler))
         .route("/v1/array/status", get(array_status_handler))
         .route(
             "/v1/array/targets/{target_id}/capabilities",
@@ -680,6 +687,16 @@ pub fn build_router(state: AppState) -> Router {
             get(agent_restart_blockers_handler),
         )
         .route("/v1/agent/switch", post(agent_switch_handler))
+        .route("/v1/agent/skills/add", post(skills_add_handler))
+        .route("/v1/agent/skills/remove", post(skills_remove_handler))
+        .route(
+            "/v1/agent/skills/sources/add",
+            post(skills_source_add_handler),
+        )
+        .route(
+            "/v1/agent/skills/sources/remove",
+            post(skills_source_remove_handler),
+        )
         .route(
             "/v1/agent/config/native/inspect",
             post(native_config_inspect_handler)

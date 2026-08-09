@@ -24,14 +24,14 @@ pub use self::schema::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
     DEFAULT_NETWORK_PROVIDER_TIMEOUT, DEFAULT_PERMISSION_REQUEST_TIMEOUT,
     DEFAULT_PERMISSION_TIMEOUT_ACTION, DEFAULT_PROMPTS_STALE_THRESHOLD,
-    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_STACK_UPDATE_FREQUENCY, DEFAULT_STACK_UPDATE_POLICY,
-    DataSourceConfig, DependenciesConfig, DependencyEntry, DependencyInstallAction,
-    DependencyInstallScope, EdgeConfig, ExtensionConfig, ExtensionType, HeaderValueSource,
-    HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig, McpHttpServer,
-    McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig, PromptsConfig,
-    SandboxConfig, SandboxMode, SandboxProviderStderr, SecurityConfig, SecurityHttpConfig,
-    StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend, SupabaseLoggingConfig,
-    UpdatesConfig, WorkspaceConfig,
+    DEFAULT_PROMPTS_SWEEP_INTERVAL, DEFAULT_SKILL_SOURCE_BRANCH, DEFAULT_STACK_UPDATE_FREQUENCY,
+    DEFAULT_STACK_UPDATE_POLICY, DataSourceConfig, DependenciesConfig, DependencyEntry,
+    DependencyInstallAction, DependencyInstallScope, EdgeConfig, ExtensionConfig, ExtensionType,
+    HeaderValueSource, HttpHeaderRef, LocalConfig, LocalSessionAuth, LoggingConfig, McpConfig,
+    McpHttpServer, McpServerConfig, McpStdioServer, PermissionTimeoutAction, PermissionsConfig,
+    PromptsConfig, SandboxConfig, SandboxMode, SandboxProviderStderr, SecurityConfig,
+    SecurityHttpConfig, SkillsConfig, StackUpdateConfig, StackUpdatePolicy, SupabaseLoggingBackend,
+    SupabaseLoggingConfig, UpdatesConfig, UserSkillSource, WorkspaceConfig,
 };
 pub use self::secret_template::{
     EnvEntry, SecretTemplate, TemplateSegment, agent_env_declares, env_entry_ref_names_lossy,
@@ -44,6 +44,7 @@ pub(crate) use self::validate::primitives::{
     DurationLimits, normalize_duration, validate_secret_ref_name_value,
 };
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
+pub(crate) use self::validate::skills::{is_valid_github_owner, is_valid_github_repo};
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
 pub(crate) use self::validate::{STACK_UPDATE_FREQUENCY_LIMITS, validate_supabase_identifiers};
 
@@ -73,6 +74,8 @@ pub struct Config {
     pub dependencies: DependenciesConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default, skip_serializing_if = "SkillsConfig::is_empty")]
+    pub skills: SkillsConfig,
     #[serde(default)]
     pub local: LocalConfig,
     /// Operator-declared extension instances, keyed by operator-chosen name.
@@ -144,6 +147,8 @@ struct RawConfig {
     #[serde(default)]
     mcp: Option<McpConfig>,
     #[serde(default)]
+    skills: Option<SkillsConfig>,
+    #[serde(default)]
     local: Option<LocalConfig>,
     #[serde(default)]
     extensions: Option<std::collections::BTreeMap<String, ExtensionConfig>>,
@@ -168,6 +173,34 @@ impl Config {
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::load_from_path_with_legacy(path)?.config)
+    }
+
+    /// Lenient path load for day-2 management surfaces (the skills routes and
+    /// CLI). Individually invalid MCP server and skill source declarations are
+    /// dropped exactly as the running daemon dropped them at boot, so one bad
+    /// hand-edited entry cannot brick the surface that would repair it.
+    pub(crate) fn load_lenient_from_path(path: impl AsRef<Path>) -> Result<Self> {
+        load_for_runtime_reload(path)
+    }
+
+    pub(crate) fn load_lenient_from_default_path() -> Result<Self> {
+        Self::load_lenient_from_path(default_config_path()?)
+    }
+
+    /// Like [`Config::load_lenient_from_path`], but also reports what was
+    /// dropped. Write paths that canonicalize this view back to disk must use
+    /// this variant and warn per dropped entry — healing a hand-edited invalid
+    /// declaration out of the file silently would be an untraceable mutation.
+    pub(crate) fn load_lenient_from_path_reporting(
+        path: impl AsRef<Path>,
+    ) -> Result<(Self, DroppedDeclarations)> {
+        let path = path.as_ref();
+        let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let (loaded, dropped) = lenient_config_from_str_reporting(&content, false)?;
+        Ok((loaded.config, dropped))
     }
 
     pub(crate) fn load_from_path_with_legacy(path: impl AsRef<Path>) -> Result<LoadedConfig> {
@@ -249,11 +282,11 @@ pub(crate) fn load_config_from_str_with_legacy(input: &str) -> Result<LoadedConf
 }
 
 /// Daemon-startup load. Like [`Config::load_from_path_with_legacy`], but an
-/// MCP server declaration that fails per-server validation degrades to a
-/// skipped server plus a startup warning instead of failing the boot: the
-/// daemon is long-running and one bad peripheral declaration must not brick
-/// it. Config syntax and every non-MCP rule still fail fast, as do all
-/// candidate-config write paths, which go through the strict loaders.
+/// MCP server or skill source declaration that fails per-entry validation
+/// degrades to a skipped entry plus a startup warning instead of failing the
+/// boot: the daemon is long-running and one bad peripheral declaration must
+/// not brick it. Config syntax and every other rule still fail fast, as do
+/// all candidate-config write paths, which go through the strict loaders.
 pub(crate) fn load_for_serve(path: impl AsRef<Path>) -> Result<LoadedConfig> {
     let path = path.as_ref();
     let content = std::fs::read_to_string(path).map_err(|source| StackError::ConfigRead {
@@ -273,26 +306,56 @@ pub(crate) fn load_for_runtime_reload(path: impl AsRef<Path>) -> Result<Config> 
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(lenient_mcp_config_from_str(&content, false)?.config)
+    Ok(lenient_config_from_str(&content, false)?.config)
 }
 
 pub(crate) fn load_from_str_for_serve(input: &str) -> Result<LoadedConfig> {
-    lenient_mcp_config_from_str(input, true)
+    lenient_config_from_str(input, true)
 }
 
-fn lenient_mcp_config_from_str(input: &str, log_drops: bool) -> Result<LoadedConfig> {
+/// Declarations a lenient load dropped, as `(name, reason)` pairs. Read paths
+/// may ignore this; a write path that canonicalizes a lenient view back to
+/// disk must warn per entry, because the write erases them from the file.
+pub(crate) struct DroppedDeclarations {
+    pub mcp_servers: Vec<(String, String)>,
+    pub skill_sources: Vec<(String, String)>,
+}
+
+fn lenient_config_from_str(input: &str, log_drops: bool) -> Result<LoadedConfig> {
+    Ok(lenient_config_from_str_reporting(input, log_drops)?.0)
+}
+
+fn lenient_config_from_str_reporting(
+    input: &str,
+    log_drops: bool,
+) -> Result<(LoadedConfig, DroppedDeclarations)> {
     let mut loaded = parse_config_from_str_with_legacy(input)?;
-    let (kept, dropped) = self::validate::mcp::partition_valid_servers(std::mem::take(
+    let (kept, dropped_servers) = self::validate::mcp::partition_valid_servers(std::mem::take(
         &mut loaded.config.mcp.servers,
     ));
     if log_drops {
-        for (name, reason) in dropped {
+        for (name, reason) in &dropped_servers {
             tracing::warn!(server = %name, %reason, "skipping invalid MCP server declaration");
         }
     }
     loaded.config.mcp.servers = kept;
+    let (kept, dropped_sources) = self::validate::skills::partition_valid_sources(std::mem::take(
+        &mut loaded.config.skills.sources,
+    ));
+    if log_drops {
+        for (alias, reason) in &dropped_sources {
+            tracing::warn!(alias = %alias, %reason, "skipping invalid skill source declaration");
+        }
+    }
+    loaded.config.skills.sources = kept;
     loaded.config.validate()?;
-    Ok(loaded)
+    Ok((
+        loaded,
+        DroppedDeclarations {
+            mcp_servers: dropped_servers,
+            skill_sources: dropped_sources,
+        },
+    ))
 }
 
 fn parse_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
@@ -390,6 +453,7 @@ fn parse_config_from_str_with_legacy(input: &str) -> Result<LoadedConfig> {
         prompts: raw.prompts.unwrap_or_default(),
         dependencies: raw.dependencies.unwrap_or_default(),
         mcp: raw.mcp.unwrap_or_default(),
+        skills: raw.skills.unwrap_or_default(),
         local: raw.local.unwrap_or_default(),
         extensions: raw.extensions.unwrap_or_default(),
     };
@@ -442,6 +506,157 @@ mod tests {
             .iter()
             .map(|server| server.name().to_owned())
             .collect()
+    }
+
+    fn config_with_block(block: &str) -> String {
+        VALID_CONFIG.replace("[agent]", &format!("{block}\n[agent]"))
+    }
+
+    const SKILLS_SOURCE_BLOCK: &str = concat!(
+        "[[skills.sources]]\n",
+        "alias = \"my-org\"\n",
+        "github = \"my-org/skills\"\n",
+        "branch = \"dev\"\n",
+        "trusted = true\n\n",
+    );
+
+    #[test]
+    fn skills_sources_parse_and_round_trip() {
+        let config = load_config_from_str(&config_with_block(SKILLS_SOURCE_BLOCK)).expect("load");
+        assert_eq!(config.skills.sources.len(), 1);
+        let source = &config.skills.sources[0];
+        assert_eq!(source.alias, "my-org");
+        assert_eq!(source.github, "my-org/skills");
+        assert_eq!(source.branch, "dev");
+        assert!(source.trusted);
+
+        let canonical = config.to_canonical_toml().expect("canonical");
+        let reloaded = load_config_from_str(&canonical).expect("reload");
+        assert_eq!(config.skills, reloaded.skills);
+    }
+
+    #[test]
+    fn skills_source_branch_defaults_to_main() {
+        let block = "[[skills.sources]]\nalias = \"my-org\"\ngithub = \"my-org/skills\"\n\n";
+        let config = load_config_from_str(&config_with_block(block)).expect("load");
+        assert_eq!(config.skills.sources[0].branch, "main");
+        assert!(!config.skills.sources[0].trusted);
+    }
+
+    #[test]
+    fn duplicate_skill_source_alias_rejected() {
+        let block = concat!(
+            "[[skills.sources]]\nalias = \"dup\"\ngithub = \"a/skills\"\n\n",
+            "[[skills.sources]]\nalias = \"dup\"\ngithub = \"b/skills\"\n\n",
+        );
+        assert!(load_config_from_str(&config_with_block(block)).is_err());
+    }
+
+    #[test]
+    fn invalid_skill_source_github_rejected() {
+        let block = "[[skills.sources]]\nalias = \"my-org\"\ngithub = \"not-a-repo\"\n\n";
+        assert!(load_config_from_str(&config_with_block(block)).is_err());
+    }
+
+    #[test]
+    fn invalid_skill_source_alias_rejected() {
+        let block = "[[skills.sources]]\nalias = \"Bad_Alias\"\ngithub = \"a/skills\"\n\n";
+        assert!(load_config_from_str(&config_with_block(block)).is_err());
+    }
+
+    #[test]
+    fn invalid_skill_source_branch_rejected() {
+        // A branch is interpolated raw into the archive URL, so reject refs with
+        // URL-breaking characters or `..` traversal segments.
+        for branch in ["main?x", "a#b", "../evil", "feature\\x", "/leading"] {
+            let block = format!(
+                "[[skills.sources]]\nalias = \"my-org\"\ngithub = \"my-org/skills\"\nbranch = \"{branch}\"\n\n"
+            );
+            assert!(
+                load_config_from_str(&config_with_block(&block)).is_err(),
+                "branch `{branch}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_source_owner_stricter_than_repo() {
+        // The installer's fetch path only accepts GitHub-shaped owners
+        // (alnum + dash, at most 39 chars); config must reject the same
+        // shapes or a persisted source would be permanently unusable.
+        for github in [
+            "my_org/skills",
+            "my.org/skills",
+            &format!("{}/skills", "a".repeat(40)),
+        ] {
+            let block =
+                format!("[[skills.sources]]\nalias = \"my-org\"\ngithub = \"{github}\"\n\n");
+            assert!(
+                load_config_from_str(&config_with_block(&block)).is_err(),
+                "github `{github}` should be rejected"
+            );
+        }
+        // Repos stay permissive: GitHub allows `_` and `.` there.
+        let block = "[[skills.sources]]\nalias = \"my-org\"\ngithub = \"my-org/my_repo.rs\"\n\n";
+        assert!(load_config_from_str(&config_with_block(block)).is_ok());
+    }
+
+    #[test]
+    fn dot_skill_source_repo_rejected() {
+        for github in ["my-org/.", "my-org/..", "./skills"] {
+            let block =
+                format!("[[skills.sources]]\nalias = \"my-org\"\ngithub = \"{github}\"\n\n");
+            assert!(
+                load_config_from_str(&config_with_block(&block)).is_err(),
+                "github `{github}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_skill_source_alias_rejected() {
+        let ok_block = format!(
+            "[[skills.sources]]\nalias = \"{}\"\ngithub = \"a/skills\"\n\n",
+            "a".repeat(64)
+        );
+        assert!(load_config_from_str(&config_with_block(&ok_block)).is_ok());
+        let long_block = format!(
+            "[[skills.sources]]\nalias = \"{}\"\ngithub = \"a/skills\"\n\n",
+            "a".repeat(65)
+        );
+        assert!(load_config_from_str(&config_with_block(&long_block)).is_err());
+    }
+
+    #[test]
+    fn serve_load_drops_invalid_skill_sources() {
+        let input = config_with_block(concat!(
+            "[[skills.sources]]\nalias = \"good\"\ngithub = \"my-org/skills\"\n\n",
+            "[[skills.sources]]\nalias = \"Bad_Alias\"\ngithub = \"a/skills\"\n\n",
+            "[[skills.sources]]\nalias = \"good\"\ngithub = \"b/skills\"\n\n",
+            "[[skills.sources]]\nalias = \"badbranch\"\ngithub = \"c/skills\"\nbranch = \"../evil\"\n\n",
+        ));
+        // The strict loader (candidate-config write paths) still rejects.
+        assert!(load_config_from_str(&input).is_err());
+        let loaded = load_from_str_for_serve(&input).expect("serve load degrades");
+        let aliases: Vec<&str> = loaded
+            .config
+            .skills
+            .sources
+            .iter()
+            .map(|source| source.alias.as_str())
+            .collect();
+        assert_eq!(aliases, vec!["good"]);
+    }
+
+    #[test]
+    fn serve_load_keeps_later_valid_skill_source_when_first_of_alias_is_invalid() {
+        let input = config_with_block(concat!(
+            "[[skills.sources]]\nalias = \"dup\"\ngithub = \"not-a-repo\"\n\n",
+            "[[skills.sources]]\nalias = \"dup\"\ngithub = \"a/skills\"\n\n",
+        ));
+        let loaded = load_from_str_for_serve(&input).expect("valid later declaration survives");
+        assert_eq!(loaded.config.skills.sources.len(), 1);
+        assert_eq!(loaded.config.skills.sources[0].github, "a/skills");
     }
 
     #[test]

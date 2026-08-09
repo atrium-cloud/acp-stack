@@ -1,4 +1,14 @@
 use super::*;
+use crate::config::UserSkillSource;
+
+fn user_source(alias: &str, github: &str, branch: &str) -> UserSkillSource {
+    UserSkillSource {
+        alias: alias.to_owned(),
+        github: github.to_owned(),
+        branch: branch.to_owned(),
+        trusted: false,
+    }
+}
 
 fn source() -> ResolvedSkillSource {
     ResolvedSkillSource {
@@ -55,6 +65,9 @@ fn write_installed_skill(root: &Path, name: &str, descriptor: &str) {
     std::fs::create_dir_all(&skill_dir).expect("skill dir");
     std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), descriptor).expect("descriptor");
     std::fs::write(skill_dir.join("script.sh"), "true\n").expect("script");
+    // Mirrors the marker written at install time; removal refuses directories
+    // without it.
+    std::fs::write(skill_dir.join(MANAGED_SKILL_MARKER), "test-source\n").expect("marker");
 }
 
 fn write_catalog_skill(root: &Path, path: &str, name: &str) {
@@ -93,6 +106,174 @@ fn parses_official_and_custom_sources() {
             owner: "my-org".to_owned()
         }
     );
+}
+
+#[test]
+fn resolve_source_ref_prefers_configured_user_source() {
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+    let sources = vec![user_source("my-org", "my-org/my-skills", "dev")];
+
+    let resolved = resolve_source_ref("my-org", &sources, &catalog).expect("resolve");
+
+    assert_eq!(resolved.owner, "my-org");
+    assert_eq!(resolved.repo, "my-skills");
+    assert_eq!(resolved.branch, "dev");
+    assert!(!resolved.catalog_managed);
+    assert_eq!(resolved.url, "https://github.com/my-org/my-skills");
+    assert_eq!(resolved.directories[0].path, CUSTOM_SKILLS_DIRECTORY);
+}
+
+#[test]
+fn resolve_source_ref_resolves_catalog_alias_and_ad_hoc_github() {
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+
+    let anthropic = resolve_source_ref("anthropic", &[], &catalog).expect("catalog alias");
+    assert!(anthropic.catalog_managed);
+
+    let repo = resolve_source_ref("github:acme/widgets", &[], &catalog).expect("ad-hoc repo");
+    assert_eq!(
+        (repo.owner.as_str(), repo.repo.as_str()),
+        ("acme", "widgets")
+    );
+    assert!(!repo.catalog_managed);
+
+    let owner_only = resolve_source_ref("github:acme", &[], &catalog).expect("owner-only");
+    assert_eq!(owner_only.repo, "skills");
+}
+
+#[test]
+fn resolve_source_ref_rejects_unknown_source() {
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+    let err = resolve_source_ref("nonsense", &[], &catalog).expect_err("unknown");
+    assert!(matches!(err, StackError::SkillInstallInvalidSource { .. }));
+}
+
+#[test]
+fn resolve_source_ref_catalog_alias_wins_over_shadowing_user_source() {
+    // A hand-edited `[[skills.sources]]` entry whose alias collides with a
+    // curated one must not hijack it: the catalog is resolved first.
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+    let sources = vec![user_source("anthropic", "evil/repo", "main")];
+
+    let resolved = resolve_source_ref("anthropic", &sources, &catalog).expect("resolve");
+
+    assert!(resolved.catalog_managed);
+    assert_ne!(resolved.owner, "evil");
+}
+
+#[test]
+fn resolve_source_ref_rejects_dot_segment_repo() {
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+    for reference in ["github:acme/..", "github:acme/."] {
+        let err = resolve_source_ref(reference, &[], &catalog).expect_err("dot repo");
+        assert!(matches!(err, StackError::SkillInstallInvalidSource { .. }));
+    }
+}
+
+#[test]
+fn discover_source_skills_reads_frontmatter_for_user_source() {
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+    let sources = vec![user_source("my-org", "my-org/skills", "main")];
+    let source = resolve_source_ref("my-org", &sources, &catalog).expect("resolve");
+    let archive = tempfile::tempdir().expect("archive");
+    write_catalog_skill(archive.path(), "skills/repo-map", "repo-map");
+    write_catalog_skill(archive.path(), "skills/code-review", "code-review");
+
+    let skills = discover_source_skills(&source, archive.path()).expect("discover");
+
+    let selectors = skills
+        .iter()
+        .map(|s| s.selector.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(selectors, ["code-review", "repo-map"]);
+    assert_eq!(skills[1].name, "repo-map");
+    assert_eq!(skills[1].description.as_deref(), Some("test"));
+    assert_eq!(skills[1].path, "skills/repo-map");
+}
+
+#[test]
+fn discover_source_skills_degrades_on_malformed_descriptor() {
+    // `add` (via `find_skill_dir`) installs a skill whose SKILL.md is any
+    // regular file, so `source get` must still surface a sibling with malformed
+    // frontmatter (degraded to the leaf name), not omit it or fail the listing.
+    let catalog = SkillCatalog::load_embedded().expect("catalog");
+    let sources = vec![user_source("my-org", "my-org/skills", "main")];
+    let source = resolve_source_ref("my-org", &sources, &catalog).expect("resolve");
+    let archive = tempfile::tempdir().expect("archive");
+    write_catalog_skill(archive.path(), "skills/good", "good");
+    // `write_skill` writes a descriptor with no YAML frontmatter.
+    write_skill(archive.path(), "skills", "broken");
+
+    let skills = discover_source_skills(&source, archive.path()).expect("discover");
+
+    let selectors = skills
+        .iter()
+        .map(|skill| skill.selector.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(selectors, ["broken", "good"]);
+    let broken = &skills[0];
+    assert_eq!(broken.name, "broken");
+    assert!(broken.description.is_none());
+}
+
+#[test]
+fn discover_source_skills_reads_descriptions_for_catalog_source() {
+    let archive = tempfile::tempdir().expect("archive");
+    let path = "plugins/zoom/skills/general";
+    write_catalog_skill(archive.path(), path, "zoom-general");
+    let source = catalog_source(vec![CatalogSkill {
+        selector: "zoom-general".to_owned(),
+        name: "zoom-general".to_owned(),
+        path: path.to_owned(),
+    }]);
+
+    let skills = discover_source_skills(&source, archive.path()).expect("discover");
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].selector, "zoom-general");
+    assert_eq!(skills[0].description.as_deref(), Some("test"));
+    assert_eq!(skills[0].path, path);
+}
+
+#[test]
+fn discover_source_skills_skips_catalog_skills_add_cannot_install() {
+    // Catalog `add` (via `find_skill_dir`) requires a parseable descriptor
+    // whose frontmatter name matches the index, so `source get` must skip
+    // indexed skills that fail either check rather than listing them.
+    let archive = tempfile::tempdir().expect("archive");
+    write_catalog_skill(
+        archive.path(),
+        "plugins/zoom/skills/general",
+        "zoom-general",
+    );
+    // `write_skill` writes a descriptor with no YAML frontmatter.
+    write_skill(archive.path(), "plugins/zoom/skills", "broken");
+    write_catalog_skill(archive.path(), "plugins/zoom/skills/renamed", "other-name");
+    let source = catalog_source(vec![
+        CatalogSkill {
+            selector: "zoom-general".to_owned(),
+            name: "zoom-general".to_owned(),
+            path: "plugins/zoom/skills/general".to_owned(),
+        },
+        CatalogSkill {
+            selector: "broken".to_owned(),
+            name: "broken".to_owned(),
+            path: "plugins/zoom/skills/broken".to_owned(),
+        },
+        CatalogSkill {
+            selector: "renamed".to_owned(),
+            name: "renamed".to_owned(),
+            path: "plugins/zoom/skills/renamed".to_owned(),
+        },
+    ]);
+
+    let skills = discover_source_skills(&source, archive.path()).expect("discover");
+
+    let selectors = skills
+        .iter()
+        .map(|skill| skill.selector.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(selectors, ["zoom-general"]);
 }
 
 #[test]
@@ -146,7 +327,7 @@ fn resolves_custom_github_owner_to_skills_repo() {
 
     assert_eq!(source.owner, "example-org");
     assert_eq!(source.repo, CUSTOM_SKILLS_REPO);
-    assert_eq!(source.branch, CUSTOM_SKILLS_BRANCH);
+    assert_eq!(source.branch, DEFAULT_SKILL_SOURCE_BRANCH);
     assert_eq!(source.url, "https://github.com/example-org/skills");
     assert_eq!(source.directories[0].path, CUSTOM_SKILLS_DIRECTORY);
     assert!(source.directories[0].installable);
@@ -176,6 +357,12 @@ fn install_from_extracted_root_copies_multiple_skills() {
             .is_file()
     );
     assert!(destination.join("code-review").join("script.sh").is_file());
+    // Installed skills carry the managed marker recording the source id.
+    assert_eq!(
+        std::fs::read_to_string(destination.join("repo-map").join(MANAGED_SKILL_MARKER))
+            .expect("marker"),
+        "openai-skills\n"
+    );
 }
 
 #[test]
@@ -540,6 +727,31 @@ fn port_skill_directories_overwrites_valid_target_skill() {
         "# New\n"
     );
     assert!(!target.join("repo-map").join("old.txt").exists());
+}
+
+#[test]
+fn port_skill_directories_skips_target_skill_not_installed_by_acp_stack() {
+    // A same-named target folder without the managed marker is the user's own
+    // content: porting must leave it untouched instead of overwriting it.
+    let home = tempfile::tempdir().expect("home");
+    let home = canonical_temp_home(&home);
+    let source = home.join(".agents/skills");
+    let target = home.join(".config/agents/skills");
+    write_installed_skill(&source, "repo-map", "# Managed New\n");
+    let user_skill = target.join("repo-map");
+    std::fs::create_dir_all(&user_skill).expect("user skill dir");
+    std::fs::write(user_skill.join(SKILL_DESCRIPTOR), "# User's Own\n").expect("descriptor");
+
+    let report = port_skill_directories(&source, &target).expect("port");
+
+    assert!(report.copied.is_empty());
+    assert!(report.overwritten.is_empty());
+    assert_eq!(report.kept_unmanaged.len(), 1);
+    assert_eq!(report.kept_unmanaged[0].name, "repo-map");
+    assert_eq!(
+        std::fs::read_to_string(user_skill.join(SKILL_DESCRIPTOR)).expect("descriptor"),
+        "# User's Own\n"
+    );
 }
 
 #[test]
@@ -1036,6 +1248,251 @@ fn link_agent_skills_prunes_nested_links_and_emptied_group_dirs() {
         std::fs::read_to_string(link_root.join("contact-center/notes.md")).expect("user file kept"),
         "user notes\n"
     );
+}
+
+fn opencode_entry(
+    catalog: &RegistryCatalog,
+) -> &crate::runtime::install::agent_registry::RegistryEntry {
+    catalog.lookup("opencode").expect("opencode entry")
+}
+
+#[test]
+fn list_installed_skills_empty_when_root_missing() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+
+    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+
+    assert!(skills.is_empty());
+}
+
+#[test]
+fn list_installed_skills_returns_sorted_flat_and_nested() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
+    write_installed_skill(&install_root, "code-review", "# Code Review\n");
+    write_installed_skill(&install_root, "contact-center/android", "# Android\n");
+
+    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+
+    let names = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(names, ["code-review", "contact-center/android", "repo-map"]);
+    assert_eq!(skills[2].path, install_root.join("repo-map"));
+    assert!(
+        skills
+            .iter()
+            .all(|skill| skill.source.as_deref() == Some("test-source"))
+    );
+}
+
+#[test]
+fn list_installed_skills_source_absent_for_unmanaged_or_empty_marker() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    // Hand-placed skill: regular SKILL.md, no managed marker.
+    let unmanaged = install_root.join("hand-made");
+    std::fs::create_dir_all(&unmanaged).expect("skill dir");
+    std::fs::write(unmanaged.join(SKILL_DESCRIPTOR), "# Mine\n").expect("descriptor");
+    // Managed skill whose marker carries no source id.
+    write_installed_skill(&install_root, "blank-marker", "# Blank\n");
+    std::fs::write(
+        install_root.join("blank-marker").join(MANAGED_SKILL_MARKER),
+        "\n",
+    )
+    .expect("blank marker");
+    write_installed_skill(&install_root, "managed", "# Managed\n");
+
+    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+
+    let sources = skills
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.source.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sources,
+        [
+            ("blank-marker", None),
+            ("hand-made", None),
+            ("managed", Some("test-source")),
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn list_installed_skills_follows_symlinked_root() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    // Dotfiles-style setup: the real skills live elsewhere and `~/.agents` is a
+    // symlink to them. Listing must follow it, not report an empty set.
+    let real_agents = home_path.join("dotfiles/agents");
+    write_installed_skill(&real_agents.join("skills"), "repo-map", "# Repo Map\n");
+    std::os::unix::fs::symlink(&real_agents, home_path.join(".agents")).expect("symlink");
+
+    let skills = list_installed_skills(&home_path, opencode_entry(&catalog)).expect("list");
+
+    let names = skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(names, ["repo-map"]);
+}
+
+#[test]
+fn remove_agent_skill_removes_flat_skill() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    write_installed_skill(&install_root, "repo-map", "# Repo Map\n");
+    write_installed_skill(&install_root, "code-review", "# Code Review\n");
+
+    let report =
+        remove_agent_skill(&home_path, opencode_entry(&catalog), "repo-map").expect("remove");
+
+    assert_eq!(report.removed.name, "repo-map");
+    assert!(!install_root.join("repo-map").exists());
+    // A sibling skill is untouched.
+    assert!(
+        install_root
+            .join("code-review")
+            .join(SKILL_DESCRIPTOR)
+            .is_file()
+    );
+}
+
+#[test]
+fn remove_agent_skill_cleans_emptied_group_parent() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    write_installed_skill(&install_root, "contact-center/android", "# Android\n");
+
+    remove_agent_skill(
+        &home_path,
+        opencode_entry(&catalog),
+        "contact-center/android",
+    )
+    .expect("remove");
+
+    assert!(!install_root.join("contact-center/android").exists());
+    // The now-empty group dir is removed, but the install root survives.
+    assert!(!install_root.join("contact-center").exists());
+    assert!(install_root.is_dir());
+}
+
+#[test]
+fn remove_agent_skill_keeps_group_dir_with_siblings() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    write_installed_skill(&install_root, "zoom/android", "# Android\n");
+    write_installed_skill(&install_root, "zoom/desktop", "# Desktop\n");
+
+    remove_agent_skill(&home_path, opencode_entry(&catalog), "zoom/android").expect("remove");
+
+    assert!(!install_root.join("zoom/android").exists());
+    // The group dir stays because a sibling skill remains under it.
+    assert!(
+        install_root
+            .join("zoom/desktop")
+            .join(SKILL_DESCRIPTOR)
+            .is_file()
+    );
+}
+
+#[test]
+fn remove_agent_skill_missing_is_not_installed() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    std::fs::create_dir_all(home_path.join(".agents/skills")).expect("root");
+
+    let err = remove_agent_skill(&home_path, opencode_entry(&catalog), "missing")
+        .expect_err("missing skill");
+
+    assert!(matches!(err, StackError::SkillNotInstalled { .. }));
+}
+
+#[test]
+fn remove_agent_skill_conflicts_on_directory_without_descriptor() {
+    // A path that exists but is not a clean managed skill (no regular
+    // SKILL.md) must surface as the installer's conflict, not the 404 — the
+    // runtime does not delete directories it did not install.
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    std::fs::create_dir_all(install_root.join("scratch")).expect("scratch dir");
+
+    let err =
+        remove_agent_skill(&home_path, opencode_entry(&catalog), "scratch").expect_err("conflict");
+
+    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+    assert!(install_root.join("scratch").is_dir());
+}
+
+#[test]
+fn remove_agent_skill_refuses_skill_not_installed_by_acp_stack() {
+    // A folder the user placed in the install root by hand looks exactly like
+    // an installed skill (regular SKILL.md) but carries no managed marker —
+    // removal must refuse it and leave every byte in place.
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    let skill_dir = install_root.join("my-skill");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(skill_dir.join(SKILL_DESCRIPTOR), "# Mine\n").expect("descriptor");
+    std::fs::write(skill_dir.join("notes.txt"), "user content\n").expect("notes");
+
+    let err = remove_agent_skill(&home_path, opencode_entry(&catalog), "my-skill")
+        .expect_err("unmanaged skill refused");
+
+    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+    assert!(skill_dir.join(SKILL_DESCRIPTOR).is_file());
+    assert!(skill_dir.join("notes.txt").is_file());
+}
+
+#[test]
+fn remove_and_list_reject_agent_without_skills_support() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let mut entry = opencode_entry(&catalog).clone();
+    entry.supports_agent_skills = false;
+
+    let skills = list_installed_skills(&home_path, &entry).expect("list");
+    assert!(skills.is_empty());
+
+    let err = remove_agent_skill(&home_path, &entry, "repo-map").expect_err("unsupported agent");
+    assert!(matches!(err, StackError::SkillInstallFailed { .. }));
+}
+
+#[test]
+#[cfg(unix)]
+fn remove_agent_skill_rejects_symlinked_target() {
+    let home = tempfile::tempdir().expect("home");
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    let home_path = canonical_temp_home(&home);
+    let install_root = home_path.join(".agents/skills");
+    std::fs::create_dir_all(&install_root).expect("root");
+    let external = tempfile::tempdir().expect("external");
+    std::fs::write(external.path().join(SKILL_DESCRIPTOR), "# Skill\n").expect("descriptor");
+    std::os::unix::fs::symlink(external.path(), install_root.join("repo-map")).expect("symlink");
+
+    let err = remove_agent_skill(&home_path, opencode_entry(&catalog), "repo-map")
+        .expect_err("symlinked target");
+
+    assert!(matches!(err, StackError::SkillInstallTargetConflict { .. }));
+    // The symlink target's descriptor is left intact — nothing was deleted.
+    assert!(external.path().join(SKILL_DESCRIPTOR).is_file());
 }
 
 #[test]

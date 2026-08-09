@@ -34,6 +34,9 @@ use crate::api::routes::sessions::{
     sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
     sessions_status_handler,
 };
+use crate::api::routes::skills::{
+    skills_catalog_handler, skills_list_handler, skills_source_get_handler,
+};
 use crate::api::routes::status::{
     health_live_handler, health_ready_handler, status_agent_handler, status_connections_handler,
     status_handler,
@@ -64,6 +67,9 @@ pub fn build_local_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route("/v1/agent/skills", get(skills_list_handler))
+        .route("/v1/agent/skills/catalog", get(skills_catalog_handler))
+        .route("/v1/agent/skills/source", get(skills_source_get_handler))
         .route("/v1/array/status", get(array_status_handler))
         .route(
             "/v1/array/targets/{target_id}/capabilities",
@@ -273,6 +279,10 @@ mod tests {
         for (method, uri) in [
             (Method::GET, "/v1/config/export"),
             (Method::POST, "/v1/config/validate"),
+            // Skill reads are session-gated on UDS, not always-keyless.
+            (Method::GET, "/v1/agent/skills"),
+            (Method::GET, "/v1/agent/skills/catalog"),
+            (Method::GET, "/v1/agent/skills/source?source=anthropic"),
             (Method::GET, "/v1/logs/events"),
             (Method::GET, "/v1/files?path=."),
             (Method::PUT, "/v1/files/content"),
@@ -311,6 +321,11 @@ mod tests {
             (Method::POST, "/v1/deps/check"),
             (Method::GET, "/v1/workspace"),
             (Method::GET, "/v1/permissions/pending"),
+            (Method::GET, "/v1/agent/skills"),
+            (Method::GET, "/v1/agent/skills/catalog"),
+            // An unresolvable source fails fast (400) before any GitHub fetch, so
+            // this asserts the route is mounted without a live network download.
+            (Method::GET, "/v1/agent/skills/source?source=nonsense"),
             (Method::POST, "/v1/sessions"),
         ] {
             let status = status_for(app.clone(), method.clone(), uri).await;
@@ -334,6 +349,11 @@ mod tests {
             (Method::POST, "/v1/deps/apply"),
             (Method::POST, "/v1/ws/connections/disconnect"),
             (Method::POST, "/v1/agent/start"),
+            // Skill mutations are admin-tier and never mounted on the UDS.
+            (Method::POST, "/v1/agent/skills/add"),
+            (Method::POST, "/v1/agent/skills/remove"),
+            (Method::POST, "/v1/agent/skills/sources/add"),
+            (Method::POST, "/v1/agent/skills/sources/remove"),
         ] {
             let status = status_for(app.clone(), method.clone(), uri).await;
             assert!(

@@ -125,7 +125,9 @@ allow_custom_provider = false
 allow_custom_model = false
 set_mode = true # smart, rush, deep
 supports_agent_skills = true
-agent_skills_install_dir = "~/.config/agents/skills"
+# Amp discovers user-level skills from ~/.agents/skills natively (second in its
+# skill precedence list), so no registry link directory is needed.
+agent_skills_install_dir = "~/.agents/skills"
 stdio_framing = "json-lines"
 website = "https://ampcode.com/"
 support_doc = "docs/agents/amp.md"

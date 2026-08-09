@@ -33,6 +33,8 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         SkillInstallSkillMissing { .. } => "agent.skill_install_missing_skill",
         SkillInstallTargetConflict { .. } => "agent.skill_install_target_conflict",
         SkillInstallFailed { .. } => "agent.skill_install_failed",
+        SkillNotInstalled { .. } => "agent.skill_not_installed",
+        SkillSourceNotConfigured { .. } => "agent.skill_source_not_configured",
         AgentInstallAllPathsFailed { .. } => "agent.install_all_paths_failed",
         DomainRateLimited { .. } => "agent.domain_rate_limited",
         GithubReleaseFetch { .. } => "agent.github_release_fetch_failed",
@@ -112,6 +114,10 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             format!("skill install target conflict at {}: {reason}", path.display())
         }
         SkillInstallFailed { reason } => format!("skill install failed: {reason}"),
+        SkillNotInstalled { skill } => format!("skill `{skill}` is not installed"),
+        SkillSourceNotConfigured { alias } => {
+            format!("skill source `{alias}` is not configured")
+        }
         AgentInstallAllPathsFailed { summary } => {
             format!("all install paths failed — {summary}")
         }
@@ -171,6 +177,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SkillInstallInvalidName { .. }
         | SkillInstallSkillMissing { .. } => StatusCode::BAD_REQUEST,
         SkillInstallTargetConflict { .. } => StatusCode::CONFLICT,
+        SkillNotInstalled { .. } | SkillSourceNotConfigured { .. } => StatusCode::NOT_FOUND,
         DomainRateLimited { .. } => StatusCode::SERVICE_UNAVAILABLE,
         AgentInstallerFailed { .. }
         | AgentInstallerCreatesMissing { .. }

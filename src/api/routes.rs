@@ -11,6 +11,7 @@ pub(crate) mod permissions;
 pub(crate) mod providers;
 pub(crate) mod security;
 pub(crate) mod sessions;
+pub(crate) mod skills;
 pub(crate) mod status;
 pub(crate) mod workspace;
 pub(crate) mod ws;
