@@ -130,19 +130,14 @@ fn embedded_registry_advertises_tested_headless_support() {
             entry.id
         );
         assert!(
-            entry
-                .agent_skills_install_dir
-                .as_deref()
-                .is_some_and(|path| {
-                    matches!(entry.id.as_str(), "amp" if path == "~/.config/agents/skills")
-                        || (entry.id != "amp" && path == "~/.agents/skills")
-                }),
+            entry.agent_skills_install_dir.as_deref() == Some("~/.agents/skills"),
             "{} must declare the documented Agent Skills install directory",
             entry.id
         );
         // Claude Code only discovers `~/.claude/skills` and Hermes only
         // discovers `~/.hermes/skills`, so they are the agents whose installed
-        // skills get symlinked out of the shared dir.
+        // skills get symlinked out of the shared dir. Amp reads
+        // `~/.agents/skills` natively, so it needs no link dir.
         match entry.id.as_str() {
             "claude-code" => assert_eq!(
                 entry.agent_skills_link_dir.as_deref(),

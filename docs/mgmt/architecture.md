@@ -38,7 +38,7 @@ flowchart LR
 | Agent switch     | harness migration planning and provider/API-key compatibility     |
 | Provider CLI     | target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation |
 | Native config import | redacted inspection and transactional semantic replacement of supported harness global config |
-| Install catalogs | curated agent registry, Agent Skills source registry, and skills installer |
+| Install catalogs | curated agent registry, Agent Skills source registry, and skills installer (init install plus day-2 list/add/remove via `acps skills` and `/v1/agent/skills`) |
 | Net rate limit   | process-wide per-domain pacing and rate-limit circuit for outbound HTTP to quota-bearing hosts (`src/runtime/net_rate_limit.rs`), consumed by the GitHub Release installer |
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |

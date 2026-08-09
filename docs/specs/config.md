@@ -84,6 +84,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[commands]`       | mediated shell command limits and env allowlist                      |
 | `[dependencies]`   | expected external programs, runtimes, packages, and MCP declarations |
 | `[[mcp.servers]]`  | MCP servers attached to ACP sessions                                 |
+| `[[skills.sources]]` | user-declared Agent Skills sources, alongside the embedded catalog  |
 | `[edge.cloudflare]` | Cloudflare Tunnel edge profile and managed provisioning refs         |
 | `[logging]`        | local logging and optional external sink settings                    |
 | `[local]`          | internal Unix socket override and local session-tier access mode      |
@@ -239,6 +240,18 @@ Value positions (HTTP header `value`, stdio `env` entries, and `[agent].env` ent
 - The looks-like-a-secret screening that applies to ref names also runs over template literals and the refs inside `${}`; the literals are additionally screened concatenated, so a credential split across a `${}` boundary still trips the heuristic.
 
 acp-stack does not interpret the composed value: the referenced secret may be an opaque token minted elsewhere and the URL a local relay endpoint, and nothing behaves differently.
+
+## Skills
+
+`[[skills.sources]]` declares user Agent Skills sources layered alongside the embedded curated catalog. Each entry sets `alias` (unique, lowercase-alphanumeric with single dashes, at most 64 characters), `github` (`owner/repo`; the owner is a GitHub account name — alphanumerics and dashes, at most 39 characters — and the repo allows alphanumerics, `-`, `_`, `.`, at most 100 characters, not `.` or `..`), optional `branch` (default `main`; non-empty, at most 255 characters, no leading or trailing `/`, and a git-ref-safe charset — letters, digits, `-`, `_`, `.`, `/`, no `..` — since it is interpolated into the archive URL), and optional `trusted` (default `false`; an operator assertion recorded and surfaced, not enforced). The alias is then usable anywhere a source is accepted — `acps skills add <alias> <skill>` and `acps skills source get <alias>`. The catalog is resolved before user sources, so `acps skills source add` refuses an alias that matches a curated one and a hand-written collision is inert (the curated source wins). An individually invalid entry does not fail startup: like an invalid MCP server declaration, it is skipped with a warning at daemon startup and quietly on later runtime reloads (re-warning on every reload would spam the log), while the strict write path (`acps skills source add`) still rejects invalid new entries; a `source add`/`remove` write also drops any previously-skipped invalid entries from the file, with a warning naming each dropped alias. Skills are discovered flat under the repo's `skills/` directory, the same convention as `github:<owner>`; nested, frontmatter-indexed layouts are the curated catalog's domain. Entries are managed with `acps skills source add`/`remove`, which edit this table through the daemon; there is no install action until `acps skills add` runs.
+
+```toml
+[[skills.sources]]
+alias = "my-org"
+github = "my-org/skills"
+branch = "main"
+trusted = false
+```
 
 ## Extensions
 

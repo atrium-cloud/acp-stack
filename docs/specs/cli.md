@@ -14,6 +14,7 @@
 | Provider/model | `acps agent provider`, `acps agent set`, `acps subagent status/set/match/free/disable` |
 | Array          | `acps array status/on/off/add/set/install/start/stop/restart`               |
 | Workspace      | `acps workspace status`, `code-source`, `data-source`, `sync`, `sandbox`    |
+| Skills         | `acps skills list/catalog/add/remove`, `acps skills source get/add/remove`  |
 | Sessions       | `acps sessions list/status/new/load/resume/fork/prompt/cancel/close`        |
 | Logs/metrics   | `acps logs query`, `logs tail`, `metrics summary`                           |
 | Operations     | `acps deps check`, `deps apply`, `security check`, `security history`, `security show`, `installer history` |
@@ -180,7 +181,7 @@ acps logging supabase set-db-url [--db-url-ref <ref>]
 acps agent switch <agent> [--drop] [--provider <provider-id>] [--api-key-ref <ref>] [--admin-key <key>]
 ```
 
-The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider credentials, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses a compatible flat ref or the current structured provider/alias selection, copies installed Agent Skills into the target skills directory when needed (and refreshes skill symlinks when the target declares a separate discovery directory, e.g. Claude Code's `~/.claude/skills`), clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
+The target agent is positional. Non-interactive runs require `--admin-key`; interactive runs prompt for the admin key without echoing it. Before calling the daemon, switch prints the target install steps, config that will migrate as-is, compatible provider credentials, optional source config cleanup, and fields that need input. Switch installs the target harness, reuses a compatible flat ref or the current structured provider/alias selection, copies installed Agent Skills into the target skills directory when needed (same-named target skills without the managed marker are left untouched and printed as kept unmanaged; symlinks are refreshed when the target declares a separate discovery directory, e.g. Claude Code's `~/.claude/skills`), clears the model, and prints advertised model values only when the target supports model selection. Interactive runs can select and apply a model before the command exits. Non-interactive runs print `acps agent set --model <model-id>` as the follow-up only when model selection is supported.
 
 Switch preserves runtime-scoped config, including workspace, MCP declarations, permissions, secrets config, and sessions. By default, it also preserves source agent-owned config, secrets, and installed harnesses/adapters so switching back is fast. `--drop` removes only source agent-owned config after the target switch succeeds. It does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
 
@@ -271,6 +272,24 @@ acps sessions close <session-id> [--session-key <key>]
 Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
 `sessions new`, `load`, `resume`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY` unless `[local].session_auth = "keyless"` is active. `sessions load` and `sessions resume` call the matching ACP session operation through the daemon. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability. `sessions close` closes the agent-side session and preserves local history; permanent deletion is deferred until product semantics are defined.
+
+## Skills
+
+```sh
+acps skills list [--session-key <key>]
+acps skills catalog [--session-key <key>]
+acps skills add <source> <selector>... [--admin-key <key>]
+acps skills remove <name> [--admin-key <key>]
+acps skills source get <source> [--session-key <key>]
+acps skills source add <alias> <owner/repo> [--branch <b>] [--trusted] [--admin-key <key>]
+acps skills source remove <alias> [--admin-key <key>]
+```
+
+`acps skills` manages the active agent's Agent Skills after init, through the running daemon. `list` shows the skills installed for the active agent, each with the source it was installed from (read from the managed marker; hand-placed folders show `(unmanaged)`); `catalog` prints the embedded catalog sources and their selectors, plus configured user sources (shown with `(none indexed)` — enumerate those live with `source get`). Both are reads that use `--session-key`/`ACP_STACK_SESSION_KEY`, falling back to the local read-only socket when `[local].session_auth = "keyless"` is active.
+
+`add <source> <selector>...` installs one or more skills, where `<source>` is a reviewed alias (see [Initialization](#initialization)), a configured user-source alias, `github:<owner>` for `<owner>/skills`, or `github:<owner>/<repo>` for a whole repo (both on branch `main`); already-installed skills are skipped. `remove <name>` uninstalls one skill by its install name (a `/`-joined path for nested skills). Removal needs no confirmation: only skills installed by acp-stack can be removed — they are re-downloadable via `add` — and each carries a `.acp-stack-managed` marker written at install time; a folder placed in the skills directory by hand has no marker and is refused. Both mutations require the admin key and refresh the harness link directory afterward.
+
+`source get <source>` fetches a source — a catalog alias, a configured alias, or `github:<owner>[/<repo>]` — and lists its installable skills with the `name` and `description` from each `SKILL.md`; it is a read using `--session-key`/`ACP_STACK_SESSION_KEY` or the keyless local socket. `source add <alias> <owner/repo>` registers a user source in `[[skills.sources]]` (optional `--branch`, default `main`; `--trusted` records that it has been vetted); the alias then works anywhere a source is accepted and cannot shadow a catalog alias (the add is refused, and even a hand-edited collision is ignored in favor of the catalog). `source remove <alias>` unregisters it. `source add`/`remove` require the admin key and edit config through the daemon; they do not install or delete any skills. Skills configured at `acps init` are documented under [Initialization](#initialization).
 
 ## Logs, Metrics, And Health
 

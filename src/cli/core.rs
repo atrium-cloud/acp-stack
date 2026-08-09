@@ -29,6 +29,7 @@ use super::secrets::SecretsCommand;
 use super::security::SecurityCommand;
 use super::serve::{ServeArgs, ServeMode};
 use super::sessions::SessionsCommand;
+use super::skill::SkillCommand;
 use super::subagent::SubagentCommand;
 #[cfg(feature = "stack-self-update")]
 use super::update::UpdateCommand;
@@ -183,6 +184,16 @@ enum Command {
     Array {
         #[command(subcommand)]
         command: ArrayCommand,
+    },
+    /// Manage Agent Skills for the active agent: list, catalog, add, remove, source.
+    #[command(after_help = "Examples:
+  acps skills list
+  acps skills catalog
+  acps skills add anthropic docx pptx xlsx pdf
+  acps skills remove docx")]
+    Skills {
+        #[command(subcommand)]
+        command: SkillCommand,
     },
     /// Configure OpenCode small-model behavior.
     Subagent {
@@ -352,6 +363,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             super::extensions::run_extensions_command(command, output.effective())
         }
         Command::Array { command } => super::array::run_array_command(command, output.effective()),
+        Command::Skills { command } => super::skill::run_skill_command(command, output.effective()),
         Command::Subagent { command } => {
             output.reject_json("subagent")?;
             super::subagent::run_subagent_command(command)
@@ -603,6 +615,20 @@ fn static_path_label(path: &str) -> &'static str {
         "/v1/agent/restart-blockers"
     } else if bare == "/v1/agent/switch" {
         "/v1/agent/switch"
+    } else if bare == "/v1/agent/skills" {
+        "/v1/agent/skills"
+    } else if bare == "/v1/agent/skills/catalog" {
+        "/v1/agent/skills/catalog"
+    } else if bare == "/v1/agent/skills/add" {
+        "/v1/agent/skills/add"
+    } else if bare == "/v1/agent/skills/remove" {
+        "/v1/agent/skills/remove"
+    } else if bare == "/v1/agent/skills/source" {
+        "/v1/agent/skills/source"
+    } else if bare == "/v1/agent/skills/sources/add" {
+        "/v1/agent/skills/sources/add"
+    } else if bare == "/v1/agent/skills/sources/remove" {
+        "/v1/agent/skills/sources/remove"
     } else if bare == "/v1/agent/config/native/inspect" {
         "/v1/agent/config/native/inspect"
     } else if bare == "/v1/agent/config/native/import" {
@@ -1078,6 +1104,19 @@ mod tests {
             ),
             ("/v1/agent/restart", "/v1/agent/restart"),
             ("/v1/agent/restart-blockers", "/v1/agent/restart-blockers"),
+            ("/v1/agent/skills", "/v1/agent/skills"),
+            ("/v1/agent/skills/catalog", "/v1/agent/skills/catalog"),
+            ("/v1/agent/skills/add", "/v1/agent/skills/add"),
+            ("/v1/agent/skills/remove", "/v1/agent/skills/remove"),
+            ("/v1/agent/skills/source", "/v1/agent/skills/source"),
+            (
+                "/v1/agent/skills/sources/add",
+                "/v1/agent/skills/sources/add",
+            ),
+            (
+                "/v1/agent/skills/sources/remove",
+                "/v1/agent/skills/sources/remove",
+            ),
             (
                 "/v1/agent/config/native/inspect",
                 "/v1/agent/config/native/inspect",
@@ -1211,6 +1250,49 @@ mod tests {
         ] {
             Cli::try_parse_from(args).expect("provider command parses");
         }
+    }
+
+    #[test]
+    fn cli_parses_skills_commands() {
+        for args in [
+            vec!["acps", "skills", "list"],
+            vec!["acps", "skills", "list", "--format", "json"],
+            vec!["acps", "skills", "catalog"],
+            vec!["acps", "skills", "add", "anthropic", "docx", "pptx"],
+            vec!["acps", "skills", "add", "github:my-org", "my-skill"],
+            vec!["acps", "skills", "remove", "docx"],
+            vec!["acps", "skills", "remove", "zoom/android"],
+            vec!["acps", "skills", "source", "get", "anthropic"],
+            vec!["acps", "skills", "source", "get", "github:my-org/skills"],
+            vec![
+                "acps",
+                "skills",
+                "source",
+                "add",
+                "my-org",
+                "my-org/skills",
+                "--trusted",
+            ],
+            vec![
+                "acps",
+                "skills",
+                "source",
+                "add",
+                "my-org",
+                "my-org/skills",
+                "--branch",
+                "dev",
+            ],
+            vec!["acps", "skills", "source", "remove", "my-org"],
+        ] {
+            Cli::try_parse_from(args).expect("skills command parses");
+        }
+    }
+
+    #[test]
+    fn cli_skills_add_requires_at_least_one_skill() {
+        Cli::try_parse_from(["acps", "skills", "add", "anthropic"])
+            .expect_err("add requires a skill selector");
     }
 
     #[test]

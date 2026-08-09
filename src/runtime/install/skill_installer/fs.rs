@@ -8,6 +8,69 @@
 
 use super::*;
 
+/// Marker proving a skill directory was installed by acp-stack. `remove` (and
+/// switch-port overwrite) refuse to touch directories without it, so skills a
+/// user placed in the install root by hand are never deleted by the runtime.
+/// The marker lives inside the skill dir so the proof cannot diverge from the
+/// files: delete or replace the folder and the proof goes with it.
+pub(super) fn write_managed_marker(target_dir: &Path, source_id: &str) -> Result<()> {
+    let marker = target_dir.join(MANAGED_SKILL_MARKER);
+    std::fs::write(&marker, format!("{source_id}\n")).map_err(|source| {
+        StackError::SkillInstallFailed {
+            reason: format!("write managed marker `{}`: {source}", marker.display()),
+        }
+    })?;
+    set_owner_only_file(&marker)?;
+    Ok(())
+}
+
+pub(super) fn has_managed_marker(target_dir: &Path) -> bool {
+    let marker = target_dir.join(MANAGED_SKILL_MARKER);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata.is_file() && !metadata.file_type().is_symlink(),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            // Treating an unreadable marker as unmanaged is the safe default
+            // (nothing gets deleted), but the operator must be able to see why
+            // a managed skill suddenly refuses removal or overwrite.
+            tracing::warn!(
+                marker = %marker.display(),
+                %source,
+                "failed to probe managed skill marker; treating skill as unmanaged"
+            );
+            false
+        }
+    }
+}
+
+/// Source id recorded in the managed marker, or `None` for hand-placed
+/// (unmanaged) skills. Unreadable or empty markers degrade to `None` with a
+/// warning: listing must never fail on one bad marker.
+pub(super) fn read_managed_marker_source(target_dir: &Path) -> Option<String> {
+    if !has_managed_marker(target_dir) {
+        return None;
+    }
+    let marker = target_dir.join(MANAGED_SKILL_MARKER);
+    match std::fs::read_to_string(&marker) {
+        Ok(content) => {
+            let source_id = content.trim();
+            if source_id.is_empty() {
+                None
+            } else {
+                Some(source_id.to_owned())
+            }
+        }
+        Err(source) => {
+            tracing::warn!(
+                marker = %marker.display(),
+                %source,
+                "failed to read managed skill marker; omitting source provenance"
+            );
+            None
+        }
+    }
+}
+
 pub(super) fn ensure_no_installed_skill_ancestor(
     destination_root: &Path,
     skill_name: &str,
@@ -89,10 +152,16 @@ pub(super) fn existing_target_state(target_dir: &Path) -> Result<ExistingTargetS
     Ok(ExistingTargetState::AlreadyInstalled)
 }
 
+/// Copy a skill tree into place via a sibling tempdir + rename.
+/// `managed_source`, when `Some`, records the installing source id in the
+/// managed marker *inside the staged tempdir* so a skill can never appear at
+/// the target without its marker: a failed marker write aborts before the
+/// rename and leaves nothing behind.
 pub(super) fn copy_skill_dir_atomically(
     source_dir: &Path,
     target_dir: &Path,
     skill_name: &str,
+    managed_source: Option<&str>,
 ) -> Result<()> {
     let parent = target_dir
         .parent()
@@ -109,6 +178,9 @@ pub(super) fn copy_skill_dir_atomically(
             ),
         })?;
     copy_dir_recursive(source_dir, tempdir.path())?;
+    if let Some(source_id) = managed_source {
+        write_managed_marker(tempdir.path(), source_id)?;
+    }
     std::fs::rename(tempdir.path(), target_dir).map_err(|source| {
         StackError::SkillInstallFailed {
             reason: format!(

@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::{DEFAULT_SKILL_SOURCE_BRANCH, UserSkillSource};
 use crate::error::{Result, StackError};
 use crate::fs_util::{create_dir_owner_only, set_owner_only_dir, set_owner_only_file};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
@@ -18,16 +19,21 @@ use crate::runtime::workspace_sources::safe_download::{DownloadOpts, download_to
 use crate::runtime::workspace_sources::safe_extract::{ExtractOpts, extract_archive};
 
 use self::fs::*;
+pub(crate) use self::validate::validate_install_target_name;
 use self::validate::{
-    validate_github_owner, validate_install_target_name, validate_registry_relative_path,
-    validate_skill_name, validate_skill_selector,
+    validate_github_owner, validate_registry_relative_path, validate_skill_name,
+    validate_skill_selector,
 };
 
 pub const SOURCE_CUSTOM_GITHUB_PREFIX: &str = "github:";
 const CUSTOM_SKILLS_REPO: &str = "skills";
-const CUSTOM_SKILLS_BRANCH: &str = "main";
 const CUSTOM_SKILLS_DIRECTORY: &str = "skills";
 const SKILL_DESCRIPTOR: &str = "SKILL.md";
+/// Marker file inside each acp-stack-installed skill dir proving the runtime
+/// manages it. `remove` and switch-port overwrite refuse unmarked dirs, so
+/// skills a user placed in the install root by hand are never deleted. The
+/// content is the id of the source the skill was installed from.
+pub(crate) const MANAGED_SKILL_MARKER: &str = ".acp-stack-managed";
 const GITHUB_ARCHIVE_MAX_BYTES: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +78,18 @@ pub struct SkillInstallEntry {
     pub path: PathBuf,
 }
 
+/// One entry in the day-2 list surface. Unlike [`SkillInstallEntry`] it
+/// carries provenance: the source id recorded in the managed marker at
+/// install time, absent for skills the user placed in the install root by
+/// hand (which `remove` will refuse to delete).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledSkill {
+    pub name: String,
+    pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkillPortReport {
     pub source_root: PathBuf,
@@ -79,6 +97,10 @@ pub struct SkillPortReport {
     pub status: SkillPortStatus,
     pub copied: Vec<SkillInstallEntry>,
     pub overwritten: Vec<SkillInstallEntry>,
+    /// Same-named target skills left untouched because they carry no managed
+    /// marker — user-owned content is never replaced.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kept_unmanaged: Vec<SkillInstallEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -110,6 +132,23 @@ pub struct SkillLinkReport {
 pub struct SkillLinkOutcome {
     pub report: Option<SkillLinkReport>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillRemoveReport {
+    pub install_root: PathBuf,
+    pub removed: SkillInstallEntry,
+}
+
+/// One installable skill surfaced by `source get` inspection: the selector to
+/// pass to `add`, plus the frontmatter identity read from its `SKILL.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillMetadata {
+    pub selector: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub path: String,
 }
 
 pub fn parse_skill_source(value: &str, catalog: &SkillCatalog) -> Result<SkillSourceSelection> {
@@ -175,7 +214,7 @@ pub fn resolve_source(
                 owner: owner.clone(),
                 repo: CUSTOM_SKILLS_REPO.to_owned(),
                 url: format!("https://github.com/{owner}/{CUSTOM_SKILLS_REPO}"),
-                branch: CUSTOM_SKILLS_BRANCH.to_owned(),
+                branch: DEFAULT_SKILL_SOURCE_BRANCH.to_owned(),
                 verified_commit: None,
                 indexed_commit: None,
                 descriptor: SKILL_DESCRIPTOR.to_owned(),
@@ -187,6 +226,118 @@ pub fn resolve_source(
                 indexed_skills: Vec::new(),
             })
         }
+    }
+}
+
+/// Resolve a day-2 source reference against, in order: the embedded catalog by
+/// alias, then configured user sources (`[[skills.sources]]`), then an ad-hoc
+/// `github:<owner>` (→ `<owner>/skills`) or `github:<owner>/<repo>`. The catalog
+/// is checked first so a hand-edited `[[skills.sources]]` entry whose alias
+/// collides with a curated one cannot hijack it (the add route already refuses
+/// to create such an alias; this keeps the invariant even for direct edits).
+pub fn resolve_source_ref(
+    source_ref: &str,
+    user_sources: &[UserSkillSource],
+    catalog: &SkillCatalog,
+) -> Result<ResolvedSkillSource> {
+    let trimmed = source_ref.trim();
+    if let Some(catalog_source) = catalog.lookup_alias(trimmed) {
+        return Ok(resolve_official_source(catalog_source));
+    }
+    if let Some(user) = user_sources.iter().find(|source| source.alias == trimmed) {
+        return resolved_user_source(user);
+    }
+    if let Some(rest) = trimmed.strip_prefix(SOURCE_CUSTOM_GITHUB_PREFIX) {
+        return resolve_ad_hoc_github(rest);
+    }
+    Err(StackError::SkillInstallInvalidSource {
+        source_id: trimmed.to_owned(),
+    })
+}
+
+fn resolved_user_source(user: &UserSkillSource) -> Result<ResolvedSkillSource> {
+    let (owner, repo) = split_owner_repo(&user.github)?;
+    Ok(github_repo_source(
+        user.alias.clone(),
+        format!("{} (user source)", user.alias),
+        owner,
+        repo,
+        user.branch.clone(),
+    ))
+}
+
+fn resolve_ad_hoc_github(rest: &str) -> Result<ResolvedSkillSource> {
+    if rest.contains('/') {
+        let (owner, repo) = split_owner_repo(rest)?;
+        Ok(github_repo_source(
+            format!("{owner}-{repo}-skills"),
+            format!("{owner}/{repo} Agent Skills"),
+            owner,
+            repo,
+            DEFAULT_SKILL_SOURCE_BRANCH.to_owned(),
+        ))
+    } else {
+        validate_github_owner(rest)?;
+        Ok(github_repo_source(
+            format!("{rest}-skills"),
+            format!("{rest} Agent Skills"),
+            rest.to_owned(),
+            CUSTOM_SKILLS_REPO.to_owned(),
+            DEFAULT_SKILL_SOURCE_BRANCH.to_owned(),
+        ))
+    }
+}
+
+/// Build a non-catalog `ResolvedSkillSource` for a whole GitHub repo. Skills
+/// are expected flat under `skills/` (the same convention as `github:<owner>`);
+/// nested/frontmatter-indexed layouts are the curated catalog's domain.
+fn github_repo_source(
+    id: String,
+    name: String,
+    owner: String,
+    repo: String,
+    branch: String,
+) -> ResolvedSkillSource {
+    ResolvedSkillSource {
+        id,
+        name,
+        url: format!("https://github.com/{owner}/{repo}"),
+        owner,
+        repo,
+        branch,
+        verified_commit: None,
+        indexed_commit: None,
+        descriptor: SKILL_DESCRIPTOR.to_owned(),
+        catalog_managed: false,
+        directories: vec![ResolvedSkillDirectory {
+            path: CUSTOM_SKILLS_DIRECTORY.to_owned(),
+            installable: true,
+        }],
+        indexed_skills: Vec::new(),
+    }
+}
+
+fn split_owner_repo(github: &str) -> Result<(String, String)> {
+    let mut parts = github.splitn(3, '/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(repo), None) => {
+            validate_github_owner(owner)?;
+            validate_github_repo(repo)?;
+            Ok((owner.to_owned(), repo.to_owned()))
+        }
+        _ => Err(StackError::SkillInstallInvalidSource {
+            source_id: github.to_owned(),
+        }),
+    }
+}
+
+fn validate_github_repo(repo: &str) -> Result<()> {
+    if crate::config::is_valid_github_repo(repo) {
+        Ok(())
+    } else {
+        Err(StackError::SkillInstallInvalidSource {
+            source_id: repo.to_owned(),
+        })
     }
 }
 
@@ -212,8 +363,20 @@ pub fn install_from_github(
     skill_names: &[String],
 ) -> Result<SkillInstallReport> {
     validate_requested_skills(source, skill_names)?;
+    let (_tempdir, archive_root) = fetch_and_extract_source(source)?;
+    install_from_extracted_root(source, &archive_root, destination_root, skill_names)
+}
+
+/// Download and extract a source's GitHub archive into a fresh temporary
+/// directory, returning the tempdir guard (keep it alive) and the archive's
+/// single top-level directory. Shared by install and inspection. Exposed so the
+/// add route can fetch off the async runtime and *before* taking the agent
+/// config-mutation lock, keeping a slow download from blocking `agent switch`.
+pub fn fetch_and_extract_source(
+    source: &ResolvedSkillSource,
+) -> Result<(tempfile::TempDir, PathBuf)> {
     let tempdir = tempfile::tempdir().map_err(|source| StackError::SkillInstallFailed {
-        reason: format!("create temporary skill install directory: {source}"),
+        reason: format!("create temporary skill directory: {source}"),
     })?;
     let archive_path = tempdir.path().join("skills.tar.gz");
     let extract_dir = tempdir.path().join("extract");
@@ -235,7 +398,123 @@ pub fn install_from_github(
                 source.id
             ),
         })?;
-    install_from_extracted_root(source, &archive_root, destination_root, skill_names)
+    Ok((tempdir, archive_root))
+}
+
+/// Download a source and list its installable skills with the `name` and
+/// `description` read from each `SKILL.md`. Blocking (network + extract); call
+/// off the async runtime. Backs `source get`.
+pub fn inspect_source(source: &ResolvedSkillSource) -> Result<Vec<SkillMetadata>> {
+    let (_tempdir, archive_root) = fetch_and_extract_source(source)?;
+    discover_source_skills(source, &archive_root)
+}
+
+/// Enumerate installable skills from an already-extracted archive. For a
+/// catalog source this walks the embedded index (exact paths); for a
+/// user/ad-hoc source it discovers `SKILL.md` directories flat under each
+/// installable directory (the `skills/` convention). Split out from
+/// [`inspect_source`] so it is testable without network access.
+pub fn discover_source_skills(
+    source: &ResolvedSkillSource,
+    archive_root: &Path,
+) -> Result<Vec<SkillMetadata>> {
+    let mut skills = Vec::new();
+    if source.catalog_managed {
+        for skill in &source.indexed_skills {
+            validate_registry_relative_path(&skill.path)?;
+            let candidate = archive_root.join(&skill.path);
+            // `add` (via `find_skill_dir`) requires a non-symlink skill dir
+            // with a non-symlink regular SKILL.md whose frontmatter parses and
+            // whose name matches the index, so a catalog skill failing any of
+            // those checks must not be listed here — otherwise `get` would
+            // offer a skill that `add` cannot install.
+            if let Err(error) = validate_skill_candidate(&candidate, &skill.selector) {
+                tracing::warn!(
+                    skill = %skill.selector,
+                    %error,
+                    "skipping catalog skill with an unsafe source path"
+                );
+                continue;
+            }
+            match read_skill_descriptor(&candidate.join(SKILL_DESCRIPTOR)) {
+                Ok(descriptor) if descriptor.name == skill.name => {
+                    skills.push(SkillMetadata {
+                        selector: skill.selector.clone(),
+                        name: skill.name.clone(),
+                        description: descriptor.description,
+                        path: skill.path.clone(),
+                    });
+                }
+                Ok(descriptor) => {
+                    tracing::warn!(
+                        skill = %skill.selector,
+                        index_name = %skill.name,
+                        descriptor_name = %descriptor.name,
+                        "skipping catalog skill whose descriptor name disagrees with the index"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        skill = %skill.selector,
+                        %error,
+                        "skipping catalog skill with an unreadable descriptor"
+                    );
+                }
+            }
+        }
+    } else {
+        for directory in source
+            .directories
+            .iter()
+            .filter(|directory| directory.installable)
+        {
+            validate_registry_relative_path(&directory.path)?;
+            let base = archive_root.join(&directory.path);
+            let entries = match std::fs::read_dir(&base) {
+                Ok(entries) => entries,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(StackError::SkillInstallFailed {
+                        reason: format!("read source directory `{}`: {source}", base.display()),
+                    });
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|source| StackError::SkillInstallFailed {
+                    reason: format!("read source directory entry `{}`: {source}", base.display()),
+                })?;
+                let leaf = entry.file_name().to_string_lossy().into_owned();
+                // Only surface entries that are directly installable by selector.
+                if validate_skill_name(&leaf).is_err() {
+                    continue;
+                }
+                let descriptor = entry.path().join(SKILL_DESCRIPTOR);
+                let Ok(metadata) = std::fs::symlink_metadata(&descriptor) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    continue;
+                }
+                // `add` (via `find_skill_dir`) only requires the descriptor to be
+                // a regular file, not valid frontmatter, so a sibling with a
+                // malformed `SKILL.md` must still appear here (degraded to the
+                // leaf name) rather than failing the whole listing — otherwise
+                // `get` would omit a skill that `add` would happily install.
+                let descriptor = read_skill_descriptor(&descriptor).ok();
+                skills.push(SkillMetadata {
+                    selector: leaf.clone(),
+                    name: descriptor
+                        .as_ref()
+                        .map(|descriptor| descriptor.name.clone())
+                        .unwrap_or_else(|| leaf.clone()),
+                    description: descriptor.and_then(|descriptor| descriptor.description),
+                    path: format!("{}/{leaf}", directory.path.trim_end_matches('/')),
+                });
+            }
+        }
+    }
+    skills.sort_by(|left, right| left.selector.cmp(&right.selector));
+    Ok(skills)
 }
 
 fn source_archive_reference(source: &ResolvedSkillSource) -> &str {
@@ -274,7 +553,7 @@ pub fn install_from_extracted_root(
     install_resolved_skill_dirs(&source.id, destination_root, resolved)
 }
 
-fn validate_requested_skills(
+pub fn validate_requested_skills(
     source: &ResolvedSkillSource,
     skill_names: &[String],
 ) -> Result<Vec<String>> {
@@ -373,6 +652,7 @@ fn install_resolved_skill_dirs(
                             &install.source_dir,
                             &install.target_dir,
                             &install.name,
+                            Some(source_id),
                         )
                         .map(|()| SkillInstallEntry {
                             name: install.name,
@@ -420,6 +700,195 @@ pub fn all_skills_installed(
             )
         })
     })
+}
+
+/// Enumerate the skills currently installed under an agent's shared install
+/// root. Day-2 read surface for `acps skills list` and the HTTP list route.
+///
+/// Returns an empty list — never an error — when the agent declares no skills
+/// support, has no install dir, or the root does not yet exist: hosted callers
+/// must be able to render the "nothing installed" state. Only a genuine read
+/// failure of an existing root propagates. Enumeration reuses the tolerant
+/// link collector, so a stray non-skill entry is skipped with a warning rather
+/// than failing the whole listing.
+pub fn list_installed_skills(home: &Path, entry: &RegistryEntry) -> Result<Vec<InstalledSkill>> {
+    let Some(root) = agent_skill_root(home, entry)? else {
+        return Ok(Vec::new());
+    };
+    // Canonicalize so a dotfiles-managed symlinked install root (e.g.
+    // `~/.agents` -> elsewhere) is followed the same way `remove_agent_skill`
+    // and `link_agent_skills` follow it, instead of being silently reported as
+    // empty. A missing root simply means nothing is installed yet.
+    let canonical_root = match root.canonicalize() {
+        Ok(path) => path,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("resolve skill install dir `{}`: {source}", root.display()),
+            });
+        }
+    };
+    if !canonical_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    collect_link_skill_directories(&canonical_root, &canonical_root, &mut candidates)?;
+    let mut skills = candidates
+        .into_iter()
+        .map(|(name, path)| {
+            let source = read_managed_marker_source(&path);
+            InstalledSkill { name, path, source }
+        })
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(skills)
+}
+
+/// Remove one installed skill from an agent's shared install root and prune the
+/// now-dangling symlink mirror. Day-2 write surface for `acps skills remove`
+/// and the HTTP remove route.
+///
+/// `skill_name` is the install name (a `/`-joined relative path for nested
+/// skills). The target must be a real *managed* skill — a directory with a
+/// regular `SKILL.md` and the `.acp-stack-managed` marker written at install
+/// time. A missing target is `SkillNotInstalled` (404); a path that exists but
+/// is not a clean managed skill — including a user's own folder, which carries
+/// no marker — surfaces as the same conflict the installer raises (409), so
+/// manually added skills are never deleted here. After removal, emptied parent
+/// group directories are cleaned up to (not including) the root, and the
+/// caller is expected to refresh links via [`link_agent_skills_best_effort`]
+/// so the dangling mirror symlink (Claude Code / Hermes) is pruned.
+pub fn remove_agent_skill(
+    home: &Path,
+    entry: &RegistryEntry,
+    skill_name: &str,
+) -> Result<SkillRemoveReport> {
+    validate_install_target_name(skill_name)?;
+    let root = agent_skill_root(home, entry)?.ok_or_else(|| StackError::SkillInstallFailed {
+        reason: format!(
+            "agent `{}` does not declare an Agent Skills install directory",
+            entry.id
+        ),
+    })?;
+    // Canonicalize the install root so a dotfiles-managed symlinked ancestor
+    // (e.g. `~/.agents`) is followed the same way linking does, instead of
+    // being rejected. A missing root means nothing is installed.
+    let canonical_root = match root.canonicalize() {
+        Ok(path) => path,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StackError::SkillNotInstalled {
+                skill: skill_name.to_owned(),
+            });
+        }
+        Err(source) => {
+            return Err(StackError::SkillInstallFailed {
+                reason: format!("resolve skill install dir `{}`: {source}", root.display()),
+            });
+        }
+    };
+    // Walk into the skill directory one component at a time, rejecting any
+    // symlinked path segment below the (already real) root so the recursive
+    // remove can never be redirected outside the managed root.
+    let mut target_dir = canonical_root.clone();
+    for component in skill_name.split('/') {
+        target_dir.push(component);
+        match std::fs::symlink_metadata(&target_dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StackError::SkillInstallTargetConflict {
+                    path: target_dir,
+                    reason: "skill path segment is a symlink".to_owned(),
+                });
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(StackError::SkillInstallTargetConflict {
+                    path: target_dir,
+                    reason: "skill path segment is not a directory".to_owned(),
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StackError::SkillNotInstalled {
+                    skill: skill_name.to_owned(),
+                });
+            }
+            Err(source) => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!("stat skill path `{}`: {source}", target_dir.display()),
+                });
+            }
+        }
+    }
+    // Confirm it is a real installed skill (a directory with a regular
+    // SKILL.md); a directory without one surfaces as the installer's conflict.
+    match existing_target_state(&target_dir)? {
+        ExistingTargetState::AlreadyInstalled => {}
+        ExistingTargetState::Missing => {
+            return Err(StackError::SkillNotInstalled {
+                skill: skill_name.to_owned(),
+            });
+        }
+    }
+    // Only skills acp-stack installed carry the managed marker. Anything else
+    // in the install root is the user's own content and must never be deleted
+    // here, even when it looks exactly like a managed skill.
+    if !has_managed_marker(&target_dir) {
+        return Err(StackError::SkillInstallTargetConflict {
+            path: target_dir,
+            reason: "skill was not installed by acp-stack; refusing to remove it".to_owned(),
+        });
+    }
+    std::fs::remove_dir_all(&target_dir).map_err(|source| StackError::SkillInstallFailed {
+        reason: format!(
+            "remove installed skill `{}`: {source}",
+            target_dir.display()
+        ),
+    })?;
+    // The skill is already gone; a failure to tidy an emptied group directory
+    // is cosmetic, so log it and continue rather than reporting the completed
+    // removal as a failure (which would also skip the caller's link refresh).
+    if let Err(error) = remove_emptied_group_parents(&canonical_root, &target_dir) {
+        tracing::warn!(error = %error, "skill group directory cleanup failed after removal");
+    }
+    Ok(SkillRemoveReport {
+        install_root: canonical_root,
+        removed: SkillInstallEntry {
+            name: skill_name.to_owned(),
+            path: target_dir,
+        },
+    })
+}
+
+/// Remove parent group directories left empty by a nested-skill removal,
+/// walking up from the removed skill to (but not including) the install root.
+/// A directory with any remaining content stops the walk.
+fn remove_emptied_group_parents(root: &Path, target_dir: &Path) -> Result<()> {
+    let mut current = target_dir.parent();
+    while let Some(dir) = current {
+        if dir == root || !dir.starts_with(root) {
+            break;
+        }
+        match std::fs::read_dir(dir) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    break;
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(StackError::SkillInstallFailed {
+                    reason: format!("read skill group directory `{}`: {source}", dir.display()),
+                });
+            }
+        }
+        std::fs::remove_dir(dir).map_err(|source| StackError::SkillInstallFailed {
+            reason: format!(
+                "remove emptied skill group directory `{}`: {source}",
+                dir.display()
+            ),
+        })?;
+        current = dir.parent();
+    }
+    Ok(())
 }
 
 pub fn port_agent_skills(
@@ -785,6 +1254,7 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
             status: SkillPortStatus::Shared,
             copied: Vec::new(),
             overwritten: Vec::new(),
+            kept_unmanaged: Vec::new(),
         });
     }
     if !source_root_exists_without_symlink_ancestors(source_root)? {
@@ -794,6 +1264,7 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
             status: SkillPortStatus::NoneFound,
             copied: Vec::new(),
             overwritten: Vec::new(),
+            kept_unmanaged: Vec::new(),
         });
     }
     let mut candidates = Vec::new();
@@ -806,11 +1277,13 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
             status: SkillPortStatus::NoneFound,
             copied: Vec::new(),
             overwritten: Vec::new(),
+            kept_unmanaged: Vec::new(),
         });
     }
 
     ensure_directory_no_symlink_ancestors(target_root, true)?;
     let mut installs = Vec::with_capacity(candidates.len());
+    let mut kept_unmanaged = Vec::new();
     for (skill_name, entry_path) in candidates {
         let target_dir = target_root.join(&skill_name);
         let target_parent = target_dir
@@ -821,7 +1294,22 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
         ensure_directory_no_symlink_ancestors(target_parent, true)?;
         let action = match existing_target_state(&target_dir)? {
             ExistingTargetState::Missing => PortAction::Copy,
-            ExistingTargetState::AlreadyInstalled => PortAction::Overwrite,
+            ExistingTargetState::AlreadyInstalled if has_managed_marker(&target_dir) => {
+                PortAction::Overwrite
+            }
+            ExistingTargetState::AlreadyInstalled => {
+                // A same-named skill the runtime did not install: leave the
+                // user's folder untouched rather than replacing it.
+                tracing::warn!(
+                    skill = %skill_name,
+                    "skipping port overwrite of a skill not installed by acp-stack"
+                );
+                kept_unmanaged.push(SkillInstallEntry {
+                    name: skill_name,
+                    path: target_dir,
+                });
+                continue;
+            }
         };
         installs.push(ResolvedPort {
             name: skill_name,
@@ -836,7 +1324,14 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
     for install in installs {
         match install.action {
             PortAction::Copy => {
-                copy_skill_dir_atomically(&install.source_dir, &install.target_dir, &install.name)?;
+                // Ported skills keep whatever marker the source dir carries;
+                // nothing new is installed here, so no marker is staged.
+                copy_skill_dir_atomically(
+                    &install.source_dir,
+                    &install.target_dir,
+                    &install.name,
+                    None,
+                )?;
                 copied.push(SkillInstallEntry {
                     name: install.name,
                     path: install.target_dir,
@@ -857,12 +1352,14 @@ fn port_skill_directories(source_root: &Path, target_root: &Path) -> Result<Skil
     }
     copied.sort_by(|left, right| left.name.cmp(&right.name));
     overwritten.sort_by(|left, right| left.name.cmp(&right.name));
+    kept_unmanaged.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(SkillPortReport {
         source_root: source_root.to_path_buf(),
         target_root: target_root.to_path_buf(),
         status: SkillPortStatus::Copied,
         copied,
         overwritten,
+        kept_unmanaged,
     })
 }
 
@@ -1204,9 +1701,21 @@ fn install_name_for_selector<'a>(
 }
 
 fn skill_descriptor_name(descriptor: &Path) -> Result<String> {
+    Ok(read_skill_descriptor(descriptor)?.name)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillDescriptor {
+    name: String,
+    description: Option<String>,
+}
+
+fn read_skill_descriptor(descriptor: &Path) -> Result<SkillDescriptor> {
     #[derive(Deserialize)]
     struct Frontmatter {
         name: String,
+        #[serde(default)]
+        description: Option<String>,
     }
 
     let body =
@@ -1247,7 +1756,13 @@ fn skill_descriptor_name(descriptor: &Path) -> Result<String> {
                 descriptor.display()
             ),
         })?;
-    Ok(frontmatter.name)
+    Ok(SkillDescriptor {
+        name: frontmatter.name,
+        description: frontmatter
+            .description
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+    })
 }
 
 #[derive(Debug)]

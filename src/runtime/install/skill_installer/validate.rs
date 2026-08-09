@@ -38,7 +38,7 @@ pub(super) fn validate_skill_selector(selector: &str) -> Result<()> {
 
 // Mirrors the catalog's install-name rules, including `:` for frontmatter
 // names such as `cocounsel-legal:deep-research`.
-pub(super) fn validate_install_target_name(name: &str) -> Result<()> {
+pub(crate) fn validate_install_target_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.split('/').all(|segment| {
             !segment.is_empty()
@@ -63,14 +63,7 @@ pub(super) fn validate_install_target_name(name: &str) -> Result<()> {
 }
 
 pub(super) fn validate_github_owner(owner: &str) -> Result<()> {
-    let valid = !owner.is_empty()
-        && owner.len() <= 39
-        && !owner.starts_with('-')
-        && !owner.ends_with('-')
-        && owner
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
-    if valid {
+    if crate::config::is_valid_github_owner(owner) {
         Ok(())
     } else {
         Err(StackError::SkillInstallInvalidSource {
