@@ -1,12 +1,54 @@
 use super::*;
 
-/// Validate an acp-stack auto-update frequency. The minimum granularity is a
-/// day, so only `d` (day) and `w` (week) units are accepted — the shared
-/// duration parser treats `m` as minutes, so allowing it here would silently
-/// schedule sub-day updates. For longer cadences use weeks (e.g. `26w` ≈ 6
-/// months).
-fn validate_update_frequency(raw: &str) -> Result<String> {
-    normalize_day_or_week_duration("stack-update-frequency", raw)
+/// Interactive Daily/Weekly/Custom frequency picker shared by the stack and
+/// agent update prompts. A custom value is validated against `field` using the
+/// consumer's `limits` (stack and agent updaters declare their own).
+fn prompt_update_frequency(field: &'static str, limits: &DurationLimits) -> Result<String> {
+    #[derive(Clone, PartialEq, Eq)]
+    enum FrequencyChoice {
+        Daily,
+        Weekly,
+        Custom,
+    }
+    let items = vec![
+        (
+            FrequencyChoice::Daily,
+            "Daily (1d)".to_owned(),
+            String::new(),
+        ),
+        (
+            FrequencyChoice::Weekly,
+            "Weekly (1w)".to_owned(),
+            String::new(),
+        ),
+        (
+            FrequencyChoice::Custom,
+            "Custom".to_owned(),
+            format!(
+                "e.g. {}; minimum {}",
+                limits.examples(),
+                limits.render_minimum()
+            ),
+        ),
+    ];
+    match prompt::select(true, "update frequency", &items)? {
+        Some(FrequencyChoice::Weekly) => Ok("1w".to_owned()),
+        Some(FrequencyChoice::Custom) => {
+            let raw = prompt::text(
+                true,
+                &format!(
+                    "frequency (e.g. {}; minimum {})",
+                    limits.examples(),
+                    limits.render_minimum()
+                ),
+                true,
+            )?
+            .unwrap_or_else(|| "1d".to_owned());
+            normalize_duration(field, &raw, limits)
+        }
+        // Daily, or a non-interactive/empty select, defaults to daily.
+        _ => Ok("1d".to_owned()),
+    }
 }
 
 fn parse_stack_update_policy(raw: &str) -> Result<StackUpdatePolicy> {
@@ -30,7 +72,11 @@ pub(crate) fn validate_stack_update_args(args: &InitArgs) -> Result<()> {
     if policy != Some(StackUpdatePolicy::Manual)
         && let Some(raw) = args.stack_update_frequency.as_deref()
     {
-        validate_update_frequency(raw)?;
+        normalize_duration(
+            "stack-update-frequency",
+            raw,
+            &STACK_UPDATE_FREQUENCY_LIMITS,
+        )?;
     }
     Ok(())
 }
@@ -57,42 +103,6 @@ fn prompt_stack_update_policy() -> Result<StackUpdatePolicy> {
         .unwrap_or(StackUpdatePolicy::SecurityCritical))
 }
 
-fn prompt_stack_update_frequency() -> Result<String> {
-    #[derive(Clone, PartialEq, Eq)]
-    enum FrequencyChoice {
-        Daily,
-        Weekly,
-        Custom,
-    }
-    let items = vec![
-        (
-            FrequencyChoice::Daily,
-            "Daily (1d)".to_owned(),
-            String::new(),
-        ),
-        (
-            FrequencyChoice::Weekly,
-            "Weekly (1w)".to_owned(),
-            String::new(),
-        ),
-        (
-            FrequencyChoice::Custom,
-            "Custom".to_owned(),
-            "day/week units, e.g. 3w".to_owned(),
-        ),
-    ];
-    match prompt::select(true, "update frequency", &items)? {
-        Some(FrequencyChoice::Weekly) => Ok("1w".to_owned()),
-        Some(FrequencyChoice::Custom) => {
-            let raw = prompt::text(true, "frequency (e.g. 3w; minimum 1 day)", true)?
-                .unwrap_or_else(|| "1d".to_owned());
-            validate_update_frequency(&raw)
-        }
-        // Daily, or a non-interactive/empty select, defaults to daily.
-        _ => Ok("1d".to_owned()),
-    }
-}
-
 /// Configure `[updates.acp_stack]` from `--stack-update`/`--stack-update-frequency`
 /// or, interactively, a policy + frequency prompt placed after model selection.
 /// `on` → Compatible, `security` → SecurityCritical, `off` → Manual. A frequency
@@ -115,8 +125,15 @@ pub(crate) fn configure_stack_update_for_init(
         None
     } else {
         match args.stack_update_frequency.as_deref() {
-            Some(raw) => Some(validate_update_frequency(raw)?),
-            None if interactive => Some(prompt_stack_update_frequency()?),
+            Some(raw) => Some(normalize_duration(
+                "stack-update-frequency",
+                raw,
+                &STACK_UPDATE_FREQUENCY_LIMITS,
+            )?),
+            None if interactive => Some(prompt_update_frequency(
+                "stack-update-frequency",
+                &STACK_UPDATE_FREQUENCY_LIMITS,
+            )?),
             None => None,
         }
     };
@@ -130,6 +147,132 @@ pub(crate) fn configure_stack_update_for_init(
         && config.updates.acp_stack.frequency != frequency
     {
         config.updates.acp_stack.frequency = frequency;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Rejection reason when `--agent-update on` targets a custom/escape-hatch agent
+/// the managed updater cannot drive. Same clauses `acps agent update set` uses
+/// (it prefixes the agent id) so the two surfaces read the same.
+const AGENT_UPDATE_UNMANAGED_REASON: &str = "this agent is not a managed registry agent; auto-update is unavailable for escape-hatch \
+     installs";
+
+fn parse_agent_update_choice(raw: &str) -> Result<bool> {
+    match raw {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(StackError::InvalidParam {
+            field: "--agent-update",
+            reason: format!("expected on|off, got `{other}`"),
+        }),
+    }
+}
+
+pub(crate) fn validate_agent_update_args(args: &InitArgs) -> Result<()> {
+    let enabled = args
+        .agent_update
+        .as_deref()
+        .map(parse_agent_update_choice)
+        .transpose()?;
+    // A `--custom-agent-id` conflicts with `--agent` at the clap layer, so its
+    // presence means the run targets a custom agent. Reject `--agent-update on`
+    // here — before key generation and install — rather than only at the late
+    // configure step. Custom configs from `--from-file` are still caught there.
+    if enabled == Some(true) && args.custom_agent_id.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "--agent-update",
+            reason: AGENT_UPDATE_UNMANAGED_REASON.to_owned(),
+        });
+    }
+    if enabled == Some(true)
+        && let Some(raw) = args.agent_update_frequency.as_deref()
+    {
+        normalize_duration(
+            "agent-update-frequency",
+            raw,
+            &AGENT_UPDATE_FREQUENCY_LIMITS,
+        )?;
+    }
+    Ok(())
+}
+
+fn prompt_agent_update_enabled() -> Result<bool> {
+    prompt::confirm(true, "Auto-update this agent's harness?", true)
+}
+
+/// Configure `[agent.auto_update]` from `--agent-update`/`--agent-update-frequency`
+/// or, interactively, an enable + frequency prompt. `managed` is whether the
+/// resolved agent is a registry agent (source of truth is the registry, not block
+/// presence — a re-init or imported config may lack the block that
+/// `apply_registry_entry_to_config` normally seeds). For a managed agent the block
+/// is created when absent so the choice is always honored, mirroring
+/// `acps agent update set`. A custom/escape-hatch agent cannot be managed-updated:
+/// an explicit `--agent-update on` is rejected, `off` strips any stale
+/// hand-written block, and the interactive prompt is skipped. Returns whether
+/// config changed.
+pub(crate) fn configure_agent_update_for_init(
+    args: &InitArgs,
+    config: &mut Config,
+    managed: bool,
+    interactive: bool,
+) -> Result<bool> {
+    let enabled = match args.agent_update.as_deref() {
+        Some(raw) => Some(parse_agent_update_choice(raw)?),
+        None if interactive && managed => Some(prompt_agent_update_enabled()?),
+        None => None,
+    };
+    let Some(enabled) = enabled else {
+        return Ok(false);
+    };
+    if !managed {
+        // Unmanaged agent: enabling is impossible. Disabling needs no block, so
+        // drop any stale hand-written one — left in place, the daemon would keep
+        // recording `agent.update.skipped` for it every cycle.
+        if enabled {
+            return Err(StackError::InvalidParam {
+                field: "--agent-update",
+                reason: AGENT_UPDATE_UNMANAGED_REASON.to_owned(),
+            });
+        }
+        return Ok(config.agent.auto_update.take().is_some());
+    }
+
+    let frequency = if enabled {
+        match args.agent_update_frequency.as_deref() {
+            Some(raw) => Some(normalize_duration(
+                "agent-update-frequency",
+                raw,
+                &AGENT_UPDATE_FREQUENCY_LIMITS,
+            )?),
+            None if interactive => Some(prompt_update_frequency(
+                "agent-update-frequency",
+                &AGENT_UPDATE_FREQUENCY_LIMITS,
+            )?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let created = config.agent.auto_update.is_none();
+    let auto_update = config
+        .agent
+        .auto_update
+        .get_or_insert_with(|| AgentAutoUpdateConfig {
+            enabled,
+            frequency: DEFAULT_AGENT_AUTO_UPDATE_FREQUENCY.to_owned(),
+        });
+
+    let mut changed = created;
+    if auto_update.enabled != enabled {
+        auto_update.enabled = enabled;
+        changed = true;
+    }
+    if let Some(frequency) = frequency
+        && auto_update.frequency != frequency
+    {
+        auto_update.frequency = frequency;
         changed = true;
     }
     Ok(changed)

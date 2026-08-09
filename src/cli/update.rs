@@ -47,7 +47,8 @@ pub struct UpdateSetArgs {
     /// Self-update policy.
     #[arg(long, value_enum)]
     policy: Option<UpdatePolicyArg>,
-    /// Auto-update frequency, such as 12h, 1d, 3d, or 4w.
+    /// Auto-update frequency (day/week units, minimum 1 day), such as 1d, 3d,
+    /// or 4w.
     #[arg(long)]
     frequency: Option<String>,
 }

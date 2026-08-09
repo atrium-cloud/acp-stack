@@ -51,13 +51,24 @@ fn max_duration_since_epoch() -> std::time::Duration {
 /// Validate a duration-valued config field: it must parse via
 /// [`parse_duration_string`] and must not exceed [`max_duration_since_epoch`].
 /// Returns the parsed `Duration` so callers can apply their own extra checks
-/// (e.g. non-zero). This is the single place the 1970 hardstop is enforced;
-/// every duration field routes through it.
+/// (e.g. non-zero). Every duration field routes through this or
+/// [`normalize_duration`], so the 1970 hardstop lives in exactly one helper.
 pub(crate) fn validate_duration_field(
     field: &'static str,
     raw: &str,
 ) -> Result<std::time::Duration> {
     let duration = parse_duration_string(raw).ok_or(StackError::InvalidDurationField { field })?;
+    validate_duration_epoch_hardstop(field, raw, duration)?;
+    Ok(duration)
+}
+
+/// The 1970 hardstop described at [`max_duration_since_epoch`], shared by
+/// [`validate_duration_field`] and [`normalize_duration`].
+fn validate_duration_epoch_hardstop(
+    field: &'static str,
+    raw: &str,
+    duration: std::time::Duration,
+) -> Result<()> {
     if duration > max_duration_since_epoch() {
         return Err(StackError::InvalidParam {
             field,
@@ -66,42 +77,267 @@ pub(crate) fn validate_duration_field(
             ),
         });
     }
-    Ok(duration)
+    Ok(())
 }
 
-pub(crate) fn normalize_day_or_week_duration(field: &'static str, raw: &str) -> Result<String> {
+/// Duration units understood by [`parse_duration_string`], plus `Month`.
+/// Ordered finest to coarsest.
+///
+/// `Month` is deliberately *not* in the shared parser: it is spelled `mo` (a
+/// fixed 30-day month, mirroring `time_util::parse_coarse_duration_suffix`) so
+/// it never collides with `m` (minute). [`normalize_duration`] recognizes it so
+/// consumers can accept it via [`DurationLimits`]; a consumer that does must
+/// also teach its runtime re-parser the `mo` suffix, since stored values are
+/// re-parsed with [`parse_duration_string`] when scheduling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DurationUnit {
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+impl DurationUnit {
+    fn from_suffix(suffix: &str) -> Option<Self> {
+        Some(match suffix {
+            "ms" => Self::Millisecond,
+            "s" => Self::Second,
+            "m" => Self::Minute,
+            "h" => Self::Hour,
+            "d" => Self::Day,
+            "w" => Self::Week,
+            "mo" => Self::Month,
+            _ => return None,
+        })
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Millisecond => "ms",
+            Self::Second => "s",
+            Self::Minute => "m",
+            Self::Hour => "h",
+            Self::Day => "d",
+            Self::Week => "w",
+            Self::Month => "mo",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Millisecond => "millisecond",
+            Self::Second => "second",
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+        }
+    }
+
+    /// "a day", "an hour" — for prose in error messages and prompts.
+    fn indefinite_name(self) -> String {
+        let article = if matches!(self, Self::Hour) {
+            "an"
+        } else {
+            "a"
+        };
+        format!("{article} {}", self.name())
+    }
+
+    fn length(self) -> std::time::Duration {
+        const DAY_SECS: u64 = 86_400;
+        match self {
+            Self::Millisecond => std::time::Duration::from_millis(1),
+            Self::Second => std::time::Duration::from_secs(1),
+            Self::Minute => std::time::Duration::from_secs(60),
+            Self::Hour => std::time::Duration::from_secs(3_600),
+            Self::Day => std::time::Duration::from_secs(DAY_SECS),
+            Self::Week => std::time::Duration::from_secs(7 * DAY_SECS),
+            Self::Month => std::time::Duration::from_secs(30 * DAY_SECS),
+        }
+    }
+
+    fn checked_duration(self, count: u64) -> Option<std::time::Duration> {
+        match self {
+            Self::Millisecond => Some(std::time::Duration::from_millis(count)),
+            _ => self
+                .length()
+                .as_secs()
+                .checked_mul(count)
+                .map(std::time::Duration::from_secs),
+        }
+    }
+}
+
+/// Per-consumer acceptance rules for a duration-valued field: which unit
+/// suffixes are accepted and the minimum total duration. Declared at each
+/// consumer (e.g. stack vs managed-agent update frequencies) so every surface
+/// states its own granularity policy instead of sharing a hardcoded one.
+pub(crate) struct DurationLimits {
+    /// Accepted units, declared finest-first.
+    pub accepted_units: &'static [DurationUnit],
+    pub minimum: std::time::Duration,
+}
+
+impl DurationLimits {
+    /// Minute and month must never appear in the same accepted set: both read
+    /// as "m" to users (month is spelled `mo`), so one field accepting both
+    /// would invite silent misconfiguration. Enforced here — at compile time
+    /// for the `const` declarations consumers use.
+    pub(crate) const fn new(
+        accepted_units: &'static [DurationUnit],
+        minimum: std::time::Duration,
+    ) -> Self {
+        assert!(
+            !accepted_units.is_empty(),
+            "duration limits must accept at least one unit"
+        );
+        let mut has_minute = false;
+        let mut has_month = false;
+        let mut index = 0;
+        while index < accepted_units.len() {
+            if index > 0 {
+                assert!(
+                    accepted_units[index - 1] as u8 <= accepted_units[index] as u8,
+                    "duration limit units must be declared finest-first"
+                );
+            }
+            match accepted_units[index] {
+                DurationUnit::Minute => has_minute = true,
+                DurationUnit::Month => has_month = true,
+                _ => {}
+            }
+            index += 1;
+        }
+        assert!(
+            !(has_minute && has_month),
+            "duration limits must not accept both minute and month units"
+        );
+        Self {
+            accepted_units,
+            minimum,
+        }
+    }
+
+    fn smallest_unit(&self) -> DurationUnit {
+        self.accepted_units[0]
+    }
+
+    /// A fine and a coarse example value, e.g. `1h, 3w` — for prompts and
+    /// error messages.
+    pub(crate) fn examples(&self) -> String {
+        format!(
+            "1{}, 3{}",
+            self.smallest_unit().suffix(),
+            self.accepted_units[self.accepted_units.len() - 1].suffix()
+        )
+    }
+
+    /// The minimum rendered as prose, e.g. `1 hour` — for prompts and error
+    /// messages.
+    pub(crate) fn render_minimum(&self) -> String {
+        render_duration_prose(self.minimum)
+    }
+
+    /// The accepted units rendered for error messages, e.g. `an hour (h), day
+    /// (d), or week (w) unit`.
+    fn render_accepted_units(&self) -> String {
+        let parts: Vec<String> = self
+            .accepted_units
+            .iter()
+            .map(|unit| format!("{} ({})", unit.name(), unit.suffix()))
+            .collect();
+        let article = if matches!(self.smallest_unit(), DurationUnit::Hour) {
+            "an"
+        } else {
+            "a"
+        };
+        match parts.len() {
+            1 => format!("{article} {} unit", parts[0]),
+            2 => format!("{article} {} or {} unit", parts[0], parts[1]),
+            last => format!(
+                "{article} {}, or {} unit",
+                parts[..last - 1].join(", "),
+                parts[last - 1]
+            ),
+        }
+    }
+}
+
+/// Validate a duration-valued field against a consumer's [`DurationLimits`]:
+/// the value must carry one of the accepted unit suffixes and total at least
+/// the minimum duration. Returns the trimmed value for storage. Applies the
+/// same 1970 hardstop as [`validate_duration_field`] so config load stays in
+/// agreement with the runtime, which re-parses the stored string when it
+/// schedules work.
+pub(crate) fn normalize_duration(
+    field: &'static str,
+    raw: &str,
+    limits: &DurationLimits,
+) -> Result<String> {
     let value = raw.trim();
     let unit_index = value
         .find(|character: char| !character.is_ascii_digit())
         .ok_or(StackError::InvalidParam {
             field,
-            reason: format!("expected a count and a day/week unit (e.g. 1d, 3w), got `{value}`"),
+            reason: format!(
+                "expected a count and a unit (e.g. {}), got `{value}`",
+                limits.examples()
+            ),
         })?;
-    let (digits, unit) = value.split_at(unit_index);
-    if !matches!(unit, "d" | "w") {
+    let (digits, suffix) = value.split_at(unit_index);
+    let accepted =
+        DurationUnit::from_suffix(suffix).filter(|unit| limits.accepted_units.contains(unit));
+    let Some(unit) = accepted else {
         return Err(StackError::InvalidParam {
             field,
             reason: format!(
-                "use a day (d) or week (w) unit; the minimum update granularity is a day, got `{value}`"
+                "use {}; the minimum granularity is {}, got `{value}`",
+                limits.render_accepted_units(),
+                limits.smallest_unit().indefinite_name()
             ),
         });
-    }
+    };
     let count: u64 = digits.parse().map_err(|_| StackError::InvalidParam {
         field,
         reason: format!("`{value}` is not a valid count + unit"),
     })?;
-    if count == 0 {
+    let duration = unit
+        .checked_duration(count)
+        .ok_or(StackError::InvalidDurationField { field })?;
+    validate_duration_epoch_hardstop(field, value, duration)?;
+    if duration < limits.minimum {
         return Err(StackError::InvalidParam {
             field,
-            reason: "frequency must be at least 1 day".to_owned(),
+            reason: format!("must be at least {}", limits.render_minimum()),
         });
     }
-    // Apply the representability + 1970 hardstop shared by every duration field
-    // (this subsumes the raw-`Duration` overflow guard). Validating here keeps
-    // config load in agreement with the runtime, which re-parses the same string
-    // with `parse_duration_string` when it schedules the next update.
-    validate_duration_field(field, value)?;
     Ok(value.to_owned())
+}
+
+/// Render a duration as `{count} {unit}` with the coarsest whole unit, for
+/// prose in prompts and error messages ("1 hour", "3 weeks").
+fn render_duration_prose(duration: std::time::Duration) -> String {
+    for unit in [
+        DurationUnit::Month,
+        DurationUnit::Week,
+        DurationUnit::Day,
+        DurationUnit::Hour,
+        DurationUnit::Minute,
+        DurationUnit::Second,
+    ] {
+        let unit_secs = unit.length().as_secs();
+        if duration.as_secs() >= unit_secs && duration.as_secs().is_multiple_of(unit_secs) {
+            let count = duration.as_secs() / unit_secs;
+            let plural = if count == 1 { "" } else { "s" };
+            return format!("{count} {}{plural}", unit.name());
+        }
+    }
+    format!("{} milliseconds", duration.as_millis())
 }
 
 pub(crate) fn validate_socket_address(field: &'static str, value: &str) -> Result<()> {
@@ -250,4 +486,103 @@ pub(crate) fn secret_value_shape(text: &str) -> bool {
 
 fn is_base64url_char(value: char) -> bool {
     value.is_ascii_alphanumeric() || value == '_' || value == '-'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOURLY_OR_SLOWER: DurationLimits = DurationLimits::new(
+        &[DurationUnit::Hour, DurationUnit::Day, DurationUnit::Week],
+        std::time::Duration::from_secs(3_600),
+    );
+
+    #[test]
+    fn normalize_duration_accepts_declared_units_at_or_above_the_minimum() {
+        assert_eq!(
+            normalize_duration("field", "12h", &HOURLY_OR_SLOWER).expect("12h is accepted"),
+            "12h"
+        );
+        assert_eq!(
+            normalize_duration("field", " 3w ", &HOURLY_OR_SLOWER).expect("3w is accepted"),
+            "3w"
+        );
+        assert_eq!(
+            normalize_duration("field", "1h", &HOURLY_OR_SLOWER)
+                .expect("the minimum itself is accepted"),
+            "1h"
+        );
+    }
+
+    #[test]
+    fn normalize_duration_rejects_units_outside_the_declared_set() {
+        let error = normalize_duration("field", "30m", &HOURLY_OR_SLOWER)
+            .expect_err("minutes are finer than the declared smallest unit");
+        let message = error.to_string();
+        assert!(
+            message.contains("an hour (h), day (d), or week (w) unit"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("the minimum granularity is an hour"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn normalize_duration_rejects_month_when_not_declared() {
+        // Month is a known unit (spelled `mo`), but a consumer that did not
+        // declare it gets the same accepted-units message as any other unit.
+        let error = normalize_duration("field", "1mo", &HOURLY_OR_SLOWER)
+            .expect_err("month is not in the declared set");
+        assert!(error.to_string().contains("hour (h)"), "got: {error}");
+    }
+
+    #[test]
+    fn normalize_duration_enforces_the_minimum_total_duration() {
+        let error = normalize_duration("field", "0d", &HOURLY_OR_SLOWER)
+            .expect_err("zero is below the minimum");
+        assert!(
+            error.to_string().contains("must be at least 1 hour"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn normalize_duration_rejects_missing_and_garbled_units() {
+        for raw in ["10", "d", "1.5h", ""] {
+            assert!(
+                normalize_duration("field", raw, &HOURLY_OR_SLOWER).is_err(),
+                "{raw} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_duration_applies_the_epoch_hardstop() {
+        let error = normalize_duration("field", "9999w", &HOURLY_OR_SLOWER)
+            .expect_err("longer than the epoch span");
+        assert!(
+            error.to_string().contains("exceeds the maximum interval"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must not accept both minute and month")]
+    fn duration_limits_reject_minute_and_month_together() {
+        let _ = DurationLimits::new(
+            &[DurationUnit::Minute, DurationUnit::Month],
+            std::time::Duration::ZERO,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "finest-first")]
+    fn duration_limits_require_finest_first_declaration() {
+        let _ = DurationLimits::new(
+            &[DurationUnit::Week, DurationUnit::Day],
+            std::time::Duration::ZERO,
+        );
+    }
 }

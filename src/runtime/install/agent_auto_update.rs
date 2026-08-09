@@ -7,9 +7,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, parse_duration_string};
+use crate::error::StackError;
 use crate::runtime::agent::supervisor::AgentSupervisor;
 use crate::runtime::install::agent_registry::RegistryCatalog;
-use crate::runtime::install::agent_updater::{AgentUpdateOptions, update_agent_for_config};
+use crate::runtime::install::agent_updater::{
+    AgentUpdateOptions, AgentUpdateReport, NON_REGISTRY_SKIP_REASON, update_agent_for_config,
+};
 use crate::state::{StateStore, default_installer_log_base};
 
 const DISABLED_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -95,15 +98,12 @@ impl AgentAutoUpdater {
                 agent_supervisor.finish_update().await;
                 match result {
                     Ok(Ok(report)) => {
-                        let event_kind = if report.has_failed_steps() {
-                            "agent.update.failed"
+                        let (event_kind, event_message) = if report.skipped {
+                            ("agent.update.skipped", "agent update skipped")
+                        } else if report.has_failed_steps() {
+                            ("agent.update.failed", "agent update failed")
                         } else {
-                            "agent.update.finished"
-                        };
-                        let event_message = if report.has_failed_steps() {
-                            "agent update failed"
-                        } else {
-                            "agent update finished"
+                            ("agent.update.finished", "agent update finished")
                         };
                         if let Err(err) = append_update_lifecycle(
                             &state,
@@ -216,7 +216,20 @@ fn run_update_once(
     let registry = RegistryCatalog::load_with_override(
         &crate::runtime::install::operator_registry_override(&home),
     )?;
-    let entry = registry.lookup_required(&config.agent.id)?;
+    // A non-registry (escape-hatch) agent has nothing the updater can resolve.
+    // Skip rather than error so the loop does not record a failure every cycle.
+    // A placeholder id keeps its own error so its "select a real agent" signal
+    // is not masked by a generic skip.
+    let entry = match registry.lookup_required(&config.agent.id) {
+        Ok(entry) => entry,
+        Err(StackError::AgentRegistryMissing { .. }) => {
+            return Ok(AgentUpdateReport::skipped(
+                config.agent.id.clone(),
+                NON_REGISTRY_SKIP_REASON,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     let workspace_root = PathBuf::from(config.workspace.root.clone());
     let dest_dir = crate::runtime::install::local_bin_dir(&home);
     let log_base = default_installer_log_base(&home);

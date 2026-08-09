@@ -274,6 +274,14 @@ struct StartInitRequest {
     deps_apply_yes: Option<bool>,
     standard_agent_work_deps: Option<bool>,
     browser_use: Option<bool>,
+    // Update policies the interactive wizard collects after model selection.
+    // They are declared up-front here rather than streamed, so the hosted flow
+    // reaches the same `[updates.acp_stack]`/`[agent.auto_update]` parity as the
+    // CLI's `--stack-update`/`--agent-update` flags. Absent → schema defaults.
+    stack_update: Option<String>,
+    stack_update_frequency: Option<String>,
+    agent_update: Option<String>,
+    agent_update_frequency: Option<String>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,
 }
@@ -426,6 +434,23 @@ impl StartInitRequest {
             return Err(StackError::InvalidParam {
                 field: "deps_apply",
                 reason: "deps_apply and deps_apply_yes must be set together".to_owned(),
+            });
+        }
+        // Mirror clap's `requires` on the CLI frequency flags: a frequency with
+        // no policy would be silently dropped by the configure step, so reject
+        // it at the boundary instead. Value validation (on|security|off, unit
+        // limits, custom-agent rejection) runs later in the shared engine via
+        // `validate_stack_update_args`/`validate_agent_update_args`.
+        if self.stack_update_frequency.is_some() && self.stack_update.is_none() {
+            return Err(StackError::InvalidParam {
+                field: "stack_update_frequency",
+                reason: "stack_update_frequency requires stack_update".to_owned(),
+            });
+        }
+        if self.agent_update_frequency.is_some() && self.agent_update.is_none() {
+            return Err(StackError::InvalidParam {
+                field: "agent_update_frequency",
+                reason: "agent_update_frequency requires agent_update".to_owned(),
             });
         }
         let essential_skills = self.essential_skills.unwrap_or(false);
@@ -588,6 +613,10 @@ impl StartInitRequest {
         args.deps_apply_yes = self.deps_apply_yes.unwrap_or(false);
         args.standard_agent_work_deps = self.standard_agent_work_deps.unwrap_or(false);
         args.browser_use_profile = self.browser_use.unwrap_or(false);
+        args.stack_update = self.stack_update;
+        args.stack_update_frequency = self.stack_update_frequency;
+        args.agent_update = self.agent_update;
+        args.agent_update_frequency = self.agent_update_frequency;
         args.prompt_data_sources = self
             .data_sources
             .into_iter()
@@ -613,6 +642,8 @@ fn empty_init_args() -> InitArgs {
         deps_apply_yes: false,
         stack_update: None,
         stack_update_frequency: None,
+        agent_update: None,
+        agent_update_frequency: None,
         non_interactive: false,
         handoff_json: false,
         from_file: None,
@@ -982,6 +1013,52 @@ mod tests {
     }
 
     #[test]
+    fn start_init_request_maps_update_policies_into_args() {
+        // Parity with the CLI's `--stack-update`/`--agent-update` flags: the
+        // hosted contract must carry both update policies so a non-interactive
+        // init can disable them, not just the interactive wizard.
+        let args = request_from_json(
+            r#"{
+                "stack_update": "security",
+                "stack_update_frequency": "2w",
+                "agent_update": "off"
+            }"#,
+        )
+        .into_init_args()
+        .expect("valid request");
+        assert_eq!(args.stack_update.as_deref(), Some("security"));
+        assert_eq!(args.stack_update_frequency.as_deref(), Some("2w"));
+        assert_eq!(args.agent_update.as_deref(), Some("off"));
+        assert_eq!(args.agent_update_frequency, None);
+    }
+
+    #[test]
+    fn start_init_request_rejects_frequency_without_policy() {
+        // Mirrors clap's `requires`: a frequency with no policy is a 400 at the
+        // boundary rather than a silently dropped field.
+        let stack_error = request_from_json(r#"{"stack_update_frequency": "1w"}"#)
+            .into_init_args()
+            .expect_err("frequency without policy must be rejected");
+        assert!(matches!(
+            stack_error,
+            StackError::InvalidParam {
+                field: "stack_update_frequency",
+                ..
+            }
+        ));
+        let agent_error = request_from_json(r#"{"agent_update_frequency": "12h"}"#)
+            .into_init_args()
+            .expect_err("frequency without policy must be rejected");
+        assert!(matches!(
+            agent_error,
+            StackError::InvalidParam {
+                field: "agent_update_frequency",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn start_init_request_skills_declaration_clears_no_skills() {
         let args = request_from_json(
             r#"{"skills_source": "github:example", "skills": ["writing-plans"]}"#,
@@ -1277,6 +1354,44 @@ mod tests {
         };
         let outcome = driver.text(request).expect("text");
         assert_eq!(outcome, HostedPromptOutcome::Unhandled);
+    }
+
+    #[test]
+    fn hosted_driver_never_streams_update_policy_prompts() {
+        // The api.md/init.md contract promises the stack- and agent-update
+        // prompts stay out of the streamed set — hosted clients supply these
+        // up front via `stack_update`/`agent_update`. These are the exact
+        // strings prompts.rs emits; pin them so a reworded prompt cannot
+        // silently start streaming and break the up-front contract.
+        // The Text entries are the custom-frequency input behind the select's
+        // Custom branch (prompts.rs renders them from the consumer's
+        // DurationLimits: stack = day/week min 1 day, agent = hour/day/week
+        // min 1 hour).
+        for request in [
+            hosted_test_request(HostedPromptStyle::Select, "acp-stack auto-update", &[]),
+            hosted_test_request(HostedPromptStyle::Select, "update frequency", &[]),
+            hosted_test_request(
+                HostedPromptStyle::Confirm,
+                "Auto-update this agent's harness?",
+                &[],
+            ),
+            hosted_test_request(
+                HostedPromptStyle::Text,
+                "frequency (e.g. 1d, 3w; minimum 1 day)",
+                &[],
+            ),
+            hosted_test_request(
+                HostedPromptStyle::Text,
+                "frequency (e.g. 1h, 3w; minimum 1 hour)",
+                &[],
+            ),
+        ] {
+            assert!(
+                !should_handle_hosted_prompt(&request),
+                "update-policy prompt `{}` must not be streamed to hosted clients",
+                request.prompt
+            );
+        }
     }
 
     #[test]

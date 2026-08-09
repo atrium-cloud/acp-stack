@@ -203,6 +203,7 @@ fn run_init_with_output(
         });
     }
     validate_stack_update_args(&args)?;
+    validate_agent_update_args(&args)?;
 
     let home = home_dir()?;
     let config_path = config::default_config_path()?;
@@ -448,6 +449,12 @@ fn run_init_with_output(
         }
         if args.stack_update_frequency.is_none() {
             args.stack_update_frequency = recorded.stack_update_frequency.clone();
+        }
+        if args.agent_update.is_none() {
+            args.agent_update = recorded.agent_update.clone();
+        }
+        if args.agent_update_frequency.is_none() {
+            args.agent_update_frequency = recorded.agent_update_frequency.clone();
         }
         if args.native_config_revision.is_none() {
             args.native_config_revision = recorded.native_config_revision.clone();
@@ -1513,6 +1520,30 @@ fn run_init_with_output(
         Ok(())
     })();
     if let Err(error) = stack_update_outcome {
+        return finalize_with_error(&store, &init_run, error);
+    }
+
+    // Managed agent auto-update: override the `[agent.auto_update]` default that
+    // `apply_registry_entry_to_config` seeded. Whether the agent is managed comes
+    // from the registry, not block presence, so an imported/re-init config that
+    // lacks the block is still treated as managed. Same interactivity gate as the
+    // stack-update step; the prompt only appears for managed registry agents.
+    let agent_update_outcome = (|| -> Result<()> {
+        let managed = !is_custom_agent(&config, &registry);
+        let changed = configure_agent_update_for_init(
+            &args,
+            &mut config,
+            managed,
+            prompts_enabled(&args) && !args.resume && creating_config,
+        )?;
+        if changed {
+            let canonical = config.to_canonical_toml()?;
+            config = config::load_config_from_str(&canonical)?;
+            atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = agent_update_outcome {
         return finalize_with_error(&store, &init_run, error);
     }
 

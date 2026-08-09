@@ -490,6 +490,40 @@ fn rejects_agent_auto_update_zero_frequency() {
 }
 
 #[test]
+fn agent_auto_update_frequency_accepts_hours_but_not_minutes() {
+    // The managed agent updater's smallest unit is an hour, unlike the stack
+    // self-update's day, so a 12h cadence loads while 30m is rejected.
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.auto_update]\n\
+         enabled = true\n\
+         frequency = \"12h\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("12h frequency should parse");
+    assert_eq!(
+        config
+            .agent
+            .auto_update
+            .expect("auto-update configured")
+            .frequency,
+        "12h"
+    );
+
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.auto_update]\n\
+         enabled = true\n\
+         frequency = \"30m\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("sub-hour agent.auto_update.frequency must be rejected");
+    assert!(
+        err.to_string().contains("agent.auto_update.frequency"),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn stack_update_config_defaults_to_security_critical_daily() {
     let config = load_config_from_str(VALID_CONFIG).expect("default config should parse");
     assert_eq!(

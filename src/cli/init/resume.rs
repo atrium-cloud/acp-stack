@@ -62,6 +62,8 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "deps_apply_yes": args.deps_apply_yes,
         "stack_update": args.stack_update,
         "stack_update_frequency": args.stack_update_frequency,
+        "agent_update": args.agent_update,
+        "agent_update_frequency": args.agent_update_frequency,
         "native_config_revision": args.native_config_revision,
         "rotate_keys": args.rotate_keys,
         "fresh": args.fresh,
@@ -133,6 +135,8 @@ pub(super) struct RecordedInitArgs {
     pub(super) deps_apply_yes: bool,
     pub(super) stack_update: Option<String>,
     pub(super) stack_update_frequency: Option<String>,
+    pub(super) agent_update: Option<String>,
+    pub(super) agent_update_frequency: Option<String>,
     pub(super) native_config_revision: Option<String>,
     #[serde(default)]
     pub(super) rotate_keys: bool,

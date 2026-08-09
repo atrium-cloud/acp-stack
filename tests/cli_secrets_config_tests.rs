@@ -176,6 +176,53 @@ fn agent_update_set_rejects_invalid_frequency() {
 }
 
 #[test]
+fn agent_update_set_accepts_sub_day_frequency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    // Unlike the stack self-update (day minimum), managed agent updates accept
+    // hour granularity so eager operators can keep harnesses fresh.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update", "set", "--frequency", "12h"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("frequency: 12h"));
+
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    let config = load_config_from_str(&config_text).expect("config parses after update set");
+    let auto_update = config.agent.auto_update.expect("auto-update written");
+    assert_eq!(auto_update.frequency, "12h");
+}
+
+#[test]
+fn agent_update_set_rejects_sub_hour_frequency() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    // Minutes are finer than the agent updater's smallest unit (an hour), so
+    // they are rejected and the config is left untouched.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update", "set", "--frequency", "30m"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("agent.auto_update.frequency"));
+
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(
+        !config_text.contains("[agent.auto_update]"),
+        "a rejected set must not write an auto-update block"
+    );
+}
+
+#[test]
 fn stack_update_set_edits_update_config() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -230,21 +277,100 @@ fn stack_update_set_rejects_sub_day_frequency() {
 }
 
 #[test]
-fn agent_update_set_auto_on_rejects_non_registry_agent() {
+fn agent_update_set_rejects_non_registry_agent() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
-    // An escape-hatch agent id that the embedded registry does not resolve:
-    // enabling auto-update would leave the daemon loop failing every cycle.
+    // An escape-hatch agent id that the embedded registry does not resolve has
+    // nothing to auto-update, so every `set` variant is rejected — writing a
+    // block would only leave the daemon loop skipping it forever.
     let escape_hatch = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "custom-private-agent""#);
     fs::write(config_dir.join("acps-config.toml"), escape_hatch).expect("config should be written");
 
+    for extra in [
+        &["--auto-on"][..],
+        &["--auto-off"][..],
+        &["--frequency", "3d"][..],
+    ] {
+        acps_command()
+            .env("HOME", tempdir.path())
+            .args(["agent", "update", "set"])
+            .args(extra)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("not a managed registry agent"));
+    }
+
+    // The rejected run must not have written an [agent.auto_update] block.
+    let config_text =
+        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(
+        !config_text.contains("[agent.auto_update]"),
+        "a rejected set must not write an auto-update block"
+    );
+}
+
+#[test]
+fn agent_check_and_update_still_error_for_placeholder_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    // The legacy `placeholder` sentinel is NOT a custom agent: it must keep its
+    // own "select a real agent" signal, not degrade to the non-registry skip
+    // (check/update) or the escape-hatch rejection (update set).
+    let placeholder = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "placeholder""#);
+    fs::write(config_dir.join("acps-config.toml"), placeholder).expect("config should be written");
+
+    for command in [
+        &["agent", "check"][..],
+        &["agent", "update"][..],
+        &["agent", "update", "set", "--auto-on"][..],
+    ] {
+        acps_command()
+            .env("HOME", tempdir.path())
+            .args(command)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("select a real agent"));
+    }
+}
+
+#[test]
+fn agent_check_skips_non_registry_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let escape_hatch = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "custom-private-agent""#);
+    fs::write(config_dir.join("acps-config.toml"), escape_hatch).expect("config should be written");
+
+    // `acps agent check` has no managed steps to inspect for an escape-hatch
+    // agent, so it reports a skip and exits 0 rather than erroring.
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["agent", "update", "set", "--auto-on"])
+        .args(["agent", "check"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("not a managed registry agent"));
+        .success()
+        .stdout(predicates::str::contains("skipped"))
+        .stdout(predicates::str::contains("not a managed registry agent"));
+}
+
+#[test]
+fn agent_update_execute_skips_non_registry_agent() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let escape_hatch = VALID_CONFIG.replace(r#"id = "opencode""#, r#"id = "custom-private-agent""#);
+    fs::write(config_dir.join("acps-config.toml"), escape_hatch).expect("config should be written");
+
+    // A one-shot `acps agent update` for an escape-hatch agent is a clean no-op:
+    // it reports the skip and exits 0 rather than erroring on a missing entry.
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "update"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("skipped"))
+        .stdout(predicates::str::contains("not a managed registry agent"));
 }
 
 #[test]
