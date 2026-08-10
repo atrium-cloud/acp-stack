@@ -7,13 +7,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, parse_duration_string};
-use crate::error::StackError;
 use crate::runtime::agent::supervisor::AgentSupervisor;
-use crate::runtime::install::agent_registry::RegistryCatalog;
-use crate::runtime::install::agent_updater::{
-    AgentUpdateOptions, AgentUpdateReport, NON_REGISTRY_SKIP_REASON, update_agent_for_config,
-};
-use crate::state::{StateStore, default_installer_log_base};
+use crate::runtime::install::agent_updater::{AgentUpdateOptions, run_managed_agent_update};
+use crate::state::StateStore;
 
 const DISABLED_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Grace window for `shutdown` to wait on an in-flight update before detaching.
@@ -92,7 +88,12 @@ impl AgentAutoUpdater {
                 let home_for_task = home.clone();
                 let state_path_for_task = state_path.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    run_update_once(home_for_task, state_path_for_task, config)
+                    run_managed_agent_update(
+                        home_for_task,
+                        state_path_for_task,
+                        config,
+                        AgentUpdateOptions::default(),
+                    )
                 })
                 .await;
                 agent_supervisor.finish_update().await;
@@ -204,47 +205,6 @@ fn next_delay(config_path: &PathBuf) -> Duration {
         return DISABLED_POLL_INTERVAL;
     }
     parse_duration_string(&auto_update.frequency).unwrap_or(DISABLED_POLL_INTERVAL)
-}
-
-fn run_update_once(
-    home: PathBuf,
-    state_path: PathBuf,
-    config: Config,
-) -> crate::error::Result<crate::runtime::install::agent_updater::AgentUpdateReport> {
-    let store = StateStore::open(&state_path)?;
-    store.migrate()?;
-    let registry = RegistryCatalog::load_with_override(
-        &crate::runtime::install::operator_registry_override(&home),
-    )?;
-    // A non-registry (escape-hatch) agent has nothing the updater can resolve.
-    // Skip rather than error so the loop does not record a failure every cycle.
-    // A placeholder id keeps its own error so its "select a real agent" signal
-    // is not masked by a generic skip.
-    let entry = match registry.lookup_required(&config.agent.id) {
-        Ok(entry) => entry,
-        Err(StackError::AgentRegistryMissing { .. }) => {
-            return Ok(AgentUpdateReport::skipped(
-                config.agent.id.clone(),
-                NON_REGISTRY_SKIP_REASON,
-            ));
-        }
-        Err(error) => return Err(error),
-    };
-    let workspace_root = PathBuf::from(config.workspace.root.clone());
-    let dest_dir = crate::runtime::install::local_bin_dir(&home);
-    let log_base = default_installer_log_base(&home);
-    update_agent_for_config(
-        &config,
-        entry,
-        &store,
-        &workspace_root,
-        &dest_dir,
-        Some(&log_base),
-        AgentUpdateOptions {
-            force: false,
-            agent_running: false,
-        },
-    )
 }
 
 async fn append_update_lifecycle(

@@ -2,6 +2,7 @@ pub mod agent_auto_update;
 pub mod agent_installer;
 pub mod agent_registry;
 pub mod agent_updater;
+pub mod agent_version_check;
 pub mod github_release;
 pub mod npm_registry;
 pub mod skill_installer;

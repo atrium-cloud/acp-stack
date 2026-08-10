@@ -42,8 +42,9 @@ use super::auth::{
 use super::routes::agent::{
     agent_capabilities_handler, agent_install_handler, agent_restart_blockers_handler,
     agent_restart_handler, agent_start_handler, agent_stop_handler, agent_switch_handler,
-    array_agent_capabilities_handler, array_agent_install_handler, array_agent_restart_handler,
-    array_agent_start_handler, array_agent_stop_handler, array_status_handler,
+    agent_update_handler, agent_update_status_handler, array_agent_capabilities_handler,
+    array_agent_install_handler, array_agent_restart_handler, array_agent_start_handler,
+    array_agent_stop_handler, array_status_handler,
 };
 use super::routes::auth::{auth_local_session_access_handler, auth_regenerate_session_key_handler};
 use super::routes::commands::{
@@ -578,6 +579,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route("/v1/agent/update/status", get(agent_update_status_handler))
         .route("/v1/agent/skills", get(skills_list_handler))
         .route("/v1/agent/skills/catalog", get(skills_catalog_handler))
         .route("/v1/agent/skills/source", get(skills_source_get_handler))
@@ -679,6 +681,7 @@ pub fn build_router(state: AppState) -> Router {
             post(ws_disconnect_sessions_handler),
         )
         .route("/v1/agent/install", post(agent_install_handler))
+        .route("/v1/agent/update", post(agent_update_handler))
         .route("/v1/agent/start", post(agent_start_handler))
         .route("/v1/agent/stop", post(agent_stop_handler))
         .route("/v1/agent/restart", post(agent_restart_handler))

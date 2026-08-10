@@ -39,6 +39,7 @@ flowchart LR
 | Provider CLI     | target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation |
 | Native config import | redacted inspection and transactional semantic replacement of supported harness global config |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer (init install plus day-2 list/add/remove via `acps skills` and `/v1/agent/skills`) |
+| Agent updates    | managed-agent update orchestration (`src/runtime/install/agent_updater.rs`, shared by the auto-update timer and `POST /v1/agent/update`) and installed-vs-upstream version checks (`src/runtime/install/agent_version_check.rs`, shared by `acps agent check` and `GET /v1/agent/update/status`) |
 | Net rate limit   | process-wide per-domain pacing and rate-limit circuit for outbound HTTP to quota-bearing hosts (`src/runtime/net_rate_limit.rs`), consumed by the GitHub Release installer |
 | Workspace        | bounded file operations and workspace source materialization      |
 | Command gateway  | policy-mediated shell command execution and output capture        |

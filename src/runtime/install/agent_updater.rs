@@ -16,6 +16,7 @@ use crate::runtime::install::agent_registry::{
     AdapterSpec, AptUpdate, HarnessSpec, InstallSet, RegistryEntry, RegistryKind,
     github_repo_from_url,
 };
+use crate::runtime::install::agent_version_check::normalize_version;
 use crate::runtime::process_runner::{
     apply_non_interactive_env, detach_into_new_session, forward_host_env, join_reader_bounded,
     kill_process_group, path_env_with_extra_dirs, spawn_capped_reader, wait_with_timeout,
@@ -98,6 +99,50 @@ pub enum AgentUpdateStepStatus {
     Failed,
 }
 
+/// Resolve the registry entry, open state, and run the update for the agent
+/// configured in `config`. Shared by the auto-update timer and the manual
+/// `POST /v1/agent/update` route; opens its own `StateStore` connection so
+/// callers never hold the daemon's shared state lock for the length of an
+/// install.
+pub fn run_managed_agent_update(
+    home: PathBuf,
+    state_path: PathBuf,
+    config: Config,
+    options: AgentUpdateOptions,
+) -> Result<AgentUpdateReport> {
+    let store = StateStore::open(&state_path)?;
+    store.migrate()?;
+    let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_with_override(
+        &crate::runtime::install::operator_registry_override(&home),
+    )?;
+    // A non-registry (escape-hatch) agent has nothing the updater can resolve.
+    // Skip rather than error so the loop does not record a failure every cycle.
+    // A placeholder id keeps its own error so its "select a real agent" signal
+    // is not masked by a generic skip.
+    let entry = match registry.lookup_required(&config.agent.id) {
+        Ok(entry) => entry,
+        Err(StackError::AgentRegistryMissing { .. }) => {
+            return Ok(AgentUpdateReport::skipped(
+                config.agent.id.clone(),
+                NON_REGISTRY_SKIP_REASON,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let workspace_root = PathBuf::from(config.workspace.root.clone());
+    let dest_dir = crate::runtime::install::local_bin_dir(&home);
+    let log_base = crate::state::default_installer_log_base(&home);
+    update_agent_for_config(
+        &config,
+        entry,
+        &store,
+        &workspace_root,
+        &dest_dir,
+        Some(&log_base),
+        options,
+    )
+}
+
 pub fn update_agent_for_config(
     config: &Config,
     entry: &RegistryEntry,
@@ -124,7 +169,7 @@ pub fn update_agent_for_config(
         force: options.force,
     };
     let mut steps = Vec::new();
-    for component in update_components(entry)? {
+    for component in update_components(entry, &config.agent)? {
         steps.push(update_component(
             &config.agent,
             entry,
@@ -281,9 +326,13 @@ struct UpdateComponent<'a> {
     install: &'a InstallSet,
     apt: Option<&'a AptUpdate>,
     github_url: Option<&'a str>,
+    version_pin: Option<&'a str>,
 }
 
-fn update_components(entry: &RegistryEntry) -> Result<Vec<UpdateComponent<'_>>> {
+fn update_components<'a>(
+    entry: &'a RegistryEntry,
+    agent: &'a AgentConfig,
+) -> Result<Vec<UpdateComponent<'a>>> {
     let harness = entry
         .harness
         .as_ref()
@@ -299,18 +348,19 @@ fn update_components(entry: &RegistryEntry) -> Result<Vec<UpdateComponent<'_>>> 
             })?;
         let mut components = Vec::new();
         if !harness.install.is_provided_by_adapter() {
-            components.push(harness_component(entry, harness, STEP_HARNESS));
+            components.push(harness_component(entry, harness, STEP_HARNESS, agent));
         }
         components.push(adapter_component(entry, adapter));
         return Ok(components);
     }
-    Ok(vec![harness_component(entry, harness, STEP_INSTALL)])
+    Ok(vec![harness_component(entry, harness, STEP_INSTALL, agent)])
 }
 
 fn harness_component<'a>(
     entry: &'a RegistryEntry,
     harness: &'a HarnessSpec,
     step: &'static str,
+    agent: &'a AgentConfig,
 ) -> UpdateComponent<'a> {
     UpdateComponent {
         step,
@@ -319,6 +369,7 @@ fn harness_component<'a>(
         install: &harness.install,
         apt: harness.update.apt.as_ref(),
         github_url: entry.github.as_deref(),
+        version_pin: agent.harness_version.as_deref(),
     }
 }
 
@@ -333,6 +384,7 @@ fn adapter_component<'a>(
         install: &adapter.install,
         apt: adapter.update.apt.as_ref(),
         github_url: adapter.github.as_deref().or(entry.github.as_deref()),
+        version_pin: None,
     }
 }
 
@@ -354,6 +406,11 @@ fn choose_update_plan(
     component: &UpdateComponent<'_>,
     installed_row: Option<&InstallerRun>,
 ) -> Result<UpdatePlan> {
+    // A harness_version pin is a GitHub Release tag, so only the github path
+    // can satisfy it — it wins over the recorded install method.
+    if component.version_pin.is_some() && component.install.github.is_some() {
+        return github_plan(entry, component);
+    }
     match installed_row.and_then(|row| row.method.as_deref()) {
         Some(INSTALLER_METHOD_GITHUB) if component.install.github.is_some() => {
             return github_plan(entry, component);
@@ -442,7 +499,10 @@ fn github_plan(entry: &RegistryEntry, component: &UpdateComponent<'_>) -> Result
             ),
         })?;
     let repo = github_repo_from_url(&entry.id, "github", github_url)?;
-    let latest = crate::runtime::install::github_release::latest_release_tag(&repo)?;
+    let latest = match component.version_pin {
+        Some(pin) => pin.to_owned(),
+        None => crate::runtime::install::github_release::latest_release_tag(&repo)?,
+    };
     Ok(UpdatePlan {
         method: INSTALLER_METHOD_GITHUB,
         latest: Some(latest),
@@ -787,26 +847,21 @@ fn command_error_row(
     }
 }
 
-fn normalize_version(value: &str) -> &str {
-    value
-        .trim()
-        .strip_prefix('v')
-        .unwrap_or_else(|| value.trim())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     use super::{
-        AgentUpdateOptions, UpdateComponent, UpdatePlanKind, choose_update_plan,
-        help_output_contains_command, update_agent_for_config, update_components,
+        AgentUpdateOptions, AgentUpdateStepStatus, UpdateComponent, UpdateExecutionContext,
+        UpdatePlanKind, choose_update_plan, help_output_contains_command, update_agent_for_config,
+        update_component, update_components,
     };
     use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
     use crate::state::{
-        INSTALLER_METHOD_APT, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_SHELL,
-        INSTALLER_OPERATION_INSTALL, INSTALLER_OPERATION_UPDATE, InstallerRun, StateStore,
+        INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE,
+        INSTALLER_METHOD_NPM, INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_INSTALL,
+        INSTALLER_OPERATION_UPDATE, InstallerRun, StateStore,
     };
 
     #[cfg(unix)]
@@ -847,7 +902,8 @@ mod tests {
     fn update_plan_preserves_shell_install_as_native_update() {
         let registry = registry_with_shell_npm_and_apt();
         let entry = registry.lookup_required("fake").expect("entry");
-        let component = harness_update_component(entry);
+        let agent = agent_config("fake", None);
+        let component = harness_update_component(entry, &agent);
         let installed = installer_run_with_method(Some(INSTALLER_METHOD_SHELL));
 
         let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
@@ -887,7 +943,8 @@ provided_by = "adapter"
         .expect("registry");
         let entry = catalog.lookup_required("sdk-backed").expect("entry");
 
-        let components = update_components(entry).expect("components");
+        let agent = agent_config("sdk-backed", None);
+        let components = update_components(entry, &agent).expect("components");
 
         assert_eq!(components.len(), 1);
         assert_eq!(components[0].step, "adapter");
@@ -898,7 +955,8 @@ provided_by = "adapter"
     fn update_plan_uses_explicit_apt_metadata_before_derived_sources() {
         let registry = registry_with_shell_npm_and_apt();
         let entry = registry.lookup_required("fake").expect("entry");
-        let component = harness_update_component(entry);
+        let agent = agent_config("fake", None);
+        let component = harness_update_component(entry, &agent);
         let installed = installer_run_with_method(None);
 
         let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
@@ -1054,6 +1112,125 @@ creates = "fake-agent"
         assert!(detail.contains("exit none"), "{detail}");
     }
 
+    #[test]
+    fn update_plan_honors_harness_version_pin() {
+        let registry = registry_with_github_and_npm();
+        let entry = registry.lookup_required("fake").expect("entry");
+        let agent = agent_config("fake", Some("v1.2.3"));
+        let component = harness_update_component(entry, &agent);
+        // Recorded npm install would normally pick the npm plan; the pin must
+        // win. A network fetch here would fail the test (no mock server).
+        let installed = installer_run_with_method(Some(INSTALLER_METHOD_NPM));
+
+        let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
+
+        assert_eq!(plan.method, INSTALLER_METHOD_GITHUB);
+        assert_eq!(plan.latest.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn update_plan_reports_up_to_date_at_pin() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+        state.migrate().expect("migrate");
+        let registry = registry_with_github_and_npm();
+        let entry = registry.lookup_required("fake").expect("entry");
+        let agent = agent_config("fake", Some("v1.2.3"));
+        let component = harness_update_component(entry, &agent);
+        let mut installed = installer_run_with_method(Some(INSTALLER_METHOD_GITHUB));
+        installed.version = Some("1.2.3".to_owned());
+        let context = UpdateExecutionContext {
+            workspace_root: tempdir.path(),
+            dest_dir: tempdir.path(),
+            state: &state,
+            log_base: None,
+            force: false,
+        };
+
+        let report = update_component(&agent, entry, &component, Some(&installed), &context)
+            .expect("report");
+
+        assert_eq!(report.status, AgentUpdateStepStatus::UpToDate);
+        assert_eq!(report.latest.as_deref(), Some("v1.2.3"));
+        assert_eq!(report.installed.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn update_components_pin_applies_to_harness_not_adapter() {
+        let catalog = RegistryCatalog::from_toml(
+            r#"
+[[agents]]
+id = "pinned"
+name = "Pinned"
+kind = "adapter"
+headless_compatible = true
+support_doc = "docs/agents/pinned.md"
+github = "https://github.com/example/pinned"
+
+[agents.adapter]
+id = "pinned-acp"
+
+[agents.adapter.install.npm]
+package = "pinned-acp"
+creates = "pinned-acp"
+
+[agents.harness]
+id = "pinned-agent"
+
+[agents.harness.install.github]
+asset_pattern = "pinned-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "pinned-agent"
+
+[agents.harness.install.github.arch]
+x86_64 = "x64"
+aarch64 = "arm64"
+"#,
+        )
+        .expect("registry");
+        let entry = catalog.lookup_required("pinned").expect("entry");
+        let agent = agent_config("pinned", Some("v9.9.9"));
+
+        let components = update_components(entry, &agent).expect("components");
+
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0].step, "harness");
+        assert_eq!(components[0].version_pin, Some("v9.9.9"));
+        assert_eq!(components[1].step, "adapter");
+        assert_eq!(components[1].version_pin, None);
+    }
+
+    fn registry_with_github_and_npm() -> RegistryCatalog {
+        RegistryCatalog::from_toml(
+            r#"
+[[agents]]
+id = "fake"
+name = "Fake"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/fake.md"
+github = "https://github.com/example/fake"
+
+[agents.harness]
+id = "fake-agent"
+
+[agents.harness.install.npm]
+package = "@example/fake-agent"
+creates = "fake-agent"
+
+[agents.harness.install.github]
+asset_pattern = "fake-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "fake-agent"
+
+[agents.harness.install.github.arch]
+x86_64 = "x64"
+aarch64 = "arm64"
+"#,
+        )
+        .expect("registry")
+    }
+
     fn registry_with_shell_npm_and_apt() -> RegistryCatalog {
         RegistryCatalog::from_toml(
             r#"
@@ -1082,7 +1259,10 @@ package = "fake-agent"
         .expect("registry")
     }
 
-    fn harness_update_component(entry: &RegistryEntry) -> UpdateComponent<'_> {
+    fn harness_update_component<'a>(
+        entry: &'a RegistryEntry,
+        agent: &'a crate::config::AgentConfig,
+    ) -> UpdateComponent<'a> {
         let harness = entry.harness.as_ref().expect("harness");
         UpdateComponent {
             step: "install",
@@ -1091,6 +1271,29 @@ package = "fake-agent"
             install: &harness.install,
             apt: harness.update.apt.as_ref(),
             github_url: entry.github.as_deref(),
+            version_pin: agent.harness_version.as_deref(),
+        }
+    }
+
+    fn agent_config(id: &str, harness_version: Option<&str>) -> crate::config::AgentConfig {
+        crate::config::AgentConfig {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            command: id.to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            expected_sha256: None,
+            restart: "never".to_owned(),
+            mode: None,
+            model: None,
+            harness_version: harness_version.map(str::to_owned),
+            adapter: None,
+            provider: None,
+            providers: None,
+            subagent: None,
+            auto_update: None,
+            install: None,
         }
     }
 
