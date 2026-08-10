@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::super::core::{AgentTargetRuntime, AppState};
+use super::super::core::{AgentTargetRuntime, AppState, load_active_registry};
 use crate::config::{AgentAdapterConfig, Config, LocalSessionAuth};
 use crate::envelope::ApiSuccess;
 use crate::error::{Result, StackError};
@@ -41,6 +41,7 @@ use crate::state::InstallerRunInput;
 
 mod lifecycle;
 mod switch;
+mod update;
 
 // Cross-seam helpers keep their visibility; re-import them here so each
 // sibling's `use super::*;` resolves items defined in the other siblings, and
@@ -51,6 +52,7 @@ pub(crate) use self::lifecycle::{
     cancel_pending_acp_permissions_for_target, ensure_agent_started,
 };
 pub(crate) use self::switch::agent_switch_handler;
+pub(crate) use self::update::{agent_update_handler, agent_update_status_handler};
 
 #[derive(Serialize)]
 pub(crate) struct AgentInstallResponse {

@@ -387,12 +387,12 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
 
 #[cfg(test)]
 mod tests {
-    use super::check::{
-        AgentCheckStatus, LatestVersionResolver, agent_check_has_failure, build_agent_check_report,
-        compare_versions,
-    };
     use super::set::default_api_key_ref_for_agent_provider;
     use super::test::{prepare_testflight_expect_fs, verify_testflight_expect_fs};
+    use crate::runtime::install::agent_version_check::{
+        AgentVersionStatus as AgentCheckStatus, LatestVersionResolver, agent_check_has_failure,
+        build_agent_check_report, compare_versions,
+    };
 
     use crate::error::{Result, StackError};
     use crate::runtime::install::agent_registry::RegistryEntry;

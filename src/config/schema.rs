@@ -464,10 +464,10 @@ pub struct AgentConfig {
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Pin the harness install to a specific GitHub Release tag (e.g.
-    /// `"v0.42.0"`). Only consulted when the resolved registry entry is
-    /// adapter-backed and its harness install is `github_release`. Default
-    /// (None) installs the latest release at install time.
+    /// Pin the harness to a specific GitHub Release tag (e.g. `"v0.42.0"`).
+    /// Consulted by both install and managed update when the harness install
+    /// path is `github_release`; updates target the pin instead of the latest
+    /// release. Default (None) resolves the latest release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_version: Option<String>,
     /// Adapter metadata is runtime-populated from the embedded registry,
