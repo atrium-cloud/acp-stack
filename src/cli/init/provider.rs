@@ -53,10 +53,30 @@ pub(super) fn preflight_provider_for_init(
             });
         }
         if !prompts_enabled(args) {
-            required_init_custom_value(false, "provider-name", args.provider_name.clone())?;
-            required_init_custom_value(false, "base-url", args.base_url.clone())?;
-            required_init_custom_value(false, "api-key-ref", args.api_key_ref.clone())?;
-            required_init_custom_value(false, "model", args.model.clone())?;
+            required_init_custom_value(
+                prompt::HostedPromptKind::ProviderName,
+                false,
+                "provider-name",
+                args.provider_name.clone(),
+            )?;
+            required_init_custom_value(
+                prompt::HostedPromptKind::BaseUrl,
+                false,
+                "base-url",
+                args.base_url.clone(),
+            )?;
+            required_init_custom_value(
+                prompt::HostedPromptKind::ApiKeyRef,
+                false,
+                "api-key-ref",
+                args.api_key_ref.clone(),
+            )?;
+            required_init_custom_value(
+                prompt::HostedPromptKind::Model,
+                false,
+                "model",
+                args.model.clone(),
+            )?;
         }
         let api = parse_init_custom_provider_api(
             args.provider_api.as_deref(),
@@ -298,7 +318,13 @@ fn prompt_missing_declared_refs(
         if secret_store.contains(env_ref) {
             continue;
         }
-        let Some(value) = prompt::password(interactive, env_ref, false)? else {
+        let Some(value) = prompt::password(
+            prompt::HostedPromptKind::SecretRefValue,
+            interactive,
+            env_ref,
+            false,
+        )?
+        else {
             continue;
         };
         let value = zeroize::Zeroizing::new(value);
@@ -491,12 +517,17 @@ fn select_provider_for_init(
     // pre-dates without round-tripping through `acps agent set`.
     let providers = providers_for_agent(&config.agent.id);
     if providers.is_empty() {
-        let provider_id = prompt::text(interactive, "provider id", true)?
-            .map(|id| id.trim().to_owned())
-            .ok_or_else(|| StackError::InvalidParam {
-                field: "--provider",
-                reason: format!("{} requires a provider id", entry.name),
-            })?;
+        let provider_id = prompt::text(
+            prompt::HostedPromptKind::ProviderId,
+            interactive,
+            "provider id",
+            true,
+        )?
+        .map(|id| id.trim().to_owned())
+        .ok_or_else(|| StackError::InvalidParam {
+            field: "--provider",
+            reason: format!("{} requires a provider id", entry.name),
+        })?;
         return Ok(Some(provider_id));
     }
     let (available, needs_input): (Vec<_>, Vec<_>) = providers.iter().partition(|summary| {
@@ -511,29 +542,36 @@ fn select_provider_for_init(
         Id(String),
         Custom,
     }
-    let mut items: Vec<(ProviderChoice, String, String)> = Vec::new();
+    let mut items: Vec<prompt::PromptItem<ProviderChoice>> = Vec::new();
     for summary in available.iter().chain(needs_input.iter()) {
-        items.push((
+        items.push(prompt::item(
             ProviderChoice::Id(summary.id.to_owned()),
+            summary.id,
             format!("{} ({})", summary.name, summary.id),
             provider_readiness_label(&config.agent.id, summary, secret_store),
         ));
     }
-    items.push((
+    items.push(prompt::item(
         ProviderChoice::Custom,
-        "enter a provider id manually".to_owned(),
-        String::new(),
+        "__custom",
+        "enter a provider id manually",
+        "",
     ));
     match prompt::searchable_select(
+        prompt::HostedPromptKind::ProviderId,
         interactive,
         &format!("provider for {}", config.agent.id),
         &items,
     )? {
         None => Ok(None),
         Some(ProviderChoice::Id(id)) => Ok(Some(id)),
-        Some(ProviderChoice::Custom) => {
-            Ok(prompt::text(interactive, "provider id", true)?.map(|id| id.trim().to_owned()))
-        }
+        Some(ProviderChoice::Custom) => Ok(prompt::text(
+            prompt::HostedPromptKind::ProviderId,
+            interactive,
+            "provider id",
+            true,
+        )?
+        .map(|id| id.trim().to_owned())),
     }
 }
 
@@ -745,12 +783,30 @@ fn apply_custom_provider_to_config(
     provider_id: String,
 ) -> Result<Vec<String>> {
     let interactive = prompts_enabled(args);
-    let provider_name =
-        required_init_custom_value(interactive, "provider-name", args.provider_name.clone())?;
-    let base_url = required_init_custom_value(interactive, "base-url", args.base_url.clone())?;
-    let api_key_ref =
-        required_init_custom_value(interactive, "api-key-ref", args.api_key_ref.clone())?;
-    let model = required_init_custom_value(interactive, "model", args.model.clone())?;
+    let provider_name = required_init_custom_value(
+        prompt::HostedPromptKind::ProviderName,
+        interactive,
+        "provider-name",
+        args.provider_name.clone(),
+    )?;
+    let base_url = required_init_custom_value(
+        prompt::HostedPromptKind::BaseUrl,
+        interactive,
+        "base-url",
+        args.base_url.clone(),
+    )?;
+    let api_key_ref = required_init_custom_value(
+        prompt::HostedPromptKind::ApiKeyRef,
+        interactive,
+        "api-key-ref",
+        args.api_key_ref.clone(),
+    )?;
+    let model = required_init_custom_value(
+        prompt::HostedPromptKind::Model,
+        interactive,
+        "model",
+        args.model.clone(),
+    )?;
     let model_name = args.model_name.clone().unwrap_or_else(|| model.clone());
     let api = parse_init_custom_provider_api(
         args.provider_api.as_deref(),
@@ -803,6 +859,7 @@ fn apply_custom_provider_to_config(
 
 fn confirm_custom_provider_setup(interactive: bool, provider_id: &str) -> Result<bool> {
     prompt::confirm(
+        prompt::HostedPromptKind::CustomProviderConfirm,
         interactive,
         &format!(
             "provider `{provider_id}` has no default API-key env mapping; configure it as a custom provider?"
@@ -812,6 +869,7 @@ fn confirm_custom_provider_setup(interactive: bool, provider_id: &str) -> Result
 }
 
 fn required_init_custom_value(
+    kind: prompt::HostedPromptKind,
     interactive: bool,
     field: &'static str,
     value: Option<String>,
@@ -826,7 +884,7 @@ fn required_init_custom_value(
         field,
         reason: format!("--{field} is required for custom provider init"),
     };
-    match prompt::text(interactive, field, true)? {
+    match prompt::text(kind, interactive, field, true)? {
         Some(answer) => {
             let answer = answer.trim().to_owned();
             if answer.is_empty() {
@@ -906,7 +964,13 @@ fn collect_missing_provider_refs(
             // Masked entry via the wizard: a provider API key is a secret value;
             // echoing it to the terminal (and scrollback) would defeat the
             // encrypted store.
-            let Some(value) = prompt::password(interactive, env_ref, true)? else {
+            let Some(value) = prompt::password(
+                prompt::HostedPromptKind::ProviderApiKeyValue,
+                interactive,
+                env_ref,
+                true,
+            )?
+            else {
                 continue;
             };
             let value = zeroize::Zeroizing::new(value);

@@ -157,7 +157,20 @@ pub(super) struct SessionInner {
     next_seq: u64,
     history: Vec<Value>,
     pub(super) pending_input: Option<PublicInputRequest>,
+    /// Identity of the prompt occupying `pending_input`, kept beside it so the
+    /// category waiting on the client is derived rather than stored.
+    pending_kind: Option<HostedPromptKind>,
     pending_response: Option<(String, Value)>,
+    current_step: Option<&'static str>,
+    /// Whether `current_step` is still running. `current_step` itself stays put
+    /// after a step finishes because the wire wants the last step the run was
+    /// inside, but a failure surfacing between steps belongs to no lane and
+    /// must not badge the settled category the previous step left behind.
+    step_in_flight: bool,
+    categories: CategoryMap,
+    /// Last snapshot put on the wire. A signal that changes nothing observable
+    /// must not burn a seq, so every emission compares against this first.
+    last_state: Option<StateSnapshot>,
     result_json: Option<String>,
     error: Option<PublicError>,
     error_acked: bool,
@@ -167,6 +180,11 @@ pub(super) struct SessionInner {
 impl HostedInitSession {
     pub(super) fn new(id: String, shutdown: Arc<Notify>) -> Arc<Self> {
         let (events, _) = broadcast::channel(INIT_WS_CHANNEL_CAPACITY);
+        // The starting snapshot seeds the dedup guard rather than being sent:
+        // every client sees it in `hello`, so the first `state` event on the
+        // wire is a real transition away from it.
+        let categories = CategoryMap::default();
+        let last_state = Some(derive_snapshot(&categories, None, None));
         let session = Arc::new(Self {
             id,
             inner: Mutex::new(SessionInner {
@@ -174,7 +192,12 @@ impl HostedInitSession {
                 next_seq: 0,
                 history: Vec::new(),
                 pending_input: None,
+                pending_kind: None,
                 pending_response: None,
+                current_step: None,
+                step_in_flight: false,
+                categories,
+                last_state,
                 result_json: None,
                 error: None,
                 error_acked: false,
@@ -186,7 +209,9 @@ impl HostedInitSession {
             activity: Mutex::new(tokio::time::Instant::now()),
             connected_ws: std::sync::atomic::AtomicUsize::new(0),
         });
-        session.push_event("progress", json!({"message": "init session started"}));
+        session.push_event(ServerEvent::Progress {
+            message: "init session started".to_owned(),
+        });
         session
     }
 
@@ -250,6 +275,10 @@ impl HostedInitSession {
         InitStatusResponse {
             session_id: self.id.clone(),
             status: inner.status.clone(),
+            // Derived live rather than read from `last_state`: a REST poller
+            // must see the current frontier even when the last transition
+            // deduped to no frame.
+            state: derive_snapshot(&inner.categories, inner.current_step, inner.pending_kind),
             last_seq: inner.next_seq,
             pending_input: inner.pending_input.clone(),
             recent_events: inner.history.iter().rev().take(50).cloned().collect(),
@@ -263,16 +292,15 @@ impl HostedInitSession {
         let snapshot = self.status_snapshot();
         // `error` rides along so a backend that reconnects after its socket
         // dropped mid-failure learns the typed error from the hello alone.
-        json!({
-            "type": "hello",
-            "session_id": self.id,
-            "status": snapshot.status,
-            "last_seq": snapshot.last_seq,
-            "pending_input": snapshot.pending_input,
-            "result_available": snapshot.result_available,
-            "error": snapshot.error
+        frame_json(ServerFrame::Hello {
+            session_id: &self.id,
+            status: &snapshot.status,
+            state: &snapshot.state,
+            last_seq: snapshot.last_seq,
+            pending_input: snapshot.pending_input.as_ref(),
+            result_available: snapshot.result_available,
+            error: snapshot.error.as_ref(),
         })
-        .to_string()
     }
 
     pub(super) fn events_after(&self, after_seq: u64) -> Vec<Value> {
@@ -284,34 +312,91 @@ impl HostedInitSession {
             .collect()
     }
 
-    pub(super) fn push_event(&self, event_type: &str, mut payload: Value) {
+    pub(super) fn push_event(&self, event: ServerEvent) {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
-            self.record_event_locked(&mut inner, event_type, &mut payload)
+            self.emit_event_locked(&mut inner, event)
         };
         let _ = self.events.send(frame.to_string());
+    }
+
+    /// Record a typed event, absorbing the single failure mode a frame has.
+    /// A payload that will not encode parks the session as errored through the
+    /// normal error path: the transition it described is lost, so continuing
+    /// would leave the client's category map permanently behind the wizard.
+    pub(super) fn emit_event_locked(&self, inner: &mut SessionInner, event: ServerEvent) -> Value {
+        let event_type = event.type_str();
+        match event.payload() {
+            Ok(payload) => self.record_event_locked(inner, event_type, payload),
+            Err(error) => {
+                tracing::warn!(
+                    event = event_type,
+                    error = %error,
+                    "hosted init event payload could not be encoded; parking the session as errored"
+                );
+                // Deliberately not `set_error_locked`: that derives a fresh
+                // state snapshot, which is one of the two payloads that can
+                // fail this way, and the retry would recurse.
+                self.record_error_locked(
+                    inner,
+                    FRAME_ENCODE_FAILED_CODE,
+                    FRAME_ENCODE_FAILED_MESSAGE.to_owned(),
+                )
+            }
+        }
+    }
+
+    /// Derive the category snapshot and record it if it moved. Returns the
+    /// frame to broadcast once the caller drops the lock, or `None` when the
+    /// mutation changed nothing observable — dedup happens before any seq is
+    /// allocated, so a no-op signal leaves the sequence untouched.
+    pub(super) fn emit_state_locked(&self, inner: &mut SessionInner) -> Option<Value> {
+        if is_terminal_status(&inner.status) {
+            return None;
+        }
+        let snapshot = derive_snapshot(&inner.categories, inner.current_step, inner.pending_kind);
+        if inner.last_state.as_ref() == Some(&snapshot) {
+            return None;
+        }
+        let frame = self.emit_event_locked(inner, ServerEvent::State(snapshot.clone()));
+        // A snapshot whose payload would not encode parks the session instead
+        // of reaching the client, so it must not seed the dedup guard: the next
+        // snapshot has to be treated as a real transition.
+        if inner.status != "errored" {
+            inner.last_state = Some(snapshot);
+        }
+        Some(frame)
+    }
+
+    /// Fold one init state signal into the category map and publish whatever
+    /// it moved. Called from the wizard thread via the hosted prompt driver.
+    pub(super) fn apply_state_signal(&self, signal: InitStateSignal) {
+        let frame = {
+            let mut inner = lock_unpoisoned(&self.inner);
+            // The frontier freezes with the session. A cancel while a prompt is
+            // pending unwinds the wizard thread, which keeps emitting signals
+            // on the way out; folding them would move the categories reported
+            // by `hello` and the status route even though `emit_state_locked`
+            // will not put another frame on the wire.
+            if is_terminal_status(&inner.status) {
+                return;
+            }
+            apply_state_signal_locked(&mut inner, signal);
+            self.emit_state_locked(&mut inner)
+        };
+        if let Some(frame) = frame {
+            let _ = self.events.send(frame.to_string());
+        }
     }
 
     fn record_event_locked(
         &self,
         inner: &mut SessionInner,
         event_type: &str,
-        payload: &mut Value,
+        payload: Map<String, Value>,
     ) -> Value {
         inner.next_seq = inner.next_seq.saturating_add(1);
-        let seq = inner.next_seq;
-        let mut object = BTreeMap::new();
-        object.insert("type".to_owned(), Value::String(event_type.to_owned()));
-        object.insert("seq".to_owned(), Value::Number(seq.into()));
-        object.insert("session_id".to_owned(), Value::String(self.id.clone()));
-        if let Some(map) = payload.as_object_mut() {
-            for (key, value) in std::mem::take(map) {
-                object.insert(key, value);
-            }
-        } else {
-            object.insert("data".to_owned(), payload.clone());
-        }
-        let frame = Value::Object(object.into_iter().collect());
+        let frame = envelope(event_type, inner.next_seq, &self.id, payload);
         inner.history.push(frame.clone());
         if inner.history.len() > INIT_EVENT_HISTORY_LIMIT {
             inner.history.remove(0);
@@ -323,43 +408,55 @@ impl HostedInitSession {
         if !should_handle_hosted_prompt(&request) {
             return Ok(None);
         }
+        let kind = request.kind;
         let public = public_input_request(request);
-        let frame = {
+        let (input_frame, state_frame) = {
             let mut inner = lock_unpoisoned(&self.inner);
-            if matches!(inner.status.as_str(), "canceled" | "closed") {
-                return Err(StackError::InvalidParam {
-                    field: "init",
-                    reason: "hosted init session was cancelled".to_owned(),
-                });
-            }
+            terminal_status_error(&inner)?;
             inner.status = "waiting_for_input".to_owned();
             inner.pending_response = None;
             inner.pending_input = Some(public.clone());
-            let mut payload = json!({ "input": public });
-            self.record_event_locked(&mut inner, "input_required", &mut payload)
+            inner.pending_kind = Some(kind);
+            // `input_required` is recorded first so the state frame announcing
+            // `awaiting_input` never arrives before the prompt it refers to.
+            let input_frame = self.emit_event_locked(
+                &mut inner,
+                ServerEvent::InputRequired {
+                    input: Box::new(public.clone()),
+                },
+            );
+            (input_frame, self.emit_state_locked(&mut inner))
         };
-        let _ = self.events.send(frame.to_string());
-
-        let mut inner = lock_unpoisoned(&self.inner);
-        loop {
-            if matches!(inner.status.as_str(), "canceled" | "closed") {
-                return Err(StackError::InvalidParam {
-                    field: "init",
-                    reason: "hosted init session was cancelled".to_owned(),
-                });
-            }
-            if let Some((request_id, value)) = inner.pending_response.take()
-                && request_id == public.request_id
-            {
-                inner.status = "running".to_owned();
-                inner.pending_input = None;
-                return Ok(Some(value));
-            }
-            inner = self
-                .input_ready
-                .wait(inner)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = self.events.send(input_frame.to_string());
+        if let Some(frame) = state_frame {
+            let _ = self.events.send(frame.to_string());
         }
+
+        let (value, state_frame) = {
+            let mut inner = lock_unpoisoned(&self.inner);
+            loop {
+                terminal_status_error(&inner)?;
+                if let Some((request_id, value)) = inner.pending_response.take()
+                    && request_id == public.request_id
+                {
+                    inner.status = "running".to_owned();
+                    inner.pending_input = None;
+                    inner.pending_kind = None;
+                    // The answer itself settles nothing: settlement comes from
+                    // the config-write sites, which know what was actually
+                    // written and never carry a secret value.
+                    break (value, self.emit_state_locked(&mut inner));
+                }
+                inner = self
+                    .input_ready
+                    .wait(inner)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        };
+        if let Some(frame) = state_frame {
+            let _ = self.events.send(frame.to_string());
+        }
+        Ok(Some(value))
     }
 
     pub(super) fn submit_input(
@@ -379,8 +476,12 @@ impl HostedInitSession {
                 ));
             }
             inner.pending_response = Some((request_id.to_owned(), value));
-            let mut payload = json!({ "request_id": request_id });
-            self.record_event_locked(&mut inner, "input_accepted", &mut payload)
+            self.emit_event_locked(
+                &mut inner,
+                ServerEvent::InputAccepted {
+                    request_id: request_id.to_owned(),
+                },
+            )
         };
         let _ = self.events.send(frame.to_string());
         self.input_ready.notify_all();
@@ -397,9 +498,13 @@ impl HostedInitSession {
             }
             inner.status = "completed_awaiting_ack".to_owned();
             inner.result_json = Some(result_json);
+            // `pending_kind` follows `pending_input` everywhere: they are two
+            // halves of one slot, and a stale kind would keep deriving a
+            // category as `awaiting_input` after the prompt is gone.
             inner.pending_input = None;
-            let mut payload = json!({ "status": "completed_awaiting_ack" });
-            let frame = self.record_event_locked(&mut inner, "result_ready", &mut payload);
+            inner.pending_kind = None;
+            let frame = self.emit_event_locked(&mut inner, ServerEvent::ResultReady);
+            drop(inner);
             let _ = self.events.send(frame.to_string());
         }
         if let Some(frame) = self.result_frame() {
@@ -410,11 +515,20 @@ impl HostedInitSession {
 
     pub(super) fn result_frame(&self) -> Option<String> {
         let inner = lock_unpoisoned(&self.inner);
+        // The borrow lives entirely inside the guard: the frame points
+        // straight at the stored result, so the plaintext handoff is never
+        // copied into an intermediate buffer just to be serialized.
         let result = inner.result_json.as_ref()?;
-        Some(format!(
-            r#"{{"type":"result","session_id":"{}","payload":{}}}"#,
-            self.id, result
-        ))
+        match ResultFrame::new(&self.id, result).and_then(|frame| frame.to_json()) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "hosted init result frame could not be encoded; sending an encode-failure frame instead"
+                );
+                Some(encode_failure_frame())
+            }
+        }
     }
 
     pub(super) fn has_result(&self) -> bool {
@@ -430,8 +544,8 @@ impl HostedInitSession {
             result.zeroize();
             inner.status = "closed".to_owned();
             inner.pending_input = None;
-            let mut payload = json!({ "status": "closed" });
-            self.record_event_locked(&mut inner, "result_acked", &mut payload)
+            inner.pending_kind = None;
+            self.emit_event_locked(&mut inner, ServerEvent::ResultAcked)
         };
         let _ = self.events.send(frame.to_string());
         self.input_ready.notify_all();
@@ -447,17 +561,19 @@ impl HostedInitSession {
             // backend is entitled to (`terminal_result` would report a
             // generic cancellation). The backend releases a parked failure
             // with `ack_error`; only the internal reapers may expire it.
-            if matches!(
-                inner.status.as_str(),
-                "completed_awaiting_ack" | "closed" | "canceled" | "errored"
-            ) {
+            if is_terminal_status(&inner.status) {
                 return;
             }
             inner.status = "canceled".to_owned();
             inner.pending_input = None;
+            inner.pending_kind = None;
             inner.pending_response = None;
-            let mut payload = json!({ "reason": reason });
-            Some(self.record_event_locked(&mut inner, "canceled", &mut payload))
+            Some(self.emit_event_locked(
+                &mut inner,
+                ServerEvent::Canceled {
+                    reason: reason.to_owned(),
+                },
+            ))
         }) else {
             return;
         };
@@ -487,8 +603,12 @@ impl HostedInitSession {
                     return;
                 }
                 inner.error_acked = true;
-                let mut payload = json!({ "reason": reason });
-                let frame = self.record_event_locked(&mut inner, "error_expired", &mut payload);
+                let frame = self.emit_event_locked(
+                    &mut inner,
+                    ServerEvent::ErrorExpired {
+                        reason: reason.to_owned(),
+                    },
+                );
                 drop(inner);
                 let _ = self.events.send(frame.to_string());
                 self.input_ready.notify_all();
@@ -500,9 +620,14 @@ impl HostedInitSession {
             }
             inner.status = "canceled".to_owned();
             inner.pending_input = None;
+            inner.pending_kind = None;
             inner.pending_response = None;
-            let mut payload = json!({ "reason": reason });
-            Some(self.record_event_locked(&mut inner, "canceled", &mut payload))
+            Some(self.emit_event_locked(
+                &mut inner,
+                ServerEvent::Canceled {
+                    reason: reason.to_owned(),
+                },
+            ))
         }) else {
             return;
         };
@@ -517,28 +642,81 @@ impl HostedInitSession {
     /// up in `errored` until `ack_error`, cancel, or the error-ack grace
     /// reaper — symmetric with how `set_result` waits for `ack_result`.
     pub(super) fn set_error(&self, code: &str, message: String) {
-        let Some(frame) = ({
+        let frames = {
             let mut inner = lock_unpoisoned(&self.inner);
-            if matches!(
-                inner.status.as_str(),
-                "canceled" | "closed" | "completed_awaiting_ack"
-            ) {
-                return;
-            }
+            self.set_error_locked(&mut inner, code, message)
+        };
+        for frame in frames {
+            let _ = self.events.send(frame.to_string());
+        }
+    }
+
+    /// Lock-held `set_error`. Returns the frames to broadcast in order: the
+    /// state frame badging the failed category first, then the terminal
+    /// `error` frame, which is the last thing a client should see for this
+    /// transition.
+    pub(super) fn set_error_locked(
+        &self,
+        inner: &mut SessionInner,
+        code: &str,
+        message: String,
+    ) -> Vec<Value> {
+        if is_terminal_status(&inner.status) {
+            // A session already parked on a typed failure keeps the first
+            // error: it is the one that explains what actually broke, and
+            // whatever the wizard thread propagated afterwards is downstream
+            // of it.
+            return Vec::new();
+        }
+        let mut frames = Vec::new();
+        if let Some(category) = inner
+            .current_step
+            .filter(|_| inner.step_in_flight)
+            .and_then(category_for_step_kind)
+        {
+            inner
+                .categories
+                .fail_step_category(category, code.to_owned());
+        }
+        inner.pending_input = None;
+        inner.pending_kind = None;
+        if let Some(frame) = self.emit_state_locked(inner) {
+            frames.push(frame);
+        }
+        frames.push(self.record_error_locked(inner, code, message));
+        frames
+    }
+
+    /// Park the session on a failure and record the `error` event. Split out
+    /// so the frame-encode path can park without deriving a state snapshot,
+    /// and always records the event: a session that was already terminal still
+    /// owes the client a contiguous history.
+    fn record_error_locked(&self, inner: &mut SessionInner, code: &str, message: String) -> Value {
+        if !is_terminal_status(&inner.status) {
             inner.status = "errored".to_owned();
             inner.pending_input = None;
+            inner.pending_kind = None;
             inner.errored_at = Some(tokio::time::Instant::now());
             inner.error = Some(PublicError {
                 code: code.to_owned(),
                 message: message.clone(),
             });
-            let mut payload = json!({ "code": code, "message": message });
-            Some(self.record_event_locked(&mut inner, "error", &mut payload))
-        }) else {
-            return;
-        };
-        let _ = self.events.send(frame.to_string());
+        }
+        // Routing back through `emit_event_locked` cannot re-enter this
+        // function: `ServerEvent::Error` builds its payload with the
+        // infallible `error_payload`, so the encode arm is unreachable for it.
+        let frame = self.emit_event_locked(
+            inner,
+            ServerEvent::Error {
+                code: code.to_owned(),
+                message,
+            },
+        );
+        // Fired under the lock so no failure path can park the session without
+        // releasing a wizard thread blocked in `request_input`; the waiter
+        // wakes once this caller drops the guard.
         self.input_ready.notify_all();
+        frame
     }
 
     /// Seq-less replay of the stored failure, for a backend that reconnected
@@ -546,15 +724,11 @@ impl HostedInitSession {
     pub(super) fn error_replay_frame(&self) -> Option<String> {
         let inner = lock_unpoisoned(&self.inner);
         let error = inner.error.as_ref()?;
-        Some(
-            json!({
-                "type": "error",
-                "session_id": self.id,
-                "code": error.code,
-                "message": error.message
-            })
-            .to_string(),
-        )
+        Some(frame_json(ServerFrame::ErrorReplay {
+            session_id: &self.id,
+            code: &error.code,
+            message: &error.message,
+        }))
     }
 
     pub(super) fn ack_error(&self) -> std::result::Result<(), String> {
@@ -571,8 +745,7 @@ impl HostedInitSession {
             }
             // Status stays `errored` so `terminal_result` still exits non-zero.
             inner.error_acked = true;
-            let mut payload = json!({ "status": "errored" });
-            self.record_event_locked(&mut inner, "error_acked", &mut payload)
+            self.emit_event_locked(&mut inner, ServerEvent::ErrorAcked)
         };
         let _ = self.events.send(frame.to_string());
         self.input_ready.notify_all();
@@ -589,6 +762,82 @@ impl HostedInitSession {
         } else {
             None
         }
+    }
+}
+
+/// The statuses after which nothing new may be said about the run's shape. The
+/// terminal frame is the last word a client gets, so both the category fold and
+/// the state emission stop here.
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "canceled" | "closed" | "errored" | "completed_awaiting_ack"
+    )
+}
+
+/// The statuses a wizard thread waiting on a prompt must give up on. `errored`
+/// is one of them: a session parked by a frame-encode failure has to release
+/// the thread, since no client will be asked to answer anything again.
+fn terminal_status_error(inner: &SessionInner) -> Result<()> {
+    match inner.status.as_str() {
+        "canceled" | "closed" => Err(StackError::InvalidParam {
+            field: "init",
+            reason: "hosted init session was cancelled".to_owned(),
+        }),
+        "errored" => Err(StackError::InvalidParam {
+            field: "init",
+            reason: inner.error.as_ref().map_or_else(
+                || "hosted init session failed".to_owned(),
+                |error| format!("{}: {}", error.code, error.message),
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Fold a signal into the session's durable state. Kept beside `SessionInner`
+/// rather than in `state.rs` because it is the only place that writes both the
+/// category map and `current_step`.
+fn apply_state_signal_locked(inner: &mut SessionInner, signal: InitStateSignal) {
+    match signal {
+        InitStateSignal::StepStarted { kind } => {
+            inner.current_step = Some(kind);
+            inner.step_in_flight = true;
+        }
+        InitStateSignal::StepFinished {
+            kind, error_code, ..
+        } => {
+            inner.step_in_flight = false;
+            if let Some(category) = category_for_step_kind(kind) {
+                match &error_code {
+                    Some(code) => inner.categories.fail_step_category(category, code.clone()),
+                    // Executed and skipped are the same verdict here: a
+                    // resumed run replays already-verified rows as skipped,
+                    // and both mean the lane is done being driven.
+                    None => inner.categories.settle_unresolved(category),
+                }
+            }
+            // The sweep says "init finished and nothing is left to drive", so a
+            // failed final step must not settle the lanes it never reached.
+            if kind == step_kind::INIT_COMPLETE && error_code.is_none() {
+                inner.categories.settle_remaining();
+            }
+        }
+        InitStateSignal::CategoryApplicability {
+            category,
+            applicable,
+            source,
+            reason,
+        } => inner
+            .categories
+            .set_applicability(category, applicable, source, reason),
+        InitStateSignal::CategorySettled { category, value } => {
+            inner.categories.settle(category, value)
+        }
+        InitStateSignal::CategoryProvisionallySettled { category, value } => {
+            inner.categories.settle_provisional(category, value)
+        }
+        InitStateSignal::CategoryFailed { category, code } => inner.categories.fail(category, code),
     }
 }
 

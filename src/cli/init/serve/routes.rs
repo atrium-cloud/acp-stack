@@ -362,12 +362,7 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let frame = json!({
-                            "type": "error",
-                            "code": "init.ws_lagged",
-                            "message": "websocket client lagged behind init event stream"
-                        }).to_string();
-                        let _ = sender.send(Message::Text(frame.into())).await;
+                        let _ = sender.send(Message::Text(ws_lagged_frame().into())).await;
                         // A lagged receiver can miss the terminal event
                         // itself; check the session state directly.
                         if !session.is_active() {
@@ -380,6 +375,15 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
             }
         }
     }
+}
+
+/// Extracted from the WebSocket loop because the only way to reach it there is
+/// to fall a full broadcast buffer behind, which no test can drive reliably.
+pub(super) fn ws_lagged_frame() -> String {
+    frame_json(ServerFrame::ProtocolError {
+        code: "init.ws_lagged",
+        message: "websocket client lagged behind init event stream",
+    })
 }
 
 pub(super) enum ClientFrameOutcome {
@@ -395,38 +399,20 @@ pub(super) fn handle_client_frame(
     let frame = match serde_json::from_str::<ClientFrame>(text) {
         Ok(frame) => frame,
         Err(error) => {
-            return ClientFrameOutcome::Send(
-                json!({
-                    "type": "error",
-                    "code": "init.bad_frame",
-                    "message": format!("invalid client frame: {error}")
-                })
-                .to_string(),
-            );
+            return protocol_error("init.bad_frame", &format!("invalid client frame: {error}"));
         }
     };
     match frame.frame_type.as_str() {
         "input" => {
             let Some(request_id) = frame.request_id else {
-                return ClientFrameOutcome::Send(
-                    json!({
-                        "type": "error",
-                        "code": "init.missing_request_id",
-                        "message": "input frame requires request_id"
-                    })
-                    .to_string(),
+                return protocol_error(
+                    "init.missing_request_id",
+                    "input frame requires request_id",
                 );
             };
             match session.submit_input(&request_id, frame.value.unwrap_or(Value::Null)) {
                 Ok(()) => ClientFrameOutcome::None,
-                Err(message) => ClientFrameOutcome::Send(
-                    json!({
-                        "type": "error",
-                        "code": "init.input_rejected",
-                        "message": message
-                    })
-                    .to_string(),
-                ),
+                Err(message) => protocol_error("init.input_rejected", &message),
             }
         }
         "cancel" => {
@@ -435,69 +421,36 @@ pub(super) fn handle_client_frame(
         }
         "replay_result" => match session.result_frame() {
             Some(frame) => ClientFrameOutcome::Send(frame),
-            None => ClientFrameOutcome::Send(
-                json!({
-                    "type": "error",
-                    "code": "init.result_unavailable",
-                    "message": "init result is not available"
-                })
-                .to_string(),
-            ),
+            None => protocol_error("init.result_unavailable", "init result is not available"),
         },
         "ack_result" => match session.ack_result() {
-            Ok(()) => ClientFrameOutcome::Close(
-                json!({
-                    "type": "ack_accepted",
-                    "session_id": session.id
-                })
-                .to_string(),
-            ),
-            Err(message) => ClientFrameOutcome::Send(
-                json!({
-                    "type": "error",
-                    "code": "init.ack_rejected",
-                    "message": message
-                })
-                .to_string(),
-            ),
+            Ok(()) => ClientFrameOutcome::Close(frame_json(ServerFrame::AckAccepted {
+                session_id: &session.id,
+            })),
+            Err(message) => protocol_error("init.ack_rejected", &message),
         },
         "replay_error" => match session.error_replay_frame() {
             Some(frame) => ClientFrameOutcome::Send(frame),
-            None => ClientFrameOutcome::Send(
-                json!({
-                    "type": "error",
-                    "code": "init.error_unavailable",
-                    "message": "no init error is recorded for this session"
-                })
-                .to_string(),
+            None => protocol_error(
+                "init.error_unavailable",
+                "no init error is recorded for this session",
             ),
         },
         "ack_error" => match session.ack_error() {
-            Ok(()) => ClientFrameOutcome::Close(
-                json!({
-                    "type": "error_acked",
-                    "session_id": session.id
-                })
-                .to_string(),
-            ),
-            Err(message) => ClientFrameOutcome::Send(
-                json!({
-                    "type": "error",
-                    "code": "init.ack_rejected",
-                    "message": message
-                })
-                .to_string(),
-            ),
+            Ok(()) => ClientFrameOutcome::Close(frame_json(ServerFrame::ErrorAckedClose {
+                session_id: &session.id,
+            })),
+            Err(message) => protocol_error("init.ack_rejected", &message),
         },
-        _ => ClientFrameOutcome::Send(
-            json!({
-                "type": "error",
-                "code": "init.unsupported_frame",
-                "message": format!("unsupported client frame `{}`", frame.frame_type)
-            })
-            .to_string(),
+        _ => protocol_error(
+            "init.unsupported_frame",
+            &format!("unsupported client frame `{}`", frame.frame_type),
         ),
     }
+}
+
+fn protocol_error(code: &str, message: &str) -> ClientFrameOutcome {
+    ClientFrameOutcome::Send(frame_json(ServerFrame::ProtocolError { code, message }))
 }
 
 #[derive(Debug, Deserialize)]

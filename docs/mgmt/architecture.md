@@ -24,7 +24,7 @@ flowchart LR
 | Config           | load, validate, import, export, and canonicalize TOML             |
 | Auth             | API key validation, auth tiers, and request envelopes             |
 | API              | HTTP routes, WebSocket subscriptions, and client-facing contracts |
-| Bootstrap init   | hosted backend-to-instance init session API before normal keys exist |
+| Bootstrap init   | hosted backend-to-instance init session API before normal keys exist, with a typed server-frame surface (`src/cli/init/serve/frames.rs`), the derived category state model behind the `state` frame (`src/cli/init/serve/state.rs`), and the init-flow signals that feed it (`src/cli/init/state_signal.rs`) |
 | Local listener   | owner-only Unix-socket surface for keyless local `acps` routes    |
 | State            | SQLite migrations and repositories for durable runtime records    |
 | Secrets          | age-compatible key management and encrypted values                |

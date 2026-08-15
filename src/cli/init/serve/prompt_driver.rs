@@ -79,38 +79,94 @@ impl HostedPromptDriver for SessionPromptDriver {
     }
 
     fn progress(&self, message: String) {
-        self.session
-            .push_event("progress", json!({ "message": message }));
+        self.session.push_event(ServerEvent::Progress { message });
     }
 
     fn result(&self, payload: Value) {
         self.session.set_result(payload);
     }
+
+    fn state_signal(&self, signal: InitStateSignal) {
+        self.session.apply_state_signal(signal);
+    }
 }
 
+/// The streamed set, decided per prompt kind. The match is exhaustive on
+/// purpose: a new prompt site cannot compile until someone decides whether a
+/// hosted client is expected to answer it.
 pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool {
-    match request.style {
-        HostedPromptStyle::Select | HostedPromptStyle::SearchableSelect => {
-            request.prompt == "Agent"
-                || request.prompt.starts_with("provider for ")
-                || request.prompt.starts_with("select ")
-        }
-        HostedPromptStyle::Confirm => {
-            request.prompt.contains("configure it as a custom provider")
-                || request.prompt == "run testflight now?"
-        }
-        HostedPromptStyle::Text => matches!(
-            request.prompt.as_str(),
-            "provider id" | "provider-name" | "base-url" | "api-key-ref" | "model"
-        ),
-        HostedPromptStyle::Password => true,
-        HostedPromptStyle::NativeConfigReview => request.inspection.is_some(),
+    match request.kind {
+        HostedPromptKind::Agent
+        | HostedPromptKind::ProviderId
+        | HostedPromptKind::CustomProviderConfirm
+        | HostedPromptKind::ProviderName
+        | HostedPromptKind::BaseUrl
+        | HostedPromptKind::ApiKeyRef
+        | HostedPromptKind::Model
+        | HostedPromptKind::Mode
+        | HostedPromptKind::TestflightConfirm
+        | HostedPromptKind::ProviderApiKeyValue
+        | HostedPromptKind::SecretRefValue
+        | HostedPromptKind::McpAdd
+        | HostedPromptKind::McpTransport
+        | HostedPromptKind::McpRowAction
+        | HostedPromptKind::McpStdioName
+        | HostedPromptKind::McpStdioCommand
+        | HostedPromptKind::McpStdioArgs
+        | HostedPromptKind::McpStdioEnvRefs
+        | HostedPromptKind::McpHttpName
+        | HostedPromptKind::McpHttpUrl
+        | HostedPromptKind::McpHttpHeaders => true,
+        // The inspection is what the client renders and echoes back in its
+        // revision-matched selection, so a review without one is unanswerable.
+        HostedPromptKind::NativeConfigReview => request.inspection.is_some(),
+        HostedPromptKind::ConfigSource
+        | HostedPromptKind::ConfigSourcePath
+        | HostedPromptKind::ConfigSourceBase64
+        | HostedPromptKind::CustomAgentId
+        | HostedPromptKind::CustomAgentName
+        | HostedPromptKind::CustomAgentCommand
+        | HostedPromptKind::CustomAgentArgs
+        | HostedPromptKind::CustomAgentInstallShell
+        | HostedPromptKind::CustomAgentCreates
+        | HostedPromptKind::SkillsSource
+        | HostedPromptKind::SkillsGithubOwner
+        | HostedPromptKind::SkillsManualNames
+        | HostedPromptKind::SkillsSelect
+        | HostedPromptKind::SubagentInheritConfirm
+        | HostedPromptKind::StackUpdatePolicy
+        | HostedPromptKind::UpdateFrequency
+        | HostedPromptKind::UpdateFrequencyCustom
+        | HostedPromptKind::AgentUpdateEnabled
+        | HostedPromptKind::EnvironmentSetup
+        | HostedPromptKind::EssentialDepsConfirm
+        | HostedPromptKind::BrowserUseConfirm
+        | HostedPromptKind::EssentialSkillsConfirm
+        | HostedPromptKind::DataSourcesConfirm
+        | HostedPromptKind::CustomDepsConfirm
+        | HostedPromptKind::AgentSkillsConfirm
+        | HostedPromptKind::AgentEnvRefsConfirm
+        | HostedPromptKind::DataSourceType
+        | HostedPromptKind::DataSourceRowAction
+        | HostedPromptKind::DataSourceLocalPath
+        | HostedPromptKind::DataSourceHttpsUrl
+        | HostedPromptKind::DataSourceS3Bucket
+        | HostedPromptKind::DataSourceS3Region
+        | HostedPromptKind::DataSourceS3AccessKeyRef
+        | HostedPromptKind::DataSourceS3SecretKeyRef
+        | HostedPromptKind::DataSourceS3Prefix
+        | HostedPromptKind::DependencyName
+        | HostedPromptKind::DependencyInstallShell
+        | HostedPromptKind::DependencyScope
+        | HostedPromptKind::DepsApplyConfirm
+        | HostedPromptKind::AgentEnvRefName => false,
     }
 }
 
 pub(super) fn public_input_request(request: HostedPromptRequest) -> PublicInputRequest {
     PublicInputRequest {
         request_id: next_input_request_id(),
+        kind: request.kind.as_str(),
         style: prompt_style_label(request.style).to_owned(),
         prompt: request.prompt,
         required: request.required,
@@ -121,6 +177,7 @@ pub(super) fn public_input_request(request: HostedPromptRequest) -> PublicInputR
             .enumerate()
             .map(|(index, item)| PublicInputOption {
                 index,
+                value: item.value,
                 label: item.label,
                 hint: item.hint,
             })
@@ -150,6 +207,20 @@ fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<
     if let Some(index) = value.get("index").and_then(Value::as_u64) {
         return validate_index(index as usize, request);
     }
+    // The stable-id form. Bare strings deliberately stay label-only: labels are
+    // display text a client may already be echoing back, and letting them also
+    // match ids would make a reworded label silently resolve to the wrong row.
+    if let Some(id) = value.get("value").and_then(Value::as_str) {
+        let index = request
+            .items
+            .iter()
+            .position(|item| item.value == id)
+            .ok_or_else(|| StackError::InvalidParam {
+                field: "init",
+                reason: format!("selection `{id}` does not match any option"),
+            })?;
+        return Ok(Some(index));
+    }
     if let Some(label) = value.as_str() {
         let index = request
             .items
@@ -163,7 +234,7 @@ fn parse_optional_index(value: &Value, request: &HostedPromptRequest) -> Result<
     }
     Err(StackError::InvalidParam {
         field: "init",
-        reason: "select input must be an index, label, or null".to_owned(),
+        reason: "select input must be an index, value, label, or null".to_owned(),
     })
 }
 

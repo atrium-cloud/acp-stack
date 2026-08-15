@@ -13,6 +13,7 @@ mod run;
 mod serve;
 mod skills;
 mod starter_config;
+mod state_signal;
 mod testflight;
 
 use std::io::{self, IsTerminal};
@@ -72,9 +73,9 @@ use self::registry_apply::{
     resolve_custom_agent_spec, select_agent_for_init,
 };
 use self::resume::{
-    FreshKeys, KeyPolicy, finalize_with_error, init_complete_event_already_recorded,
-    installer_postcondition_holds, perform_auth_init, recorded_init_args, resolve_init_run,
-    step_needs_resume, workspace_postcondition_holds,
+    FreshKeys, KeyPolicy, RecordedInitArgs, finalize_with_error,
+    init_complete_event_already_recorded, installer_postcondition_holds, perform_auth_init,
+    recorded_init_args, resolve_init_run, step_needs_resume, workspace_postcondition_holds,
 };
 use self::skills::{
     install_init_skills, prompt_init_skills_if_needed, resolve_skill_install_plan,
@@ -90,6 +91,7 @@ use self::starter_config::{
     should_apply_deps_for_init, starter_config, validate_agent_update_args,
     validate_deployment_overrides_match_existing, validate_stack_update_args,
 };
+use self::state_signal::{ApplicabilitySource, InitCategory, InitStateSignal};
 use self::testflight::{TestflightDecision, resolve_testflight_decision};
 use super::config as cli_config;
 use super::logging::{

@@ -58,21 +58,28 @@ pub(super) fn prompt_init_skills_if_needed(
         .iter()
         .filter(|source| !source.indexed_skills.is_empty())
         .map(|source| {
-            (
+            prompt::item(
                 SkillSourceChoice::Catalog(source.id.clone()),
+                source.id.clone(),
                 source.name.clone(),
                 format!("{}/{}", source.owner, source.repo),
             )
         })
         .collect::<Vec<_>>();
-    choices.push((
+    choices.push(prompt::item(
         SkillSourceChoice::CustomGithub,
-        "Custom GitHub owner/org".to_owned(),
-        String::new(),
+        "__custom",
+        "Custom GitHub owner/org",
+        "",
     ));
-    choices.push((SkillSourceChoice::Skip, "Skip".to_owned(), String::new()));
+    choices.push(prompt::item(SkillSourceChoice::Skip, "__skip", "Skip", ""));
 
-    match prompt::select(interactive, "Select Agent Skills source", &choices)? {
+    match prompt::select(
+        prompt::HostedPromptKind::SkillsSource,
+        interactive,
+        "Select Agent Skills source",
+        &choices,
+    )? {
         None | Some(SkillSourceChoice::Skip) => {
             args.no_skills = true;
             Ok(())
@@ -99,16 +106,20 @@ pub(super) fn prompt_init_skills_if_needed(
             Ok(())
         }
         Some(SkillSourceChoice::CustomGithub) => {
-            let source =
-                match prompt::text(interactive, "GitHub owner/org for <owner>/skills", true)? {
-                    Some(owner) if !owner.trim().is_empty() => {
-                        format!("{SOURCE_CUSTOM_GITHUB_PREFIX}{}", owner.trim())
-                    }
-                    _ => {
-                        args.no_skills = true;
-                        return Ok(());
-                    }
-                };
+            let source = match prompt::text(
+                prompt::HostedPromptKind::SkillsGithubOwner,
+                interactive,
+                "GitHub owner/org for <owner>/skills",
+                true,
+            )? {
+                Some(owner) if !owner.trim().is_empty() => {
+                    format!("{SOURCE_CUSTOM_GITHUB_PREFIX}{}", owner.trim())
+                }
+                _ => {
+                    args.no_skills = true;
+                    return Ok(());
+                }
+            };
             args.skills_source = Some(source);
             prompt_manual_skill_names(interactive, args)
         }
@@ -117,6 +128,7 @@ pub(super) fn prompt_init_skills_if_needed(
 
 fn prompt_manual_skill_names(interactive: bool, args: &mut InitArgs) -> Result<()> {
     let skills = prompt::text(
+        prompt::HostedPromptKind::SkillsManualNames,
         interactive,
         "skills (comma-separated dash-case, blank to skip)",
         false,
@@ -145,15 +157,21 @@ fn prompt_indexed_names(interactive: bool, label: &str, names: &[String]) -> Res
         let mut items = remaining
             .iter()
             .map(|name| {
-                (
+                prompt::item(
                     IndexedNameChoice::Name(name.clone()),
                     name.clone(),
-                    String::new(),
+                    name.clone(),
+                    "",
                 )
             })
             .collect::<Vec<_>>();
-        items.push((IndexedNameChoice::Done, "Done".to_owned(), String::new()));
-        match prompt::searchable_select(interactive, label, &items)? {
+        items.push(prompt::item(IndexedNameChoice::Done, "__done", "Done", ""));
+        match prompt::searchable_select(
+            prompt::HostedPromptKind::SkillsSelect,
+            interactive,
+            label,
+            &items,
+        )? {
             Some(IndexedNameChoice::Name(name)) => {
                 remaining.retain(|candidate| candidate != &name);
                 selected.push(name);

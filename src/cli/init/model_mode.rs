@@ -21,14 +21,23 @@ use super::headless_snapshot::{
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
 };
 use super::registry_apply::is_custom_agent;
+use super::state_signal::{ApplicabilitySource, InitCategory, InitStateSignal};
 use super::{InitArgs, prompt, prompts_enabled};
 
-/// Outcome of the init model selection step.
+/// Option id of the synthetic "Skip" choice in a session-config selection.
+/// It shares the id namespace with the harness-advertised values, so it is
+/// double-underscored to stay out of their way and filtered out of them below.
+const SKIP_OPTION_ID: &str = "__skip";
+
+/// Outcome of one init session-config selection lane.
 /// `Skipped` covers "agent doesn't support this category", "no flag, no
 /// resume, no interactive prompt", and the codex non-OpenAI lane when no
 /// live provider catalog is available; `PrintedList` is the
 /// L87 path where non-interactive init prints advertised values but
 /// declines to mutate config; `Set` triggers a canonical re-write.
+///
+/// The mode lane never yields `PrintedList`: it has no print-and-skip
+/// behavior, because an unattended run without `--mode` never enters it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModelModeAction {
     #[default]
@@ -40,19 +49,38 @@ pub(super) enum ModelModeAction {
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct ModelModeOutcome {
     pub(super) model_action: ModelModeAction,
+    pub(super) mode_action: ModelModeAction,
 }
 
+/// Capability gates for both lanes, evaluated before any side effects. An
+/// explicit flag is never silently dropped: the operator gets a precise
+/// capability error instead of a downstream "binary not on PATH" / "no
+/// advertised values" / silent no-op.
+///
+/// Also called at the top of `configure_model_and_mode_for_init` so the gates
+/// hold for every caller of the lane, not just the run that preflighted it.
 pub(super) fn preflight_model_and_mode_for_init(
     args: &InitArgs,
     registry: &RegistryCatalog,
     config: &Config,
     config_path: &Path,
 ) -> Result<()> {
-    if is_custom_agent(config, registry) && args.model.is_some() {
-        return Err(StackError::InvalidParam {
-            field: "--model",
-            reason: "custom agents configure models through their own environment; `--model` applies only to supported registry agents".to_owned(),
-        });
+    // The clap conflict catches `--custom-agent-id` paired with these flags;
+    // this catches the config-driven path, where an existing custom-agent
+    // config is re-inited with `--model`/`--mode` and no custom-agent flags.
+    if is_custom_agent(config, registry) {
+        if args.model.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "--model",
+                reason: "custom agents configure models through their own environment; `--model` applies only to supported registry agents".to_owned(),
+            });
+        }
+        if args.mode.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "--mode",
+                reason: "custom agents configure modes through their own environment; `--mode` applies only to supported registry agents".to_owned(),
+            });
+        }
     }
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(());
@@ -66,56 +94,11 @@ pub(super) fn preflight_model_and_mode_for_init(
             ),
         });
     }
-    if args.model.is_some()
-        && entry.set_provider
-        && args.provider.is_none()
-        && config.agent.provider.is_none()
-    {
-        return Err(StackError::InvalidParam {
-            field: "model",
-            reason: format!(
-                "{} stores the model inside [agent.provider]; pass --provider <id> together with --model, or run `acps agent set` after init",
-                entry.name,
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Drives the model ACP-discovery flow during `acps init`.
-///
-/// - L84: spawns one provisional ACP session via `fetch_session_config`
-///   when the configured agent supports model setup, so the advertised list
-///   comes straight from the installed harness instead
-///   of a stale registry snapshot.
-/// - L85: reads `model` `session/new` config_options before accepting or
-///   printing any choice.
-/// - L86: explicit `--model` values are validated against the advertised list
-///   before being written to canonical config.
-/// - L87: non-interactive runs without `--model` print the
-///   advertised values and return `PrintedList` so the caller does NOT
-///   mutate that field; init continues with the existing config so
-///   downstream steps stay usable.
-pub(super) fn configure_model_and_mode_for_init(
-    args: &InitArgs,
-    home: &Path,
-    registry: &RegistryCatalog,
-    config: &mut Config,
-    config_path: &Path,
-) -> Result<ModelModeOutcome> {
-    let Some(entry) = registry.lookup(&config.agent.id) else {
-        return Ok(ModelModeOutcome::default());
-    };
-
-    // Capability gate, evaluated before any side effects. Reject explicit
-    // --model for agents whose registry entry says model selection is not
-    // supported, so the operator gets a precise capability error instead of a
-    // downstream "binary not on PATH" / "no advertised values" / silent no-op.
-    if args.model.is_some() && !entry.set_model {
+    if args.mode.is_some() && !entry.set_mode {
         return Err(StackError::AgentConfigProvision {
             path: config_path.to_path_buf(),
             reason: format!(
-                "{} does not support model configuration through `acps init`",
+                "{} does not support mode configuration through `acps init`",
                 entry.name,
             ),
         });
@@ -127,11 +110,9 @@ pub(super) fn configure_model_and_mode_for_init(
     // these agents) or pair the new model with a stale provider block.
     // Require the operator to pair them explicitly; for model-only
     // agents (set_provider=false) a bare `--model` is still fine.
-    if args.model.is_some()
-        && entry.set_provider
-        && args.provider.is_none()
-        && config.agent.provider.is_none()
-    {
+    let provider_missing =
+        entry.set_provider && args.provider.is_none() && config.agent.provider.is_none();
+    if args.model.is_some() && provider_missing {
         return Err(StackError::InvalidParam {
             field: "model",
             reason: format!(
@@ -140,31 +121,81 @@ pub(super) fn configure_model_and_mode_for_init(
             ),
         });
     }
-    if !entry.set_model {
+    // Mode lives at the config root, so the reason differs from the model's:
+    // the advertised mode list comes from a provisional session, and a
+    // provider-backed harness with no provider cannot be launched to produce
+    // one. Validating `--mode` against nothing would accept any string.
+    if args.mode.is_some() && provider_missing {
+        return Err(StackError::InvalidParam {
+            field: "mode",
+            reason: format!(
+                "{} needs a configured provider before its modes can be discovered; pass --provider <id> together with --mode, or run `acps agent set` after init",
+                entry.name,
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Drives the model and mode ACP-discovery flows during `acps init`.
+///
+/// - L84: spawns one provisional ACP session via `fetch_session_config`
+///   when the configured agent supports model or mode setup, so the advertised
+///   lists come straight from the installed harness instead
+///   of a stale registry snapshot. Both lanes share the one session.
+/// - L85: reads `model` and `mode` `session/new` config_options before
+///   accepting or printing any choice.
+/// - L86: explicit `--model`/`--mode` values are validated against the
+///   advertised list before being written to canonical config.
+/// - L87: non-interactive runs without `--model` print the
+///   advertised values and return `PrintedList` so the caller does NOT
+///   mutate that field; init continues with the existing config so
+///   downstream steps stay usable. Mode has no such lane: a non-interactive
+///   run without `--mode` never enters it and prints nothing.
+///
+/// Lane resolution is deliberately fall-through rather than early-return: a
+/// model lane that is skipped, pinned, or written without discovery must still
+/// let the mode lane reach the same session (amp, set_model=false/set_mode=true,
+/// has nothing but a mode lane).
+pub(super) fn configure_model_and_mode_for_init(
+    args: &InitArgs,
+    home: &Path,
+    registry: &RegistryCatalog,
+    config: &mut Config,
+    config_path: &Path,
+) -> Result<ModelModeOutcome> {
+    let Some(entry) = registry.lookup(&config.agent.id) else {
+        return Ok(ModelModeOutcome::default());
+    };
+    preflight_model_and_mode_for_init(args, registry, config, config_path)?;
+    if !entry.set_model && !entry.set_mode {
         return Ok(ModelModeOutcome::default());
     }
+    let mut outcome = ModelModeOutcome::default();
     // Kimi requires a model before its ACP process can initialize, so its
     // model is an init input rather than a discovered value: without
     // `--model`, pin the tier-universal default instead of spawning the
     // agent for a picker. A model already present in config (from a prior
     // init or `agent set`) is kept; the operator can re-select any time
-    // with `acps agent set --model`.
-    if config.agent.id == KIMI_CODE_AGENT_ID && args.model.is_none() {
-        if config.agent.model.is_some() {
-            return Ok(ModelModeOutcome::default());
+    // with `acps agent set --model`. Either way the model lane is settled
+    // before the mode lane may spawn the harness, which is what makes that
+    // spawn legal for kimi at all.
+    let mut model_lane_resolved = false;
+    if entry.set_model && config.agent.id == KIMI_CODE_AGENT_ID && args.model.is_none() {
+        if config.agent.model.is_none() {
+            write_model_into_config(
+                config,
+                KIMI_CODE_DEFAULT_MODEL.to_owned(),
+                entry.set_provider,
+            );
+            outcome.model_action = ModelModeAction::Set;
         }
-        write_model_into_config(
-            config,
-            KIMI_CODE_DEFAULT_MODEL.to_owned(),
-            entry.set_provider,
-        );
-        return Ok(ModelModeOutcome {
-            model_action: ModelModeAction::Set,
-        });
+        model_lane_resolved = true;
     }
     // Custom-provider flow already wrote a literal model id into the
     // provider config and that id is not an ACP-advertised value, so
-    // the model lane is skipped for custom-provider runs.
+    // the model lane is skipped for custom-provider runs. Mode is
+    // provider-independent, so its lane still runs.
     let skip_model_lane = args.custom_provider;
 
     let interactive = prompts_enabled(args);
@@ -175,7 +206,9 @@ pub(super) fn configure_model_and_mode_for_init(
     // interactive model picker — otherwise it would write into root
     // `agent.model`, which the supervisor prefers and which the
     // provider-backed model-ownership contract explicitly forbids
-    // for these agents.
+    // for these agents. The mode lane shares the gate because a
+    // provider-backed harness with no provider cannot be launched to
+    // advertise anything.
     let provider_present =
         provider_set_this_run || config.agent.provider.is_some() || !entry.set_provider;
     let explicit_model_without_discovery = args.model.is_some()
@@ -185,21 +218,38 @@ pub(super) fn configure_model_and_mode_for_init(
     // validate an explicit value (L86), to drive an interactive picker (L84), or
     // to surface the L87 print-and-skip behavior after a provider was just set
     // non-interactively.
-    let model_lane_active = entry.set_model
+    let mut model_lane_active = entry.set_model
         && !skip_model_lane
+        && !model_lane_resolved
         && provider_present
         && (args.model.is_some() || interactive || provider_set_this_run);
-    if !model_lane_active {
-        return Ok(ModelModeOutcome::default());
-    }
-    if explicit_model_without_discovery && let Some(model) = args.model.as_deref() {
+    if model_lane_active
+        && explicit_model_without_discovery
+        && let Some(model) = args.model.as_deref()
+    {
         write_model_into_config(config, model.to_owned(), entry.set_provider);
-        return Ok(ModelModeOutcome {
-            model_action: ModelModeAction::Set,
-        });
+        outcome.model_action = ModelModeAction::Set;
+        model_lane_active = false;
     }
-    // `explicit` gates the failure path of the preflight checks below.
-    let explicit = args.model.is_some();
+    // The mode lane has no "print the list" fallback, so an unattended run
+    // without `--mode` stays out of it entirely: no spawn, no output.
+    let mode_lane_active =
+        entry.set_mode && provider_present && (args.mode.is_some() || interactive);
+    if !model_lane_active && !mode_lane_active {
+        return Ok(outcome);
+    }
+    // `explicit_flags` gates and names the failure path of the preflight checks
+    // below: only a flag whose lane is still live can be validated by this
+    // session, and the operator must be told which one could not be honored.
+    let explicit_flags = match (
+        model_lane_active && args.model.is_some(),
+        mode_lane_active && args.mode.is_some(),
+    ) {
+        (true, true) => Some("--model and --mode"),
+        (true, false) => Some("--model"),
+        (false, true) => Some("--mode"),
+        (false, false) => None,
+    };
 
     // Two preconditions must hold before we spawn the agent for
     // session/new:
@@ -215,9 +265,9 @@ pub(super) fn configure_model_and_mode_for_init(
     //      (audit P2).
     // When either is missing on a non-explicit call we skip the L84-L87
     // dance with a printed note — the operator gets a working partial config
-    // they can finish off with a follow-up `acps init --model`. For explicit
-    // `--model` we fail loudly so it is never silently accepted without
-    // validation.
+    // they can finish off with a follow-up `acps init --model`. For an explicit
+    // `--model`/`--mode` we fail loudly so the value is never silently accepted
+    // without validation.
     let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
         || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
     let spawn_cwd: PathBuf = config
@@ -234,7 +284,7 @@ pub(super) fn configure_model_and_mode_for_init(
         .is_none();
     let cwd_missing = !fixture_discovery && !spawn_cwd.is_dir();
     if !fixture_discovery && (binary_missing || cwd_missing) {
-        if explicit {
+        if let Some(flags) = explicit_flags {
             let reason = match (binary_missing, cwd_missing) {
                 (true, true) => format!(
                     "agent command `{}` is not on PATH and spawn cwd `{}` does not exist",
@@ -250,25 +300,33 @@ pub(super) fn configure_model_and_mode_for_init(
                 ),
                 (false, false) => unreachable!(),
             };
-            return Err(StackError::AgentConfigProvision {
+            let error = StackError::AgentConfigProvision {
                 path: config_path.to_path_buf(),
-                reason: format!("cannot validate --model for {}: {reason}", entry.name),
-            });
+                reason: format!("cannot validate {flags} for {}: {reason}", entry.name),
+            };
+            signal_lane_failure(model_lane_active, mode_lane_active, &error);
+            return Err(error);
         }
-        if !args.handoff_json {
-            if binary_missing {
-                println!(
-                    "model discovery skipped: agent command `{}` not found on PATH",
-                    config.agent.command,
-                );
-            } else {
-                println!(
-                    "model discovery skipped: spawn cwd `{}` is not yet provisioned",
-                    spawn_cwd.display(),
-                );
-            }
-        }
-        return Ok(ModelModeOutcome::default());
+        // Name the lanes that were about to run, so an amp-class agent with
+        // nothing but a mode lane is not told its model discovery was skipped.
+        let lanes = match (model_lane_active, mode_lane_active) {
+            (false, true) => "mode",
+            (true, true) => "model and mode",
+            _ => "model",
+        };
+        let skip_reason = if binary_missing {
+            format!(
+                "{lanes} discovery skipped: agent command `{}` not found on PATH",
+                config.agent.command,
+            )
+        } else {
+            format!(
+                "{lanes} discovery skipped: spawn cwd `{}` is not yet provisioned",
+                spawn_cwd.display(),
+            )
+        };
+        init_progress(args, &skip_reason);
+        return Ok(outcome);
     }
 
     // Provision the agent's headless config so the spawned harness
@@ -313,12 +371,39 @@ pub(super) fn configure_model_and_mode_for_init(
         crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking(
             home, config,
         );
-        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
-            config, home,
-        )?;
-        let response = fetch_session_config(home, config)?;
-        let outcome = ModelModeOutcome {
-            model_action: configure_model_for_init(
+        crate::runtime::agent::agent_headless_config::provision_agent_headless_config(config, home)
+            .inspect_err(|error| signal_lane_failure(model_lane_active, mode_lane_active, error))?;
+        let response = match fetch_session_config(home, config) {
+            Ok(response) => response,
+            // A mode-only lane with no explicit `--mode` is pure enrichment:
+            // before the mode lane existed these agents never spawned here at
+            // all, so a harness that cannot complete a provisional session must
+            // not turn an otherwise good init into a failure. Swallowing inside
+            // the closure also keeps the headless provision, which step 5
+            // re-runs unconditionally; the outer snapshot restore exists for
+            // rejected explicit values, which still propagate.
+            Err(error) if !model_lane_active && args.mode.is_none() => {
+                let reason = format!("mode discovery skipped: {error}");
+                init_progress(args, &reason);
+                prompt::emit_state_signal(|| InitStateSignal::CategoryApplicability {
+                    category: InitCategory::Mode,
+                    applicable: false,
+                    // The session never completed, so this says nothing about
+                    // whether the agent has modes — only that this run cannot
+                    // find out. A mode already in config outlives it.
+                    source: ApplicabilitySource::DiscoveryUnavailable,
+                    reason: Some(reason),
+                });
+                return Ok(outcome);
+            }
+            Err(error) => {
+                signal_lane_failure(model_lane_active, mode_lane_active, &error);
+                return Err(error);
+            }
+        };
+        emit_discovery_applicability_corrections(&response, entry.set_model, entry.set_mode);
+        if model_lane_active {
+            outcome.model_action = configure_model_for_init(
                 args,
                 home,
                 config,
@@ -326,8 +411,14 @@ pub(super) fn configure_model_and_mode_for_init(
                 &response,
                 &entry.name,
                 entry.set_provider,
-            )?,
-        };
+            )
+            .inspect_err(|error| signal_lane_failure(true, false, error))?;
+        }
+        if mode_lane_active {
+            outcome.mode_action =
+                configure_mode_for_init(args, config, config_path, &response, interactive)
+                    .inspect_err(|error| signal_lane_failure(false, true, error))?;
+        }
         Ok::<ModelModeOutcome, StackError>(outcome)
     })();
 
@@ -568,8 +659,12 @@ fn configure_model_for_init(
         return Ok(ModelModeAction::PrintedList);
     }
 
-    let Some(selected) =
-        prompt_session_config_selection(interactive, &values, AgentSessionConfigCategory::Model)?
+    let Some(selected) = prompt_session_config_selection(
+        prompt::HostedPromptKind::Model,
+        interactive,
+        &values,
+        AgentSessionConfigCategory::Model,
+    )?
     else {
         return Ok(ModelModeAction::Skipped);
     };
@@ -578,6 +673,134 @@ fn configure_model_for_init(
     }
     write_model_into_config(config, selected, provider_backed);
     Ok(ModelModeAction::Set)
+}
+
+/// Mode counterpart to `configure_model_for_init`, sharing the caller's one
+/// provisional session. There is no L87 print-and-skip lane: an unattended run
+/// without `--mode` never reaches here, and a set_mode agent that turns out to
+/// advertise nothing is reported through the discovery correction rather than
+/// printed at the operator.
+fn configure_mode_for_init(
+    args: &InitArgs,
+    config: &mut Config,
+    config_path: &Path,
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    interactive: bool,
+) -> Result<ModelModeAction> {
+    // An agent that advertises no `mode` option errors here rather than
+    // returning an empty list; for the picker that is simply "nothing to pick",
+    // while an explicit `--mode` still fails through `validate_advertised_value`
+    // below with the same rejection wording it would have produced.
+    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Mode)
+        .unwrap_or_default();
+    if let Some(explicit) = args.mode.as_deref() {
+        // Validation runs against the response already in hand:
+        // `validate_agent_session_config_value` would spawn a second session.
+        validate_advertised_value(response, AgentSessionConfigCategory::Mode, explicit).map_err(
+            |err| StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("{err}; advertised modes: [{}]", values.join(", ")),
+            },
+        )?;
+        write_mode_into_config(config, explicit.to_owned());
+        return Ok(ModelModeAction::Set);
+    }
+    let Some(selected) = prompt_session_config_selection(
+        prompt::HostedPromptKind::Mode,
+        interactive,
+        &values,
+        AgentSessionConfigCategory::Mode,
+    )?
+    else {
+        return Ok(ModelModeAction::Skipped);
+    };
+    write_mode_into_config(config, selected);
+    Ok(ModelModeAction::Set)
+}
+
+/// Modes always live at the config root — unlike models they are not owned by
+/// the provider block. Settlement is signalled here, at the write, for the same
+/// reason `write_model_into_config` does it: the report cannot drift from what
+/// actually landed in config.
+fn write_mode_into_config(config: &mut Config, mode: String) {
+    prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+        category: InitCategory::Mode,
+        value: Some(mode.clone()),
+    });
+    config.agent.mode = Some(mode);
+}
+
+/// Live corrections to the registry's applicability verdict, from the one
+/// thing that actually knows: the installed harness's `session/new`
+/// config_options. The correction runs one way only. `applicable` promises the
+/// client that init will configure the lane, and the registry is the authority
+/// for writes — init still refuses to write a mode for a `set_mode = false`
+/// agent — so a harness advertising values the registry denies changes nothing
+/// this run will do.
+fn emit_discovery_applicability_corrections(
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    registry_set_model: bool,
+    registry_set_mode: bool,
+) {
+    prompt::emit_state_signals(|| {
+        [
+            (
+                InitCategory::Model,
+                AgentSessionConfigCategory::Model,
+                registry_set_model,
+            ),
+            (
+                InitCategory::Mode,
+                AgentSessionConfigCategory::Mode,
+                registry_set_mode,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(category, acp_category, registry_says)| {
+            let advertised_empty = advertised_values_for_category(response, acp_category)
+                .unwrap_or_default()
+                .is_empty();
+            (registry_says && advertised_empty).then(|| InitStateSignal::CategoryApplicability {
+                category,
+                applicable: false,
+                source: ApplicabilitySource::Discovery,
+                reason: Some(format!(
+                    "agent advertised no `{}` values on session/new",
+                    acp_category.id()
+                )),
+            })
+        })
+        .collect()
+    });
+}
+
+/// The durable `provider_configure` step holds both lanes, so a step-level
+/// failure alone cannot say which one broke. Badge the lanes that were live
+/// when the error surfaced, before it propagates.
+fn signal_lane_failure(model_lane: bool, mode_lane: bool, error: &StackError) {
+    for (live, category) in [
+        (model_lane, InitCategory::Model),
+        (mode_lane, InitCategory::Mode),
+    ] {
+        if live {
+            prompt::emit_state_signal(|| InitStateSignal::CategoryFailed {
+                category,
+                code: error.error_code().to_owned(),
+            });
+        }
+    }
+}
+
+/// `init_println!` lives in run.rs and needs that run's output mode, which this
+/// lane never receives; the three-way split is reproduced from what the args
+/// imply so a swallowed discovery failure still reaches hosted clients as
+/// progress instead of only stdout.
+fn init_progress(args: &InitArgs, message: &str) {
+    if prompt::hosted_driver_active() {
+        prompt::emit_progress(message.to_owned());
+    } else if !args.handoff_json {
+        println!("{message}");
+    }
 }
 
 /// Write the chosen model into whichever config slot the agent uses.
@@ -590,7 +813,14 @@ fn configure_model_for_init(
 /// `agent.model` that a prior model-only flow may have left behind —
 /// runtime selection in supervisor.rs prefers the root slot, so a leftover
 /// value there would silently override the newly chosen provider model.
+///
+/// Settlement is signalled here rather than at the five call sites because
+/// this is the write: a lane that grows a sixth path cannot forget to report.
 fn write_model_into_config(config: &mut Config, model: String, provider_backed: bool) {
+    prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+        category: InitCategory::Model,
+        value: Some(model.clone()),
+    });
     if provider_backed && let Some(provider) = config.agent.provider.as_mut() {
         provider.model = Some(model);
         config.agent.model = None;
@@ -603,6 +833,7 @@ fn write_model_into_config(config: &mut Config, model: String, provider_backed: 
 }
 
 fn prompt_session_config_selection(
+    kind: prompt::HostedPromptKind,
     interactive: bool,
     values: &[String],
     category: AgentSessionConfigCategory,
@@ -615,20 +846,277 @@ fn prompt_session_config_selection(
         Value(String),
         Skip,
     }
-    let mut items: Vec<(ConfigChoice, String, String)> = values
+    // Option ids are answerable over the wire, so a harness that advertises the
+    // same value twice would make one of the two unreachable. Dedup here rather
+    // than trusting agent-supplied data, keeping first-occurrence order. A value
+    // colliding with the Skip sentinel is dropped for the same reason: it would
+    // otherwise shadow Skip and leave the operator no way out of the prompt.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut items: Vec<prompt::PromptItem<ConfigChoice>> = values
         .iter()
+        .filter(|value| value.as_str() != SKIP_OPTION_ID)
+        .filter(|value| seen.insert(value.as_str()))
         .map(|value| {
-            (
+            prompt::item(
                 ConfigChoice::Value(value.clone()),
                 value.clone(),
-                String::new(),
+                value.clone(),
+                "",
             )
         })
         .collect();
-    items.push((ConfigChoice::Skip, "Skip".to_owned(), String::new()));
-    match prompt::searchable_select(interactive, &format!("select {}", category.id()), &items)? {
+    items.push(prompt::item(ConfigChoice::Skip, SKIP_OPTION_ID, "Skip", ""));
+    match prompt::searchable_select(
+        kind,
+        interactive,
+        &format!("select {}", category.id()),
+        &items,
+    )? {
         None => Ok(None),
         Some(ConfigChoice::Value(value)) => Ok(Some(value)),
         Some(ConfigChoice::Skip) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::schema::v1::{NewSessionResponse, SessionConfigOption};
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(clap::Parser)]
+    struct TestInitArgs {
+        #[command(flatten)]
+        args: InitArgs,
+    }
+
+    fn parse_init_args(argv: &[&str]) -> InitArgs {
+        let mut all = vec!["init-test"];
+        all.extend_from_slice(argv);
+        TestInitArgs::parse_from(all).args
+    }
+
+    /// Mirrors the shape `fetch_session_config` returns for a fixture run.
+    fn response_with(models: &[&str], modes: &[&str]) -> NewSessionResponse {
+        let mut options = Vec::new();
+        for (id, values) in [("model", models), ("mode", modes)] {
+            if values.is_empty() {
+                continue;
+            }
+            let option: SessionConfigOption = serde_json::from_value(serde_json::json!({
+                "id": id,
+                "name": id,
+                "category": id,
+                "type": "select",
+                "currentValue": values[0],
+                "options": values
+                    .iter()
+                    .map(|value| serde_json::json!({ "value": value, "name": value }))
+                    .collect::<Vec<_>>(),
+            }))
+            .expect("session config option fixture parses");
+            options.push(option);
+        }
+        NewSessionResponse::new("test").config_options(options)
+    }
+
+    fn amp_config() -> Config {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture config");
+        config.agent.id = "amp".to_owned();
+        config
+    }
+
+    #[test]
+    fn explicit_mode_is_written_and_settled_at_the_write() {
+        let mut config = amp_config();
+        let args = parse_init_args(&["--mode", "deep"]);
+        let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
+
+        let action = prompt::with_hosted_driver(driver.clone(), || {
+            configure_mode_for_init(
+                &args,
+                &mut config,
+                Path::new("acps-config.toml"),
+                &response_with(&[], &["smart", "rush", "deep"]),
+                true,
+            )
+        })
+        .expect("advertised mode is accepted");
+
+        assert_eq!(action, ModelModeAction::Set);
+        assert_eq!(config.agent.mode.as_deref(), Some("deep"));
+        assert_eq!(
+            driver.recorded(),
+            vec![InitStateSignal::CategorySettled {
+                category: InitCategory::Mode,
+                value: Some("deep".to_owned()),
+            }],
+        );
+    }
+
+    #[test]
+    fn explicit_mode_that_is_not_advertised_lists_the_advertised_modes() {
+        let mut config = amp_config();
+        let args = parse_init_args(&["--mode", "bogus"]);
+
+        let error = configure_mode_for_init(
+            &args,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &response_with(&[], &["smart", "rush", "deep"]),
+            true,
+        )
+        .expect_err("unadvertised mode must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("advertised modes: [deep, rush, smart]"),
+            "error: {error}"
+        );
+        assert!(config.agent.mode.is_none());
+    }
+
+    // Nothing to pick is not an error: the operator is told through the state
+    // report, not by failing an init that had no explicit request.
+    #[test]
+    fn a_mode_picker_with_nothing_advertised_skips_without_writing() {
+        let mut config = amp_config();
+        let args = parse_init_args(&[]);
+
+        let action = configure_mode_for_init(
+            &args,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &response_with(&["openai/gpt-5.5"], &[]),
+            true,
+        )
+        .expect("an empty mode list is not a failure");
+
+        assert_eq!(action, ModelModeAction::Skipped);
+        assert!(config.agent.mode.is_none());
+    }
+
+    /// Answers every picker with its first option and keeps what was offered,
+    /// so a test can assert on the option ids that reached the wire.
+    #[derive(Default)]
+    struct FirstChoiceDriver {
+        offered: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl prompt::HostedPromptDriver for FirstChoiceDriver {
+        fn select(
+            &self,
+            request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+            self.offered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(
+                    request
+                        .items
+                        .iter()
+                        .map(|item| item.value.clone())
+                        .collect(),
+                );
+            Ok(prompt::HostedPromptOutcome::Handled(Some(0)))
+        }
+
+        fn confirm(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<bool>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn text(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn password(
+            &self,
+            _request: prompt::HostedPromptRequest,
+        ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+            Ok(prompt::HostedPromptOutcome::Unhandled)
+        }
+
+        fn progress(&self, _message: String) {}
+
+        fn result(&self, _payload: serde_json::Value) {}
+    }
+
+    // Option ids are answerable over the wire and the shared prompt entry point
+    // asserts they are unique, so a harness advertising the same mode twice
+    // would take a debug build down with it.
+    #[test]
+    fn a_repeated_advertised_value_is_offered_once() {
+        let mut config = amp_config();
+        let args = parse_init_args(&[]);
+        let driver = std::sync::Arc::new(FirstChoiceDriver::default());
+
+        let action = prompt::with_hosted_driver(driver.clone(), || {
+            configure_mode_for_init(
+                &args,
+                &mut config,
+                Path::new("acps-config.toml"),
+                &response_with(&[], &["smart", "deep", "smart"]),
+                true,
+            )
+        })
+        .expect("a duplicated advertised value is not a failure");
+
+        assert_eq!(action, ModelModeAction::Set);
+        assert_eq!(config.agent.mode.as_deref(), Some("deep"));
+        assert_eq!(
+            driver
+                .offered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            [vec![
+                "deep".to_owned(),
+                "smart".to_owned(),
+                "__skip".to_owned()
+            ]]
+        );
+    }
+
+    #[test]
+    fn discovery_only_retracts_a_lane_the_registry_claimed() {
+        let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
+        prompt::with_hosted_driver(driver.clone(), || {
+            // Registry says both lanes exist; the harness advertises neither.
+            emit_discovery_applicability_corrections(&response_with(&[], &[]), true, true);
+            // Registry says neither; the harness advertises modes anyway. Init
+            // will not write a mode for such an agent, so nothing is claimed.
+            emit_discovery_applicability_corrections(&response_with(&[], &["plan"]), false, false);
+        });
+
+        let recorded = driver.recorded();
+        assert_eq!(
+            recorded,
+            [InitCategory::Model, InitCategory::Mode].map(|category| {
+                InitStateSignal::CategoryApplicability {
+                    category,
+                    applicable: false,
+                    source: ApplicabilitySource::Discovery,
+                    reason: Some(format!(
+                        "agent advertised no `{}` values on session/new",
+                        match category {
+                            InitCategory::Model => "model",
+                            _ => "mode",
+                        }
+                    )),
+                }
+            }),
+            "only the registry-claimed lanes the harness contradicts are corrected"
+        );
     }
 }

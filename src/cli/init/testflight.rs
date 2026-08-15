@@ -72,7 +72,12 @@ pub(super) fn resolve_testflight_decision(
 
 fn confirm_testflight_credit_warning(interactive: bool, entry: &RegistryEntry) -> Result<bool> {
     print_testflight_credit_warning(entry);
-    prompt::confirm(interactive, "run testflight now?", false)
+    prompt::confirm(
+        prompt::HostedPromptKind::TestflightConfirm,
+        interactive,
+        "run testflight now?",
+        false,
+    )
 }
 
 fn print_testflight_credit_warning(entry: &RegistryEntry) {

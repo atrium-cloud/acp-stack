@@ -1,3 +1,8 @@
+// `serde_json::json!` expands one recursion level per key, and the init resume
+// record (`cli::init::resume`) enumerates every replayable flag in one literal;
+// the default limit of 128 is not enough for it.
+#![recursion_limit = "256"]
+
 pub mod api;
 pub mod auth;
 pub mod cli;

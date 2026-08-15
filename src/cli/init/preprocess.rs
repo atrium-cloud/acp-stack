@@ -91,6 +91,7 @@ pub(super) fn configure_subagent_inherit_for_init(
     // provider/model by leaving `subagent` unset under the "absent = inherit"
     // semantic; only an explicit "no" disables it.
     if prompt::confirm(
+        prompt::HostedPromptKind::SubagentInheritConfirm,
         interactive,
         &format!("inherit main provider/model for {alias}? declining disables it."),
         true,

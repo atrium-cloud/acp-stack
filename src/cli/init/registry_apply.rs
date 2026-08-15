@@ -218,20 +218,28 @@ pub(super) fn select_agent_for_init<'a>(
     let mut items = entries
         .iter()
         .map(|entry| {
-            (
+            prompt::item(
                 AgentChoice::Id(entry.id.clone()),
+                entry.id.clone(),
                 format!("{} ({})", entry.name, entry.id),
-                String::new(),
+                "",
             )
         })
         .collect::<Vec<_>>();
-    items.push((
+    items.push(prompt::item(
         AgentChoice::Custom,
-        "Custom agent…".to_owned(),
-        "not in the registry".to_owned(),
+        "__custom",
+        "Custom agent…",
+        "not in the registry",
     ));
-    items.push((AgentChoice::Skip, "Skip".to_owned(), String::new()));
-    let Some(choice) = prompt::searchable_select(prompts_enabled(args), "Agent", &items)? else {
+    items.push(prompt::item(AgentChoice::Skip, "__skip", "Skip", ""));
+    let Some(choice) = prompt::searchable_select(
+        prompt::HostedPromptKind::Agent,
+        prompts_enabled(args),
+        "Agent",
+        &items,
+    )?
+    else {
         return Ok(None);
     };
     match choice {
@@ -256,23 +264,43 @@ pub(super) fn select_agent_for_init<'a>(
 /// operator explicitly picks "Custom agent…" in a TTY, so every field prompt is
 /// interactive; `required` re-prompts on empty for the mandatory fields.
 fn collect_custom_agent_interactively(registry: &RegistryCatalog) -> Result<CustomAgentSpec> {
-    let id = required_custom_text("custom agent id (e.g. my-agent)")?;
+    let id = required_custom_text(
+        prompt::HostedPromptKind::CustomAgentId,
+        "custom agent id (e.g. my-agent)",
+    )?;
     validate_custom_agent_id(&id)?;
     reject_registry_id_for_custom_agent(&id, registry)?;
-    let name = prompt::text(true, "display name (blank = id)", false)?
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| id.clone());
-    let command = required_custom_text("launch command (binary on PATH)")?;
-    let args = prompt::text(true, "launch args (space-separated, blank = none)", false)?
-        .map(|line| {
-            line.split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let install_shell = required_custom_text("install shell command (installs harness + adapter)")?;
+    let name = prompt::text(
+        prompt::HostedPromptKind::CustomAgentName,
+        true,
+        "display name (blank = id)",
+        false,
+    )?
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| id.clone());
+    let command = required_custom_text(
+        prompt::HostedPromptKind::CustomAgentCommand,
+        "launch command (binary on PATH)",
+    )?;
+    let args = prompt::text(
+        prompt::HostedPromptKind::CustomAgentArgs,
+        true,
+        "launch args (space-separated, blank = none)",
+        false,
+    )?
+    .map(|line| {
+        line.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    let install_shell = required_custom_text(
+        prompt::HostedPromptKind::CustomAgentInstallShell,
+        "install shell command (installs harness + adapter)",
+    )?;
     let creates = prompt::text(
+        prompt::HostedPromptKind::CustomAgentCreates,
         true,
         "creates: path that must exist post-install (blank = command)",
         false,
@@ -290,8 +318,8 @@ fn collect_custom_agent_interactively(registry: &RegistryCatalog) -> Result<Cust
     })
 }
 
-fn required_custom_text(prompt_text: &str) -> Result<String> {
-    let value = prompt::text(true, prompt_text, true)?.ok_or(StackError::MissingField {
+fn required_custom_text(kind: prompt::HostedPromptKind, prompt_text: &str) -> Result<String> {
+    let value = prompt::text(kind, true, prompt_text, true)?.ok_or(StackError::MissingField {
         field: "custom-agent field",
     })?;
     let value = value.trim().to_owned();
