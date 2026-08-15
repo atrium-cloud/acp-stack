@@ -11,19 +11,12 @@ fn prompt_update_frequency(field: &'static str, limits: &DurationLimits) -> Resu
         Custom,
     }
     let items = vec![
-        (
-            FrequencyChoice::Daily,
-            "Daily (1d)".to_owned(),
-            String::new(),
-        ),
-        (
-            FrequencyChoice::Weekly,
-            "Weekly (1w)".to_owned(),
-            String::new(),
-        ),
-        (
+        prompt::item(FrequencyChoice::Daily, "1d", "Daily (1d)", ""),
+        prompt::item(FrequencyChoice::Weekly, "1w", "Weekly (1w)", ""),
+        prompt::item(
             FrequencyChoice::Custom,
-            "Custom".to_owned(),
+            "__custom",
+            "Custom",
             format!(
                 "e.g. {}; minimum {}",
                 limits.examples(),
@@ -31,10 +24,16 @@ fn prompt_update_frequency(field: &'static str, limits: &DurationLimits) -> Resu
             ),
         ),
     ];
-    match prompt::select(true, "update frequency", &items)? {
+    match prompt::select(
+        prompt::HostedPromptKind::UpdateFrequency,
+        true,
+        "update frequency",
+        &items,
+    )? {
         Some(FrequencyChoice::Weekly) => Ok("1w".to_owned()),
         Some(FrequencyChoice::Custom) => {
             let raw = prompt::text(
+                prompt::HostedPromptKind::UpdateFrequencyCustom,
                 true,
                 &format!(
                     "frequency (e.g. {}; minimum {})",
@@ -83,24 +82,32 @@ pub(crate) fn validate_stack_update_args(args: &InitArgs) -> Result<()> {
 
 fn prompt_stack_update_policy() -> Result<StackUpdatePolicy> {
     let items = vec![
-        (
+        prompt::item(
             StackUpdatePolicy::SecurityCritical,
-            "Security updates only".to_owned(),
-            "recommended".to_owned(),
+            "security",
+            "Security updates only",
+            "recommended",
         ),
-        (
+        prompt::item(
             StackUpdatePolicy::Compatible,
-            "On — all compatible updates".to_owned(),
-            String::new(),
+            "on",
+            "On — all compatible updates",
+            "",
         ),
-        (
+        prompt::item(
             StackUpdatePolicy::Manual,
-            "Off — manual updates only".to_owned(),
-            String::new(),
+            "off",
+            "Off — manual updates only",
+            "",
         ),
     ];
-    Ok(prompt::select(true, "acp-stack auto-update", &items)?
-        .unwrap_or(StackUpdatePolicy::SecurityCritical))
+    Ok(prompt::select(
+        prompt::HostedPromptKind::StackUpdatePolicy,
+        true,
+        "acp-stack auto-update",
+        &items,
+    )?
+    .unwrap_or(StackUpdatePolicy::SecurityCritical))
 }
 
 /// Configure `[updates.acp_stack]` from `--stack-update`/`--stack-update-frequency`
@@ -198,7 +205,12 @@ pub(crate) fn validate_agent_update_args(args: &InitArgs) -> Result<()> {
 }
 
 fn prompt_agent_update_enabled() -> Result<bool> {
-    prompt::confirm(true, "Auto-update this agent's harness?", true)
+    prompt::confirm(
+        prompt::HostedPromptKind::AgentUpdateEnabled,
+        true,
+        "Auto-update this agent's harness?",
+        true,
+    )
 }
 
 /// Configure `[agent.auto_update]` from `--agent-update`/`--agent-update-frequency`
@@ -315,19 +327,21 @@ pub(crate) fn prompt_environment_configuration_if_needed(
         return Ok(());
     }
     let setup_path = prompt::select(
+        prompt::HostedPromptKind::EnvironmentSetup,
         interactive,
         "Environment configuration",
         &[
-            (
+            prompt::item(
                 EnvironmentSetupPath::Standard,
-                "Standard Setup".to_owned(),
-                "Opinionated defaults: essential dependencies, browser-use, skills, data sources"
-                    .to_owned(),
+                "standard",
+                "Standard Setup",
+                "Opinionated defaults: essential dependencies, browser-use, skills, data sources",
             ),
-            (
+            prompt::item(
                 EnvironmentSetupPath::Advanced,
-                "Advanced Setup".to_owned(),
-                "Clean slate: custom dependencies, skills, MCP, agent env, data sources".to_owned(),
+                "advanced",
+                "Advanced Setup",
+                "Clean slate: custom dependencies, skills, MCP, agent env, data sources",
             ),
         ],
     )?;
@@ -353,10 +367,20 @@ fn prompt_standard_setup(
     registry: &RegistryCatalog,
     skill_catalog: &SkillCatalog,
 ) -> Result<()> {
-    if prompt::confirm(interactive, "Install essential dependencies?", true)? {
+    if prompt::confirm(
+        prompt::HostedPromptKind::EssentialDepsConfirm,
+        interactive,
+        "Install essential dependencies?",
+        true,
+    )? {
         args.standard_agent_work_deps = true;
     }
-    if prompt::confirm(interactive, "Install browser-use?", false)? {
+    if prompt::confirm(
+        prompt::HostedPromptKind::BrowserUseConfirm,
+        interactive,
+        "Install browser-use?",
+        false,
+    )? {
         args.browser_use_profile = true;
     }
     if agent_supports_skills(args, registry)
@@ -365,13 +389,23 @@ fn prompt_standard_setup(
         && !args.essential_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
-        && prompt::confirm(interactive, "Add essential agent skills?", false)?
+        && prompt::confirm(
+            prompt::HostedPromptKind::EssentialSkillsConfirm,
+            interactive,
+            "Add essential agent skills?",
+            false,
+        )?
     {
         apply_essential_agent_skills(args, skill_catalog);
     }
     if args.data_from.is_empty()
         && args.prompt_data_sources.is_empty()
-        && prompt::confirm(interactive, "Add data sources now?", false)?
+        && prompt::confirm(
+            prompt::HostedPromptKind::DataSourcesConfirm,
+            interactive,
+            "Add data sources now?",
+            false,
+        )?
     {
         prompt_data_sources(interactive, args)?;
     }
@@ -390,7 +424,12 @@ fn prompt_advanced_setup(
 ) -> Result<()> {
     if args.dep.is_empty()
         && args.dep_system.is_empty()
-        && prompt::confirm(interactive, "Add custom dependencies?", false)?
+        && prompt::confirm(
+            prompt::HostedPromptKind::CustomDepsConfirm,
+            interactive,
+            "Add custom dependencies?",
+            false,
+        )?
     {
         prompt_deps(interactive, args)?;
     }
@@ -399,18 +438,33 @@ fn prompt_advanced_setup(
         && !args.essential_skills
         && args.skills_source.is_none()
         && args.skills.is_empty()
-        && prompt::confirm(interactive, "Add agent skills?", false)?
+        && prompt::confirm(
+            prompt::HostedPromptKind::AgentSkillsConfirm,
+            interactive,
+            "Add agent skills?",
+            false,
+        )?
     {
         args.prompt_skills = true;
     }
     if args.agent_env_ref.is_empty()
-        && prompt::confirm(interactive, "Add agent environment variables?", false)?
+        && prompt::confirm(
+            prompt::HostedPromptKind::AgentEnvRefsConfirm,
+            interactive,
+            "Add agent environment variables?",
+            false,
+        )?
     {
         args.prompt_agent_env_refs = true;
     }
     if args.data_from.is_empty()
         && args.prompt_data_sources.is_empty()
-        && prompt::confirm(interactive, "Add data sources now?", false)?
+        && prompt::confirm(
+            prompt::HostedPromptKind::DataSourcesConfirm,
+            interactive,
+            "Add data sources now?",
+            false,
+        )?
     {
         prompt_data_sources(interactive, args)?;
     }
@@ -428,24 +482,32 @@ pub(in crate::cli::init) fn prompt_mcp_servers(
     offer_http: bool,
 ) -> Result<()> {
     loop {
-        let mut items = vec![(
+        let mut items = vec![prompt::item(
             McpTransportChoice::Stdio,
-            "stdio server".to_owned(),
-            "Local command, args, env refs".to_owned(),
+            "stdio",
+            "stdio server",
+            "Local command, args, env refs",
         )];
         if offer_http {
-            items.push((
+            items.push(prompt::item(
                 McpTransportChoice::Http,
-                "HTTP server".to_owned(),
-                "Remote URL and header refs".to_owned(),
+                "http",
+                "HTTP server",
+                "Remote URL and header refs",
             ));
         }
-        items.push((
+        items.push(prompt::item(
             McpTransportChoice::Done,
-            "Done".to_owned(),
-            "Finish adding MCP servers".to_owned(),
+            "__done",
+            "Done",
+            "Finish adding MCP servers",
         ));
-        let choice = prompt::select(interactive, "MCP transport", &items)?;
+        let choice = prompt::select(
+            prompt::HostedPromptKind::McpTransport,
+            interactive,
+            "MCP transport",
+            &items,
+        )?;
         match choice {
             Some(McpTransportChoice::Stdio) => prompt_mcp_stdio_servers(interactive, args)?,
             Some(McpTransportChoice::Http) => prompt_mcp_http_servers(interactive, args)?,
@@ -478,23 +540,27 @@ fn apply_essential_agent_skills(args: &mut InitArgs, _skill_catalog: &SkillCatal
 fn prompt_data_sources(interactive: bool, args: &mut InitArgs) -> Result<()> {
     loop {
         let Some(kind) = prompt::select(
+            prompt::HostedPromptKind::DataSourceType,
             interactive,
             "data source type",
             &[
-                (
+                prompt::item(
                     DataSourceKind::S3,
-                    "S3 bucket".to_owned(),
-                    "Bucket, region, credential refs".to_owned(),
+                    "s3",
+                    "S3 bucket",
+                    "Bucket, region, credential refs",
                 ),
-                (
+                prompt::item(
                     DataSourceKind::Https,
-                    "HTTPS archive".to_owned(),
-                    "Download URL".to_owned(),
+                    "https",
+                    "HTTPS archive",
+                    "Download URL",
                 ),
-                (
+                prompt::item(
                     DataSourceKind::Local,
-                    "Local path".to_owned(),
-                    "Absolute path".to_owned(),
+                    "local",
+                    "Local path",
+                    "Absolute path",
                 ),
             ],
         )?
@@ -504,7 +570,11 @@ fn prompt_data_sources(interactive: bool, args: &mut InitArgs) -> Result<()> {
         let Some(source) = prompt_data_source_row(interactive, kind)? else {
             break;
         };
-        match prompt_setup_row_action(interactive, "Data source row")? {
+        match prompt_setup_row_action(
+            prompt::HostedPromptKind::DataSourceRowAction,
+            interactive,
+            "Data source row",
+        )? {
             SetupRowAction::AddAnother => args.prompt_data_sources.push(source),
             SetupRowAction::Discard => continue,
             SetupRowAction::Done => {
@@ -522,7 +592,12 @@ fn prompt_data_source_row(
 ) -> Result<Option<DataSourceConfig>> {
     match kind {
         DataSourceKind::Local => {
-            let Some(path) = prompt::text(interactive, "local path (blank to finish)", false)?
+            let Some(path) = prompt::text(
+                prompt::HostedPromptKind::DataSourceLocalPath,
+                interactive,
+                "local path (blank to finish)",
+                false,
+            )?
             else {
                 return Ok(None);
             };
@@ -533,8 +608,12 @@ fn prompt_data_source_row(
             classify_data_from(path).map(Some)
         }
         DataSourceKind::Https => {
-            let Some(url) =
-                prompt::text(interactive, "HTTPS archive URL (blank to finish)", false)?
+            let Some(url) = prompt::text(
+                prompt::HostedPromptKind::DataSourceHttpsUrl,
+                interactive,
+                "HTTPS archive URL (blank to finish)",
+                false,
+            )?
             else {
                 return Ok(None);
             };
@@ -545,7 +624,12 @@ fn prompt_data_source_row(
             classify_data_from(url).map(Some)
         }
         DataSourceKind::S3 => {
-            let Some(bucket) = prompt::text(interactive, "S3 bucket (blank to finish)", false)?
+            let Some(bucket) = prompt::text(
+                prompt::HostedPromptKind::DataSourceS3Bucket,
+                interactive,
+                "S3 bucket (blank to finish)",
+                false,
+            )?
             else {
                 return Ok(None);
             };
@@ -553,11 +637,18 @@ fn prompt_data_source_row(
             if bucket.is_empty() {
                 return Ok(None);
             }
-            let Some(region) = prompt::text(interactive, "S3 region", true)? else {
+            let Some(region) = prompt::text(
+                prompt::HostedPromptKind::DataSourceS3Region,
+                interactive,
+                "S3 region",
+                true,
+            )?
+            else {
                 return Ok(None);
             };
             let region = region.trim().to_owned();
             let Some(access_key_ref) = prompt::text(
+                prompt::HostedPromptKind::DataSourceS3AccessKeyRef,
                 interactive,
                 "access key ref (e.g., AWS_ACCESS_KEY_ID)",
                 true,
@@ -567,6 +658,7 @@ fn prompt_data_source_row(
             };
             let access_key_ref = access_key_ref.trim().to_owned();
             let Some(secret_key_ref) = prompt::text(
+                prompt::HostedPromptKind::DataSourceS3SecretKeyRef,
                 interactive,
                 "secret key ref (e.g., AWS_SECRET_ACCESS_KEY)",
                 true,
@@ -575,9 +667,14 @@ fn prompt_data_source_row(
                 return Ok(None);
             };
             let secret_key_ref = secret_key_ref.trim().to_owned();
-            let prefix = prompt::text(interactive, "S3 prefix (blank for bucket root)", false)?
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty());
+            let prefix = prompt::text(
+                prompt::HostedPromptKind::DataSourceS3Prefix,
+                interactive,
+                "S3 prefix (blank for bucket root)",
+                false,
+            )?
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
             Ok(Some(DataSourceConfig {
                 source_type: "s3".to_owned(),
                 name: None,
@@ -598,26 +695,43 @@ fn prompt_data_source_row(
 
 fn prompt_mcp_stdio_servers(interactive: bool, args: &mut InitArgs) -> Result<()> {
     loop {
-        let Some(name) = prompt::text(interactive, "MCP name (blank to finish)", false)? else {
+        let Some(name) = prompt::text(
+            prompt::HostedPromptKind::McpStdioName,
+            interactive,
+            "MCP name (blank to finish)",
+            false,
+        )?
+        else {
             break;
         };
         let name = name.trim().to_owned();
         if name.is_empty() {
             break;
         }
-        let Some(command) = prompt::text(interactive, "command", true)? else {
+        let Some(command) = prompt::text(
+            prompt::HostedPromptKind::McpStdioCommand,
+            interactive,
+            "command",
+            true,
+        )?
+        else {
             break;
         };
         let command = command.trim().to_owned();
         if command.is_empty() {
             continue;
         }
-        let cli_args =
-            match prompt::text(interactive, "args (comma-separated, blank for none)", false)? {
-                Some(raw) => parse_comma_separated_prompt_values(&raw),
-                None => Vec::new(),
-            };
+        let cli_args = match prompt::text(
+            prompt::HostedPromptKind::McpStdioArgs,
+            interactive,
+            "args (comma-separated, blank for none)",
+            false,
+        )? {
+            Some(raw) => parse_comma_separated_prompt_values(&raw),
+            None => Vec::new(),
+        };
         let env = match prompt::text(
+            prompt::HostedPromptKind::McpStdioEnvRefs,
             interactive,
             "env refs (comma-separated, blank for none)",
             false,
@@ -631,7 +745,11 @@ fn prompt_mcp_stdio_servers(interactive: bool, args: &mut InitArgs) -> Result<()
             args: cli_args,
             env,
         };
-        match prompt_setup_row_action(interactive, "MCP row")? {
+        match prompt_setup_row_action(
+            prompt::HostedPromptKind::McpRowAction,
+            interactive,
+            "MCP row",
+        )? {
             SetupRowAction::AddAnother => args.prompt_mcp_stdio.push(row),
             SetupRowAction::Discard => continue,
             SetupRowAction::Done => {
@@ -645,14 +763,26 @@ fn prompt_mcp_stdio_servers(interactive: bool, args: &mut InitArgs) -> Result<()
 
 fn prompt_mcp_http_servers(interactive: bool, args: &mut InitArgs) -> Result<()> {
     loop {
-        let Some(name) = prompt::text(interactive, "MCP name (blank to finish)", false)? else {
+        let Some(name) = prompt::text(
+            prompt::HostedPromptKind::McpHttpName,
+            interactive,
+            "MCP name (blank to finish)",
+            false,
+        )?
+        else {
             break;
         };
         let name = name.trim().to_owned();
         if name.is_empty() {
             break;
         }
-        let Some(url) = prompt::text(interactive, "URL", true)? else {
+        let Some(url) = prompt::text(
+            prompt::HostedPromptKind::McpHttpUrl,
+            interactive,
+            "URL",
+            true,
+        )?
+        else {
             break;
         };
         let url = url.trim().to_owned();
@@ -660,6 +790,7 @@ fn prompt_mcp_http_servers(interactive: bool, args: &mut InitArgs) -> Result<()>
             continue;
         }
         let headers = match prompt::text(
+            prompt::HostedPromptKind::McpHttpHeaders,
             interactive,
             "headers (comma-separated Header:SECRET_REF, blank for none)",
             false,
@@ -668,7 +799,11 @@ fn prompt_mcp_http_servers(interactive: bool, args: &mut InitArgs) -> Result<()>
             None => Vec::new(),
         };
         let row = InitMcpHttpServer { name, url, headers };
-        match prompt_setup_row_action(interactive, "MCP row")? {
+        match prompt_setup_row_action(
+            prompt::HostedPromptKind::McpRowAction,
+            interactive,
+            "MCP row",
+        )? {
             SetupRowAction::AddAnother => args.prompt_mcp_http.push(row),
             SetupRowAction::Discard => continue,
             SetupRowAction::Done => {
@@ -680,25 +815,32 @@ fn prompt_mcp_http_servers(interactive: bool, args: &mut InitArgs) -> Result<()>
     Ok(())
 }
 
-fn prompt_setup_row_action(interactive: bool, prompt_label: &str) -> Result<SetupRowAction> {
+fn prompt_setup_row_action(
+    kind: prompt::HostedPromptKind,
+    interactive: bool,
+    prompt_label: &str,
+) -> Result<SetupRowAction> {
     let items = [
-        (
+        prompt::item(
             SetupRowAction::AddAnother,
-            "Add another".to_owned(),
-            "Save this row and continue".to_owned(),
+            "add_another",
+            "Add another",
+            "Save this row and continue",
         ),
-        (
+        prompt::item(
             SetupRowAction::Discard,
-            "Discard".to_owned(),
-            "Drop this row and continue".to_owned(),
+            "discard",
+            "Discard",
+            "Drop this row and continue",
         ),
-        (
+        prompt::item(
             SetupRowAction::Done,
-            "Done".to_owned(),
-            "Save this row and finish".to_owned(),
+            "done",
+            "Done",
+            "Save this row and finish",
         ),
     ];
-    Ok(prompt::select(interactive, prompt_label, &items)?.unwrap_or(SetupRowAction::Done))
+    Ok(prompt::select(kind, interactive, prompt_label, &items)?.unwrap_or(SetupRowAction::Done))
 }
 
 fn parse_secret_ref_prompt_values(field: &'static str, raw: &str) -> Result<Vec<String>> {
@@ -714,11 +856,14 @@ fn parse_secret_ref_prompt_values(field: &'static str, raw: &str) -> Result<Vec<
         if value.contains('=') {
             crate::config::parse_env_entry(field, value)?;
         } else if !is_valid_secret_ref_name(value) {
+            // The screen above only recognizes the credential shapes it knows;
+            // a dashed token walks past it, so the complaint describes the
+            // constraint instead of quoting the entry back. This error reaches
+            // the hosted client as an init failure reason and stays in
+            // replayable history.
             return Err(StackError::InvalidParam {
                 field,
-                reason: format!(
-                    "`{value}` is not a valid secret ref name (letters, digits, and underscore; must not start with a digit)"
-                ),
+                reason: "secret ref name must use letters, digits, and underscore, and must not start with a digit".to_owned(),
             });
         }
     }
@@ -751,7 +896,12 @@ fn parse_comma_separated_prompt_values(raw: &str) -> Vec<String> {
 /// stacks onto `--dep`/`--dep-system` so `deps_from_args` consumes it uniformly.
 fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
     loop {
-        let Some(name) = prompt::text(interactive, "dependency name (blank to finish)", false)?
+        let Some(name) = prompt::text(
+            prompt::HostedPromptKind::DependencyName,
+            interactive,
+            "dependency name (blank to finish)",
+            false,
+        )?
         else {
             break;
         };
@@ -759,7 +909,13 @@ fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
         if name.is_empty() {
             break;
         }
-        let Some(shell) = prompt::text(interactive, "install shell command", true)? else {
+        let Some(shell) = prompt::text(
+            prompt::HostedPromptKind::DependencyInstallShell,
+            interactive,
+            "install shell command",
+            true,
+        )?
+        else {
             break;
         };
         let shell = shell.trim().to_owned();
@@ -768,18 +924,21 @@ fn prompt_deps(interactive: bool, args: &mut InitArgs) -> Result<()> {
         }
         let entry = format!("{name}={shell}");
         let scope = prompt::select(
+            prompt::HostedPromptKind::DependencyScope,
             interactive,
             "dependency scope",
             &[
-                (
+                prompt::item(
                     DependencyInstallScope::User,
-                    "User".to_owned(),
-                    "Runtime user install".to_owned(),
+                    "user",
+                    "User",
+                    "Runtime user install",
                 ),
-                (
+                prompt::item(
                     DependencyInstallScope::System,
-                    "System".to_owned(),
-                    "Requires OS privilege".to_owned(),
+                    "system",
+                    "System",
+                    "Requires OS privilege",
                 ),
             ],
         )?

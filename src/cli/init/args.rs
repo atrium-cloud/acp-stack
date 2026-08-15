@@ -67,7 +67,7 @@ pub struct InitArgs {
     #[arg(
         long = "custom-agent-id",
         value_name = "ID",
-        conflicts_with_all = ["agent", "provider", "model", "custom_provider"]
+        conflicts_with_all = ["agent", "provider", "model", "mode", "custom_provider"]
     )]
     pub(super) custom_agent_id: Option<String>,
     /// Display name for the custom agent (defaults to the id).
@@ -203,6 +203,10 @@ pub struct InitArgs {
     /// session.
     #[arg(long)]
     pub(super) model: Option<String>,
+    /// Initial session mode id, validated against the agent's ACP-advertised
+    /// `mode` values discovered via the same provisional session as `--model`.
+    #[arg(long)]
+    pub(super) mode: Option<String>,
     /// Display name for a custom model.
     #[arg(long = "model-name", requires = "custom_provider")]
     pub(super) model_name: Option<String>,

@@ -14,7 +14,7 @@ The non-interactive contract: a first run that creates a new config requires `--
 
 Each `acps init` invocation is recorded as an init run. Within a run, every phase is recorded as a step keyed by an ordinal, so a failed or interrupted run can be continued from the first unsettled step. See [runtime.md](runtime.md) for the step machine and `src/runtime/init_runner.rs` for the implementation.
 
-- `acps init --resume [--run-id <id>]` continues the most recent unfinished or failed run (or a specific run id). Completed steps whose postcondition still holds are replayed as skipped; the first failed or incomplete step re-runs, and everything after it runs fresh.
+- `acps init --resume [--run-id <id>]` continues the most recent unfinished or failed run (or a specific run id). Completed steps whose postcondition still holds are replayed as skipped; the first failed or incomplete step re-runs, and everything after it runs fresh. The original run's arguments replay, with anything passed on the resume invocation taking precedence, and a recorded `--provider`, `--model`, or `--mode` re-runs provider configuration rather than replaying it as skipped, so the value is validated and persisted.
 - `acps init --fresh` forces a new run rather than resuming.
 - Re-running `acps init` over an already-initialized instance preserves existing API keys and config; it does not regenerate keys or overwrite config unless an explicit option requests it.
 
@@ -92,20 +92,25 @@ The operator-facing sequence, in order:
     - Configured features the advertisement does not cover are reported as ignored; they stay in config and are skipped at session time.
     - A failed probe records `probe_status: "unavailable"` and never fails init. The step re-runs on every resume.
     - The probe runs before provider configuration and harness config provisioning; session-time behavior always follows the live bridge.
-12. MCP configuration (interactive, new config only, skipped when MCP servers were already declared by flag).
+12. MCP configuration (interactive, new config only, skipped when MCP servers were already declared by flag or in the hosted start request).
     - Prompts run only when the probe advertised MCP support; the transport picker offers HTTP only when `mcpCapabilities.http` is advertised. Added servers are written to config and their secret refs collected.
+    - Hosted sessions get the same prompts on the stream, each carrying its machine-readable kind. Secret values are requested only as `password` inputs; refs and header templates are ordinary text inputs, screened at the boundary so a pasted credential is rejected without being echoed.
+    - Skips are reported as progress, so a hosted client learns why the picker never appeared (probe unavailable, or the agent does not advertise MCP support).
     - Resume never re-drives these prompts.
-13. Provider and model.
+13. Provider, model, and mode.
     - Supported registry agents:
         - Select or validate provider and required secret refs.
-        - Discover ACP-advertised model options with one provisional session.
+        - Discover ACP-advertised model and mode options with one provisional session shared by both lanes.
+        - The mode lane runs only for agents the registry marks as supporting mode configuration; `--mode` against any other registry agent is rejected before discovery, as `--model` is. Provider-backed agents need a provider (passed this run or already in config) before either lane runs, since the harness cannot be launched to advertise anything without one.
+        - Interactive runs offer a mode selector alongside the model selector. A non-interactive run without `--mode` never enters the mode lane: it spawns nothing, prints nothing, and writes no mode. Explicit `--mode` is validated against the advertised values and a rejection lists them.
+        - When mode is the only active lane and `--mode` was not passed, a provisional session that cannot be established is reported and skipped rather than failing init; an explicit `--mode` still fails loudly.
         - Codex with a non-OpenAI provider lists models from the provider's live catalog (fetched during init and cached at `~/.config/acp-stack/provider-models.json`) instead of the adapter's advertised OpenAI presets; when no catalog is available (custom provider or an offline fetch), the model step is skipped with a hint to rerun with `--model`.
-        - Apply `--provider`, `--api-key-ref`, `--model`, and custom-provider flags.
+        - Apply `--provider`, `--api-key-ref`, `--model`, `--mode`, and custom-provider flags.
         - Kimi Code skips model discovery: `--model` is accepted as supplied, and without it init pins `kimi-for-coding` unless config already has a model.
     - Custom agents:
-        - Skip provider/model discovery.
+        - Skip provider/model/mode discovery.
         - Run one ACP connection gate when the launch command and cwd are present.
-        - Explicit `--model` is rejected.
+        - Explicit `--model` and `--mode` are rejected.
 14. `acp-stack` auto-update.
     - Configure `[updates.acp_stack]` as on, security-only, or off.
     - Frequencies use day/week units, minimum `1d`.
@@ -165,7 +170,11 @@ The payload carries an `ignored_features` array (omitted when empty) listing con
 
 `acps init serve` runs a bootstrap-only HTTP/WebSocket server for hosted init. The hosted backend connects to the instance; the web UI does not connect to the instance directly. Bootstrap auth uses a bearer token from `ACP_STACK_INIT_TOKEN`, `--token-env`, or `--token-file`.
 
-The hosted flow follows the same init steps as interactive `acps init`, but only streams the bootstrap prompts needed for agent selection, provider selection, required secret collection, custom-provider fields, model selection, and the simple confirmations on that path. Environment configuration (MCP servers, skills, dependencies, browser-use, data sources) and the acp-stack/agent auto-update policies (`stack_update`/`stack_update_frequency`, `agent_update`/`agent_update_frequency`) are declared up-front in the session-create request instead of being streamed: these wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce. Secret collection covers the refs those declarations name — MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs; an unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization. Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the streamed set use the same skip/default behavior as non-interactive init unless supplied through initial args. The post-install MCP configuration step is never streamed; MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
+The hosted flow follows the same init steps as interactive `acps init`, but only streams the bootstrap prompts needed for agent selection, provider selection, required secret collection, custom-provider fields, model and mode selection, the post-install MCP setup, and the simple confirmations on that path. Every streamed prompt carries a machine-readable `kind` and, for selections, stable option values, so a client routes and answers by id rather than by prompt text. Environment configuration (skills, dependencies, browser-use, data sources) and the acp-stack/agent auto-update policies (`stack_update`/`stack_update_frequency`, `agent_update`/`agent_update_frequency`) are declared up-front in the session-create request instead of being streamed: these wizard prompts remain outside the streamed set, and the request fields map onto the same init arguments the wizard would produce. Secret collection covers the refs those declarations name — MCP env/header refs (whole-value refs and refs named inside `${}` templates alike) and S3 data-source key refs missing from the store are requested as `password` inputs; an unanswered ref skips without failing init and surfaces later through MCP health or workspace materialization. Normal `acps init` keeps its existing terminal behavior; hosted prompts outside the streamed set use the same skip/default behavior as non-interactive init unless supplied through initial args. The post-install MCP configuration step streams its prompts only when the start request declared no MCP server — declaring servers up front still wins and skips the wizard outright; MCP declarations the installed agent's capabilities do not cover are reported only through the result frame's `ignored_features`, never through progress frames.
+
+Alongside the prompt stream, the session reports structured readiness through `state` frames: which init step is running, which of the nine categories (agent, provider, model, mode, workspace, native config, MCP, skills, dependencies) apply to this run, which have settled and with what value, and which one holds the pending prompt. A full snapshot rides the `hello` frame and the status response, and each transition arrives as one seq-bearing `state` event, so a client renders init progress without parsing progress text. The frame contract, category vocabulary, and status values are in [api.md](api/api.md#bootstrap-init-api).
+
+A hosted session can also continue a crashed run and bring its own agent: `resume`/`fresh` in the start request behave like `--resume`/`--fresh`, and the `custom_agent_*` fields declare an escape-hatch agent the way the `--custom-agent-*` flags do. Custom-agent prompts are not streamed, so that declaration must be complete in the request; the state report then derives provider, model, mode, and skills as not applicable, since a non-registry agent configures those through its own environment.
 
 A fresh registry-agent session may include one in-memory `native_config` upload. The server inspects it before durable init work and sends a `native_config_review` input containing only the redacted manifest. The response selects compatible managed field ids and acknowledges executable unmanaged categories for that revision. After agent installation, init commits the journaled semantic replacement before provider/model discovery and before the first persistent agent start, so onboarding does not restart an agent. The source document is excluded from recorded init arguments, events, progress, and handoff metadata; the final handoff may include only the sanitized `native_config_import` operation.
 

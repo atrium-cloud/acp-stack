@@ -236,6 +236,9 @@ mod tests {
             apply_agent_env_collection(&mut store, &collection(&[("ADMIN_KEY", "attacker")]))
                 .expect_err("collision with an existing secret must be rejected");
         assert!(error.to_string().contains("already exists"), "got: {error}");
+        // A valid ref name can still be credential-shaped, so the collision
+        // complaint names the condition and not the entry.
+        assert!(!error.to_string().contains("ADMIN_KEY"), "got: {error}");
         assert_eq!(
             store.get("ADMIN_KEY").expect("preserved"),
             "original-admin-secret",
@@ -251,9 +254,13 @@ mod tests {
         let error = apply_agent_env_collection(&mut store, &collection(&[("bad-name", "v")]))
             .expect_err("an invalid ref name must be rejected");
         assert!(
-            error.to_string().contains("valid secret ref name"),
+            error.to_string().contains("secret ref name must use"),
             "got: {error}"
         );
+        // The rejected entry is most often a credential pasted where its ref
+        // name belongs, so the complaint states the constraint and quotes
+        // nothing back.
+        assert!(!error.to_string().contains("bad-name"), "got: {error}");
     }
 
     #[test]

@@ -128,11 +128,14 @@ pub(crate) fn collect_agent_env_refs_for_init(
             });
         }
         if !is_valid_secret_ref_name(&name) {
+            // A value pasted where its ref name belongs is screened first, and
+            // the shape complaint names the constraint rather than the entry:
+            // the heuristic only recognizes the credential prefixes it knows,
+            // so a token it does not recognize must not ride the error out.
+            crate::config::screen_ref_name("agent-env-ref", &name)?;
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",
-                reason: format!(
-                    "`{name}` is not a valid secret ref name (letters, digits, and underscore; must not start with a digit)"
-                ),
+                reason: "secret ref name must use letters, digits, and underscore, and must not start with a digit".to_owned(),
             });
         }
         if !flag_refs.contains(&name) {
@@ -142,7 +145,12 @@ pub(crate) fn collect_agent_env_refs_for_init(
     let mut fresh: Vec<(String, zeroize::Zeroizing<String>)> = Vec::new();
     if interactive && args.prompt_agent_env_refs {
         loop {
-            let Some(name) = prompt::text(interactive, "secret ref name (blank to finish)", false)?
+            let Some(name) = prompt::text(
+                prompt::HostedPromptKind::AgentEnvRefName,
+                interactive,
+                "secret ref name (blank to finish)",
+                false,
+            )?
             else {
                 break;
             };
@@ -156,7 +164,12 @@ pub(crate) fn collect_agent_env_refs_for_init(
                 );
                 continue;
             }
-            let Some(value) = prompt::password(interactive, &format!("value for {name}"), false)?
+            let Some(value) = prompt::password(
+                prompt::HostedPromptKind::SecretRefValue,
+                interactive,
+                &format!("value for {name}"),
+                false,
+            )?
             else {
                 break;
             };
@@ -196,19 +209,20 @@ pub(crate) fn apply_agent_env_collection(
     // collides would silently overwrite an existing provider/MCP secret.
     for (name, _) in &collection.fresh {
         if !is_valid_secret_ref_name(name) {
+            crate::config::screen_ref_name("agent-env-ref", name)?;
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",
-                reason: format!(
-                    "`{name}` is not a valid secret ref name (letters, digits, and underscore; must not start with a digit)"
-                ),
+                reason: "secret ref name must use letters, digits, and underscore, and must not start with a digit".to_owned(),
             });
         }
         if secret_store.contains(name) {
+            // A valid ref name can still be credential-shaped — 40-plus hex
+            // characters starting with a letter passes both checks — so this
+            // arm names the condition rather than the entry, like the one
+            // above. The operator typed the name and knows which it is.
             return Err(StackError::InvalidParam {
                 field: "agent-env-ref",
-                reason: format!(
-                    "secret `{name}` already exists in the store; refusing to overwrite it. Choose a new ref name, or update the value with `acps secrets set`."
-                ),
+                reason: "an agent env ref with this name already exists in the secret store; refusing to overwrite it. Choose a new ref name, or update the value with `acps secrets set`.".to_owned(),
             });
         }
     }
@@ -574,5 +588,10 @@ pub(crate) fn should_apply_deps_for_init(
     for line in &notice_lines {
         emit_notice(line);
     }
-    prompt::confirm(interactive, "Apply these dependencies now?", false)
+    prompt::confirm(
+        prompt::HostedPromptKind::DepsApplyConfirm,
+        interactive,
+        "Apply these dependencies now?",
+        false,
+    )
 }

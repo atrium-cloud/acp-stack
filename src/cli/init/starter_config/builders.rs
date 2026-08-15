@@ -432,17 +432,25 @@ fn find_mcp_server_mut<'a>(
 
 fn split_mcp_pair(field: &'static str, value: &str) -> Result<(String, String)> {
     let Some((name, target)) = value.split_once('=') else {
+        // Screened before the echo, on the same grounds as
+        // `split_mcp_header_ref`: an entry that never split is the one shape
+        // that can be a bare pasted credential.
+        crate::config::screen_ref_name(field, value)?;
         return Err(StackError::InvalidParam {
             field,
-            reason: format!("`{value}` must use NAME=VALUE"),
+            reason: "entry must use NAME=VALUE".to_owned(),
         });
     };
     let name = name.trim();
     let target = target.trim();
     if name.is_empty() || target.is_empty() {
+        // A composite paste splits somewhere the screen does not recognize —
+        // base64 padding leaves an empty target — so, like the arm above, the
+        // complaint states the shape rather than repeating what arrived.
+        crate::config::screen_ref_name(field, value)?;
         return Err(StackError::InvalidParam {
             field,
-            reason: format!("`{value}` must include a non-empty name and value"),
+            reason: "entry must include a non-empty name and value".to_owned(),
         });
     }
     Ok((name.to_owned(), target.to_owned()))
@@ -459,9 +467,15 @@ pub(super) fn split_mcp_header_ref(value: &str) -> Result<HttpHeaderRef> {
         } else if let Some((header_name, value_ref)) = value.split_once(HEADER_REF_SEPARATOR) {
             (header_name, value_ref, false)
         } else {
+            // A whole entry with no separator is most often the credential
+            // pasted where its ref name belongs, so it is screened before the
+            // shape complaint — and the complaint describes the expected shape
+            // rather than repeating what arrived. Both errors reach the client
+            // as an init failure reason and stay in replayable history.
+            crate::config::screen_ref_name("mcp-http-header", value)?;
             return Err(StackError::InvalidParam {
                 field: "mcp-http-header",
-                reason: format!("`{value}` must use HEADER:SECRET_REF or HEADER:=TEMPLATE"),
+                reason: "MCP HTTP header must use HEADER:SECRET_REF or HEADER:=TEMPLATE".to_owned(),
             });
         };
     let header_name = header_name.trim();
@@ -469,12 +483,18 @@ pub(super) fn split_mcp_header_ref(value: &str) -> Result<HttpHeaderRef> {
     if header_name.is_empty() || header_value.is_empty() {
         return Err(StackError::InvalidParam {
             field: "mcp-http-header",
-            reason: format!("`{value}` must include a non-empty header and value"),
+            reason: "MCP HTTP header must include a non-empty header and value".to_owned(),
         });
     }
+    // A paste that happens to contain a colon lands its head in the header
+    // position. Screening catches the shapes it recognizes, and the validity
+    // error describes the constraint rather than quoting the name back, so a
+    // credential the heuristic does not recognize still cannot ride the error
+    // out to the terminal frame and replayable history.
+    crate::config::screen_ref_name("mcp-http-header", header_name)?;
     HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| StackError::InvalidParam {
         field: "mcp-http-header",
-        reason: format!("`{header_name}` is not a valid HTTP header name"),
+        reason: "MCP HTTP header name is not a valid HTTP header name; it must be a token with no spaces, separators, or control characters".to_owned(),
     })?;
     if is_template {
         crate::config::screen_template("mcp-http-header", header_value)?;

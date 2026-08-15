@@ -23,6 +23,14 @@ pub(super) fn prompts_enabled(args: &InitArgs) -> bool {
     prompts_enabled_for(args, io::stdin().is_terminal())
 }
 
+/// Whether the post-probe `mcp_configure` step drives its own prompts. Hosted
+/// runs stream them like any other init prompt, so declaring MCP servers in the
+/// start request is what keeps a hosted session out of the wizard: those
+/// servers are already in `config.mcp.servers` by the time this is evaluated.
+fn mcp_prompting_enabled(args: &InitArgs, creating_config: bool, config: &Config) -> bool {
+    creating_config && !args.resume && prompts_enabled(args) && config.mcp.servers.is_empty()
+}
+
 fn config_import_source_for_init(
     args: &InitArgs,
 ) -> Result<Option<cli_config::ConfigImportSource<'_>>> {
@@ -70,47 +78,69 @@ fn prompt_config_source_if_needed(
 
     let mut items = Vec::new();
     if resumable {
-        items.push((
+        items.push(prompt::item(
             ConfigSourceChoice::Resume,
-            "Resume interrupted init".to_owned(),
-            String::new(),
+            "resume",
+            "Resume interrupted init",
+            "",
         ));
-        items.push((
+        items.push(prompt::item(
             ConfigSourceChoice::ContinueExisting,
-            "Continue with existing config".to_owned(),
-            String::new(),
+            "continue_existing",
+            "Continue with existing config",
+            "",
         ));
     } else {
-        items.push((
+        items.push(prompt::item(
             ConfigSourceChoice::ImportFile,
-            "Import acps-config.toml path".to_owned(),
-            String::new(),
+            "import_file",
+            "Import acps-config.toml path",
+            "",
         ));
-        items.push((
+        items.push(prompt::item(
             ConfigSourceChoice::PasteBase64,
-            "Paste base64 acps-config.toml".to_owned(),
-            String::new(),
+            "paste_base64",
+            "Paste base64 acps-config.toml",
+            "",
         ));
-        items.push((
+        items.push(prompt::item(
             ConfigSourceChoice::StartFresh,
-            "Start fresh".to_owned(),
-            String::new(),
+            "start_fresh",
+            "Start fresh",
+            "",
         ));
     }
 
-    match prompt::select(interactive, "Config source", &items)? {
+    match prompt::select(
+        prompt::HostedPromptKind::ConfigSource,
+        interactive,
+        "Config source",
+        &items,
+    )? {
         Some(ConfigSourceChoice::Resume) => {
             args.resume = true;
         }
         Some(ConfigSourceChoice::ContinueExisting | ConfigSourceChoice::StartFresh) | None => {}
         Some(ConfigSourceChoice::ImportFile) => {
-            let Some(path) = prompt::text(interactive, "acps-config.toml path", true)? else {
+            let Some(path) = prompt::text(
+                prompt::HostedPromptKind::ConfigSourcePath,
+                interactive,
+                "acps-config.toml path",
+                true,
+            )?
+            else {
                 return Ok(());
             };
             args.from_file = Some(PathBuf::from(path.trim()));
         }
         Some(ConfigSourceChoice::PasteBase64) => {
-            let Some(encoded) = prompt::text(interactive, "base64 acps-config.toml", true)? else {
+            let Some(encoded) = prompt::text(
+                prompt::HostedPromptKind::ConfigSourceBase64,
+                interactive,
+                "base64 acps-config.toml",
+                true,
+            )?
+            else {
                 return Ok(());
             };
             args.from_base64 = Some(encoded.trim().to_owned());
@@ -156,6 +186,297 @@ fn agent_install_progress_message(attempt: u32) -> String {
     } else {
         format!("installing agent (attempt {attempt}/{MAX_INSTALL_ATTEMPTS})")
     }
+}
+
+/// MCP applicability as the live handshake reports it. An agent that
+/// advertises no MCP transport cannot be given servers, and a probe that could
+/// not run leaves no evidence MCP works — both are inapplicable, with the
+/// probe's own wording as the reason.
+pub(super) fn mcp_applicability_from_probe(outcome: &CapabilityProbeOutcome) -> InitStateSignal {
+    match outcome {
+        CapabilityProbeOutcome::Probed(capabilities) => applicability(
+            InitCategory::Mcp,
+            capabilities.advertises_mcp_support(),
+            ApplicabilitySource::Probe,
+            "agent does not advertise MCP support",
+        ),
+        CapabilityProbeOutcome::Unavailable { reason } => {
+            applicability(InitCategory::Mcp, false, ApplicabilitySource::Probe, reason)
+        }
+    }
+}
+
+/// The MCP lane's outcome as the probe leaves it. A run that declared its
+/// servers up front never reaches the prompt that would otherwise settle this
+/// lane, and a resumed run re-probes every time, so this is where the servers
+/// the agent will actually be handed become known. `ignored` is the partition
+/// the probe already computed, which is what keeps this report and the
+/// runtime's own transport filtering from drifting apart; a partition that
+/// could not be computed arrives empty, leaving the list untrimmed rather than
+/// unreported. `None` when nothing will be delivered — an agent that advertises
+/// no MCP support has already been ruled inapplicable, and a run with no
+/// declared servers leaves the lane for the prompt to settle.
+pub(super) fn mcp_settlement_from_probe(
+    capabilities: &crate::runtime::agent::acp_bridge::AgentCapabilitiesDto,
+    config: &Config,
+    ignored: &[crate::runtime::agent::acp_bridge::IgnoredFeature],
+) -> Option<InitStateSignal> {
+    if !capabilities.advertises_mcp_support() {
+        return None;
+    }
+    let delivered = config
+        .mcp
+        .servers
+        .iter()
+        .map(|server| server.name())
+        .filter(|name| {
+            !ignored.iter().any(|feature| {
+                feature.feature == crate::runtime::agent::acp_bridge::IGNORED_FEATURE_MCP_SERVER
+                    && feature.target == *name
+            })
+        })
+        .collect::<Vec<_>>();
+    (!delivered.is_empty()).then(|| InitStateSignal::CategorySettled {
+        category: InitCategory::Mcp,
+        value: Some(delivered.join(", ")),
+    })
+}
+
+/// Skills freshly written this run. A resumed run whose skills were all
+/// already present installs nothing, which settles the category with no value
+/// rather than an empty list.
+fn installed_skill_names(reports: &[SkillInstallReport]) -> Option<String> {
+    let names = reports
+        .iter()
+        .flat_map(|report| report.installed.iter().map(|entry| entry.name.as_str()))
+        .collect::<Vec<_>>();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// A reason is carried only for an inapplicable verdict: "why is this lane
+/// missing" is the question a client asks, and an applicable lane answers it
+/// by simply appearing.
+fn applicability(
+    category: InitCategory,
+    applicable: bool,
+    source: ApplicabilitySource,
+    reason: &str,
+) -> InitStateSignal {
+    InitStateSignal::CategoryApplicability {
+        category,
+        applicable,
+        source,
+        reason: (!applicable).then(|| reason.to_owned()),
+    }
+}
+
+/// Everything knowable about the categories the instant the agent is settled:
+/// the registry says which lanes this agent even has, the flags say which of
+/// the remaining lanes this run will drive, and the config on disk says what
+/// the harness lanes already hold. Returned rather than emitted so the
+/// derivation is exercisable without a hosted driver.
+///
+/// MCP is deliberately absent from the applicability verdicts — the registry
+/// has no MCP column and only the live capability probe can answer it, so MCP
+/// stays provisionally applicable until the probe corrects it.
+pub(super) fn agent_settlement_signals(
+    config: &Config,
+    registry: &RegistryCatalog,
+    args: &InitArgs,
+    native_config_pending: bool,
+) -> Vec<InitStateSignal> {
+    let mut signals = vec![InitStateSignal::CategorySettled {
+        category: InitCategory::Agent,
+        value: Some(config.agent.id.clone()),
+    }];
+    let registry_applicability = |category, applicable, reason: &str| {
+        applicability(category, applicable, ApplicabilitySource::Registry, reason)
+    };
+    // A custom agent has no registry entry, so init drives none of the four
+    // harness-configuration lanes for it: provider, model, and mode go through
+    // the agent's own environment, and skills have no known install dir.
+    let entry = registry.lookup(&config.agent.id);
+    let custom_reason = "custom agents configure this outside acp-stack";
+    signals.push(registry_applicability(
+        InitCategory::Provider,
+        entry.is_some_and(|entry| entry.set_provider),
+        entry.map_or(custom_reason, |_| "agent does not take a provider"),
+    ));
+    signals.push(registry_applicability(
+        InitCategory::Model,
+        entry.is_some_and(|entry| entry.set_model),
+        entry.map_or(custom_reason, |_| "agent does not take a model"),
+    ));
+    signals.push(registry_applicability(
+        InitCategory::Mode,
+        entry.is_some_and(|entry| entry.set_mode),
+        entry.map_or(custom_reason, |_| "agent does not take a mode"),
+    ));
+    let skills_applicable = entry.is_some_and(|entry| {
+        entry.supports_agent_skills && entry.agent_skills_install_dir.is_some()
+    }) && !args.no_skills;
+    signals.push(registry_applicability(
+        InitCategory::Skills,
+        skills_applicable,
+        // The reason is wire surface for hosted clients, which have no flags:
+        // a hosted request turns skills off by declaring none of them.
+        if args.no_skills {
+            "no skills were declared"
+        } else {
+            entry.map_or(custom_reason, |_| "agent does not support Agent Skills")
+        },
+    ));
+    let args_applicability = |category, applicable, reason: &str| {
+        applicability(category, applicable, ApplicabilitySource::Args, reason)
+    };
+    signals.push(args_applicability(
+        InitCategory::Workspace,
+        !args.skip_workspace_init(),
+        "--skip-workspace-init",
+    ));
+    signals.push(args_applicability(
+        InitCategory::NativeConfig,
+        native_config_pending,
+        "no native Agent config was uploaded",
+    ));
+    signals.push(args_applicability(
+        InitCategory::Deps,
+        !pending_candidates(config, None).is_empty(),
+        "no pending dependency install actions",
+    ));
+    // A resumed run replays its configuration steps as skipped and a fully
+    // declared run never prompts, so on those paths no write site ever fires
+    // and the lanes would report `settled` with a null value. The config in
+    // hand is the outcome, so it is what gets reported; when a lane is really
+    // driven later, its write site settles it again with the same value, and
+    // an `awaiting_input` prompt still outranks a settlement while it is live.
+    // MCP is deliberately not settled here: only the probe knows whether the
+    // installed agent can be given servers at all, so its lane settles there.
+    // These three rest on the disk rather than on anything this run did, so they
+    // settle provisionally: an agent that dropped a lane since the config was
+    // written must still be able to retract it from the live discovery pass.
+    if let Some(provider) = config.agent.provider.as_ref() {
+        signals.push(InitStateSignal::CategoryProvisionallySettled {
+            category: InitCategory::Provider,
+            value: provider.id.clone(),
+        });
+    }
+    // `write_model_into_config` puts the model in the provider slot for
+    // provider-backed agents and at the agent root otherwise, clearing the slot
+    // it did not use; reading them in that order recovers the written value.
+    if let Some(model) = config
+        .agent
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.model.clone())
+        .or_else(|| config.agent.model.clone())
+    {
+        signals.push(InitStateSignal::CategoryProvisionallySettled {
+            category: InitCategory::Model,
+            value: model,
+        });
+    }
+    if let Some(mode) = config.agent.mode.clone() {
+        signals.push(InitStateSignal::CategoryProvisionallySettled {
+            category: InitCategory::Mode,
+            value: mode,
+        });
+    }
+    signals
+}
+
+/// Re-adopt the skill plan a resumed run recorded, for a resume that redeclared
+/// nothing about skills.
+///
+/// `agent_settlement_signals` runs well before this point and read the request's
+/// own `no_skills`, so a resume inheriting a skills-off verdict from the original
+/// run has already been reported to hosted clients as having a Skills lane. The
+/// skills step will not run and the terminal sweep would settle the lane with no
+/// value, so the verdict is corrected here — legally, since nothing has settled
+/// Skills yet.
+fn restore_recorded_skill_plan(args: &mut InitArgs, recorded: &RecordedInitArgs) {
+    args.skills_source = recorded.skills_source.clone();
+    args.skills = recorded.skills.clone();
+    args.essential_skills = recorded.essential_skills;
+    args.no_skills = recorded.no_skills;
+    if args.no_skills {
+        prompt::emit_state_signal(|| InitStateSignal::CategoryApplicability {
+            category: InitCategory::Skills,
+            applicable: false,
+            source: ApplicabilitySource::Args,
+            reason: Some("no skills were declared".to_owned()),
+        });
+    }
+}
+
+fn signal_category_failed(category: InitCategory, error: &StackError) {
+    prompt::emit_state_signal(|| InitStateSignal::CategoryFailed {
+        category,
+        code: error.error_code().to_owned(),
+    });
+}
+
+fn signal_step_started(kind: &'static str) {
+    prompt::emit_state_signal(|| InitStateSignal::StepStarted { kind });
+}
+
+fn signal_step_finished(kind: &'static str, result: &Result<StepDisposition>) {
+    prompt::emit_state_signal(|| InitStateSignal::StepFinished {
+        kind,
+        // A failed step has no disposition of its own; the error_code is what
+        // distinguishes it, so the executed/skipped axis reports the body ran.
+        disposition: result
+            .as_ref()
+            .copied()
+            .unwrap_or(StepDisposition::Executed),
+        error_code: result
+            .as_ref()
+            .err()
+            .map(|error| error.error_code().to_owned()),
+    });
+}
+
+/// `init_runner::record_step` bracketed with state signals. The runtime
+/// recorder stays ignorant of hosted concepts, so the bracketing lives here,
+/// on the driver side; the call order below is the authority on step sequence,
+/// never the ordinals.
+fn record_init_step(
+    store: &StateStore,
+    run: &crate::state::InitRunRecord,
+    ordinal: i64,
+    kind: &'static str,
+    verify: impl FnOnce() -> Result<bool>,
+    body: impl FnOnce() -> Result<StepOutcome>,
+) -> Result<StepDisposition> {
+    signal_step_started(kind);
+    let result = record_step(store, run, ordinal, kind, verify, body);
+    signal_step_finished(kind, &result);
+    result
+}
+
+/// Signal-bracketed [`crate::runtime::init_runner::record_step_with_default_log_dir`].
+#[allow(clippy::too_many_arguments)]
+fn record_init_step_with_default_log_dir(
+    store: &StateStore,
+    run: &crate::state::InitRunRecord,
+    ordinal: i64,
+    kind: &'static str,
+    default_log_dir: Option<&str>,
+    verify: impl FnOnce() -> Result<bool>,
+    body: impl FnOnce() -> Result<StepOutcome>,
+) -> Result<StepDisposition> {
+    signal_step_started(kind);
+    let result = crate::runtime::init_runner::record_step_with_default_log_dir(
+        store,
+        run,
+        ordinal,
+        kind,
+        default_log_dir,
+        verify,
+        body,
+    );
+    signal_step_finished(kind, &result);
+    result
 }
 
 pub(in crate::cli) fn run_init(args: InitArgs, mode: InitMode) -> Result<()> {
@@ -471,6 +792,9 @@ fn run_init_with_output(
         if args.model.is_none() {
             args.model = recorded.model.clone();
         }
+        if args.mode.is_none() {
+            args.mode = recorded.mode.clone();
+        }
         if args.provider.is_none() {
             args.provider = recorded.provider.clone();
         }
@@ -538,6 +862,15 @@ fn run_init_with_output(
         config = config::load_config_from_str(&canonical)?;
         atomic_write_owner_only(&config_path, canonical.as_bytes())?;
     }
+    // The agent is now final on every path into this point — fresh, existing,
+    // imported, resumed, or custom — which is what makes the registry-derived
+    // verdicts below trustworthy. `pending_init_native_config` still holds the
+    // uploaded config; `args.native_config_revision` covers the resumed form.
+    let native_config_pending =
+        pending_init_native_config.is_some() || args.native_config_revision.is_some();
+    prompt::emit_state_signals(|| {
+        agent_settlement_signals(&config, &registry, &args, native_config_pending)
+    });
 
     let recorded_native_config_operation: Option<
         crate::runtime::agent::native_config_import::NativeConfigOperation,
@@ -640,10 +973,7 @@ fn run_init_with_output(
         && args.skills.is_empty()
         && let Some(recorded) = recorded_args.as_ref()
     {
-        args.skills_source = recorded.skills_source.clone();
-        args.skills = recorded.skills.clone();
-        args.essential_skills = recorded.essential_skills;
-        args.no_skills = recorded.no_skills;
+        restore_recorded_skill_plan(&mut args, recorded);
     }
     if step_needs_resume(&prior_init_steps, step_kind::PROVIDER_CONFIGURE)
         && args.provider.is_none()
@@ -731,7 +1061,7 @@ fn run_init_with_output(
     } else {
         KeyPolicy::PreserveExisting
     };
-    let step_result = record_step(
+    let step_result = record_init_step(
         &store,
         &init_run,
         1,
@@ -902,7 +1232,7 @@ fn run_init_with_output(
         let verify_config = config.clone();
         let verify_workspace_root = PathBuf::from(config.workspace.root.clone());
         let verify_local_bin_dir = local_bin_dir(&home);
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             2,
@@ -986,7 +1316,7 @@ fn run_init_with_output(
         init_println!(output_mode, "progress: importing native Agent config");
         let already_applied = record.phase
             == crate::runtime::agent::native_config_import::NativeConfigOperationPhase::Applied;
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             11,
@@ -996,6 +1326,10 @@ fn run_init_with_output(
                 let (updated, operation) =
                     native_config::apply_for_init(record, &config_path, &state_path, &home)?;
                 config = updated;
+                prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+                    category: InitCategory::NativeConfig,
+                    value: Some(operation.revision.clone()),
+                });
                 handoff_context.native_config_import = Some(operation.clone());
                 if let Some(context) = key_handover.failure_context.as_mut() {
                     context.native_config_import = Some(operation.clone());
@@ -1041,7 +1375,7 @@ fn run_init_with_output(
             );
         };
         let verify_plan = plan.clone();
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             9,
@@ -1080,6 +1414,10 @@ fn run_init_with_output(
                 .map_err(|source| StackError::SkillInstallFailed {
                     reason: format!("serialize skill install report: {source}"),
                 })?;
+                prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+                    category: InitCategory::Skills,
+                    value: installed_skill_names(&reports),
+                });
                 skill_install_reports = reports;
                 Ok(StepOutcome::with_payload(payload))
             },
@@ -1113,7 +1451,7 @@ fn run_init_with_output(
         // would see `log_dir = NULL` exactly when they need the
         // captured stderr most.
         let log_dir_str = log_paths.run_dir.display().to_string();
-        let result = crate::runtime::init_runner::record_step_with_default_log_dir(
+        let result = record_init_step_with_default_log_dir(
             &store,
             &init_run,
             3,
@@ -1140,6 +1478,14 @@ fn run_init_with_output(
         }
     } else {
         init_println!(output_mode, "workspace: skipped (--skip-workspace-init)");
+        prompt::emit_state_signal(|| {
+            applicability(
+                InitCategory::Workspace,
+                false,
+                ApplicabilitySource::Args,
+                "--skip-workspace-init",
+            )
+        });
     }
 
     // -----------------------------------------------------------------
@@ -1149,6 +1495,19 @@ fn run_init_with_output(
     // `--deps-apply --deps-apply-yes` non-interactively.
     // -----------------------------------------------------------------
     let deps_candidates = pending_candidates(&config, None);
+    if deps_candidates.is_empty() {
+        // Re-asserted here rather than trusted from the agent-settlement
+        // derivation: the install and workspace steps in between can satisfy
+        // the last pending action.
+        prompt::emit_state_signal(|| {
+            applicability(
+                InitCategory::Deps,
+                false,
+                ApplicabilitySource::Args,
+                "no pending dependency install actions",
+            )
+        });
+    }
     // Probe escalation once and reuse it for the preflight notice and the
     // apply itself, so the prompt cannot promise a mode the apply won't use.
     let deps_escalation = if pending_system_candidates(&config, None).is_empty() {
@@ -1172,7 +1531,7 @@ fn run_init_with_output(
     };
     if deps_apply_requested || step_needs_resume(&prior_init_steps, step_kind::DEPS_APPLY) {
         init_println!(output_mode, "progress: applying dependencies");
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             10,
@@ -1288,7 +1647,7 @@ fn run_init_with_output(
     let mut probed_capabilities: Option<crate::runtime::agent::acp_bridge::AgentCapabilitiesDto> =
         None;
     let mut ignored_features: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature> = Vec::new();
-    let result = record_step(
+    let result = record_init_step(
         &store,
         &init_run,
         12,
@@ -1297,39 +1656,54 @@ fn run_init_with_output(
         // change the advertisement, and a stale "supported" is worse than one
         // redundant short-lived spawn.
         || Ok(false),
-        || match probe_agent_capabilities_for_init(&home, &config) {
-            CapabilityProbeOutcome::Probed(capabilities) => {
-                store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
-                // The ignore assessment is best-effort: an unresolvable MCP
-                // declaration (missing secret, absent stdio binary) is a
-                // pre-existing config condition surfaced at session time, not
-                // a reason to fail the probe step.
-                match crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, &secret_store)
+        || {
+            let outcome = probe_agent_capabilities_for_init(&home, &config);
+            // The handshake is the only authority on MCP: the registry has no
+            // MCP column, so whatever the agent just advertised (or failed to)
+            // overrides the provisional verdict.
+            prompt::emit_state_signal(|| mcp_applicability_from_probe(&outcome));
+            match outcome {
+                CapabilityProbeOutcome::Probed(capabilities) => {
+                    store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
+                    // The ignore assessment is best-effort: an unresolvable MCP
+                    // declaration (missing secret, absent stdio binary) is a
+                    // pre-existing config condition surfaced at session time, not
+                    // a reason to fail the probe step.
+                    match crate::runtime::agent::mcp::resolve_mcp_servers(
+                        &config.mcp,
+                        &secret_store,
+                    )
                     .and_then(|declared| capabilities.ignored_mcp_features(declared))
-                {
-                    Ok(ignored) => ignored_features = ignored,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "skipping MCP capability assessment: declared servers did not resolve"
-                        );
+                    {
+                        Ok(ignored) => ignored_features = ignored,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "skipping MCP capability assessment: declared servers did not resolve"
+                            );
+                        }
                     }
+                    if let Some(settlement) =
+                        mcp_settlement_from_probe(&capabilities, &config, &ignored_features)
+                    {
+                        prompt::emit_state_signal(|| settlement);
+                    }
+                    let payload = serde_json::json!({
+                        "probe_status": "ok",
+                        "protocol_version": capabilities.protocol_version,
+                        "agent_name": capabilities.agent_name,
+                        "ignored": ignored_features,
+                    });
+                    probed_capabilities = Some(capabilities);
+                    Ok(StepOutcome::with_payload(payload.to_string()))
                 }
-                let payload = serde_json::json!({
-                    "probe_status": "ok",
-                    "protocol_version": capabilities.protocol_version,
-                    "agent_name": capabilities.agent_name,
-                    "ignored": ignored_features,
-                });
-                probed_capabilities = Some(capabilities);
-                Ok(StepOutcome::with_payload(payload.to_string()))
-            }
-            CapabilityProbeOutcome::Unavailable { reason } => {
-                let payload = serde_json::json!({
-                    "probe_status": "unavailable",
-                    "reason": reason,
-                });
-                Ok(StepOutcome::with_payload(payload.to_string()))
+                CapabilityProbeOutcome::Unavailable { reason } => {
+                    let payload = serde_json::json!({
+                        "probe_status": "unavailable",
+                        "reason": reason,
+                    });
+                    Ok(StepOutcome::with_payload(payload.to_string()))
+                }
             }
         },
     );
@@ -1344,19 +1718,22 @@ fn run_init_with_output(
     // -----------------------------------------------------------------
     // Step 13: mcp_configure — interactive MCP prompting. Lives after the
     // probe (not in the pre-install wizard) because MCP support is only
-    // knowable from the installed agent's advertisement. Flag-driven runs
-    // declare MCP in the starter config and are covered by the
-    // ignored-features report; these prompts never reach hosted streams.
+    // knowable from the installed agent's advertisement, which also bounds
+    // the transport picker below (`advertises_mcp_support`, `offer_http`).
+    // Flag-driven runs declare MCP in the starter config and are covered by
+    // the ignored-features report. Hosted runs get the same prompts on the
+    // stream, each carrying its machine-readable kind; a session that
+    // declared MCP servers in its start request arrives here with a
+    // non-empty `config.mcp.servers` and skips prompting outright, so
+    // declaring up front still wins.
     // -----------------------------------------------------------------
-    let mcp_interactive = prompts_enabled(&args) && !prompt::hosted_driver_active();
-    let mcp_prompting_active =
-        creating_config && !args.resume && mcp_interactive && config.mcp.servers.is_empty();
+    let mcp_prompting_active = mcp_prompting_enabled(&args, creating_config, &config);
     // `step_needs_resume`: a resumed run must still settle a prior failed
     // `mcp_configure` row even though prompting is gated off on resume — the
     // body then settles it without prompts (the confirm gate below is
     // `mcp_prompting_active`, false on every resume path).
     if mcp_prompting_active || step_needs_resume(&prior_init_steps, step_kind::MCP_CONFIGURE) {
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             13,
@@ -1366,17 +1743,32 @@ fn run_init_with_output(
             || Ok(true),
             || {
                 let Some(capabilities) = probed_capabilities.as_ref() else {
-                    if output_mode.is_text() {
-                        println!("mcp: skipped (agent capabilities unavailable)");
-                    }
+                    init_println!(output_mode, "mcp: skipped (agent capabilities unavailable)");
+                    prompt::emit_state_signal(|| {
+                        applicability(
+                            InitCategory::Mcp,
+                            false,
+                            ApplicabilitySource::Probe,
+                            "agent capabilities unavailable",
+                        )
+                    });
                     return Ok(StepOutcome::with_payload(
                         r#"{"prompted":false,"reason":"probe_unavailable"}"#,
                     ));
                 };
                 if !capabilities.advertises_mcp_support() {
-                    if output_mode.is_text() {
-                        println!("mcp: skipped (agent does not advertise MCP support)");
-                    }
+                    init_println!(
+                        output_mode,
+                        "mcp: skipped (agent does not advertise MCP support)"
+                    );
+                    prompt::emit_state_signal(|| {
+                        applicability(
+                            InitCategory::Mcp,
+                            false,
+                            ApplicabilitySource::Probe,
+                            "agent does not advertise MCP support",
+                        )
+                    });
                     return Ok(StepOutcome::with_payload(
                         r#"{"prompted":false,"reason":"no_mcp_transports"}"#,
                     ));
@@ -1386,13 +1778,18 @@ fn run_init_with_output(
                 if offer_http {
                     transports_offered.push("http");
                 }
-                // Prompt calls must be skipped outright here, not just
-                // flagged non-interactive: `prompt::confirm` consults the
-                // hosted driver before the interactive flag, and the
-                // mcp_configure prompts must never reach hosted streams
-                // (docs/specs/init.md).
+                // The gate stays outside the call rather than riding only the
+                // `interactive` argument: `prompt::confirm` consults the
+                // hosted driver before that flag, so an unguarded call would
+                // re-drive the wizard on a resumed hosted run, whose answers
+                // this step cannot replay.
                 if mcp_prompting_active
-                    && prompt::confirm(mcp_prompting_active, "Add MCP servers?", false)?
+                    && prompt::confirm(
+                        prompt::HostedPromptKind::McpAdd,
+                        mcp_prompting_active,
+                        "Add MCP servers?",
+                        false,
+                    )?
                 {
                     prompt_mcp_servers(mcp_prompting_active, &mut args, offer_http)?;
                 }
@@ -1411,9 +1808,13 @@ fn run_init_with_output(
                         &config,
                         &mut secret_store,
                     )?;
-                    if output_mode.is_text() && !stored.is_empty() {
-                        println!("declared secrets: set ({})", stored.join(", "));
+                    if !stored.is_empty() {
+                        init_println!(output_mode, "declared secrets: set ({})", stored.join(", "));
                     }
+                    prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+                        category: InitCategory::Mcp,
+                        value: Some(added.join(", ")),
+                    });
                 }
                 let payload = serde_json::json!({
                     "prompted": mcp_prompting_active,
@@ -1435,21 +1836,22 @@ fn run_init_with_output(
     init_println!(output_mode, "progress: configuring provider and model");
     let provider_verify_config = config.clone();
     let provider_verify_home = home.clone();
-    let result = record_step(
+    let result = record_init_step(
         &store,
         &init_run,
         4,
         step_kind::PROVIDER_CONFIGURE,
         || {
             // Provider config is idempotent only when there's no explicit
-            // change requested for any lane this step owns (provider, model).
-            // We always re-run on resume so partial writes (e.g. missing secret
-            // refs) get re-collected, and so a resumed `--model` still gets
-            // validated and persisted rather than silently skipped because the
-            // prior succeeded row passes the verifier.
+            // change requested for any lane this step owns (provider, model,
+            // mode). We always re-run on resume so partial writes (e.g. missing
+            // secret refs) get re-collected, and so a resumed `--model`/`--mode`
+            // still gets validated and persisted rather than silently skipped
+            // because the prior succeeded row passes the verifier.
             let secret_store = SecretStore::open(&provider_verify_home)?;
             Ok(args.provider.is_none()
                 && args.model.is_none()
+                && args.mode.is_none()
                 && configured_provider_refs_satisfied(
                     &registry,
                     &provider_verify_config,
@@ -1457,13 +1859,29 @@ fn run_init_with_output(
                 ))
         },
         || {
+            // All three lanes live inside one step, so a step-level failure
+            // alone could not say which of them broke; the lane badges itself
+            // before the error propagates. The model/mode lanes badge
+            // themselves from inside `configure_model_and_mode_for_init`, which
+            // is the only place that knows which of the two was live.
+            // Settlement rides the config writes, the one place each value is
+            // written.
             let provider_configured = configure_provider_for_init(
                 &args,
                 &registry,
                 &mut config,
                 &config_path,
                 &mut secret_store,
-            )?;
+            )
+            .inspect_err(|error| signal_category_failed(InitCategory::Provider, error))?;
+            prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+                category: InitCategory::Provider,
+                value: config
+                    .agent
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider.id.clone()),
+            });
             let model_mode_outcome = configure_model_and_mode_for_init(
                 &args,
                 &home,
@@ -1478,7 +1896,8 @@ fn run_init_with_output(
                 verify_agent_acp_connection(&home, &config, output_mode.is_text())?;
             }
             let model_mode_changed =
-                matches!(model_mode_outcome.model_action, ModelModeAction::Set);
+                matches!(model_mode_outcome.model_action, ModelModeAction::Set)
+                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
             let subagent_configured = configure_subagent_inherit_for_init(
                 prompts_enabled(&args),
                 &registry,
@@ -1495,8 +1914,8 @@ fn run_init_with_output(
                 atomic_write_owner_only(&config_path, canonical.as_bytes())?;
             }
             Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
-                model_mode_outcome.model_action,
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
+                model_mode_outcome.model_action, model_mode_outcome.mode_action,
             )))
         },
     );
@@ -1553,7 +1972,7 @@ fn run_init_with_output(
     // -----------------------------------------------------------------
     let mut provisioned_agent_configs = Vec::new();
     init_println!(output_mode, "progress: writing agent headless config");
-    let result = record_step(
+    let result = record_init_step(
         &store,
         &init_run,
         5,
@@ -1604,7 +2023,7 @@ fn run_init_with_output(
     let mut provisioned_edge_artifacts = Vec::new();
     if edge_requested || step_needs_resume(&prior_init_steps, step_kind::EDGE_ARTIFACTS) {
         init_println!(output_mode, "progress: preparing Cloudflare edge artifacts");
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             6,
@@ -1681,7 +2100,7 @@ fn run_init_with_output(
     // Resume verifier: the event is already present in the unified log.
     // -----------------------------------------------------------------
     let verify_run_id = init_run.id.clone();
-    let result = record_step(
+    let result = record_init_step(
         &store,
         &init_run,
         7,
@@ -1803,7 +2222,7 @@ fn run_init_with_output(
     // the resolver above; only `Run` actually executes the agent.
     // -----------------------------------------------------------------
     if let Some(decision) = resolve_testflight_decision(&args, &config, &registry)? {
-        let result = record_step(
+        let result = record_init_step(
             &store,
             &init_run,
             8,
@@ -1898,6 +2317,7 @@ fn run_init_with_output(
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::Arc;
 
     #[derive(Debug, Parser)]
     struct TestInitArgs {
@@ -1926,6 +2346,627 @@ mod tests {
         assert_eq!(
             agent_install_progress_message(2),
             format!("installing agent (attempt 2/{MAX_INSTALL_ATTEMPTS})")
+        );
+    }
+
+    use prompt::RecordingPromptDriver as RecordingDriver;
+
+    fn config_for_agent(agent_id: &str) -> Config {
+        let mut config = config::load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture config");
+        config.agent.id = agent_id.to_owned();
+        config
+    }
+
+    fn applicability_of(signals: &[InitStateSignal], wanted: InitCategory) -> Option<bool> {
+        signals.iter().find_map(|signal| match signal {
+            InitStateSignal::CategoryApplicability {
+                category,
+                applicable,
+                ..
+            } if *category == wanted => Some(*applicable),
+            _ => None,
+        })
+    }
+
+    fn settlement_signals_for(agent_id: &str) -> Vec<InitStateSignal> {
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let args = parse_init_args(&[]);
+        agent_settlement_signals(&config_for_agent(agent_id), &registry, &args, false)
+    }
+
+    // amp declares set_provider=false/set_model=false in the registry, so a
+    // client must not show either lane as pending input that will never come.
+    #[test]
+    fn registry_derivation_marks_amp_provider_and_model_inapplicable() {
+        let signals = settlement_signals_for("amp");
+        assert_eq!(
+            signals.first(),
+            Some(&InitStateSignal::CategorySettled {
+                category: InitCategory::Agent,
+                value: Some("amp".to_owned()),
+            }),
+            "agent settles before anything is derived from it"
+        );
+        assert_eq!(
+            applicability_of(&signals, InitCategory::Provider),
+            Some(false)
+        );
+        assert_eq!(applicability_of(&signals, InitCategory::Model), Some(false));
+        assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));
+        assert_eq!(applicability_of(&signals, InitCategory::Skills), Some(true));
+    }
+
+    #[test]
+    fn registry_derivation_marks_cursor_provider_inapplicable_but_keeps_model() {
+        let signals = settlement_signals_for("cursor");
+        assert_eq!(
+            applicability_of(&signals, InitCategory::Provider),
+            Some(false)
+        );
+        assert_eq!(applicability_of(&signals, InitCategory::Model), Some(true));
+        assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));
+    }
+
+    #[test]
+    fn registry_derivation_marks_every_harness_lane_inapplicable_for_a_custom_agent() {
+        let signals = settlement_signals_for("not-in-the-registry");
+        for category in [
+            InitCategory::Provider,
+            InitCategory::Model,
+            InitCategory::Mode,
+            InitCategory::Skills,
+        ] {
+            assert_eq!(
+                applicability_of(&signals, category),
+                Some(false),
+                "custom agents configure {} outside acp-stack",
+                category.id()
+            );
+        }
+    }
+
+    #[test]
+    fn registry_derivation_reports_mcp_nowhere_and_reads_flags_for_the_rest() {
+        let signals = settlement_signals_for("opencode");
+        assert_eq!(
+            applicability_of(&signals, InitCategory::Mcp),
+            None,
+            "only the capability probe may rule on MCP"
+        );
+        assert_eq!(
+            applicability_of(&signals, InitCategory::Workspace),
+            Some(true)
+        );
+        assert_eq!(
+            applicability_of(&signals, InitCategory::NativeConfig),
+            Some(false),
+            "no native config was uploaded"
+        );
+        assert_eq!(
+            applicability_of(&signals, InitCategory::Deps),
+            Some(false),
+            "the fixture declares no dependency install actions"
+        );
+    }
+
+    #[test]
+    fn registry_derivation_honors_no_skills() {
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let args = parse_init_args(&["--no-skills"]);
+        let signals = agent_settlement_signals(&config_for_agent("amp"), &registry, &args, false);
+        assert_eq!(
+            applicability_of(&signals, InitCategory::Skills),
+            Some(false)
+        );
+    }
+
+    fn skills_applicability_under_restore(recorded: &RecordedInitArgs) -> (InitArgs, Option<bool>) {
+        // The hosted resume shape: the request redeclares nothing about skills,
+        // so `no_skills` is false when the settlement signals go out and only
+        // the recorded run can put it back.
+        let mut args = parse_init_args(&["--resume"]);
+        let driver = Arc::new(RecordingDriver::default());
+        prompt::with_hosted_driver(driver.clone(), || {
+            restore_recorded_skill_plan(&mut args, recorded);
+        });
+        let applicability = applicability_of(&driver.recorded(), InitCategory::Skills);
+        (args, applicability)
+    }
+
+    // The settlement signals fire before the recorded args are restored, so a
+    // resume of a `--no-skills` run has already reported the lane as applicable
+    // by the time the restore turns the skills step off. Without the correction
+    // the terminal sweep would settle Skills with no value, telling the client
+    // the lane ran.
+    #[test]
+    fn a_resume_that_inherits_no_skills_withdraws_the_skills_lane() {
+        let (args, applicability) = skills_applicability_under_restore(&RecordedInitArgs {
+            no_skills: true,
+            ..Default::default()
+        });
+        assert!(args.no_skills);
+        assert_eq!(applicability, Some(false));
+    }
+
+    #[test]
+    fn a_resume_that_inherits_a_skill_plan_leaves_the_skills_lane_alone() {
+        let (args, applicability) = skills_applicability_under_restore(&RecordedInitArgs {
+            skills_source: Some("github:example".to_owned()),
+            skills: vec!["writing-plans".to_owned()],
+            ..Default::default()
+        });
+        assert_eq!(args.skills_source.as_deref(), Some("github:example"));
+        assert_eq!(args.skills, vec!["writing-plans".to_owned()]);
+        assert_eq!(
+            applicability, None,
+            "a resume that still has skills to install must not retract the lane"
+        );
+    }
+
+    #[test]
+    fn registry_derivation_reports_a_pending_native_config_as_applicable() {
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let args = parse_init_args(&[]);
+        let signals = agent_settlement_signals(&config_for_agent("amp"), &registry, &args, true);
+        assert_eq!(
+            applicability_of(&signals, InitCategory::NativeConfig),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn registry_derivation_reports_pending_dependencies_as_applicable() {
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let args = parse_init_args(&[]);
+        let mut config = config_for_agent("opencode");
+        config.dependencies = crate::config::DependenciesConfig {
+            commands: vec![crate::config::DependencyEntry {
+                name: "acps-state-signal-absent-tool".to_owned(),
+                required: true,
+                feature: None,
+                install: Some(crate::config::DependencyInstallAction {
+                    shell: "true".to_owned(),
+                    creates: Some("acps-state-signal-absent-tool".to_owned()),
+                    scope: crate::config::DependencyInstallScope::User,
+                    timeout_secs: None,
+                }),
+            }],
+            ..Default::default()
+        };
+        let signals = agent_settlement_signals(&config, &registry, &args, false);
+        assert_eq!(applicability_of(&signals, InitCategory::Deps), Some(true));
+    }
+
+    #[test]
+    fn probe_rules_on_mcp_applicability() {
+        // Spelled out rather than routed back through `applicability`: the rule
+        // under test is that an applicable verdict carries no reason, and
+        // reusing the helper the implementation uses would assert nothing.
+        let advertised = capabilities_fixture(serde_json::json!({ "http": true }));
+        assert_eq!(
+            mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(advertised)),
+            InitStateSignal::CategoryApplicability {
+                category: InitCategory::Mcp,
+                applicable: true,
+                source: ApplicabilitySource::Probe,
+                reason: None,
+            },
+        );
+
+        let silent = capabilities_fixture(serde_json::json!({}));
+        assert_eq!(
+            mcp_applicability_from_probe(&CapabilityProbeOutcome::Probed(silent)),
+            InitStateSignal::CategoryApplicability {
+                category: InitCategory::Mcp,
+                applicable: false,
+                source: ApplicabilitySource::Probe,
+                reason: Some("agent does not advertise MCP support".to_owned()),
+            },
+        );
+
+        assert_eq!(
+            mcp_applicability_from_probe(&CapabilityProbeOutcome::Unavailable {
+                reason: "agent command `placebo` not found on PATH".to_owned(),
+            }),
+            InitStateSignal::CategoryApplicability {
+                category: InitCategory::Mcp,
+                applicable: false,
+                source: ApplicabilitySource::Probe,
+                reason: Some("agent command `placebo` not found on PATH".to_owned()),
+            },
+        );
+    }
+
+    fn config_without_mcp_servers() -> Config {
+        let mut config = config_for_agent("opencode");
+        config.mcp.servers.clear();
+        config
+    }
+
+    fn config_with_mcp_servers(names: &[&str]) -> Config {
+        let mut config = config_without_mcp_servers();
+        config.mcp.servers = names
+            .iter()
+            .map(|name| {
+                crate::config::McpServerConfig::Stdio(crate::config::McpStdioServer {
+                    name: (*name).to_owned(),
+                    command: format!("mcp-{name}"),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                })
+            })
+            .collect();
+        config
+    }
+
+    fn ignored_mcp_server(name: &str) -> crate::runtime::agent::acp_bridge::IgnoredFeature {
+        crate::runtime::agent::acp_bridge::IgnoredFeature {
+            feature: crate::runtime::agent::acp_bridge::IGNORED_FEATURE_MCP_SERVER,
+            target: name.to_owned(),
+            capability: "mcpCapabilities.stdio",
+            reason: "agent does not advertise this MCP transport".to_owned(),
+        }
+    }
+
+    fn settled_mcp(value: &str) -> Option<InitStateSignal> {
+        Some(InitStateSignal::CategorySettled {
+            category: InitCategory::Mcp,
+            value: Some(value.to_owned()),
+        })
+    }
+
+    // The lane reports what the agent will actually be handed, which is why the
+    // settlement reads the probe's own partition rather than the config list.
+    #[test]
+    fn probe_settles_mcp_with_the_servers_the_agent_will_be_given() {
+        let config = config_with_mcp_servers(&["linear", "files"]);
+        let advertised = capabilities_fixture(serde_json::json!({ "stdio": true }));
+        assert_eq!(
+            mcp_settlement_from_probe(&advertised, &config, &[]),
+            settled_mcp("linear, files")
+        );
+        assert_eq!(
+            mcp_settlement_from_probe(&advertised, &config, &[ignored_mcp_server("files")]),
+            settled_mcp("linear"),
+            "a server the agent cannot take must not be reported as configured"
+        );
+        assert_eq!(
+            mcp_settlement_from_probe(
+                &advertised,
+                &config,
+                &[ignored_mcp_server("linear"), ignored_mcp_server("files")]
+            ),
+            None,
+            "nothing delivered leaves the lane for the applicability verdict"
+        );
+    }
+
+    // Both ways the settlement declines: the agent takes no servers at all, and
+    // the run declared none. The first is the case the probe-first ordering
+    // exists for — the applicability verdict has to be the last word.
+    #[test]
+    fn probe_settles_no_mcp_without_support_or_declarations() {
+        assert_eq!(
+            mcp_settlement_from_probe(
+                &capabilities_fixture(serde_json::json!({})),
+                &config_with_mcp_servers(&["linear"]),
+                &[],
+            ),
+            None
+        );
+        assert_eq!(
+            mcp_settlement_from_probe(
+                &capabilities_fixture(serde_json::json!({ "stdio": true })),
+                &config_without_mcp_servers(),
+                &[],
+            ),
+            None
+        );
+    }
+
+    fn declared_stdio_servers() -> Vec<crate::config::McpServerConfig> {
+        mcp_servers_from_prompted(
+            &[InitMcpStdioServer {
+                name: "files".to_owned(),
+                command: "mcp-files".to_owned(),
+                args: Vec::new(),
+                env: Vec::new(),
+            }],
+            &[],
+        )
+        .expect("declared servers")
+    }
+
+    // The hosted lift's boundary: a session that declared nothing gets the
+    // streamed picker, and one that declared its servers up front is left
+    // alone — the wizard is skipped, not answered on the client's behalf.
+    #[test]
+    fn declared_mcp_servers_keep_a_hosted_run_out_of_the_wizard() {
+        let args = parse_init_args(&[]);
+        let mut config = config_without_mcp_servers();
+        prompt::with_hosted_driver(Arc::new(RecordingDriver::default()), || {
+            assert!(
+                mcp_prompting_enabled(&args, true, &config),
+                "a hosted session that declared no MCP servers gets the picker"
+            );
+            config.mcp.servers = declared_stdio_servers();
+            assert!(
+                !mcp_prompting_enabled(&args, true, &config),
+                "declared servers skip prompting entirely"
+            );
+        });
+    }
+
+    // The lift only widened the hosted path: every other run reaches the
+    // wizard exactly as before.
+    #[test]
+    fn mcp_prompting_stays_off_for_non_hosted_and_flag_driven_runs() {
+        let config = config_without_mcp_servers();
+        assert!(
+            !mcp_prompting_enabled(&parse_init_args(&[]), true, &config),
+            "no hosted driver and no terminal stdin under `cargo test`"
+        );
+        prompt::with_hosted_driver(Arc::new(RecordingDriver::default()), || {
+            for flag in ["--non-interactive", "--handoff-json", "--resume"] {
+                let args = parse_init_args(&[flag]);
+                assert!(
+                    !mcp_prompting_enabled(&args, true, &config),
+                    "`{flag}` must keep the MCP wizard off"
+                );
+            }
+            assert!(
+                !mcp_prompting_enabled(&parse_init_args(&[]), false, &config),
+                "an existing config is never re-prompted for MCP"
+            );
+        });
+    }
+
+    fn capabilities_fixture(
+        mcp_capabilities: serde_json::Value,
+    ) -> crate::runtime::agent::acp_bridge::AgentCapabilitiesDto {
+        serde_json::from_value(serde_json::json!({
+            "protocol_version": 1,
+            "capabilities": { "mcpCapabilities": mcp_capabilities },
+            "agent_name": "placebo",
+            "agent_title": null,
+            "agent_version": null,
+        }))
+        .expect("capabilities fixture")
+    }
+
+    /// The step kinds in the order `run_init_with_output` drives them. Call
+    /// order is the authority on sequence, so this list is maintained against
+    /// the call sites, never against the ordinals.
+    const STEP_CALL_ORDER: [&str; 13] = [
+        step_kind::SECRETS_INIT,
+        step_kind::AGENT_INSTALL,
+        step_kind::NATIVE_CONFIG_IMPORT,
+        step_kind::AGENT_SKILLS_INSTALL,
+        step_kind::WORKSPACE_MATERIALIZE,
+        step_kind::DEPS_APPLY,
+        step_kind::CAPABILITY_PROBE,
+        step_kind::MCP_CONFIGURE,
+        step_kind::PROVIDER_CONFIGURE,
+        step_kind::AGENT_HEADLESS_CONFIG,
+        step_kind::EDGE_ARTIFACTS,
+        step_kind::INIT_COMPLETE,
+        step_kind::TESTFLIGHT,
+    ];
+
+    fn test_store() -> (tempfile::TempDir, StateStore, crate::state::InitRunRecord) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::open(dir.path().join("state.sqlite")).expect("store");
+        store.migrate().expect("migrate");
+        let run = crate::runtime::init_runner::begin_run(&store, None, None, "{}").expect("run");
+        (dir, store, run)
+    }
+
+    /// Drives every step through its wrapper, including the pre-created
+    /// log-dir variant workspace materialization uses.
+    fn drive_all_steps(store: &StateStore, run: &crate::state::InitRunRecord) {
+        for (index, kind) in STEP_CALL_ORDER.iter().enumerate() {
+            let ordinal = index as i64 + 1;
+            if *kind == step_kind::WORKSPACE_MATERIALIZE {
+                record_init_step_with_default_log_dir(
+                    store,
+                    run,
+                    ordinal,
+                    kind,
+                    Some("/tmp/acps-test-logs"),
+                    || Ok(false),
+                    || Ok(StepOutcome::empty()),
+                )
+                .expect("workspace step");
+            } else {
+                record_init_step(
+                    store,
+                    run,
+                    ordinal,
+                    kind,
+                    || Ok(false),
+                    || Ok(StepOutcome::empty()),
+                )
+                .expect("step");
+            }
+        }
+    }
+
+    #[test]
+    fn step_wrappers_signal_started_and_finished_in_call_order() {
+        let (_dir, store, run) = test_store();
+        let driver = Arc::new(RecordingDriver::default());
+        prompt::with_hosted_driver(driver.clone(), || drive_all_steps(&store, &run));
+
+        let expected: Vec<InitStateSignal> = STEP_CALL_ORDER
+            .iter()
+            .flat_map(|kind| {
+                [
+                    InitStateSignal::StepStarted { kind },
+                    InitStateSignal::StepFinished {
+                        kind,
+                        disposition: StepDisposition::Executed,
+                        error_code: None,
+                    },
+                ]
+            })
+            .collect();
+        assert_eq!(driver.recorded(), expected);
+    }
+
+    // A terminal run must not merely discard signals, it must never build
+    // them: the derivations behind them walk the registry and the filesystem.
+    #[test]
+    fn signals_are_never_built_without_a_hosted_driver() {
+        let built = std::cell::Cell::new(false);
+        prompt::emit_state_signal(|| {
+            built.set(true);
+            InitStateSignal::StepStarted {
+                kind: step_kind::AGENT_INSTALL,
+            }
+        });
+        prompt::emit_state_signals(|| {
+            built.set(true);
+            Vec::new()
+        });
+        assert!(!built.get());
+    }
+
+    #[test]
+    fn step_wrapper_carries_the_error_code_of_a_failed_step() {
+        let (_dir, store, run) = test_store();
+        let driver = Arc::new(RecordingDriver::default());
+        let error = prompt::with_hosted_driver(driver.clone(), || {
+            record_init_step(
+                &store,
+                &run,
+                1,
+                step_kind::AGENT_INSTALL,
+                || Ok(false),
+                || {
+                    Err(StackError::AgentInitializeFailed {
+                        reason: "synthetic".to_owned(),
+                    })
+                },
+            )
+            .expect_err("body error propagates")
+        });
+        assert_eq!(
+            driver.recorded(),
+            vec![
+                InitStateSignal::StepStarted {
+                    kind: step_kind::AGENT_INSTALL,
+                },
+                InitStateSignal::StepFinished {
+                    kind: step_kind::AGENT_INSTALL,
+                    disposition: StepDisposition::Executed,
+                    error_code: Some(error.error_code().to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn step_wrapper_reports_a_verifier_skip_as_skipped() {
+        let (_dir, store, run) = test_store();
+        record_init_step(
+            &store,
+            &run,
+            1,
+            step_kind::AGENT_INSTALL,
+            || Ok(false),
+            || Ok(StepOutcome::empty()),
+        )
+        .expect("first pass");
+
+        let driver = Arc::new(RecordingDriver::default());
+        prompt::with_hosted_driver(driver.clone(), || {
+            record_init_step(
+                &store,
+                &run,
+                1,
+                step_kind::AGENT_INSTALL,
+                || Ok(true),
+                || panic!("verified step must not re-run its body"),
+            )
+            .expect("resume")
+        });
+        assert_eq!(
+            driver.recorded(),
+            vec![
+                InitStateSignal::StepStarted {
+                    kind: step_kind::AGENT_INSTALL,
+                },
+                InitStateSignal::StepFinished {
+                    kind: step_kind::AGENT_INSTALL,
+                    disposition: StepDisposition::Skipped,
+                    error_code: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_skill_names_omits_an_empty_list() {
+        assert_eq!(installed_skill_names(&[]), None);
+    }
+
+    // The highest-blast-radius part of the mode lane: amp-class agents
+    // (set_model=false) never spawned during init before it existed, so a
+    // harness that cannot complete a provisional session must degrade to a
+    // skipped lane rather than fail the run. The stub resolves and spawns, then
+    // exits without speaking ACP — exactly the shape of that failure.
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let stub = tempdir.path().join("silent-agent");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub written");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("stub is executable");
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let mut config = config_for_agent("amp");
+        config.agent.command = stub.display().to_string();
+        config.agent.args = Vec::new();
+        config.agent.env = Vec::new();
+        config.agent.install = None;
+        config.agent.cwd = Some(tempdir.path().display().to_string());
+        config.workspace.root = tempdir.path().display().to_string();
+        let args = parse_init_args(&[]);
+        let driver = Arc::new(RecordingDriver::default());
+
+        let outcome = prompt::with_hosted_driver(driver.clone(), || {
+            configure_model_and_mode_for_init(
+                &args,
+                tempdir.path(),
+                &registry,
+                &mut config,
+                &tempdir.path().join("acps-config.toml"),
+            )
+        })
+        .expect("a mode-only discovery failure must not fail init");
+
+        assert_eq!(outcome.mode_action, ModelModeAction::Skipped);
+        assert!(config.agent.mode.is_none());
+        assert!(
+            driver.recorded().iter().any(|signal| matches!(
+                signal,
+                InitStateSignal::CategoryApplicability {
+                    category: InitCategory::Mode,
+                    applicable: false,
+                    // Not `Discovery`: the session never opened, so this reports
+                    // that the check could not be made, which is not grounds for
+                    // withdrawing a mode the config already holds.
+                    source: ApplicabilitySource::DiscoveryUnavailable,
+                    ..
+                }
+            )),
+            "the skipped lane is reported, not silent: {:?}",
+            driver.recorded()
         );
     }
 }

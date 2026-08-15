@@ -48,17 +48,19 @@ Binary downloads and WebSocket frames are not wrapped in this envelope.
 | Route                                      | Contract |
 | ------------------------------------------ | -------- |
 | `POST /v1/init/sessions`                  | starts one active init session and accepts optional initial agent/provider/model/workspace args, environment configuration declarations, plus an in-memory native config upload |
-| `GET /v1/init/sessions/{id}`              | returns non-secret status, pending input, recent progress, `last_activity_age_secs`, and `completed_awaiting_ack` when a result exists |
-| `GET /v1/init/sessions/{id}/events?after_seq=N` | replays non-secret progress and input lifecycle events |
+| `GET /v1/init/sessions/{id}`              | returns non-secret status, the category `state` snapshot, pending input, recent progress, `last_activity_age_secs`, and `completed_awaiting_ack` when a result exists |
+| `GET /v1/init/sessions/{id}/events?after_seq=N` | replays non-secret progress, state, and input lifecycle events |
 | `GET /v1/init/sessions/{id}/ws`           | upgrades to the hosted init WebSocket |
 
 `POST /v1/init/sessions` returns `{ "session_id": "...", "status": "running" }` in the standard success envelope. It returns `409 init.session_active` while another session is running or awaiting result acknowledgement. Unknown request fields are rejected.
 
 The request body groups into:
 
-- Agent/provider/model: `agent`, `provider`, `api_key_ref`, `model`, `custom_provider`, `provider_name`, `base_url`, `provider_api`, `model_name`, `context`, `output_max_tokens`, `skip_testflight`, `testflight`, `native_config` (`{ "filename", "content" }`).
+- Agent/provider/model/mode: `agent`, `provider`, `api_key_ref`, `model`, `mode`, `custom_provider`, `provider_name`, `base_url`, `provider_api`, `model_name`, `context`, `output_max_tokens`, `skip_testflight`, `testflight`, `native_config` (`{ "filename", "content" }`). `mode` is the initial session mode id, validated against the agent's ACP-advertised `mode` values by the same provisional session that discovers models; declaring it here skips the streamed mode picker. `api_key_ref` and `custom_provider` each require `provider`, and `provider_name`, `base_url`, `provider_api`, `model_name`, `context`, and `output_max_tokens` each require `custom_provider: true`; a field arriving without its anchor is a `400` naming the offending field, never echoing its value.
+- Custom agent (the escape-hatch agent, mirroring the `--custom-agent-*` flags): `custom_agent_id`, `custom_agent_name`, `custom_agent_command`, `custom_agent_args` (array), `custom_agent_install`, `custom_agent_creates`. Custom-agent prompts are never streamed, so the whole spec must arrive here. Every other field in this group requires `custom_agent_id`; `custom_agent_id` in turn requires non-blank `custom_agent_command` and `custom_agent_install`, and conflicts with `agent`, `provider`, `model`, `mode`, and `custom_provider: true`. Violations are a `400` naming the offending field, never echoing its value. Reserved and registry-colliding ids are rejected later, in-session, where the registry is in hand.
+- Run selection: `resume` and `fresh` booleans, matching `--resume` and `--fresh`; they conflict with each other. `resume` continues the most recent unfinished or failed run instead of starting another — recorded arguments replay, and any field set in this request layers on top like an explicit flag. Hosted init rotates keys on every run, including a resumed one.
 - Workspace: `workspace_root`, `workspace_uploads`, `runtime_user`, `sandbox`, `code_from` (array of git URLs), `data_from` (array of local paths or https archive URLs).
-- Environment configuration (mirrors the `acps init` flag and wizard surface; these replace the interactive environment wizard, which is never streamed to hosted clients):
+- Environment configuration (mirrors the `acps init` flag and wizard surface; these replace the interactive environment wizard, which is never streamed to hosted clients — the one exception is the post-install MCP step, whose prompts stream when this request declared no MCP server):
   - `mcp_preset`: array of preset ids (`linear`).
   - `mcp_stdio`: array of `{ "name", "command", "args": [...], "env": [...] }`; each `env` entry is a bare secret ref name exported into the server's environment, or a `VAR=template` entry whose template interpolates `${SECRET_REF}` (rules in [config.md](../config.md)).
   - `mcp_http`: array of `{ "name", "url", "headers": [{ "name", "value_ref"? , "value"? }] }`; each header sets exactly one of `value_ref` (whole-value secret ref) or `value` (a `${SECRET_REF}`-interpolated template). URLs must be https, or http to a loopback host (a local relay endpoint).
@@ -71,9 +73,42 @@ The create route validates request shape, the cross-field rules above, and the M
 
 Secret values referenced by these declarations (MCP `env`/`value_ref` entries, refs inside `${}` templates, S3 key refs) are never carried in the request body: init collects any refs missing from the secret store over the prompt stream as `password` inputs with `required: false`. Answering with `null` skips a ref without failing the session; a skipped MCP secret later surfaces through runtime MCP health, and a skipped S3 key ref fails workspace materialization. Provider key ref prompts stream `required: true` instead: a `null` answer is accepted but a still-unresolved provider ref fails the session. The values never appear in status or event replay.
 
-Status and event replay never include plaintext session/admin keys or secret input values. Pending input includes `request_id`, `style`, `prompt`, `required`, optional `default`, and visible option labels/hints. A native upload produces `style: "native_config_review"` plus the redacted `inspection`; its client response value is the revision-bound selection object used by the normal import contract. Client `input` frames must include the active `request_id`; stale input is rejected.
+Status and event replay never include plaintext session/admin keys or secret input values. Pending input includes `request_id`, `kind`, `style`, `prompt`, `required`, optional `default`, and per-option `index`, `value`, `label`, and `hint`. `kind` is the machine-readable prompt identity (`agent`, `provider_id`, `model`, `mode`, `mcp_transport`, `secret_ref_value`, and so on) and is the field a client routes on; `style` remains the rendering hint. Option `value` is a stable id that survives display rewording, so answers may address a choice as `{"value": "<id>"}` in addition to the existing index, label, and `null` forms; an unknown value is rejected as an invalid parameter. A native upload produces `style: "native_config_review"` plus the redacted `inspection`; its client response value is the revision-bound selection object used by the normal import contract. Client `input` frames must include the active `request_id`; stale input is rejected.
 
-WebSocket server frames are `hello`, `progress`, `input_required`, `input_accepted`, `result`, and `error`. Client frames are `input`, `cancel`, `replay_result`, `ack_result`, `replay_error`, and `ack_error`. The final `result` frame carries the platform handoff payload and always includes plaintext `session_key` and `admin_key`: hosted init generates them on a fresh instance and rotates them over pre-existing state, so a keyless result cannot occur.
+WebSocket server frames are `hello`, `progress`, `state`, `input_required`, `input_accepted`, `result`, and `error`. Client frames are `input`, `cancel`, `replay_result`, `ack_result`, `replay_error`, and `ack_error`. The final `result` frame carries the platform handoff payload and always includes plaintext `session_key` and `admin_key`: hosted init generates them on a fresh instance and rotates them over pre-existing state, so a keyless result cannot occur.
+
+The `state` frame reports what init has settled, what it is working on, and what it is waiting for, so a client renders progress from structure instead of parsing `progress` text. It is a seq-bearing event: it appears in event replay (`after_seq`) alongside `progress`, and one frame is emitted per real transition — an update that changes nothing observable allocates no seq. The same snapshot is embedded as a `state` field in the `hello` frame and in the status response body, so a client that connects late, or reconnects after the bounded event history evicted early frames, is current without replaying anything.
+
+```json
+{
+  "categories": [
+    { "id": "agent", "status": "settled", "value": "opencode" },
+    { "id": "provider", "status": "awaiting_input" },
+    { "id": "model", "status": "blocked", "blocked_on": "provider" },
+    { "id": "mode", "status": "blocked", "blocked_on": "model" },
+    { "id": "workspace", "status": "settled" },
+    { "id": "native_config", "status": "not_applicable", "reason": "no native Agent config was uploaded" },
+    { "id": "mcp", "status": "settled", "value": "linear" },
+    { "id": "skills", "status": "settled", "value": "pdf, xlsx" },
+    { "id": "deps", "status": "not_applicable", "reason": "no pending dependency install actions" }
+  ],
+  "current_step": "provider_configure",
+  "seq": 41,
+  "session_id": "...",
+  "type": "state"
+}
+```
+
+`categories` always carries all nine entries in this order: `agent`, `provider`, `model`, `mode`, `workspace`, `native_config`, `mcp`, `skills`, `deps`. Each entry has a `status`, listed below in the precedence the snapshot resolves them — a category that qualifies for more than one reports the first that matches:
+
+- `failed` — with the typed error `code` that broke the lane. A lane that broke did run, so failure outranks a `not_applicable` verdict that arrived before it.
+- `not_applicable` — this run has no such lane (the registry says the agent does not take a provider, the capability probe found no MCP support, the harness advertised no modes, the operator skipped workspace init). A `reason` string names what ruled the lane out; it is the only status that carries one.
+- `awaiting_input` — the pending prompt belongs to this category. At most one category can hold it, since there is one pending input at a time.
+- `settled` — done, with an optional `value` naming what was written. Values are ids and secret ref names only (the provider settles with the configured provider id, not the key behind it), never secret values. A settlement this run wrote is never withdrawn as inapplicable, and neither is a failure — though a settled lane still moves to `failed` if the step behind it breaks afterwards; a settlement carried over from configuration that predates the run — what a resumed or fully declared run reports for its provider, model, and mode lanes — is withdrawn, value and all, when the live capability probe or session discovery finds the installed agent no longer has the lane, but never merely because that live check could not be made.
+- `blocked` — waiting on the category named in `blocked_on`. `provider` waits on `agent`, `model` on `provider`, `mode` on `model`, and both `mcp` and `skills` on `agent`; `workspace`, `native_config`, and `deps` wait on nothing.
+- `ready` — applicable, unblocked, not yet settled.
+
+`current_step` is the durable init step the run is inside, using the step-kind vocabulary recorded in state (`agent_install`, `capability_probe`, `mcp_configure`, `provider_configure`, and so on); it is `null` before the first step starts. Steps with no category of their own surface only here. An `input_required` whose `kind` belongs to a category is always followed by the `state` frame that marks that category `awaiting_input`; cross-cutting prompts that belong to no category (`secret_ref_value`, `testflight_confirm`, and the other setup kinds) leave nothing awaiting input and raise no `state` frame at all. A failure inside a step that owns a category marks a category `failed` in a `state` frame before the terminal `error` frame: the lane that already took the blame where one did (`provider_configure` covers the provider, model, and mode lanes, and the lane that broke badges itself), otherwise the step's own lane, and no category at all when that lane is one this run does not have — there the `error` frame and `current_step` carry the failure alone; a failure owning no live step moves no category and emits no `state` frame before the `error`. After init completes successfully, no category is left as `ready`. The frontier freezes with the session: once it is canceled, closed, errored, or awaiting result acknowledgement, no later `state` frame is recorded and the snapshot in `hello` and the status route stops moving, so the terminal frame is the last word on what the run settled. A `state` payload that cannot be encoded parks the session as errored with code `init.frame_encode_failed` rather than silently dropping the transition.
 
 Environment declarations the installed agent's capabilities do not cover do not fail the session: they are written to config, skipped at runtime, and reported only through the result payload's `ignored_features` (see [init.md](../init.md#platform-handoff-json)), never through `progress` frames.
 
