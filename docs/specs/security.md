@@ -31,7 +31,7 @@ Both keys are presented as `Authorization: Bearer <key>` and validated against s
 
 Secret values are stored in the encrypted local secret store. Config files carry secret reference names only.
 
-The same `secrets.age` ciphertext contains the instance-wide mapped-provider credential catalog. A provider has either one aliasless credential or a permanently promoted alias map. Each credential bundle contains its required and supplied env fields, retained source-ref names, and an opaque revision used only to detect whether a running process is stale.
+The same `secrets.age` ciphertext contains the instance-wide provider credential catalog, covering mapped providers (keyed by their canonical env vars) and configured custom providers (keyed by the provider's configured `api_key_ref`, which config validation requires to be identical across every declaration of that custom provider id, since one credential set is stored per id). A provider has either one aliasless credential or a permanently promoted alias map. Each credential bundle contains its required and supplied env fields, retained source-ref names, and an opaque revision used only to detect whether a running process is stale.
 
 Catalog entries carry a provenance source: operator (the default, written by CLI and import flows) or external, owned by a named managed-state extension namespace (see [extensions.md](extensions.md)). Overwrite protection is a property of the store: operator flows refuse to touch external entries, an external namespace can only create entries or replace its own, and the ciphertext also carries each namespace's applied-revision watermark, persisted atomically with the catalog swap so the watermark never diverges from the stored credential.
 

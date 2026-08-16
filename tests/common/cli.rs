@@ -259,6 +259,29 @@ pub fn seed_provider_credential(home: &std::path::Path, provider_id: &str, env_n
         .expect("provider credential should be stored");
 }
 
+/// Seed a catalog credential WITHOUT the flat-store copy, mirroring what a
+/// managed-state apply leaves behind: the value lives only in the structured
+/// catalog.
+pub fn seed_catalog_only_provider_credential(
+    home: &std::path::Path,
+    provider_id: &str,
+    values: &[(&str, &str)],
+) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store should open");
+    let values = values
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let mut catalog = store.provider_credentials().clone();
+    catalog.insert(
+        provider_id.to_owned(),
+        ProviderCredentialSet::aliasless(ProviderCredential::new(values, BTreeMap::new())),
+    );
+    store
+        .replace_provider_credentials(catalog, &[])
+        .expect("provider credential should be stored");
+}
+
 pub fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }

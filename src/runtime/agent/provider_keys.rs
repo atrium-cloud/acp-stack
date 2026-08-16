@@ -16,8 +16,9 @@ use crate::secrets::SecretStore;
 
 pub use self::resolve::{
     ResolvedAgentEnvironment, ResolvedProviderSnapshot, apply_catalog_mapped_agent_provider,
-    apply_mapped_agent_provider, effective_active_provider_ids, resolve_agent_environment,
-    resolve_agent_environment_without_secrets, target_uses_provider,
+    apply_mapped_agent_provider, catalog_covers_env_ref, configured_custom_provider_api_key_ref,
+    effective_active_provider_ids, env_ref_is_satisfiable, env_ref_is_satisfiable_for_config,
+    resolve_agent_environment, resolve_agent_environment_without_secrets, target_uses_provider,
 };
 
 const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
@@ -869,6 +870,44 @@ pub fn validate_env_keyed_credential_values(
             || companions.iter().any(|companion| companion == name)
             || optional.iter().any(|optional_ref| optional_ref == name);
         if !allowed {
+            return Err(StackError::InvalidParam {
+                field,
+                reason: format!(
+                    "env var `{name}` is not part of provider `{provider_id}`'s credential contract"
+                ),
+            });
+        }
+        if value.is_empty() {
+            return Err(StackError::InvalidParam {
+                field,
+                reason: format!("value for env var `{name}` must not be empty"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate env-keyed credential values for a custom (non-mapped) provider.
+/// The contract is the configured `api_key_ref` from the agent TOML: exactly
+/// that one env var, non-empty. Kept beside
+/// [`validate_env_keyed_credential_values`] so the two credential contracts
+/// live together.
+pub fn validate_custom_provider_credential_values(
+    provider_id: &str,
+    api_key_ref: &str,
+    values: &BTreeMap<String, String>,
+    field: &'static str,
+) -> Result<()> {
+    if !values.contains_key(api_key_ref) {
+        return Err(StackError::InvalidParam {
+            field,
+            reason: format!(
+                "custom provider `{provider_id}` requires env var `{api_key_ref}`; it is missing from the supplied values"
+            ),
+        });
+    }
+    for (name, value) in values {
+        if name != api_key_ref {
             return Err(StackError::InvalidParam {
                 field,
                 reason: format!(

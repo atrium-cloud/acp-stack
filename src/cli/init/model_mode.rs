@@ -15,10 +15,15 @@ use crate::runtime::agent::model_discovery::{
 use crate::runtime::agent::provider_keys::{CODEX_AGENT_ID, agent_provider_id_for_provider_id};
 use crate::runtime::agent::provider_model_catalog::cached_models;
 use crate::runtime::install::agent_registry::RegistryCatalog;
+use crate::secrets::SecretStore;
 
 use super::headless_snapshot::{
     capture_dir_listings_for, capture_path_snapshots, headless_config_candidate_paths,
     headless_config_side_dirs, remove_new_files_in_dirs, restore_headless_snapshots,
+};
+use super::provider::{
+    pending_custom_provider_credential, pending_provider_credential_reason,
+    primary_provider_is_custom,
 };
 use super::registry_apply::is_custom_agent;
 use super::state_signal::{ApplicabilitySource, InitCategory, InitStateSignal};
@@ -163,6 +168,7 @@ pub(super) fn configure_model_and_mode_for_init(
     registry: &RegistryCatalog,
     config: &mut Config,
     config_path: &Path,
+    secrets: &SecretStore,
 ) -> Result<ModelModeOutcome> {
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(ModelModeOutcome::default());
@@ -196,7 +202,18 @@ pub(super) fn configure_model_and_mode_for_init(
     // provider config and that id is not an ACP-advertised value, so
     // the model lane is skipped for custom-provider runs. Mode is
     // provider-independent, so its lane still runs.
-    let skip_model_lane = args.custom_provider;
+    let skip_model_lane = primary_provider_is_custom(config);
+    // Discovery is skipped, but an explicit `--model` still has to land: a
+    // rerun over an existing custom-provider config (no `--custom-provider`
+    // this run, so nothing else writes it) would otherwise drop the flag.
+    // Custom-provider model ids are accepted as supplied.
+    if skip_model_lane
+        && entry.set_model
+        && let Some(model) = args.model.as_deref()
+    {
+        write_model_into_config(config, model.to_owned(), entry.set_provider);
+        outcome.model_action = ModelModeAction::Set;
+    }
 
     let interactive = prompts_enabled(args);
     let provider_set_this_run = args.provider.is_some();
@@ -251,6 +268,38 @@ pub(super) fn configure_model_and_mode_for_init(
         (false, false) => None,
     };
 
+    let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
+        || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
+
+    // A hosted init accepts a custom provider whose api-key ref has not landed
+    // yet, expecting a managed credential push once init finishes. Until it
+    // lands the agent cannot resolve its environment, so the discovery spawn
+    // would fail on a state that is pending by design. Checked before the
+    // binary/cwd preconditions so the attribution names the credential rather
+    // than whatever else happens to be unready.
+    if !fixture_discovery
+        && let Some((provider_id, api_key_ref)) =
+            pending_custom_provider_credential(config, secrets)
+    {
+        let reason = pending_provider_credential_reason(&provider_id, &api_key_ref);
+        if let Some(flags) = explicit_flags {
+            let error = StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("cannot validate {flags} for {}: {reason}", entry.name),
+            };
+            signal_lane_failure(model_lane_active, mode_lane_active, &error);
+            return Err(error);
+        }
+        init_progress(
+            args,
+            &format!(
+                "{} discovery skipped: {reason}",
+                active_lane_label(model_lane_active, mode_lane_active)
+            ),
+        );
+        return Ok(outcome);
+    }
+
     // Two preconditions must hold before we spawn the agent for
     // session/new:
     //   1. The agent binary must resolve on PATH so the spawn won't
@@ -268,8 +317,6 @@ pub(super) fn configure_model_and_mode_for_init(
     // they can finish off with a follow-up `acps init --model`. For an explicit
     // `--model`/`--mode` we fail loudly so the value is never silently accepted
     // without validation.
-    let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
-        || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
     let spawn_cwd: PathBuf = config
         .agent
         .cwd
@@ -307,13 +354,7 @@ pub(super) fn configure_model_and_mode_for_init(
             signal_lane_failure(model_lane_active, mode_lane_active, &error);
             return Err(error);
         }
-        // Name the lanes that were about to run, so an amp-class agent with
-        // nothing but a mode lane is not told its model discovery was skipped.
-        let lanes = match (model_lane_active, mode_lane_active) {
-            (false, true) => "mode",
-            (true, true) => "model and mode",
-            _ => "model",
-        };
+        let lanes = active_lane_label(model_lane_active, mode_lane_active);
         let skip_reason = if binary_missing {
             format!(
                 "{lanes} discovery skipped: agent command `{}` not found on PATH",
@@ -429,6 +470,16 @@ pub(super) fn configure_model_and_mode_for_init(
             remove_new_files_in_dirs(dir_listings);
             Err(err)
         }
+    }
+}
+
+/// Name the lanes that were about to run, so an amp-class agent with nothing
+/// but a mode lane is not told its model discovery was skipped.
+fn active_lane_label(model_lane_active: bool, mode_lane_active: bool) -> &'static str {
+    match (model_lane_active, mode_lane_active) {
+        (false, true) => "mode",
+        (true, true) => "model and mode",
+        _ => "model",
     }
 }
 

@@ -28,10 +28,19 @@ pub(crate) async fn extension_managed_state_apply_handler(
     // whole-file read-modify-write, and the catalog swap + watermark persist
     // must not interleave with config import or the CLI credential commands.
     let _mutation = state.lock_agent_config_mutation().await?;
+    // Custom-provider validation reads the provider declared in the agent
+    // TOML; load it fresh from disk because `state.config` is a start-time
+    // snapshot that predates any provider written by a later init. Lenient,
+    // like every other read-only reload: strictness belongs to config-write
+    // paths, and one unusable MCP or skill declaration must not block a
+    // credential rotation on a daemon that is already running.
+    let runtime_config =
+        crate::config::Config::load_lenient_from_path(&state.runtime_paths.config_path)?;
     let home = home_dir()?;
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let revision = body.revision;
-    let response = crate::extensions::managed_state::apply(&mut store, &name, body)?;
+    let response =
+        crate::extensions::managed_state::apply(&mut store, &runtime_config, &name, body)?;
 
     let payload = serde_json::json!({
         "namespace": name,

@@ -145,6 +145,17 @@ impl ServerHarness {
     fn reopen_store(&self) -> SecretStore {
         SecretStore::open(&self.home).expect("reopen secret store")
     }
+
+    /// The handler reloads the runtime config from disk on every apply, so a
+    /// test can stage config changes (e.g. an init writing a custom provider)
+    /// by rewriting the file the harness pointed `RuntimePaths` at.
+    fn rewrite_runtime_config(&self, config: &Config) {
+        std::fs::write(
+            self.home.join("acps-config.toml"),
+            config.to_canonical_toml().expect("canonical config"),
+        )
+        .expect("rewrite runtime config");
+    }
 }
 
 impl Drop for ServerHarness {
@@ -355,6 +366,186 @@ async fn rejects_env_var_outside_provider_contract() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+fn config_with_custom_provider() -> Config {
+    use acp_stack::config::{AgentCustomProviderConfig, AgentProviderConfig, CustomProviderApi};
+    let mut config = test_config();
+    config.agent.env.push("MY_CUSTOM_KEY".to_owned());
+    config.agent.provider = Some(AgentProviderConfig {
+        id: "my-custom".to_owned(),
+        model: Some("my-model".to_owned()),
+        api_key_ref: Some("MY_CUSTOM_KEY".to_owned()),
+        custom: Some(AgentCustomProviderConfig {
+            name: "My Custom".to_owned(),
+            base_url: "https://example.test/v1".to_owned(),
+            api: CustomProviderApi::default(),
+            model_name: None,
+            context: 128_000,
+            output_max_tokens: 8_192,
+        }),
+    });
+    config
+}
+
+fn custom_selection(value: &str) -> Value {
+    json!({
+        "provider_id": "my-custom",
+        "values": { "MY_CUSTOM_KEY": value },
+    })
+}
+
+#[tokio::test]
+async fn custom_provider_apply_uses_configured_api_key_ref_contract() {
+    let harness = ServerHarness::spawn().await;
+    harness.rewrite_runtime_config(&config_with_custom_provider());
+
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(3, custom_selection("ck-1")),
+        )
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["outcome"], "applied");
+    let store = harness.reopen_store();
+    let (credential, _alias) = store
+        .provider_credential_set("my-custom")
+        .expect("catalog set")
+        .selected(None)
+        .expect("selected credential");
+    assert_eq!(
+        credential.values.get("MY_CUSTOM_KEY").map(String::as_str),
+        Some("ck-1")
+    );
+}
+
+/// A credential rotation must not be held hostage by an unrelated bad
+/// declaration: the handler reload is lenient, so an MCP server the strict
+/// loader would reject is dropped rather than failing the apply.
+#[tokio::test]
+async fn apply_succeeds_when_the_runtime_config_carries_an_invalid_mcp_server() {
+    use acp_stack::config::{McpServerConfig, McpStdioServer};
+
+    let harness = ServerHarness::spawn().await;
+    let mut config = config_with_custom_provider();
+    config
+        .mcp
+        .servers
+        .push(McpServerConfig::Stdio(McpStdioServer {
+            name: "broken".to_owned(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+        }));
+    harness.rewrite_runtime_config(&config);
+
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(3, custom_selection("ck-1")),
+        )
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["outcome"], "applied");
+    // The custom-provider env contract still came from the lenient load.
+    let store = harness.reopen_store();
+    let (credential, _alias) = store
+        .provider_credential_set("my-custom")
+        .expect("catalog set")
+        .selected(None)
+        .expect("selected credential");
+    assert_eq!(
+        credential.values.get("MY_CUSTOM_KEY").map(String::as_str),
+        Some("ck-1")
+    );
+}
+
+#[tokio::test]
+async fn custom_provider_apply_rejects_keys_outside_configured_contract() {
+    let harness = ServerHarness::spawn().await;
+    harness.rewrite_runtime_config(&config_with_custom_provider());
+
+    // Extra key beside the configured ref.
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                3,
+                json!({
+                    "provider_id": "my-custom",
+                    "values": { "MY_CUSTOM_KEY": "ck-1", "EXTRA_KEY": "nope" },
+                }),
+            ),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Single key that is not the configured ref.
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                3,
+                json!({
+                    "provider_id": "my-custom",
+                    "values": { "WRONG_KEY": "ck-1" },
+                }),
+            ),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        harness
+            .reopen_store()
+            .managed_state_record(NAMESPACE)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn custom_provider_apply_retries_same_revision_after_config_lands() {
+    let harness = ServerHarness::spawn().await;
+
+    // The runtime config does not declare the custom provider yet, so the
+    // apply is rejected before any watermark persists.
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(5, custom_selection("ck-1")),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.expect("error envelope");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert!(
+        harness
+            .reopen_store()
+            .managed_state_record(NAMESPACE)
+            .is_none()
+    );
+
+    // Once init writes the provider, the same revision replays cleanly.
+    harness.rewrite_runtime_config(&config_with_custom_provider());
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(5, custom_selection("ck-1")),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(body["data"]["outcome"], "applied");
 }
 
 #[tokio::test]

@@ -60,6 +60,8 @@ Init is resumable. A resumed run skips completed work whose result still exists 
 
 Provider ids are resolved through the provider metadata for the configured agent. Starts, restarts, installs, model discovery, and agent tests share one environment resolver for generic refs and provider bundles. Equal values for a shared env name are deduplicated; different values fail without exposing them. Mapped models and modes are validated against ACP-advertised session config options where the agent exposes them.
 
+A catalog credential that covers an env var wins over a bare `[agent].env` ref of the same name: the bare ref is skipped and the catalog value is injected, so a managed rotation takes effect without touching the flat store. Templated `VAR=...` entries keep flat-store semantics. Custom providers inject their configured `api_key_ref` from the catalog credential stored under their provider id, falling back to the flat store; when neither store holds the key, agent start fails with an error naming the provider and ref.
+
 Custom providers are accepted only for agents that support them. Custom model ids are operator-supplied and are not certified by `acp-stack`.
 
 Agent-owned config files are written before canonical config changes are committed. If provisioning fails, the canonical config is not advanced.

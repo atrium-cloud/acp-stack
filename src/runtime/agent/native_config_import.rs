@@ -407,8 +407,8 @@ pub use self::transaction::{
     capture_native_config_file_digests, capture_native_config_snapshots, native_config_path,
     native_config_projection, native_config_transaction_paths, prepare_native_config_file_paths,
     restore_native_config_snapshots, validate_native_config_file_digests,
-    validate_native_config_secret_refs, validate_native_config_secret_refs_read_only,
-    write_native_config_files,
+    validate_native_config_mcp_secret_refs, validate_native_config_secret_refs,
+    validate_native_config_secret_refs_read_only, write_native_config_files,
 };
 
 pub fn inspect_native_config(

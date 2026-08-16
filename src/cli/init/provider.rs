@@ -7,9 +7,9 @@ use crate::config::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
-    AgentProviderSummary, CLAUDE_CODE_AGENT_ID, env_var_for_agent_provider_id,
-    provider_id_is_known, provider_id_supports_agent, provider_uses_agent_native_auth,
-    providers_for_agent, required_env_refs_for_agent_provider_id,
+    AgentProviderSummary, CLAUDE_CODE_AGENT_ID, env_ref_is_satisfiable_for_config,
+    env_var_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
+    provider_uses_agent_native_auth, providers_for_agent, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -52,6 +52,7 @@ pub(super) fn preflight_provider_for_init(
                 reason: format!("{} does not support custom model setup", config.agent.name),
             });
         }
+        reject_reserved_custom_provider_id(provider_id)?;
         if !prompts_enabled(args) {
             required_init_custom_value(
                 prompt::HostedPromptKind::ProviderName,
@@ -149,7 +150,18 @@ pub(super) fn configure_provider_for_init(
         );
     };
     let required_refs = apply_provider_to_config(args, registry, config, config_path, provider_id)?;
-    collect_missing_provider_refs(prompts_enabled(args), secret_store, &required_refs)?;
+    let configured_provider_id = config
+        .agent
+        .provider
+        .as_ref()
+        .map(|provider| provider.id.clone());
+    collect_missing_provider_refs(
+        prompts_enabled(args),
+        secret_store,
+        config,
+        configured_provider_id.as_deref(),
+        &required_refs,
+    )?;
     Ok(true)
 }
 
@@ -184,7 +196,9 @@ pub(super) fn configured_provider_refs_satisfied(
         crate::config::agent_env_declares(&config.agent.env, env_ref)
             && agent_env_secret_refs_for_var(&config.agent.env, env_ref)
                 .iter()
-                .all(|name| secret_store.contains(name))
+                .all(|name| {
+                    env_ref_is_satisfiable_for_config(config, secret_store, &provider.id, name)
+                })
     })
 }
 
@@ -207,7 +221,6 @@ pub(super) fn collect_prepared_secret_refs_for_init(
     secret_store: &mut SecretStore,
 ) -> Result<()> {
     validate_configured_provider_for_init(registry, config, config_path)?;
-    let mut required_refs = BTreeSet::new();
     if let Some(provider) = config.agent.provider.as_ref() {
         let provider_refs = required_env_refs_for_agent_provider_id(
             &config.agent.id,
@@ -224,17 +237,29 @@ pub(super) fn collect_prepared_secret_refs_for_init(
                     .to_owned(),
             });
         }
-        required_refs.extend(
-            provider_refs
-                .iter()
-                .flat_map(|name| agent_env_secret_refs_for_var(&config.agent.env, name)),
-        );
+        let provider_required: BTreeSet<String> = provider_refs
+            .iter()
+            .flat_map(|name| agent_env_secret_refs_for_var(&config.agent.env, name))
+            .collect();
+        collect_missing_provider_refs(
+            prompts_enabled(args),
+            secret_store,
+            config,
+            Some(&provider.id),
+            &provider_required.into_iter().collect::<Vec<_>>(),
+        )?;
     }
-    required_refs.extend(config_mcp_secret_refs(config));
+    // MCP refs stay flat-store-gated with a hard failure: only provider api
+    // keys are delivered through the credential catalog, and the hosted
+    // soft-pass above must not leak to them.
     collect_missing_provider_refs(
         prompts_enabled(args),
         secret_store,
-        &required_refs.into_iter().collect::<Vec<_>>(),
+        config,
+        None,
+        &config_mcp_secret_refs(config)
+            .into_iter()
+            .collect::<Vec<_>>(),
     )
 }
 
@@ -372,10 +397,12 @@ fn ensure_configured_provider_refs_for_init(
         provider.api_key_ref = Some(default_api_key_ref.to_owned());
         api_key_ref_changed = true;
     }
+    let provider_id = provider.id.clone();
+    let provider_api_key_ref = provider.api_key_ref.clone();
     let required_refs = required_env_refs_for_agent_provider_id(
         &config.agent.id,
-        &provider.id,
-        provider.api_key_ref.as_deref(),
+        &provider_id,
+        provider_api_key_ref.as_deref(),
     );
     let mut env_changed = false;
     for env_ref in &required_refs {
@@ -384,7 +411,13 @@ fn ensure_configured_provider_refs_for_init(
             env_changed = true;
         }
     }
-    collect_missing_provider_refs(prompts_enabled(args), secret_store, &required_refs)?;
+    collect_missing_provider_refs(
+        prompts_enabled(args),
+        secret_store,
+        config,
+        Some(&provider_id),
+        &required_refs,
+    )?;
     Ok(env_changed || api_key_ref_changed)
 }
 
@@ -530,9 +563,9 @@ fn select_provider_for_init(
         })?;
         return Ok(Some(provider_id));
     }
-    let (available, needs_input): (Vec<_>, Vec<_>) = providers.iter().partition(|summary| {
-        provider_has_available_secret_refs(&config.agent.id, summary, secret_store)
-    });
+    let (available, needs_input): (Vec<_>, Vec<_>) = providers
+        .iter()
+        .partition(|summary| provider_has_available_secret_refs(config, summary, secret_store));
     // Ready providers first, then ones needing secret/custom setup; the hint
     // column carries the readiness label so the grouping survives without
     // separate headers. A trailing item accepts a free-form id for a provider
@@ -548,7 +581,7 @@ fn select_provider_for_init(
             ProviderChoice::Id(summary.id.to_owned()),
             summary.id,
             format!("{} ({})", summary.name, summary.id),
-            provider_readiness_label(&config.agent.id, summary, secret_store),
+            provider_readiness_label(config, summary, secret_store),
         ));
     }
     items.push(prompt::item(
@@ -576,10 +609,11 @@ fn select_provider_for_init(
 }
 
 fn provider_has_available_secret_refs(
-    agent_id: &str,
+    config: &Config,
     summary: &AgentProviderSummary,
     secret_store: &SecretStore,
 ) -> bool {
+    let agent_id = config.agent.id.as_str();
     let required_refs =
         required_env_refs_for_agent_provider_id(agent_id, summary.id, summary.default_api_key_ref);
     if summary.default_api_key_ref.is_none()
@@ -589,19 +623,22 @@ fn provider_has_available_secret_refs(
     }
     required_refs
         .iter()
-        .all(|env_ref| secret_store.contains(env_ref))
+        .all(|env_ref| env_ref_is_satisfiable_for_config(config, secret_store, summary.id, env_ref))
 }
 
 fn provider_readiness_label(
-    agent_id: &str,
+    config: &Config,
     summary: &AgentProviderSummary,
     secret_store: &SecretStore,
 ) -> String {
+    let agent_id = config.agent.id.as_str();
     let required_refs =
         required_env_refs_for_agent_provider_id(agent_id, summary.id, summary.default_api_key_ref);
     let missing_refs: Vec<_> = required_refs
         .iter()
-        .filter(|env_ref| !secret_store.contains(env_ref))
+        .filter(|env_ref| {
+            !env_ref_is_satisfiable_for_config(config, secret_store, summary.id, env_ref)
+        })
         .map(String::as_str)
         .collect();
     if missing_refs.is_empty() {
@@ -610,7 +647,11 @@ fn provider_readiness_label(
         {
             "agent-native auth".to_owned()
         } else if summary.default_api_key_ref.is_none() {
-            "custom provider setup required".to_owned()
+            // The harness lists the provider but the registry maps no API-key
+            // env var for it, and the id itself stays reserved, so the only
+            // route is a custom provider under a different id. Say so here:
+            // selecting the entry can now only produce that error.
+            "needs a distinct custom id".to_owned()
         } else {
             "ready".to_owned()
         }
@@ -659,6 +700,9 @@ pub(super) fn apply_provider_to_config(
                 reason: format!("{} does not support custom model setup", config.agent.name),
             });
         }
+        // Reject before the custom-provider prompts run, so a hosted driver is
+        // not asked for four values that can never be written.
+        reject_reserved_custom_provider_id(&provider_id)?;
         return apply_custom_provider_to_config(args, config, config_path, provider_id);
     }
     if !provider_id_is_known(&provider_id) {
@@ -719,18 +763,16 @@ pub(super) fn apply_provider_to_config(
                 reason: format!("{} does not support custom model setup", config.agent.name),
             });
         }
-        if !args.custom_provider
-            && !confirm_custom_provider_setup(prompts_enabled(args), &provider_id)?
-        {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: format!(
-                    "provider `{provider_id}` has no API-key env mapping for agent `{}`",
-                    config.agent.id
-                ),
-            });
-        }
-        return apply_custom_provider_to_config(args, config, config_path, provider_id);
+        // A registry id with no mapping for this harness cannot be steered into
+        // custom setup: the id stays reserved, so the config it would write is
+        // rejected by validation. Point at the distinct-id route instead.
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "provider `{provider_id}` has no API-key env mapping for agent `{}`; configure it with `--custom-provider` under a distinct id such as `{provider_id}-1`",
+                config.agent.id
+            ),
+        });
     }
     if native_auth && args.api_key_ref.is_some() {
         return Err(StackError::AgentConfigProvision {
@@ -857,15 +899,16 @@ fn apply_custom_provider_to_config(
     Ok(vec![api_key_ref])
 }
 
-fn confirm_custom_provider_setup(interactive: bool, provider_id: &str) -> Result<bool> {
-    prompt::confirm(
-        prompt::HostedPromptKind::CustomProviderConfirm,
-        interactive,
-        &format!(
-            "provider `{provider_id}` has no default API-key env mapping; configure it as a custom provider?"
-        ),
-        false,
-    )
+fn reject_reserved_custom_provider_id(provider_id: &str) -> Result<()> {
+    if provider_id_is_known(provider_id) {
+        return Err(StackError::InvalidParam {
+            field: "provider",
+            reason: format!(
+                "`{provider_id}` is reserved by the mapped-provider registry; choose a distinct custom id such as `{provider_id}-1`"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn required_init_custom_value(
@@ -950,15 +993,96 @@ fn parse_init_custom_token_limit(
     Ok(parsed)
 }
 
-fn collect_missing_provider_refs(
+/// Custom providers the primary agent will actually launch with: its own
+/// provider and its enabled subagent's, as `(provider_id, api_key_ref)`.
+/// Providers declared only on another array target are excluded — the init
+/// lanes only ever spawn the primary agent.
+fn configured_custom_providers(config: &Config) -> impl Iterator<Item = (&str, &str)> {
+    let subagent_provider = config
+        .agent
+        .subagent
+        .as_ref()
+        .filter(|subagent| !subagent.disabled)
+        .and_then(|subagent| subagent.provider.as_ref());
+    config
+        .agent
+        .provider
+        .as_ref()
+        .into_iter()
+        .chain(subagent_provider)
+        .filter(|provider| provider.custom.is_some())
+        .filter_map(|provider| {
+            provider
+                .api_key_ref
+                .as_deref()
+                .map(|api_key_ref| (provider.id.as_str(), api_key_ref))
+        })
+}
+
+fn provider_is_configured_custom(config: &Config, provider_id: &str) -> bool {
+    configured_custom_providers(config).any(|(id, _)| id == provider_id)
+}
+
+/// True when the primary agent's own provider is custom. The custom-provider
+/// flow writes a literal model id that no harness advertises, so the init model
+/// lane has nothing to discover. Derived from config rather than
+/// `args.custom_provider` so a rerun over an existing custom-provider config
+/// reaches the same conclusion.
+pub(super) fn primary_provider_is_custom(config: &Config) -> bool {
+    config
+        .agent
+        .provider
+        .as_ref()
+        .is_some_and(|provider| provider.custom.is_some())
+}
+
+/// The first configured custom provider whose api-key ref is neither in the
+/// flat secret store nor in the credential catalog. Hosted init soft-passes
+/// such a ref expecting a managed credential push after init (see
+/// [`collect_missing_provider_refs`]), so every init lane that would spawn the
+/// agent has to check for it: the spawn would otherwise fail on an environment
+/// that is pending by design. The check is keyed on the configured ref alone,
+/// so it can fire for a hand-edited config whose ref never entered
+/// `[agent].env` even though that spawn would resolve; init always writes the
+/// ref into `[agent].env`, so the conservative skip only affects such configs.
+pub(super) fn pending_custom_provider_credential(
+    config: &Config,
+    secrets: &SecretStore,
+) -> Option<(String, String)> {
+    configured_custom_providers(config)
+        .find(|(provider_id, api_key_ref)| {
+            !env_ref_is_satisfiable_for_config(config, secrets, provider_id, api_key_ref)
+        })
+        .map(|(provider_id, api_key_ref)| (provider_id.to_owned(), api_key_ref.to_owned()))
+}
+
+/// Shared remediation for a custom provider whose credential has not landed
+/// yet; mirrors the spawn-time wording in `remap_pending_provider_credential`
+/// so an operator sees one story regardless of which layer catches it first.
+pub(super) fn pending_provider_credential_reason(provider_id: &str, api_key_ref: &str) -> String {
+    format!(
+        "provider `{provider_id}` has no credential yet: `{api_key_ref}` is not in the secret store and no managed credential has been applied; push one through the managed-state extension or run `acps secrets set {api_key_ref}`"
+    )
+}
+
+pub(super) fn collect_missing_provider_refs(
     interactive: bool,
     secret_store: &mut SecretStore,
+    config: &Config,
+    provider_id: Option<&str>,
     required_refs: &[String],
 ) -> Result<()> {
+    // With a provider context the ref is satisfiable from the flat store or
+    // the structured credential catalog; without one (MCP refs on the
+    // prepared-config path) only the flat store counts.
+    let satisfiable = |store: &SecretStore, env_ref: &str| match provider_id {
+        Some(provider_id) => env_ref_is_satisfiable_for_config(config, store, provider_id, env_ref),
+        None => store.contains(env_ref),
+    };
     if interactive {
         let mut collected = Vec::new();
         for env_ref in required_refs {
-            if secret_store.contains(env_ref) {
+            if satisfiable(secret_store, env_ref) {
                 continue;
             }
             // Masked entry via the wizard: a provider API key is a secret value;
@@ -985,7 +1109,27 @@ fn collect_missing_provider_refs(
         )?;
     }
     for env_ref in required_refs {
-        if !secret_store.contains(env_ref) {
+        if !satisfiable(secret_store, env_ref) {
+            // A hosted backend answers the value prompt with null by design
+            // (plaintext never rides an input frame) and pushes the credential
+            // through the managed-state extension after init completes, so a
+            // provider ref missing here is deferred rather than fatal. Scoped
+            // to configured custom providers: their init lanes skip every
+            // later agent spawn, whereas a mapped provider's model-discovery
+            // spawn would still hard-fail on the missing ref and turn the
+            // deferral into a worse-attributed failure.
+            let custom_provider = provider_id
+                .is_some_and(|provider_id| provider_is_configured_custom(config, provider_id));
+            if custom_provider && prompt::hosted_driver_active() {
+                prompt::emit_progress(format!(
+                    "provider secret `{env_ref}` not present yet; expecting a managed credential push after init"
+                ));
+                tracing::warn!(
+                    env_ref = %env_ref,
+                    "provider secret missing at init; deferring to a managed credential push"
+                );
+                continue;
+            }
             return Err(StackError::SecretNotFound {
                 name: env_ref.clone(),
             });
@@ -1005,6 +1149,53 @@ mod tests {
             .unwrap_or_else(|| panic!("{agent_id}/{provider_id} summary should exist"))
     }
 
+    fn readiness_config(agent_id: &str) -> Config {
+        config::load_config_from_str(&format!(
+            r#"
+[api]
+bind = "127.0.0.1:7700"
+public_url = "http://127.0.0.1:7700"
+max_request_bytes = 104857600
+
+[security.http]
+max_request_bytes = 104857600
+rate_limit_per_minute = 120
+burst = 30
+auth_failures_per_minute = 5
+auth_block_duration = "15m"
+allowed_origins = []
+trust_proxy_headers = false
+
+[workspace]
+root = "/workspace"
+uploads = "/workspace/uploads"
+default_shell = "/bin/bash"
+runtime_user = "acp"
+max_file_bytes = 8388608
+
+[logging]
+level = "info"
+local_retention_days = 30
+
+[logging.supabase]
+enabled = false
+url = "https://example.supabase.co"
+api_key_ref = "SUPABASE_SECRET_KEY"
+schema = "acp_stack"
+
+[agent]
+id = "{agent_id}"
+name = "Test Agent"
+command = "{agent_id}"
+args = []
+cwd = "/workspace"
+env = []
+restart = "on-crash"
+"#
+        ))
+        .expect("config parses")
+    }
+
     #[test]
     fn provider_readiness_reports_missing_default_secret_ref() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1012,7 +1203,7 @@ mod tests {
         let summary = summary_for("opencode", "openai");
 
         assert_eq!(
-            provider_readiness_label("opencode", &summary, &secret_store),
+            provider_readiness_label(&readiness_config("opencode"), &summary, &secret_store),
             "missing OPENAI_API_KEY"
         );
     }
@@ -1027,11 +1218,11 @@ mod tests {
         let summary = summary_for("opencode", "openai");
 
         assert_eq!(
-            provider_readiness_label("opencode", &summary, &secret_store),
+            provider_readiness_label(&readiness_config("opencode"), &summary, &secret_store),
             "ready"
         );
         assert!(provider_has_available_secret_refs(
-            "opencode",
+            &readiness_config("opencode"),
             &summary,
             &secret_store
         ));
@@ -1047,25 +1238,25 @@ mod tests {
         let summary = summary_for("opencode", "cloudflare-ai-gateway");
 
         assert_eq!(
-            provider_readiness_label("opencode", &summary, &secret_store),
+            provider_readiness_label(&readiness_config("opencode"), &summary, &secret_store),
             "missing CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID"
         );
         assert!(!provider_has_available_secret_refs(
-            "opencode",
+            &readiness_config("opencode"),
             &summary,
             &secret_store
         ));
     }
 
     #[test]
-    fn provider_readiness_reports_custom_setup_for_provider_without_default_ref() {
+    fn provider_readiness_reports_a_distinct_custom_id_for_provider_without_default_ref() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
         let summary = summary_for("opencode", "helicone");
 
         assert_eq!(
-            provider_readiness_label("opencode", &summary, &secret_store),
-            "custom provider setup required"
+            provider_readiness_label(&readiness_config("opencode"), &summary, &secret_store),
+            "needs a distinct custom id"
         );
     }
 
@@ -1076,7 +1267,7 @@ mod tests {
         let summary = summary_for("codex", "openai");
 
         assert_eq!(
-            provider_readiness_label("codex", &summary, &secret_store),
+            provider_readiness_label(&readiness_config("codex"), &summary, &secret_store),
             "agent-native auth"
         );
     }
@@ -1088,11 +1279,11 @@ mod tests {
         let summary = summary_for("claude-code", "google-vertex-anthropic");
 
         assert_eq!(
-            provider_readiness_label("claude-code", &summary, &secret_store),
+            provider_readiness_label(&readiness_config("claude-code"), &summary, &secret_store),
             "missing ANTHROPIC_VERTEX_PROJECT_ID, CLOUD_ML_REGION"
         );
         assert!(!provider_has_available_secret_refs(
-            "claude-code",
+            &readiness_config("claude-code"),
             &summary,
             &secret_store
         ));
@@ -1120,6 +1311,154 @@ mod tests {
     }
 
     #[test]
+    fn provider_readiness_reports_ready_from_catalog_only_credential() {
+        use crate::secrets::{ProviderCredential, ProviderCredentialSet};
+        use std::collections::BTreeMap;
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        secret_store
+            .replace_provider_credentials(
+                BTreeMap::from([(
+                    "openai".to_owned(),
+                    ProviderCredentialSet::aliasless(ProviderCredential::new(
+                        BTreeMap::from([("OPENAI_API_KEY".to_owned(), "catalog-key".to_owned())]),
+                        BTreeMap::new(),
+                    )),
+                )]),
+                &[],
+            )
+            .expect("catalog");
+        let summary = summary_for("opencode", "openai");
+        let config = readiness_config("opencode");
+
+        assert_eq!(
+            provider_readiness_label(&config, &summary, &secret_store),
+            "ready"
+        );
+        assert!(provider_has_available_secret_refs(
+            &config,
+            &summary,
+            &secret_store
+        ));
+    }
+
+    fn seed_catalog_credential(
+        secret_store: &mut SecretStore,
+        provider_id: &str,
+        env_name: &str,
+        value: &str,
+    ) {
+        use crate::secrets::{ProviderCredential, ProviderCredentialSet};
+        use std::collections::BTreeMap;
+        secret_store
+            .replace_provider_credentials(
+                BTreeMap::from([(
+                    provider_id.to_owned(),
+                    ProviderCredentialSet::aliasless(ProviderCredential::new(
+                        BTreeMap::from([(env_name.to_owned(), value.to_owned())]),
+                        BTreeMap::new(),
+                    )),
+                )]),
+                &[],
+            )
+            .expect("catalog");
+    }
+
+    fn custom_provider_readiness_config() -> Config {
+        let mut config = readiness_config("opencode");
+        config.agent.env = vec!["CUSTOM_KEY".to_owned()];
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "my-custom".to_owned(),
+            model: Some("my-model".to_owned()),
+            api_key_ref: Some("CUSTOM_KEY".to_owned()),
+            custom: Some(AgentCustomProviderConfig {
+                name: "My Custom".to_owned(),
+                base_url: "https://example.test/v1".to_owned(),
+                api: CustomProviderApi::default(),
+                model_name: None,
+                context: DEFAULT_CUSTOM_MODEL_CONTEXT,
+                output_max_tokens: DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+            }),
+        });
+        config
+    }
+
+    #[test]
+    fn hosted_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
+        use std::sync::Arc;
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        let config = custom_provider_readiness_config();
+        let required = vec!["CUSTOM_KEY".to_owned()];
+
+        // Local non-interactive run keeps the hard failure.
+        let error = collect_missing_provider_refs(
+            false,
+            &mut secret_store,
+            &config,
+            Some("my-custom"),
+            &required,
+        )
+        .expect_err("hard failure without hosted driver");
+        assert!(error.to_string().contains("CUSTOM_KEY"));
+
+        // Hosted run with a null answer defers the provider ref to the
+        // managed credential push instead of failing.
+        let driver = Arc::new(prompt::RecordingPromptDriver::default());
+        prompt::with_hosted_driver(driver, || {
+            collect_missing_provider_refs(
+                true,
+                &mut secret_store,
+                &config,
+                Some("my-custom"),
+                &required,
+            )
+            .expect("hosted soft-pass");
+            // Refs without a provider context (MCP refs on the prepared-config
+            // path) never soft-pass.
+            collect_missing_provider_refs(true, &mut secret_store, &config, None, &required)
+                .expect_err("flat-only refs keep the hard failure");
+            // Mapped providers keep the hard failure even in hosted runs: their
+            // model-discovery spawn would fail on the missing ref anyway.
+            let mapped_config = readiness_config("opencode");
+            collect_missing_provider_refs(
+                true,
+                &mut secret_store,
+                &mapped_config,
+                Some("openai"),
+                &["OPENAI_API_KEY".to_owned()],
+            )
+            .expect_err("mapped providers keep the hard failure under hosted");
+        });
+    }
+
+    #[test]
+    fn provider_gate_and_idempotence_verifier_accept_catalog_only_credential() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        seed_catalog_credential(&mut secret_store, "my-custom", "CUSTOM_KEY", "catalog-key");
+        let config = custom_provider_readiness_config();
+        let required = vec!["CUSTOM_KEY".to_owned()];
+
+        collect_missing_provider_refs(
+            false,
+            &mut secret_store,
+            &config,
+            Some("my-custom"),
+            &required,
+        )
+        .expect("catalog credential satisfies the gate");
+
+        let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_embedded()
+            .expect("registry");
+        assert!(configured_provider_refs_satisfied(
+            &registry,
+            &config,
+            &secret_store
+        ));
+    }
+
+    #[test]
     fn provider_readiness_label_reports_ready_with_secret() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
@@ -1129,7 +1468,7 @@ mod tests {
         let summary = summary_for("opencode", "openai");
 
         assert_eq!(
-            provider_readiness_label("opencode", &summary, &secret_store),
+            provider_readiness_label(&readiness_config("opencode"), &summary, &secret_store),
             "ready"
         );
     }
