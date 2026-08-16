@@ -197,7 +197,7 @@ fn model_base_matches(value: &str, provider: &str, model: &str) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires installed OpenCode, pi-acp, Cursor CLI, amp-acp, OPENCODE_API_KEY, CURSOR_API_KEY, and AMP_API_KEY"]
+#[ignore = "requires installed OpenCode, pi-acp, amp-acp, OPENCODE_API_KEY, and AMP_API_KEY"]
 async fn real_agents_print_mode_values() {
     print_real_agent_mode_values(
         real_agent_config("opencode", "OpenCode", "opencode", &["acp"]),
@@ -207,11 +207,6 @@ async fn real_agents_print_mode_values() {
     print_real_agent_mode_values(
         real_agent_config("pi", "Pi Agent", "pi-acp", &[]),
         required_env(&["OPENCODE_API_KEY"]),
-    )
-    .await;
-    print_real_agent_mode_values(
-        real_agent_config("cursor", "Cursor CLI", "cursor-agent", &["acp"]),
-        required_env(&["CURSOR_API_KEY"]),
     )
     .await;
     print_real_agent_mode_values(
@@ -359,18 +354,6 @@ async fn real_pi_advertises_opencode_go_deepseek_model() {
         required_env(&["OPENCODE_API_KEY"]),
         "opencode-go",
         "deepseek-v4-flash",
-    )
-    .await;
-}
-
-#[tokio::test]
-#[ignore = "requires installed Cursor CLI and CURSOR_API_KEY"]
-async fn real_cursor_advertises_openai_gpt_5_5_model() {
-    assert_real_agent_advertises_model(
-        real_agent_config("cursor", "Cursor CLI", "cursor-agent", &["acp"]),
-        required_env(&["CURSOR_API_KEY"]),
-        "openai",
-        "gpt-5.5",
     )
     .await;
 }

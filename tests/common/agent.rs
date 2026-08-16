@@ -296,18 +296,18 @@ pub fn write_installed_skill(root: &std::path::Path, name: &str, descriptor: &st
     std::fs::write(skill_dir.join(".acp-stack-managed"), "test-source\n").expect("marker");
 }
 
-pub fn write_cursor_registry_override(config_dir: &std::path::Path) {
+pub fn write_kimi_registry_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]
-id = "cursor"
-name = "Cursor CLI"
+id = "kimi"
+name = "Kimi Code"
 kind = "native"
 headless_compatible = true
 set_model = true
 set_mode = true
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
-support_doc = "docs/agents/cursor.md"
+support_doc = "docs/agents/kimi.md"
 
 [agents.harness]
 id = "true"

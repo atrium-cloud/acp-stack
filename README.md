@@ -27,7 +27,6 @@ These harnesses are currently supported:
 | Pi Agent    | adapter    |
 | Goose       | native     |
 | Amp Code    | adapter    |
-| Cursor CLI  | native     |
 | Hermes Agent | native    |
 
 "native" means the agent harness is compatible with ACP natively; "adapter" means an ACP adapter must be installed alongside the harness to enable agent-ACP communication.

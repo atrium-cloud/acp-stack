@@ -2434,8 +2434,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_derivation_marks_cursor_provider_inapplicable_but_keeps_model() {
-        let signals = settlement_signals_for("cursor");
+    fn registry_derivation_marks_kimi_provider_inapplicable_but_keeps_model() {
+        let signals = settlement_signals_for("kimi");
         assert_eq!(
             applicability_of(&signals, InitCategory::Provider),
             Some(false)

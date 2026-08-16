@@ -227,7 +227,7 @@ fn provider_metadata_scopes_supported_agents() {
         "claude-code"
     ));
     assert!(!provider_id_supports_agent("xai", "codex"));
-    assert!(!provider_id_supports_agent("openai", "cursor"));
+    assert!(!provider_id_supports_agent("openai", "amp"));
     assert!(provider_id_supports_agent("anthropic", "goose"));
     assert!(provider_id_supports_agent("openai", "goose"));
     assert!(provider_id_supports_agent("mistral", "goose"));
@@ -236,7 +236,7 @@ fn provider_metadata_scopes_supported_agents() {
     assert!(provider_id_supports_agent("cerebras", "goose"));
     assert!(provider_id_supports_agent("xai", "goose"));
     assert!(!provider_id_supports_agent("deepseek", "goose"));
-    assert_eq!(env_var_for_agent_provider_id("cursor", "openai"), None);
+    assert_eq!(env_var_for_agent_provider_id("amp", "openai"), None);
     assert_eq!(
         env_var_for_agent_provider_id("goose", "openrouter"),
         Some("OPENROUTER_API_KEY")
@@ -312,7 +312,7 @@ fn agent_native_provider_ids_are_data_driven() {
         agent_provider_id_for_provider_id("opencode", "kimi-coding"),
         Some("kimi-for-coding")
     );
-    assert_eq!(agent_provider_id_for_provider_id("cursor", "openai"), None);
+    assert_eq!(agent_provider_id_for_provider_id("amp", "openai"), None);
 }
 
 #[test]
@@ -350,7 +350,6 @@ fn pi_native_config_provider_ids_resolve_to_canonical() {
 #[test]
 fn direct_agent_env_refs_are_data_driven() {
     assert_eq!(env_refs_for_agent_id("amp"), ["AMP_API_KEY"]);
-    assert_eq!(env_refs_for_agent_id("cursor"), ["CURSOR_API_KEY"]);
     assert_eq!(env_refs_for_agent_id("kimi"), ["KIMI_API_KEY"]);
     assert!(env_refs_for_agent_id("opencode").is_empty());
     // Hermes is provider-backed, not a direct-secret agent.

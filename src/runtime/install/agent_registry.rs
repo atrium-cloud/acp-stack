@@ -4,7 +4,7 @@
 //! `acps agent install`. It supersedes the upstream
 //! `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` so the
 //! runtime can make conservative support claims. The embedded catalog includes
-//! Goose, OpenCode, Cursor CLI, Amp, Pi, Codex, Claude Code, Kimi Code, and
+//! Goose, OpenCode, Amp, Pi, Codex, Claude Code, Kimi Code, and
 //! Hermes Agent as curated headless targets.
 //! The schema supports entries that need both an ACP adapter and the upstream
 //! harness it wraps.

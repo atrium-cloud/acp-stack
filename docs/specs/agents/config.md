@@ -92,7 +92,6 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 | OpenCode    | every active provider and an exact `enabled_providers` allowlist are written to OpenCode JSON |
 | Pi Agent    | every active provider env bundle is injected; only the default provider/model lane is written to Pi settings |
 | Amp Code    | mode selection only                                                                      |
-| Cursor CLI  | model and mode selection only                                                            |
 | Goose       | provider-native env vars; model applied through ACP session config                       |
 | Codex       | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY`                  |
 | Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |

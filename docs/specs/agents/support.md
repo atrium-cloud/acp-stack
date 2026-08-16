@@ -20,7 +20,6 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | OpenCode    | native  |                    | yes          |
 | Pi Agent    | adapter | `pi-acp`           | yes          |
 | Amp Code    | adapter | `amp-acp`          | yes          |
-| Cursor CLI  | native  |                    | yes          |
 | Goose       | native  |                    | yes          |
 | Codex CLI   | adapter | `codex-acp`        | yes          |
 | Claude Code | adapter | `claude-agent-acp` | yes          |
@@ -41,8 +40,10 @@ An agent whose harness discovers skills somewhere other than its managed install
 
 ## Currently Unsupported
 
-| Agent       | Reason                                                                     |
-| ----------- | -------------------------------------------------------------------------- |
-| Cortex Code | Snowflake-specific, not a general-purpose ACP target                       |
-| Kilo        | exposes a host/port ACP server rather than a stdio ACP peer                |
-| Cline       | ACP session setup requires an auth path that is not headless API-key based |
+- Cortex Code: Snowflake-specific, not a general-purpose ACP target;
+- Kilo: exposes a host/port ACP server rather than a stdio ACP peer;
+- Cline: ACP session setup requires an auth path that is not headless API-key based.
+
+## Deprecated
+
+- Cursor CLI: set up a custom harness pointing to Cursor install script, or use Cursor's first-party cloud agent products instead.

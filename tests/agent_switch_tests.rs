@@ -21,7 +21,7 @@ use common::agent::{
     AgentHarness, EnvVarGuard, add_codex_placebo_target, add_hermes_placebo_target,
     add_kimi_placebo_target, admin_bearer, http, session_bearer, switch_mcp_config, test_config,
     write_amp_linked_skills_registry_override, write_amp_registry_override,
-    write_config_options_fixture, write_cursor_registry_override, write_installed_skill,
+    write_config_options_fixture, write_installed_skill, write_kimi_registry_override,
     write_pi_registry_override,
 };
 
@@ -32,7 +32,7 @@ async fn agent_switch_requires_admin_key() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", session_bearer())
-        .json(&serde_json::json!({ "agent": "cursor" }))
+        .json(&serde_json::json!({ "agent": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -48,7 +48,7 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
     let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    write_cursor_registry_override(&config_dir);
+    write_kimi_registry_override(&config_dir);
     let mut config = test_config();
     let workspace = tempdir.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -58,9 +58,9 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
     secrets
-        .set_many([("CURSOR_API_KEY", "cursor-secret")])
-        .expect("cursor secret");
-    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+        .set_many([("KIMI_API_KEY", "kimi-secret")])
+        .expect("kimi secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
     let harness = AgentHarness::spawn_with_config(config).await;
@@ -68,7 +68,7 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "cursor" }))
+        .json(&serde_json::json!({ "agent": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -77,7 +77,7 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
     let body: Value = serde_json::from_str(&body_text).expect("switch json");
     assert_eq!(body["data"]["old_agent_id"], "opencode");
-    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert_eq!(body["data"]["agent_id"], "kimi");
     assert_eq!(body["data"]["provider_status"], "not_applicable");
     assert_eq!(body["data"]["set_model"], true);
     assert_eq!(
@@ -88,11 +88,11 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
         body["data"]["install"]["outcome"].as_str(),
         Some("installed" | "already_present")
     ));
-    assert_eq!(body["data"]["models"][0], "cursor/gpt-5.5");
+    assert_eq!(body["data"]["models"][0], "kimi/kimi-k3");
 
     let written = std::fs::read_to_string(&harness.config_path).expect("read config");
-    assert!(written.contains(r#"id = "cursor""#));
-    assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
+    assert!(written.contains(r#"id = "kimi""#));
+    assert!(written.contains(r#"env = ["KIMI_API_KEY"]"#));
     assert!(!written.contains("[agent.provider]"));
     assert!(!written.contains("model ="));
 }
@@ -103,7 +103,7 @@ async fn agent_switch_preserves_mcp_runtime_config() {
     let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    write_cursor_registry_override(&config_dir);
+    write_kimi_registry_override(&config_dir);
     let mut config = test_config();
     let workspace = tempdir.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -115,9 +115,9 @@ async fn agent_switch_preserves_mcp_runtime_config() {
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
     secrets
-        .set_many([("CURSOR_API_KEY", "cursor-secret")])
-        .expect("cursor secret");
-    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+        .set_many([("KIMI_API_KEY", "kimi-secret")])
+        .expect("kimi secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
     let harness = AgentHarness::spawn_with_config(config).await;
@@ -125,7 +125,7 @@ async fn agent_switch_preserves_mcp_runtime_config() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "cursor" }))
+        .json(&serde_json::json!({ "agent": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -135,7 +135,7 @@ async fn agent_switch_preserves_mcp_runtime_config() {
 
     let written = std::fs::read_to_string(&harness.config_path).expect("read config");
     let written_config = load_config_from_str(&written).expect("written config parses");
-    assert_eq!(written_config.agent.id, "cursor");
+    assert_eq!(written_config.agent.id, "kimi");
     assert_eq!(written_config.mcp, expected_mcp);
 }
 
@@ -349,7 +349,7 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
     let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    write_cursor_registry_override(&config_dir);
+    write_kimi_registry_override(&config_dir);
     write_installed_skill(
         &tempdir.path().join(".agents/skills"),
         "repo-map",
@@ -358,9 +358,9 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
     secrets
-        .set_many([("CURSOR_API_KEY", "cursor-secret")])
-        .expect("cursor secret");
-    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+        .set_many([("KIMI_API_KEY", "kimi-secret")])
+        .expect("kimi secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
     let mut config = test_config();
@@ -374,7 +374,7 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "cursor" }))
+        .json(&serde_json::json!({ "agent": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -383,7 +383,7 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
     let body: Value = serde_json::from_str(&body_text).expect("switch json");
 
-    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert_eq!(body["data"]["agent_id"], "kimi");
     assert_eq!(body["data"]["skills_port"]["status"], "shared");
     assert!(
         tempdir
@@ -519,7 +519,7 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    write_cursor_registry_override(&config_dir);
+    write_kimi_registry_override(&config_dir);
     let mut config = test_config();
     let workspace = tempdir.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -550,10 +550,10 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     secrets
         .set_many([
             ("OPENAI_API_KEY", "openai-secret"),
-            ("CURSOR_API_KEY", "cursor-secret"),
+            ("KIMI_API_KEY", "kimi-secret"),
         ])
         .expect("secrets");
-    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
     let harness = AgentHarness::spawn_with_config(config).await;
@@ -561,7 +561,7 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "cursor", "drop": true }))
+        .json(&serde_json::json!({ "agent": "kimi", "drop": true }))
         .send()
         .await
         .expect("send switch");
@@ -569,7 +569,7 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     let body_text = response.text().await.unwrap_or_default();
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
     let body: Value = serde_json::from_str(&body_text).expect("switch json");
-    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert_eq!(body["data"]["agent_id"], "kimi");
     assert_eq!(
         body["data"]["cleaned_configs"][0]["path"],
         opencode_path.to_string_lossy().as_ref()
@@ -589,8 +589,8 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
         "openai-secret"
     );
     assert_eq!(
-        secrets.get("CURSOR_API_KEY").expect("target secret"),
-        "cursor-secret"
+        secrets.get("KIMI_API_KEY").expect("target secret"),
+        "kimi-secret"
     );
 }
 
@@ -600,7 +600,7 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let _home = HomeEnvGuard::set(tempdir.path());
     let config_dir = tempdir.path().join(".config/acp-stack");
     std::fs::create_dir_all(&config_dir).expect("config dir");
-    write_cursor_registry_override(&config_dir);
+    write_kimi_registry_override(&config_dir);
     let mut config = test_config();
     let workspace = tempdir.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -618,9 +618,9 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let mut secrets =
         acp_stack::secrets::SecretStore::open_or_create(tempdir.path()).expect("secret store");
     secrets
-        .set_many([("CURSOR_API_KEY", "cursor-secret")])
-        .expect("cursor secret");
-    let fixture_path = write_config_options_fixture(tempdir.path(), &["cursor/gpt-5.5"]);
+        .set_many([("KIMI_API_KEY", "kimi-secret")])
+        .expect("kimi secret");
+    let fixture_path = write_config_options_fixture(tempdir.path(), &["kimi/kimi-k3"]);
     let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
 
     let harness = AgentHarness::spawn_with_config(config).await;
@@ -628,7 +628,7 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "cursor", "drop": true }))
+        .json(&serde_json::json!({ "agent": "kimi", "drop": true }))
         .send()
         .await
         .expect("send switch");
@@ -636,7 +636,7 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let body_text = response.text().await.unwrap_or_default();
     assert_eq!(status, StatusCode::OK, "body: {body_text}");
     let body: Value = serde_json::from_str(&body_text).expect("switch json");
-    assert_eq!(body["data"]["agent_id"], "cursor");
+    assert_eq!(body["data"]["agent_id"], "kimi");
     assert!(
         body["data"]["cleanup_errors"]
             .as_array()
@@ -644,7 +644,7 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
         "cleanup error should be reported: {body}"
     );
     let written = std::fs::read_to_string(&harness.config_path).expect("read config");
-    assert!(written.contains(r#"id = "cursor""#));
+    assert!(written.contains(r#"id = "kimi""#));
 }
 
 #[tokio::test]

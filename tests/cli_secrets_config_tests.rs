@@ -101,14 +101,14 @@ fn init_agent_flag_updates_config_non_interactively() {
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["dev", "init", "--agent", "cursor", "--skip-workspace-init"])
+        .args(["dev", "init", "--agent", "kimi", "--skip-workspace-init"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: Cursor CLI (cursor)"));
+        .stdout(predicates::str::contains("agent: Kimi Code (kimi)"));
 
     let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config readable");
-    assert!(written.contains(r#"id = "cursor""#));
+    assert!(written.contains(r#"id = "kimi""#));
     assert!(written.contains(&format!(
         r#"command = "{}""#,
         env!("CARGO_BIN_EXE_placebo-agent")
@@ -116,7 +116,7 @@ fn init_agent_flag_updates_config_non_interactively() {
     assert!(written.contains(r#""acp""#));
     assert!(written.contains(r#""--model-config-option""#));
     assert!(written.contains(r#""placebo-model""#));
-    assert!(written.contains(r#"env = ["CURSOR_API_KEY"]"#));
+    assert!(written.contains(r#"env = ["KIMI_API_KEY"]"#));
     assert!(written.contains("[array.targets.agent.auto_update]"));
     assert!(written.contains("enabled = true"));
     assert!(written.contains(r#"frequency = "1d""#));

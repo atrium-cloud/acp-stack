@@ -4,7 +4,6 @@
 # [OpenCode Docs - Providers](https://opencode.ai/docs/providers/)
 # [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
 # [Amp manual](https://ampcode.com/manual)
-# [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [Kimi Code environment variables](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html)
 # [Hermes Agent configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
 # [models.dev](https://models.dev/api.json)
@@ -181,8 +180,3 @@ agent_ids = ["amp"]
 companion_env_vars = []
 optional_env_vars = []
 
-[[api_keys]]
-env_var = "CURSOR_API_KEY"
-agent_ids = ["cursor"]
-companion_env_vars = []
-optional_env_vars = []

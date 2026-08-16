@@ -4,7 +4,6 @@
 # [OpenCode Docs - Providers](https://opencode.ai/docs/providers/)
 # [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
 # [Amp manual](https://ampcode.com/manual)
-# [Cursor CLI auth docs](https://docs.cursor.com/en/cli/reference/authentication)
 # [models.dev](https://models.dev/api.json)
 # [Hermes Agent configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
 # Last updated on 2026-08-05
@@ -305,11 +304,6 @@ env = { CLAUDE_CODE_USE_FOUNDRY = "1" }
 id = ["amp-code"]
 name = "Amp Code"
 agents = ["amp"]
-
-[[providers]]
-id = ["cursor"]
-name = "Cursor CLI"
-agents = ["cursor"]
 
 # OpenCode-only providers from models.dev
 # Excluded:

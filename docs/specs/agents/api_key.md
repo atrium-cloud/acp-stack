@@ -11,7 +11,6 @@ How each harness reads resolved provider credentials:
 | OpenCode    | generated provider config referencing env refs                                         |
 | Pi Agent    | provider env refs plus Pi model/provider settings                                      |
 | Amp Code    | reads `AMP_API_KEY` from the environment                                               |
-| Cursor CLI  | reads `CURSOR_API_KEY` from the environment                                            |
 | Goose       | provider-native env vars plus Goose config                                             |
 | Codex       | Codex-native OpenAI auth, or env refs for non-OpenAI mapped providers                  |
 | Claude Code | provider env refs exposed through Claude settings, or native cloud provider credentials |

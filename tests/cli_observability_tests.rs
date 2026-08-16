@@ -1724,13 +1724,10 @@ fn agent_status_reports_model_only_agent_params() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
-        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
-        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
-        .replace(
-            r#"env = ["OPENCODE_API_KEY"]"#,
-            r#"env = ["CURSOR_API_KEY"]"#,
-        )
+        .replace(r#"id = "opencode""#, r#"id = "kimi""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Kimi Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "kimi""#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["KIMI_API_KEY"]"#)
         .replace(
             r#"restart = "on-crash""#,
             r#"restart = "on-crash"
@@ -1752,7 +1749,7 @@ creates = "opencode"
         .args(["agent", "status"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent: cursor"))
+        .stdout(predicates::str::contains("agent: kimi"))
         .stdout(predicates::str::contains("model: gpt-5.5"))
         .stdout(predicates::str::contains("mode unset"))
         .stdout(predicates::str::contains("provider unavailable"));

@@ -738,9 +738,9 @@ fn subagent_set_rejects_unsupported_agents() {
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
-        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
-        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#);
+        .replace(r#"id = "opencode""#, r#"id = "kimi""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Kimi Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "kimi""#);
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
     acps_command()
@@ -1881,53 +1881,6 @@ fn agent_set_claude_code_rejects_non_anthropic_messages_custom_provider() {
 }
 
 #[test]
-fn agent_set_cursor_accepts_openai_model_from_acp_options() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    let config_dir = tempdir.path().join(".config/acp-stack");
-    fs::create_dir_all(&config_dir).expect("config dir should be created");
-    let config = VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
-        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
-        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
-        .replace(
-            r#"env = ["OPENCODE_API_KEY"]"#,
-            r#"env = ["CURSOR_API_KEY"]"#,
-        )
-        .replace(
-            r#"
-[agent.install]
-type = "shell"
-shell = "curl -fsSL https://opencode.ai/install | bash"
-creates = "opencode"
-"#,
-            "",
-        );
-    fs::write(config_dir.join("acps-config.toml"), &config).expect("config should be written");
-    let options_path = write_acp_config_options(
-        tempdir.path(),
-        &["gpt-5.5[context=272k,reasoning=medium,fast=false]"],
-        &[],
-    );
-
-    acps_command()
-        .env("HOME", tempdir.path())
-        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["agent", "set", "--model", "gpt-5.5"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(
-            "required_env_refs: CURSOR_API_KEY",
-        ));
-
-    let after =
-        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(after.contains(r#"env = ["CURSOR_API_KEY"]"#));
-    assert!(!after.contains("[array.targets.agent.provider]"));
-    assert!(after.contains(r#"model = "gpt-5.5[context=272k,reasoning=medium,fast=false]""#));
-    assert!(!after.contains(r#"api_key_ref = "CURSOR_API_KEY""#));
-}
-
-#[test]
 fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -1953,45 +1906,6 @@ fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
     assert!(!config.contains("KIMI_MODEL_"));
     assert!(!config.contains("test-kimi-key"));
     assert!(!config.contains("[agent.provider]"));
-}
-
-#[test]
-fn agent_provider_use_cursor_rejects_provider_selection() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    let config_dir = tempdir.path().join(".config/acp-stack");
-    fs::create_dir_all(&config_dir).expect("config dir should be created");
-    let config = VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
-        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
-        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
-        .replace(
-            r#"env = ["OPENCODE_API_KEY"]"#,
-            r#"env = ["CURSOR_API_KEY"]"#,
-        )
-        .replace(
-            r#"
-[agent.install]
-type = "shell"
-shell = "curl -fsSL https://opencode.ai/install | bash"
-creates = "opencode"
-"#,
-            "",
-        );
-    fs::write(config_dir.join("acps-config.toml"), &config).expect("config should be written");
-    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
-
-    acps_command()
-        .env("HOME", tempdir.path())
-        .args(["agent", "provider", "use", "openai", "--model", "gpt-5.5"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "Cursor CLI does not support mapped provider selection",
-        ));
-
-    let after =
-        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(!after.contains("[array.targets.agent.provider]"));
 }
 
 #[test]
@@ -2439,49 +2353,6 @@ fn agent_set_opencode_accepts_mode_only() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: opencode"))
-        .stdout(predicates::str::contains("mode: plan"))
-        .stdout(predicates::str::contains(
-            "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
-        ));
-
-    let config =
-        fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(config.contains(r#"mode = "plan""#));
-    assert!(!config.contains("[array.targets.agent.provider]"));
-}
-
-#[test]
-fn agent_set_cursor_accepts_mode_only() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    let config_dir = tempdir.path().join(".config/acp-stack");
-    fs::create_dir_all(&config_dir).expect("config dir should be created");
-    let config = VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "cursor""#)
-        .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
-        .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
-        .replace(
-            r#"env = ["OPENCODE_API_KEY"]"#,
-            r#"env = ["CURSOR_API_KEY"]"#,
-        )
-        .replace(
-            r#"
-[agent.install]
-type = "shell"
-shell = "curl -fsSL https://opencode.ai/install | bash"
-creates = "opencode"
-"#,
-            "",
-        );
-    fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
-    let options_path = write_acp_config_options(tempdir.path(), &[], &["agent", "ask", "plan"]);
-
-    acps_command()
-        .env("HOME", tempdir.path())
-        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["agent", "set", "--mode", "plan"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("agent: cursor"))
         .stdout(predicates::str::contains("mode: plan"))
         .stdout(predicates::str::contains(
             "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
