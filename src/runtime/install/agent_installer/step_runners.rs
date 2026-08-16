@@ -6,15 +6,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{GithubInstall, InstallSet, github_repo_from_url};
 use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::runtime::process_runner::{
-    apply_non_interactive_env, detach_into_new_session, forward_host_env, join_reader_bounded,
-    kill_process_group, path_env_with_extra_dirs, spawn_capped_reader, wait_with_timeout,
+    CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
+    kill_process_group, path_env_with_extra_dirs, run_captured,
 };
 
 use super::{
@@ -693,13 +693,7 @@ fn run_program_install(
     }
 
     let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear();
+    command.args(args).current_dir(workspace_root).env_clear();
 
     // Minimal env so the installer is no wider a door than the agent itself.
     // PATH is required so `creates` lookups resolve. HOME lets installers
@@ -737,60 +731,45 @@ fn run_program_install(
         command.env(name, value);
     }
 
-    // Detach into a fresh session so the timeout-induced SIGKILL also reaches
-    // whatever grandchildren the shell forks, and so an installer probing
-    // /dev/tty cannot prompt-and-stop when prior state (e.g. ~/.pi) exists.
-    detach_into_new_session(&mut command);
-
-    let mut child = command
-        .spawn()
+    // `run_captured` detaches into a fresh session so the timeout-induced
+    // SIGKILL also reaches whatever grandchildren the shell forks, and so an
+    // installer probing /dev/tty cannot prompt-and-stop when prior state
+    // (e.g. ~/.pi) exists. It also owns the capped reader threads: without
+    // dedicated drainers, a chatty installer can fill the pipe buffer and
+    // wedge the shell once it tries to write more.
+    let outcome = run_captured(&mut command, INSTALLER_TIMEOUT, MAX_INSTALLER_STREAM_BYTES)
         .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
-    // Read stdout/stderr concurrently in dedicated threads with a hard cap
-    // per stream. Without dedicated drainers, a chatty installer can fill
-    // the pipe buffer and wedge the shell once it tries to write more.
-    let stdout_handle = child
-        .stdout
-        .take()
-        .map(|r| spawn_capped_reader(r, MAX_INSTALLER_STREAM_BYTES));
-    let stderr_handle = child
-        .stderr
-        .take()
-        .map(|r| spawn_capped_reader(r, MAX_INSTALLER_STREAM_BYTES));
-
-    let deadline = Instant::now() + INSTALLER_TIMEOUT;
-    let exit = wait_with_timeout(&mut child, deadline);
-
-    match exit {
-        Ok(Some(status)) => {
-            // Kill any grandchildren that inherited stdout/stderr from the
-            // shell. Without this, a `(slow-process &)` in the installer
-            // leaves the pipes open and the reader threads block forever
-            // on EOF — exactly the bypass the spec hardening guards against.
-            kill_process_group(&mut child);
-            let stdout = stdout_handle
-                .and_then(join_reader_bounded)
-                .unwrap_or_default();
-            let stderr = stderr_handle
-                .and_then(join_reader_bounded)
-                .unwrap_or_default();
-            Ok(CapturedOutput {
-                stdout,
-                stderr,
-                exit_status: status.code(),
-            })
-        }
-        Ok(None) => {
-            // Timeout: kill the whole process group, then drain readers.
+    match outcome {
+        CaptureOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+            ..
+        } => Ok(CapturedOutput {
+            stdout,
+            stderr,
+            exit_status: status.code(),
+        }),
+        CaptureOutcome::TimedOut {
+            mut child,
+            stdout_reader,
+            stderr_reader,
+        } => {
+            // Timeout: kill the whole process group, then drain readers. The
+            // captured output is dropped because the typed timeout error
+            // carries no output.
             kill_process_group(&mut child);
             // Best-effort: ensure the kernel reaps the child.
             let _ = child.wait();
             // Threads will exit once the pipes close from the kill.
-            let _ = stdout_handle.and_then(join_reader_bounded);
-            let _ = stderr_handle.and_then(join_reader_bounded);
+            let _ = stdout_reader.and_then(join_reader_bounded);
+            let _ = stderr_reader.and_then(join_reader_bounded);
             Err(StackError::AgentInstallerTimeout)
         }
-        Err(source) => {
+        CaptureOutcome::WaitFailed {
+            source, mut child, ..
+        } => {
             let _ = child.kill();
             let _ = child.wait();
             Err(StackError::AgentSpawnFailed { source })

@@ -243,6 +243,38 @@ pub fn resolve_agent_environment_without_secrets(
     })
 }
 
+/// Snapshot entries are compared by value by callers and are emitted in a
+/// stable shape, so env-name ordering is normalized in one place rather than at
+/// every construction site.
+fn provider_snapshot(
+    provider_id: String,
+    alias: Option<&str>,
+    revision: Option<&str>,
+    mut env_names: Vec<String>,
+) -> ResolvedProviderSnapshot {
+    env_names.sort();
+    env_names.dedup();
+    ResolvedProviderSnapshot {
+        provider_id,
+        alias: alias.map(str::to_owned),
+        revision: revision.map(str::to_owned),
+        env_names,
+    }
+}
+
+/// Both credential branches reject a missing selected alias identically; only
+/// the promoted-set hint differs, because the catalog CLI's `credential select`
+/// remediation refuses to run for non-mapped provider ids.
+fn missing_selected_alias_error(provider_id: &str, promoted_hint: Option<String>) -> StackError {
+    let reason = promoted_hint.unwrap_or_else(|| {
+        format!("selected credential alias for provider `{provider_id}` does not exist")
+    });
+    StackError::InvalidParam {
+        field: "agent.providers.selected_aliases",
+        reason,
+    }
+}
+
 pub fn resolve_agent_environment(
     config: &Config,
     secrets: &SecretStore,
@@ -280,22 +312,14 @@ pub fn resolve_agent_environment(
                 {
                     let selected_alias = selected_alias_for(config, &provider_id);
                     let Some((credential, alias)) = credentials.selected(selected_alias) else {
-                        // No CLI hint here: the catalog CLI commands reject
-                        // non-mapped provider ids, so the mapped branch's
-                        // `credential select` remediation would refuse to run.
-                        let reason = if credentials.is_promoted() && selected_alias.is_none() {
-                            format!(
-                                "custom provider `{provider_id}` has backup credential aliases and none is selected in agent.providers.selected_aliases"
-                            )
-                        } else {
-                            format!(
-                                "selected credential alias for provider `{provider_id}` does not exist"
-                            )
-                        };
-                        return Err(StackError::InvalidParam {
-                            field: "agent.providers.selected_aliases",
-                            reason,
-                        });
+                        return Err(missing_selected_alias_error(
+                            &provider_id,
+                            (credentials.is_promoted() && selected_alias.is_none()).then(|| {
+                                format!(
+                                    "custom provider `{provider_id}` has backup credential aliases and none is selected in agent.providers.selected_aliases"
+                                )
+                            }),
+                        ));
                     };
                     let value = credential.values.get(api_key_ref).ok_or_else(|| {
                         StackError::SecretStorePlaintextInvalid {
@@ -311,28 +335,21 @@ pub fn resolve_agent_environment(
                         value.clone(),
                         &provider_id,
                     )?;
-                    snapshots.push(ResolvedProviderSnapshot {
+                    snapshots.push(provider_snapshot(
                         provider_id,
-                        alias: alias.map(str::to_owned),
-                        revision: Some(credential.revision.clone()),
-                        env_names: vec![api_key_ref.to_owned()],
-                    });
+                        alias,
+                        Some(&credential.revision),
+                        vec![api_key_ref.to_owned()],
+                    ));
                     continue;
                 }
-                let mut env_names: Vec<String> = provider
+                let env_names: Vec<String> = provider
                     .api_key_ref
                     .iter()
                     .filter(|name| env.contains_key(name.as_str()))
                     .cloned()
                     .collect();
-                env_names.sort();
-                env_names.dedup();
-                snapshots.push(ResolvedProviderSnapshot {
-                    provider_id,
-                    alias: None,
-                    revision: None,
-                    env_names,
-                });
+                snapshots.push(provider_snapshot(provider_id, None, None, env_names));
             }
             continue;
         }
@@ -345,36 +362,21 @@ pub fn resolve_agent_environment(
                     .map(str::to_owned),
             );
             env_names.retain(|env_name| env.contains_key(env_name));
-            env_names.sort();
-            env_names.dedup();
-            snapshots.push(ResolvedProviderSnapshot {
-                provider_id,
-                alias: None,
-                revision: None,
-                env_names,
-            });
+            snapshots.push(provider_snapshot(provider_id, None, None, env_names));
             continue;
         }
 
         if let Some(credentials) = secrets.provider_credential_set(&provider_id) {
-            let selected_alias = config
-                .agent
-                .providers
-                .as_ref()
-                .and_then(|providers| providers.selected_aliases.get(&provider_id))
-                .map(String::as_str);
+            let selected_alias = selected_alias_for(config, &provider_id);
             let Some((credential, alias)) = credentials.selected(selected_alias) else {
-                let reason = if credentials.is_promoted() && selected_alias.is_none() {
-                    format!(
-                        "provider `{provider_id}` has backup aliases; select one with `acps agent provider credential select {provider_id} <alias>`"
-                    )
-                } else {
-                    format!("selected credential alias for provider `{provider_id}` does not exist")
-                };
-                return Err(StackError::InvalidParam {
-                    field: "agent.providers.selected_aliases",
-                    reason,
-                });
+                return Err(missing_selected_alias_error(
+                    &provider_id,
+                    (credentials.is_promoted() && selected_alias.is_none()).then(|| {
+                        format!(
+                            "provider `{provider_id}` has backup aliases; select one with `acps agent provider credential select {provider_id} <alias>`"
+                        )
+                    }),
+                ));
             };
             let canonical_primary =
                 env_var_for_provider_id(&provider_id).ok_or_else(|| StackError::InvalidParam {
@@ -431,14 +433,12 @@ pub fn resolve_agent_environment(
                     env_names.push(env_name.to_owned());
                 }
             }
-            env_names.sort();
-            env_names.dedup();
-            snapshots.push(ResolvedProviderSnapshot {
+            snapshots.push(provider_snapshot(
                 provider_id,
-                alias: alias.map(str::to_owned),
-                revision: Some(credential.revision.clone()),
+                alias,
+                Some(&credential.revision),
                 env_names,
-            });
+            ));
             continue;
         }
 
@@ -458,7 +458,7 @@ pub fn resolve_agent_environment(
                 ),
             }
         })?;
-        let mut env_names = required_env_refs_for_agent_provider_id(
+        let env_names = required_env_refs_for_agent_provider_id(
             &config.agent.id,
             &provider_id,
             Some(api_key_ref),
@@ -473,14 +473,7 @@ pub fn resolve_agent_environment(
                 });
             }
         }
-        env_names.sort();
-        env_names.dedup();
-        snapshots.push(ResolvedProviderSnapshot {
-            provider_id,
-            alias: None,
-            revision: None,
-            env_names,
-        });
+        snapshots.push(provider_snapshot(provider_id, None, None, env_names));
     }
 
     snapshots.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
