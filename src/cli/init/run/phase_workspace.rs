@@ -1,0 +1,417 @@
+use super::*;
+
+/// Step: workspace_materialize — clone repos + download/extract data sources
+/// into /workspace/usr/. Skipped if --skip-workspace-init.
+/// Verifier: every source destination has its sentinel file.
+pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> {
+    let output_mode = flow.output_mode;
+    let workspace_for_verify = flow.config.workspace.clone();
+    if flow.args.skip_workspace_init()
+        && !step_needs_resume(&flow.prior_init_steps, step_kind::WORKSPACE_MATERIALIZE)
+    {
+        init_println!(output_mode, "workspace: skipped (--skip-workspace-init)");
+        prompt::emit_state_signal(|| {
+            applicability(
+                InitCategory::Workspace,
+                false,
+                ApplicabilitySource::Args,
+                "--skip-workspace-init",
+            )
+        });
+        return Ok(());
+    }
+    init_println!(output_mode, "progress: materializing workspace sources");
+    let log_paths = crate::runtime::workspace_sources::workspace_init::WorkspaceLogPaths::for_run(
+        &crate::runtime::workspace_sources::workspace_init::default_workspace_init_log_base(
+            &flow.home,
+        ),
+        &flow.init_run.id,
+    );
+    create_dir_owner_only(&log_paths.run_dir)?;
+    // Pre-compute the log_dir path so a mid-clone failure still
+    // records it on the init_steps row — otherwise the operator
+    // would see `log_dir = NULL` exactly when they need the
+    // captured stderr most.
+    let log_dir_str = log_paths.run_dir.display().to_string();
+    let config = &flow.config;
+    let secret_store = &flow.secret_store;
+    let materialize_report = &mut flow.materialize_report;
+    let result = record_init_step_with_default_log_dir(
+        &flow.store,
+        &flow.init_run,
+        3,
+        step_kind::WORKSPACE_MATERIALIZE,
+        Some(&log_dir_str),
+        || Ok(workspace_postcondition_holds(&workspace_for_verify)),
+        || {
+            let report = crate::runtime::workspace_sources::workspace_init::materialize_workspace(
+                &config.workspace,
+                secret_store,
+                Some(&log_paths),
+            )?;
+            let step_log_dir = report.log_dir.as_ref().map(|p| p.display().to_string());
+            *materialize_report = Some(report);
+            Ok(StepOutcome {
+                log_dir: step_log_dir,
+                payload_json: "{}".to_owned(),
+            })
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&flow.store, &flow.init_run, error);
+    }
+    Ok(())
+}
+
+/// Step: deps_apply — run declared dependency install actions before the agent
+/// is launched for provider/model discovery, so deps the agent needs to run
+/// already exist. Opt-in: a TTY confirm, or `--deps-apply --deps-apply-yes`
+/// non-interactively.
+pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
+    let output_mode = flow.output_mode;
+    let deps_candidates = pending_candidates(&flow.config, None);
+    if deps_candidates.is_empty() {
+        // Re-asserted here rather than trusted from the agent-settlement
+        // derivation: the install and workspace steps in between can satisfy
+        // the last pending action.
+        prompt::emit_state_signal(|| {
+            applicability(
+                InitCategory::Deps,
+                false,
+                ApplicabilitySource::Args,
+                "no pending dependency install actions",
+            )
+        });
+    }
+    // Probe escalation once and reuse it for the preflight notice and the
+    // apply itself, so the prompt cannot promise a mode the apply won't use.
+    let deps_escalation = if pending_system_candidates(&flow.config, None).is_empty() {
+        PrivilegeEscalation::NotNeeded
+    } else {
+        probe_privilege_escalation()
+    };
+    // Wrap in finalize_with_error so a confirmation error (e.g. `--deps-apply`
+    // without `--deps-apply-yes`) marks the run terminal instead of leaving it
+    // pending after the earlier steps already succeeded.
+    let deps_apply_requested = match should_apply_deps_for_init(
+        &flow.args,
+        &deps_candidates,
+        prompts_enabled(&flow.args),
+        &deps_escalation,
+        &flow.config.workspace.default_shell,
+        &mut |line| init_println!(output_mode, "{line}"),
+    ) {
+        Ok(requested) => requested,
+        Err(error) => return finalize_with_error(&flow.store, &flow.init_run, error),
+    };
+    if !(deps_apply_requested || step_needs_resume(&flow.prior_init_steps, step_kind::DEPS_APPLY)) {
+        return Ok(());
+    }
+    init_println!(output_mode, "progress: applying dependencies");
+    let store = &flow.store;
+    let config = &flow.config;
+    let result = record_init_step(
+        store,
+        &flow.init_run,
+        10,
+        step_kind::DEPS_APPLY,
+        || Ok(pending_candidates(config, None).is_empty()),
+        || {
+            let report = apply_dependencies_with_escalation(
+                config,
+                None,
+                Some(store),
+                &config.workspace.default_shell,
+                &deps_escalation,
+                |current, total, name| {
+                    init_println!(
+                        output_mode,
+                        "progress: applying dependency {current}/{total}: {name}"
+                    );
+                    Ok(())
+                },
+            )?;
+            // Genuine action failures fail init: the operator confirmed
+            // an apply that then broke. Privilege skips do not — an
+            // un-escalatable host is a host property, so init degrades
+            // and continues to provider/auth collection; the skipped
+            // deps stay visible via `privilege_required` audit rows and
+            // health, and a later resume re-runs them because the step
+            // verifier (`pending_candidates(...).is_empty()`) is still
+            // false for them.
+            let mut failures = Vec::new();
+            let mut skipped_privileged = Vec::new();
+            let mut skipped_privilege_uid: Option<u32> = None;
+            for entry in &report.results {
+                match &entry.outcome {
+                    DepApplyOutcome::Failed { exit_code, .. } => {
+                        let code = exit_code
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "?".to_owned());
+                        failures.push(format!("{} failed (exit={code})", entry.name));
+                    }
+                    DepApplyOutcome::PrivilegeRequired { uid } => {
+                        skipped_privileged.push(entry.name.clone());
+                        skipped_privilege_uid = Some(*uid);
+                    }
+                    DepApplyOutcome::Installed | DepApplyOutcome::AlreadyPresent => {}
+                }
+            }
+            if !failures.is_empty() {
+                if !skipped_privileged.is_empty() {
+                    failures.push(format!(
+                        "{} action(s) skipped on privilege",
+                        skipped_privileged.len(),
+                    ));
+                }
+                return Err(StackError::DepsApplyFailed {
+                    summary: failures.join("; "),
+                    apply_run_id: report.apply_run_id.clone(),
+                    retry_command: "acps init --resume --deps-apply --deps-apply-yes",
+                });
+            }
+            if !skipped_privileged.is_empty() {
+                init_println!(
+                    output_mode,
+                    "warning: {count} dependency install action(s) need root and were skipped (uid={uid}, no passwordless sudo)",
+                    count = skipped_privileged.len(),
+                    // The outcome carries the real euid;
+                    // `deps_escalation.uid()` reports 0 under
+                    // `NotNeeded`, which can still reach
+                    // PrivilegeRequired when a system dep turned
+                    // pending between probe and apply.
+                    uid = skipped_privilege_uid.unwrap_or_default(),
+                );
+                for candidate in pending_system_candidates(config, None) {
+                    init_println!(
+                        output_mode,
+                        "  - {name}: {manual}",
+                        name = candidate.name,
+                        manual =
+                            manual_privileged_command(&config.workspace.default_shell, &candidate,),
+                    );
+                }
+                init_println!(
+                    output_mode,
+                    "recorded as privilege_required under `acps installer history --agent deps_apply` (apply_run_id={})",
+                    report.apply_run_id,
+                );
+                init_println!(
+                    output_mode,
+                    "after installing them manually (or granting passwordless sudo), resume with: acps init --resume --deps-apply --deps-apply-yes"
+                );
+            }
+            Ok(StepOutcome::with_payload(format!(
+                r#"{{"apply_run_id":"{}","applied":{},"skipped_privileged":{}}}"#,
+                report.apply_run_id,
+                report.results.len(),
+                skipped_privileged.len(),
+            )))
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&flow.store, &flow.init_run, error);
+    }
+    Ok(())
+}
+
+/// Step: capability_probe — handshake-only spawn of the installed agent to
+/// capture its ACP `initialize` advertisement, which feeds the MCP prompt gate
+/// below, the ignored-features report, and (persisted)
+/// `GET /v1/agent/capabilities`. A failed probe never fails init.
+pub(super) fn run_capability_probe_step(flow: &mut InitFlow) -> Result<()> {
+    let output_mode = flow.output_mode;
+    init_println!(output_mode, "progress: probing agent capabilities");
+    let store = &flow.store;
+    let home = &flow.home;
+    let config = &flow.config;
+    let secret_store = &flow.secret_store;
+    let probed_capabilities = &mut flow.probed_capabilities;
+    let ignored_features = &mut flow.ignored_features;
+    let result = record_init_step(
+        store,
+        &flow.init_run,
+        12,
+        step_kind::CAPABILITY_PROBE,
+        // Always re-probe on resume: a reinstall or update between runs can
+        // change the advertisement, and a stale "supported" is worse than one
+        // redundant short-lived spawn.
+        || Ok(false),
+        || {
+            let outcome = probe_agent_capabilities_for_init(home, config);
+            // The handshake is the only authority on MCP: the registry has no
+            // MCP column, so whatever the agent just advertised (or failed to)
+            // overrides the provisional verdict.
+            prompt::emit_state_signal(|| mcp_applicability_from_probe(&outcome));
+            match outcome {
+                CapabilityProbeOutcome::Probed(capabilities) => {
+                    store.upsert_agent_capabilities(&config.agent.id, &capabilities.to_json()?)?;
+                    // The ignore assessment is best-effort: an unresolvable MCP
+                    // declaration (missing secret, absent stdio binary) is a
+                    // pre-existing config condition surfaced at session time, not
+                    // a reason to fail the probe step.
+                    match crate::runtime::agent::mcp::resolve_mcp_servers(&config.mcp, secret_store)
+                        .and_then(|declared| capabilities.ignored_mcp_features(declared))
+                    {
+                        Ok(ignored) => *ignored_features = ignored,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "skipping MCP capability assessment: declared servers did not resolve"
+                            );
+                        }
+                    }
+                    if let Some(settlement) =
+                        mcp_settlement_from_probe(&capabilities, config, ignored_features)
+                    {
+                        prompt::emit_state_signal(|| settlement);
+                    }
+                    let payload = serde_json::json!({
+                        "probe_status": "ok",
+                        "protocol_version": capabilities.protocol_version,
+                        "agent_name": capabilities.agent_name,
+                        "ignored": &*ignored_features,
+                    });
+                    *probed_capabilities = Some(capabilities);
+                    Ok(StepOutcome::with_payload(payload.to_string()))
+                }
+                CapabilityProbeOutcome::Unavailable { reason } => {
+                    let payload = serde_json::json!({
+                        "probe_status": "unavailable",
+                        "reason": reason,
+                    });
+                    Ok(StepOutcome::with_payload(payload.to_string()))
+                }
+            }
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&flow.store, &flow.init_run, error);
+    }
+    flow.handoff_context.ignored_features = flow.ignored_features.clone();
+    if let Some(context) = flow.key_handover.failure_context.as_mut() {
+        context.ignored_features = flow.ignored_features.clone();
+    }
+    Ok(())
+}
+
+/// Step: mcp_configure — interactive MCP prompting. Lives after the probe (not
+/// in the pre-install wizard) because MCP support is only knowable from the
+/// installed agent's advertisement, which also bounds the transport picker
+/// below (`advertises_mcp_support`, `offer_http`). Flag-driven runs declare MCP
+/// in the starter config and are covered by the ignored-features report. Hosted
+/// runs get the same prompts on the stream, each carrying its machine-readable
+/// kind; a session that declared MCP servers in its start request arrives here
+/// with a non-empty `config.mcp.servers` and skips prompting outright, so
+/// declaring up front still wins.
+pub(super) fn run_mcp_configure_step(flow: &mut InitFlow) -> Result<()> {
+    let output_mode = flow.output_mode;
+    let mcp_prompting_active =
+        mcp_prompting_enabled(&flow.args, flow.creating_config, &flow.config);
+    // `step_needs_resume`: a resumed run must still settle a prior failed
+    // `mcp_configure` row even though prompting is gated off on resume — the
+    // body then settles it without prompts (the confirm gate below is
+    // `mcp_prompting_active`, false on every resume path).
+    if !(mcp_prompting_active
+        || step_needs_resume(&flow.prior_init_steps, step_kind::MCP_CONFIGURE))
+    {
+        return Ok(());
+    }
+    let config_path = &flow.config_path;
+    let probed_capabilities = &flow.probed_capabilities;
+    let args = &mut flow.args;
+    let config = &mut flow.config;
+    let secret_store = &mut flow.secret_store;
+    let result = record_init_step(
+        &flow.store,
+        &flow.init_run,
+        13,
+        step_kind::MCP_CONFIGURE,
+        // Interactively-collected answers cannot be replayed; a prior
+        // succeeded row skips instead of re-driving prompts on resume.
+        || Ok(true),
+        || {
+            let Some(capabilities) = probed_capabilities.as_ref() else {
+                init_println!(output_mode, "mcp: skipped (agent capabilities unavailable)");
+                prompt::emit_state_signal(|| {
+                    applicability(
+                        InitCategory::Mcp,
+                        false,
+                        ApplicabilitySource::Probe,
+                        "agent capabilities unavailable",
+                    )
+                });
+                return Ok(StepOutcome::with_payload(
+                    r#"{"prompted":false,"reason":"probe_unavailable"}"#,
+                ));
+            };
+            if !capabilities.advertises_mcp_support() {
+                init_println!(
+                    output_mode,
+                    "mcp: skipped (agent does not advertise MCP support)"
+                );
+                prompt::emit_state_signal(|| {
+                    applicability(
+                        InitCategory::Mcp,
+                        false,
+                        ApplicabilitySource::Probe,
+                        "agent does not advertise MCP support",
+                    )
+                });
+                return Ok(StepOutcome::with_payload(
+                    r#"{"prompted":false,"reason":"no_mcp_transports"}"#,
+                ));
+            }
+            let offer_http = capabilities.supports_mcp_capability("http");
+            let mut transports_offered = vec!["stdio"];
+            if offer_http {
+                transports_offered.push("http");
+            }
+            // The gate stays outside the call rather than riding only the
+            // `interactive` argument: `prompt::confirm` consults the
+            // hosted driver before that flag, so an unguarded call would
+            // re-drive the wizard on a resumed hosted run, whose answers
+            // this step cannot replay.
+            if mcp_prompting_active
+                && prompt::confirm(
+                    prompt::HostedPromptKind::McpAdd,
+                    mcp_prompting_active,
+                    "Add MCP servers?",
+                    false,
+                )?
+            {
+                prompt_mcp_servers(mcp_prompting_active, args, offer_http)?;
+            }
+            let new_servers =
+                mcp_servers_from_prompted(&args.prompt_mcp_stdio, &args.prompt_mcp_http)?;
+            let added = merge_prompted_mcp_servers(&mut config.mcp.servers, new_servers)?;
+            if !added.is_empty() {
+                let canonical = config.to_canonical_toml()?;
+                // The reassignment is what makes provider_configure and
+                // agent_headless_config see the servers: later steps read
+                // the in-memory config, not the file.
+                *config = config::load_config_from_str(&canonical)?;
+                atomic_write_owner_only(config_path, canonical.as_bytes())?;
+                let stored =
+                    collect_mcp_secret_refs_for_init(mcp_prompting_active, config, secret_store)?;
+                if !stored.is_empty() {
+                    init_println!(output_mode, "declared secrets: set ({})", stored.join(", "));
+                }
+                prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+                    category: InitCategory::Mcp,
+                    value: Some(added.join(", ")),
+                });
+            }
+            let payload = serde_json::json!({
+                "prompted": mcp_prompting_active,
+                "added": added,
+                "transports_offered": transports_offered,
+            });
+            Ok(StepOutcome::with_payload(payload.to_string()))
+        },
+    );
+    if let Err(error) = result {
+        return finalize_with_error(&flow.store, &flow.init_run, error);
+    }
+    Ok(())
+}
