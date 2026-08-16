@@ -78,7 +78,7 @@ pub struct GithubReleaseOutcome {
 /// `v0.11.1`) so callers can do a stringly compare against
 /// `installer_runs.version`.
 pub fn latest_release_tag(repo: &str) -> Result<String> {
-    let client = build_client()?;
+    let client = build_client("")?;
     // Resolve the base ONCE and reuse it. Reading the env twice (once
     // for the token decision, once inside `fetch_release` to build the
     // URL) would let a concurrent env mutation flip the security
@@ -104,7 +104,7 @@ pub fn install(
     _agent_env: &HashMap<String, String>,
 ) -> Result<GithubReleaseOutcome> {
     let mut log = LogBuf::new();
-    let client = build_client()?;
+    let client = build_client("")?;
     // Resolve the base ONCE and reuse it (see `latest_release_tag` —
     // the token decision and the URL target must read the same value).
     let base = github_api_base();
@@ -212,13 +212,16 @@ pub fn install(
     })
 }
 
-fn build_client() -> Result<reqwest::blocking::Client> {
+/// Shared blocking-HTTP client factory for every GitHub Releases caller in the
+/// runtime, including the self-updater. `repo` only labels the construction
+/// failure; callers with no single repository in scope pass `""`.
+pub(crate) fn build_client(repo: &str) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()
         .map_err(|source| StackError::GithubReleaseFetch {
-            repo: String::new(),
+            repo: repo.to_owned(),
             source,
         })
 }
