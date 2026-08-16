@@ -527,3 +527,42 @@ fn init_custom_agent_acp_gate_fails_for_non_acp_binary() {
         "{stderr}"
     );
 }
+
+#[test]
+fn init_staging_failure_finalizes_run_for_resume() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+
+    // With an existing config the unknown agent survives preflight and fails
+    // during staging, after the run row exists; the failure must finalize the
+    // run instead of leaving a pending row for a later `--resume` to adopt.
+    let output = acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "nonexistent-agent",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("ACP registry does not contain agent `nonexistent-agent`"),
+        "{stderr}"
+    );
+    let run_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("init failed in run "))
+        .expect("staging failure should finalize the init run");
+    assert!(
+        stderr.contains(&format!("retry: acps init --resume --run-id {run_id}")),
+        "{stderr}"
+    );
+}
