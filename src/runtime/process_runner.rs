@@ -13,8 +13,10 @@
 //!   needs (PATH, HOME, LANG).
 //!
 //! Centralizing those primitives here prevents the three call sites from
-//! drifting on security-relevant behavior. The runners keep their own
-//! orchestration; only the leaf helpers live in this module.
+//! drifting on security-relevant behavior. Alongside the leaf helpers this
+//! module owns [`run_captured`], the one spawn → capture → wait composition
+//! all three runners share; the timeout and wait-failure policies, which
+//! genuinely differ per runner, stay at the call sites.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -290,6 +292,110 @@ pub fn read_to_cap_with_tail<R: Read>(
     (prefix_string, tail_string)
 }
 
+/// Outcome of [`run_captured`].
+///
+/// Only the clean-exit path is completed by the helper, because that is the
+/// one path every caller handles identically (kill the group, bounded-join the
+/// readers, map the exit status). The timeout and wait-failure paths hand the
+/// live child and the still-running reader threads back so each runner can
+/// apply its own reap/kill/reporting policy, which genuinely differs: the
+/// deps-apply runner reaps with a grace and warns because an escalated child is
+/// root-owned and may refuse SIGKILL, the installer surfaces a typed timeout
+/// error and discards the captured output, and the updater turns the timeout
+/// into a persisted `timeout` row that keeps the output.
+///
+/// Dropping a `TimedOut` or `WaitFailed` value leaks the live child and both
+/// reader threads — callers must kill/reap the child and join or drain the
+/// readers themselves.
+#[must_use]
+pub enum CaptureOutcome {
+    Exited {
+        status: std::process::ExitStatus,
+        stdout: String,
+        stderr: String,
+        /// Rolling tail of stderr; see [`read_to_cap_with_tail`].
+        stderr_tail: String,
+    },
+    TimedOut {
+        child: std::process::Child,
+        stdout_reader: Option<JoinHandle<String>>,
+        stderr_reader: Option<JoinHandle<(String, String)>>,
+    },
+    WaitFailed {
+        source: std::io::Error,
+        child: std::process::Child,
+        stdout_reader: Option<JoinHandle<String>>,
+        stderr_reader: Option<JoinHandle<(String, String)>>,
+    },
+}
+
+/// Spawn `command` detached, capture both streams through capped reader
+/// threads, and wait up to `timeout`.
+///
+/// The caller configures the program, arguments, cwd and environment; this
+/// helper owns the parts that must not drift between runners: null stdin with
+/// piped stdout/stderr, session detachment (so a timeout kill reaches
+/// grandchildren and `/dev/tty` prompts cannot block), the per-stream ingest
+/// cap, and the bounded wait. A spawn failure is returned as the raw
+/// `io::Error` so each caller keeps its own mapping (typed error vs. logged
+/// row).
+pub fn run_captured(
+    command: &mut Command,
+    timeout: Duration,
+    stream_cap_bytes: usize,
+) -> std::io::Result<CaptureOutcome> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    detach_into_new_session(command);
+    let mut child = command.spawn()?;
+
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|stream| spawn_capped_reader(stream, stream_cap_bytes));
+    // Always compute the stderr tail: the prefix is byte-identical to a plain
+    // capped read, so callers that do not want the tail simply ignore it.
+    let stderr_reader = child.stderr.take().map(|stream| {
+        std::thread::spawn(move || {
+            read_to_cap_with_tail(stream, stream_cap_bytes, STDERR_TAIL_BYTES)
+        })
+    });
+
+    match wait_with_timeout(&mut child, Instant::now() + timeout) {
+        Ok(Some(status)) => {
+            // Kill the group even on a clean exit: a grandchild that inherited
+            // stdout/stderr would otherwise hold the pipes open and block the
+            // reader threads on EOF forever.
+            kill_process_group(&mut child);
+            let stdout = stdout_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            let (stderr, stderr_tail) = stderr_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            Ok(CaptureOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+                stderr_tail,
+            })
+        }
+        Ok(None) => Ok(CaptureOutcome::TimedOut {
+            child,
+            stdout_reader,
+            stderr_reader,
+        }),
+        Err(source) => Ok(CaptureOutcome::WaitFailed {
+            source,
+            child,
+            stdout_reader,
+            stderr_reader,
+        }),
+    }
+}
+
 /// Poll-join a thread up to [`READER_JOIN_GRACE`]. After we kill the process
 /// group the pipes close almost immediately so reader threads return; this
 /// bound guards against a kernel-level edge case where the close is delayed.
@@ -325,6 +431,48 @@ mod tests {
         let sid = unsafe { libc::getsid(pid) };
         assert_eq!(sid, pid, "detached child must lead its own session");
         let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_run_reports_exit_status_and_both_streams() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("echo out; echo err 1>&2; exit 3");
+        let outcome =
+            run_captured(&mut command, Duration::from_secs(30), 64 * 1024).expect("spawn");
+        match outcome {
+            CaptureOutcome::Exited {
+                status,
+                stdout,
+                stderr,
+                stderr_tail,
+            } => {
+                assert_eq!(status.code(), Some(3));
+                assert_eq!(stdout.trim(), "out");
+                assert_eq!(stderr.trim(), "err");
+                assert_eq!(stderr_tail.trim(), "err");
+            }
+            _ => panic!("expected a clean exit"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_run_hands_back_the_child_on_timeout() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30");
+        let outcome =
+            run_captured(&mut command, Duration::from_millis(100), 64 * 1024).expect("spawn");
+        match outcome {
+            CaptureOutcome::TimedOut { mut child, .. } => {
+                // The helper must leave the child alive so the caller owns the
+                // kill/reap policy.
+                kill_process_group(&mut child);
+                let reaped = wait_with_timeout(&mut child, Instant::now() + READER_JOIN_GRACE);
+                assert!(matches!(reaped, Ok(Some(_))), "child must be reapable");
+            }
+            _ => panic!("expected a timeout"),
+        }
     }
 
     #[cfg(unix)]

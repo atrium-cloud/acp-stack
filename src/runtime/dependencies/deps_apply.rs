@@ -33,8 +33,8 @@ use crate::config::{Config, DependencyEntry, DependencyInstallScope};
 use crate::error::{Result, StackError};
 use crate::runtime::dependencies::deps::{DepStatus, check_dependencies};
 use crate::runtime::process_runner::{
-    NON_INTERACTIVE_ENV, STDERR_TAIL_BYTES, apply_non_interactive_env, detach_into_new_session,
-    join_reader_bounded, kill_process_group, read_to_cap, read_to_cap_with_tail, wait_with_timeout,
+    CaptureOutcome, NON_INTERACTIVE_ENV, apply_non_interactive_env, detach_into_new_session,
+    join_reader_bounded, kill_process_group, wait_with_timeout,
 };
 use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,

@@ -34,82 +34,73 @@ pub(crate) fn run_shell(
             command
         }
     };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .envs(scrubbed_env());
+    command.env_clear().envs(scrubbed_env());
     apply_non_interactive_env(&mut command);
-    // Detach into a fresh session so a timeout-induced kill reaches every
-    // grandchild the shell forked (without this, `child.kill()` only stops
-    // the shell — a `sleep 999` it spawned would keep the stdout/stderr
-    // pipes open and the join threads would block forever), and so a dep
-    // script probing /dev/tty cannot prompt. Same pattern as agent_installer.
-    detach_into_new_session(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
-    let stdout_handle = child.stdout.take().expect("piped stdout");
-    let stderr_handle = child.stderr.take().expect("piped stderr");
+    // `run_captured` owns the piped stdio, the session detachment (so a
+    // timeout kill reaches every grandchild the shell forked and a dep script
+    // probing /dev/tty cannot prompt), the capped reader threads and the
+    // bounded wait; only the timeout reap policy below is specific to
+    // deps apply.
+    let outcome =
+        crate::runtime::process_runner::run_captured(&mut command, timeout, STREAM_CAP_BYTES)
+            .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
-    let stdout_thread = std::thread::spawn(move || read_to_cap(stdout_handle, STREAM_CAP_BYTES));
-    let stderr_thread = std::thread::spawn(move || {
-        read_to_cap_with_tail(stderr_handle, STREAM_CAP_BYTES, STDERR_TAIL_BYTES)
-    });
-
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    // On escalated runs the child is root-owned, so our
-                    // SIGKILL is refused with EPERM and an unbounded
-                    // `wait()` would hang the apply; the bounded reap
-                    // (plus the bounded reader joins below) keeps the
-                    // outcome reported as a timeout Failed either way.
-                    kill_process_group(&mut child);
-                    timed_out = true;
-                    if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
-                        // Root-owned (escalated) children ignore our SIGKILL,
-                        // so the unreaped child lingers as a zombie until the
-                        // process exits. Surface it rather than leak silently.
-                        tracing::warn!(
-                            "dep install action outlived its timeout kill and was abandoned unreaped (pid={})",
-                            child.id(),
-                        );
-                    }
-                    break std::process::ExitStatus::default();
-                }
-                std::thread::sleep(Duration::from_millis(50));
+    let (status, timed_out, stdout, stderr, stderr_tail) = match outcome {
+        CaptureOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+            stderr_tail,
+        } => (status, false, stdout, stderr, stderr_tail),
+        CaptureOutcome::TimedOut {
+            mut child,
+            stdout_reader,
+            stderr_reader,
+        } => {
+            // On escalated runs the child is root-owned, so our SIGKILL is
+            // refused with EPERM and an unbounded `wait()` would hang the
+            // apply; the bounded reap (plus the bounded reader joins below)
+            // keeps the outcome reported as a timeout Failed either way.
+            kill_process_group(&mut child);
+            if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
+                // Root-owned (escalated) children ignore our SIGKILL, so the
+                // unreaped child lingers as a zombie until the process exits.
+                // Surface it rather than leak silently.
+                tracing::warn!(
+                    "dep install action outlived its timeout kill and was abandoned unreaped (pid={})",
+                    child.id(),
+                );
+                // Still alive after the grace, so it may hold the pipes open;
+                // signal the group once more before the bounded joins.
+                kill_process_group(&mut child);
             }
-            Err(err) => {
-                return Err(StackError::AgentSpawnFailed { source: err });
-            }
+            // Bounded join: a double-forked daemon that escaped the process
+            // group could still hold our pipe descriptors open. We can't
+            // SIGKILL it (we don't have a pid), so we wait `READER_JOIN_GRACE`
+            // for the close to land and then abandon the thread if it didn't.
+            // Abandoning is fine here — the OS reaps the orphaned thread when
+            // `acps` exits, and dropping the captured output is preferable to
+            // hanging the entire `deps apply` call.
+            let stdout = stdout_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            let (stderr, stderr_tail) = stderr_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            (
+                std::process::ExitStatus::default(),
+                true,
+                stdout,
+                stderr,
+                stderr_tail,
+            )
+        }
+        CaptureOutcome::WaitFailed { source, .. } => {
+            return Err(StackError::AgentSpawnFailed { source });
         }
     };
-    // Always kill the process group, even on a clean shell exit. If
-    // the shell forked a background grandchild that inherited
-    // stdout/stderr, the reader threads would block forever waiting
-    // for EOF on those pipes. Killing the group closes the pipes
-    // (the child's std handles get released), so the readers see
-    // EOF and the joins below return.
-    kill_process_group(&mut child);
-    // Bounded join: a double-forked daemon that escaped the process
-    // group could still hold our pipe descriptors open. We can't
-    // SIGKILL it (we don't have a pid), so we wait `READER_JOIN_GRACE`
-    // for the close to land and then abandon the thread if it didn't.
-    // Abandoning is fine here — the OS reaps the orphaned thread when
-    // `acps` exits, and dropping the captured output is preferable to
-    // hanging the entire `deps apply` call.
-    let stdout = join_reader_bounded(stdout_thread).unwrap_or_default();
-    let (stderr, stderr_tail) =
-        join_reader_bounded(stderr_thread).unwrap_or((String::new(), String::new()));
-    let exit_code = status.code();
-    Ok((exit_code, stdout, stderr, timed_out, stderr_tail))
+    Ok((status.code(), stdout, stderr, timed_out, stderr_tail))
 }
 
 /// Bounded reap after a group kill. A root-owned (escalated) child cannot be

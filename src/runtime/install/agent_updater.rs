@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -18,8 +18,8 @@ use crate::runtime::install::agent_registry::{
 };
 use crate::runtime::install::agent_version_check::normalize_version;
 use crate::runtime::process_runner::{
-    apply_non_interactive_env, detach_into_new_session, forward_host_env, join_reader_bounded,
-    kill_process_group, path_env_with_extra_dirs, spawn_capped_reader, wait_with_timeout,
+    CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
+    kill_process_group, path_env_with_extra_dirs, run_captured,
 };
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
@@ -625,30 +625,20 @@ fn probe_native_update_subcommand(
     let mut command_ran = false;
     let mut failures = Vec::new();
     for args in [&["--help"][..], &["help"][..]] {
-        let run_probe = || {
-            run_command_step_with_started_at(
-                STEP_INSTALL,
-                INSTALL_METHOD_NATIVE,
-                crate::runtime::install::agent_installer::current_timestamp(),
-                path.to_path_buf(),
-                args,
-                &context,
-            )
-        };
-        let mut row = run_probe();
-        if let Some(subcommand) = advertised_subcommand(&row) {
-            return Ok(subcommand);
-        }
+        let mut row = run_help_probe(path, args, &context);
         // A spawn error or a timeout with no output means the child stalled
         // between fork and exec (a known hazard of pre_exec-based spawns in a
         // heavily threaded process) rather than the command lacking the
-        // subcommand. That stall is transient, so one fresh spawn is retried.
-        if row.status == "error" || row.status == "timeout" {
+        // subcommand. That stall is transient, so one fresh spawn is retried,
+        // and the retry's row replaces the stalled one for reporting.
+        if advertised_subcommand(&row).is_none()
+            && (row.status == "error" || row.status == "timeout")
+        {
             std::thread::sleep(HELP_PROBE_RETRY_DELAY);
-            row = run_probe();
-            if let Some(subcommand) = advertised_subcommand(&row) {
-                return Ok(subcommand);
-            }
+            row = run_help_probe(path, args, &context);
+        }
+        if let Some(subcommand) = advertised_subcommand(&row) {
+            return Ok(subcommand);
         }
         // "ran" and "failed" both mean the command itself executed; "error"
         // and "timeout" mean the probe never got a real help listing.
@@ -659,6 +649,21 @@ fn probe_native_update_subcommand(
         command_ran,
         detail: failures.join("; "),
     })
+}
+
+fn run_help_probe(
+    path: &Path,
+    args: &[&str],
+    context: &CommandStepContext<'_>,
+) -> crate::runtime::install::agent_installer::InstallerRowDraft {
+    run_command_step_with_started_at(
+        STEP_INSTALL,
+        INSTALL_METHOD_NATIVE,
+        crate::runtime::install::agent_installer::current_timestamp(),
+        path.to_path_buf(),
+        args,
+        context,
+    )
 }
 
 fn advertised_subcommand(
@@ -762,34 +767,48 @@ fn run_command_step_with_started_at(
         command.env("PATH", path);
     }
     apply_non_interactive_env(&mut command);
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    // Detach so a native updater (e.g. `pi update`) probing the terminal
-    // cannot prompt-and-block the daemon's uncancellable update task.
-    detach_into_new_session(&mut command);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    // `run_captured` detaches the child, so a native updater (e.g. `pi update`)
+    // probing the terminal cannot prompt-and-block the daemon's uncancellable
+    // update task.
+    let outcome = match run_captured(&mut command, context.timeout, INSTALLER_OUTPUT_CAP_BYTES) {
+        Ok(outcome) => outcome,
         Err(err) => {
             return command_error_row(step, method, started_at, err.to_string());
         }
     };
-    let stdout = child
-        .stdout
-        .take()
-        .map(|stream| spawn_capped_reader(stream, INSTALLER_OUTPUT_CAP_BYTES));
-    let stderr = child
-        .stderr
-        .take()
-        .map(|stream| spawn_capped_reader(stream, INSTALLER_OUTPUT_CAP_BYTES));
-    let deadline = Instant::now() + context.timeout;
-    let status = match wait_with_timeout(&mut child, deadline) {
-        Ok(Some(status)) => status,
-        Ok(None) => {
+    match outcome {
+        CaptureOutcome::Exited {
+            status,
+            stdout,
+            stderr,
+            ..
+        } => crate::runtime::install::agent_installer::InstallerRowDraft {
+            started_at,
+            finished_at: Some(crate::runtime::install::agent_installer::current_timestamp()),
+            status: if status.success() { "ran" } else { "failed" }.to_owned(),
+            stdout,
+            stderr,
+            exit_status: status.code(),
+            step: step.to_owned(),
+            method: Some(method.to_owned()),
+            version: None,
+            log_dir: None,
+        },
+        CaptureOutcome::TimedOut {
+            mut child,
+            stdout_reader,
+            stderr_reader,
+        } => {
+            // A timeout still produces a persisted row, so the captured output
+            // is drained rather than discarded.
             kill_process_group(&mut child);
-            let stdout = stdout.and_then(join_reader_bounded).unwrap_or_default();
-            let stderr = stderr.and_then(join_reader_bounded).unwrap_or_default();
-            return crate::runtime::install::agent_installer::InstallerRowDraft {
+            let stdout = stdout_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            let (stderr, _) = stderr_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            crate::runtime::install::agent_installer::InstallerRowDraft {
                 started_at,
                 finished_at: Some(crate::runtime::install::agent_installer::current_timestamp()),
                 status: "timeout".to_owned(),
@@ -800,30 +819,14 @@ fn run_command_step_with_started_at(
                 method: Some(method.to_owned()),
                 version: None,
                 log_dir: None,
-            };
+            }
         }
-        Err(err) => {
+        CaptureOutcome::WaitFailed {
+            source, mut child, ..
+        } => {
             kill_process_group(&mut child);
-            return command_error_row(step, method, started_at, err.to_string());
+            command_error_row(step, method, started_at, source.to_string())
         }
-    };
-    // Reap any grandchildren that inherited the pipes before joining the reader
-    // threads, so a command that backgrounds a child can't leave the readers
-    // blocked on EOF — the same hardening the installer applies on success.
-    kill_process_group(&mut child);
-    let stdout = stdout.and_then(join_reader_bounded).unwrap_or_default();
-    let stderr = stderr.and_then(join_reader_bounded).unwrap_or_default();
-    crate::runtime::install::agent_installer::InstallerRowDraft {
-        started_at,
-        finished_at: Some(crate::runtime::install::agent_installer::current_timestamp()),
-        status: if status.success() { "ran" } else { "failed" }.to_owned(),
-        stdout,
-        stderr,
-        exit_status: status.code(),
-        step: step.to_owned(),
-        method: Some(method.to_owned()),
-        version: None,
-        log_dir: None,
     }
 }
 
