@@ -1205,20 +1205,43 @@ fn run_init_with_output(
     if let Some(prepared) = init_native_config_record
         .as_ref()
         .and_then(|record| record.prepared.as_ref())
-        && let Err(error) = collect_prepared_secret_refs_for_init(
+    {
+        if let Err(error) = collect_prepared_secret_refs_for_init(
             &args,
             &registry,
             &prepared.canonical_config,
             &config_path,
             &mut secret_store,
-        )
-        .and_then(|()| {
-            crate::runtime::agent::native_config_import::validate_native_config_secret_refs(
-                prepared, &home,
-            )
-        })
-    {
-        return finalize_with_error(&store, &init_run, error);
+        ) {
+            return finalize_with_error(&store, &init_run, error);
+        }
+        // A hosted init may have just soft-passed a custom provider ref that is
+        // pending a managed credential push; resolving the prepared environment
+        // would hard-fail on that same ref, so only the unrelated MCP refs are
+        // validated until the credential lands.
+        let validation = match pending_custom_provider_credential(
+            &prepared.canonical_config,
+            &secret_store,
+        ) {
+            Some((provider_id, api_key_ref)) => {
+                init_println!(
+                    output_mode,
+                    "native config secret validation deferred: {}",
+                    pending_provider_credential_reason(&provider_id, &api_key_ref)
+                );
+                crate::runtime::agent::native_config_import::validate_native_config_mcp_secret_refs(
+                    prepared, &home,
+                )
+            }
+            None => {
+                crate::runtime::agent::native_config_import::validate_native_config_secret_refs(
+                    prepared, &home,
+                )
+            }
+        };
+        if let Err(error) = validation {
+            return finalize_with_error(&store, &init_run, error);
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1888,6 +1911,7 @@ fn run_init_with_output(
                 &registry,
                 &mut config,
                 &config_path,
+                &secret_store,
             )?;
             // Custom agents skip provider/model discovery, so they would
             // otherwise never spawn during init. Gate on an ACP session here so a
@@ -2221,7 +2245,7 @@ fn run_init_with_output(
     // Step 8: testflight — optional real-prompt test. Decision uses
     // the resolver above; only `Run` actually executes the agent.
     // -----------------------------------------------------------------
-    if let Some(decision) = resolve_testflight_decision(&args, &config, &registry)? {
+    if let Some(decision) = resolve_testflight_decision(&args, &config, &registry, &secret_store)? {
         let result = record_init_step(
             &store,
             &init_run,
@@ -2229,7 +2253,7 @@ fn run_init_with_output(
             step_kind::TESTFLIGHT,
             || Ok(!matches!(decision, TestflightDecision::Run)),
             || {
-                match decision {
+                match &decision {
                     TestflightDecision::Run => {
                         init_println!(output_mode, "---");
                         init_println!(output_mode, "running real-prompt agent testflight");
@@ -2258,9 +2282,19 @@ fn run_init_with_output(
                             "testflight: skipped (agent does not support headless testflight)"
                         );
                     }
+                    TestflightDecision::SkipCredentialPending {
+                        provider_id,
+                        api_key_ref,
+                    } => {
+                        init_println!(
+                            output_mode,
+                            "testflight: skipped (provider `{provider_id}` credential `{api_key_ref}` is pending a managed push)"
+                        );
+                    }
                 }
                 Ok(StepOutcome::with_payload(format!(
-                    r#"{{"decision":"{decision:?}"}}"#
+                    r#"{{"decision":"{}"}}"#,
+                    decision.label()
                 )))
             },
         );
@@ -2946,6 +2980,7 @@ mod tests {
                 &registry,
                 &mut config,
                 &tempdir.path().join("acps-config.toml"),
+                &SecretStore::open_or_create(tempdir.path()).expect("secret store"),
             )
         })
         .expect("a mode-only discovery failure must not fail init");
@@ -2968,5 +3003,113 @@ mod tests {
             "the skipped lane is reported, not silent: {:?}",
             driver.recorded()
         );
+    }
+
+    /// A hosted init writes a custom provider whose api-key ref arrives later
+    /// through a managed credential push. Until it lands the agent cannot
+    /// resolve its environment, so the lanes that would spawn it must gate on
+    /// the credential rather than on the spawn failing.
+    #[cfg(unix)]
+    fn pending_credential_fixture() -> (tempfile::TempDir, Config, RegistryCatalog, SecretStore) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let stub = tempdir.path().join("stub-agent");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub written");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("stub is executable");
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let mut config = config_for_agent("opencode");
+        // Binary and cwd both resolve, so nothing but the pending credential
+        // can be what stops the lane.
+        config.agent.command = stub.display().to_string();
+        config.agent.args = Vec::new();
+        config.agent.env = vec!["PENDING_CUSTOM_KEY".to_owned()];
+        config.agent.install = None;
+        config.agent.cwd = Some(tempdir.path().display().to_string());
+        config.workspace.root = tempdir.path().display().to_string();
+        config.agent.provider = Some(config::AgentProviderConfig {
+            id: "my-custom".to_owned(),
+            model: Some("my-model".to_owned()),
+            api_key_ref: Some("PENDING_CUSTOM_KEY".to_owned()),
+            custom: Some(config::AgentCustomProviderConfig {
+                name: "My Custom".to_owned(),
+                base_url: "https://example.test/v1".to_owned(),
+                api: config::CustomProviderApi::default(),
+                context: 128_000,
+                output_max_tokens: 8_192,
+                model_name: None,
+            }),
+        });
+        let secrets = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+        (tempdir, config, registry, secrets)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pending_provider_credential_skips_discovery_instead_of_spawning() {
+        let (tempdir, mut config, registry, secrets) = pending_credential_fixture();
+        let args = parse_init_args(&[]);
+        let driver = Arc::new(RecordingDriver::default());
+
+        let outcome = prompt::with_hosted_driver(driver.clone(), || {
+            configure_model_and_mode_for_init(
+                &args,
+                tempdir.path(),
+                &registry,
+                &mut config,
+                &tempdir.path().join("acps-config.toml"),
+                &secrets,
+            )
+        })
+        .expect("a deferred credential must not fail init");
+
+        assert_eq!(outcome.model_action, ModelModeAction::Skipped);
+        assert_eq!(outcome.mode_action, ModelModeAction::Skipped);
+        assert!(config.agent.mode.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_explicit_mode_fails_early_when_the_provider_credential_is_pending() {
+        let (tempdir, mut config, registry, secrets) = pending_credential_fixture();
+        let args = parse_init_args(&["--mode", "build"]);
+
+        let error = configure_model_and_mode_for_init(
+            &args,
+            tempdir.path(),
+            &registry,
+            &mut config,
+            &tempdir.path().join("acps-config.toml"),
+            &secrets,
+        )
+        .expect_err("an explicit --mode cannot be validated without a credential");
+        let message = error.to_string();
+        assert!(message.contains("--mode"), "{message}");
+        assert!(message.contains("PENDING_CUSTOM_KEY"), "{message}");
+        assert!(message.contains("managed-state extension"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn testflight_skips_or_errors_on_a_pending_provider_credential() {
+        let (_tempdir, config, registry, secrets) = pending_credential_fixture();
+
+        let decision =
+            resolve_testflight_decision(&parse_init_args(&[]), &config, &registry, &secrets)
+                .expect("implicit run resolves a decision");
+        assert!(matches!(
+            decision,
+            Some(TestflightDecision::SkipCredentialPending { .. })
+        ));
+
+        let error = resolve_testflight_decision(
+            &parse_init_args(&["--testflight"]),
+            &config,
+            &registry,
+            &secrets,
+        )
+        .expect_err("an explicit --testflight cannot run without a credential");
+        assert!(error.to_string().contains("PENDING_CUSTOM_KEY"));
     }
 }

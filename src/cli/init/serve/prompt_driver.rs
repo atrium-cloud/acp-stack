@@ -98,7 +98,6 @@ pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool
     match request.kind {
         HostedPromptKind::Agent
         | HostedPromptKind::ProviderId
-        | HostedPromptKind::CustomProviderConfirm
         | HostedPromptKind::ProviderName
         | HostedPromptKind::BaseUrl
         | HostedPromptKind::ApiKeyRef

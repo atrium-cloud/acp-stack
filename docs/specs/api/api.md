@@ -134,7 +134,7 @@ The server also self-terminates abandoned sessions: after `--idle-timeout` (defa
 
 Secret values are never returned by the API. Auth keys are not secret-store entries.
 
-`POST /v1/admin/extensions/{name}/apply` is the managed-state extension seam: `{name}` must resolve to a declared `type = "managed-state"` instance (else `404 extensions.not_found`), the body is `{schema_version, revision, desired}` with responses in the standard envelope, revision-ordering conflicts are `409 extensions.revision_conflict`, and provenance refusals are `400 extensions.state_ownership`. Full contract in [extensions.md](../extensions.md).
+`POST /v1/admin/extensions/{name}/apply` is the managed-state extension seam: `{name}` must resolve to a declared `type = "managed-state"` instance (else `404 extensions.not_found`), the body is `{schema_version, revision, desired}` with responses in the standard envelope, revision-ordering conflicts are `409 extensions.revision_conflict`, provenance refusals are `400 extensions.state_ownership`, and a provider id that is neither mapped nor configured as a custom provider is `400 request.invalid_param`. Full contract in [extensions.md](../extensions.md).
 
 ## Agent And Providers
 

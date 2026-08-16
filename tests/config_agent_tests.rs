@@ -285,6 +285,135 @@ fn rejects_custom_provider_anthropic_messages_for_non_claude_agent() {
 }
 
 #[test]
+fn rejects_custom_provider_reusing_a_registry_known_id() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"anthropic\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n"
+    );
+
+    let error = load_config_from_str(&config_text).expect_err("registry-known custom id fails");
+
+    assert!(
+        error
+            .to_string()
+            .contains("reserved by the mapped-provider registry"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("anthropic-1"), "{error}");
+}
+
+#[test]
+fn rejects_one_custom_provider_id_bound_to_two_api_key_refs() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n\n\
+         [agent.subagent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-small-model\"\n\
+         api_key_ref = \"OTHER_CUSTOM_API_KEY\"\n\n\
+         [agent.subagent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n"
+    );
+
+    let error = load_config_from_str(&config_text).expect_err("conflicting api_key_ref fails");
+
+    assert!(
+        error.to_string().contains("conflicting api_key_ref"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("myprovider"), "{error}");
+}
+
+#[test]
+fn rejects_conflicting_custom_provider_api_key_refs_across_array_targets() {
+    use acp_stack::config::{AgentCustomProviderConfig, AgentProviderConfig};
+
+    let custom = |api_key_ref: &str| AgentProviderConfig {
+        id: "myprovider".to_owned(),
+        model: Some("my-model".to_owned()),
+        api_key_ref: Some(api_key_ref.to_owned()),
+        custom: Some(AgentCustomProviderConfig {
+            name: "My Provider".to_owned(),
+            base_url: "https://api.myprovider.example/v1".to_owned(),
+            api: CustomProviderApi::ChatCompletions,
+            model_name: None,
+            context: 128_000,
+            output_max_tokens: 8_192,
+        }),
+    };
+
+    let mut config = load_config_from_str(VALID_CONFIG).expect("legacy config should parse");
+    config.agent.provider = Some(custom("CUSTOM_API_KEY"));
+    config.array.targets[0].agent.provider = config.agent.provider.clone();
+    let mut second_agent = config.agent.clone();
+    second_agent.id = "goose".to_owned();
+    second_agent.name = "Goose".to_owned();
+    second_agent.command = "goose".to_owned();
+    second_agent.provider = Some(custom("OTHER_CUSTOM_API_KEY"));
+    config.array.enabled = true;
+    config.array.targets.push(ArrayTargetConfig {
+        id: "goose".to_owned(),
+        agent: second_agent,
+    });
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let error =
+        load_config_from_str(&canonical).expect_err("conflicting refs across targets are rejected");
+
+    assert!(
+        error.to_string().contains("conflicting api_key_ref"),
+        "{error}"
+    );
+}
+
+#[test]
+fn accepts_one_custom_provider_id_sharing_a_single_api_key_ref() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [agent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n\n\
+         [agent.subagent.provider]\n\
+         id = \"myprovider\"\n\
+         model = \"my-small-model\"\n\
+         api_key_ref = \"CUSTOM_API_KEY\"\n\n\
+         [agent.subagent.provider.custom]\n\
+         name = \"My Provider\"\n\
+         base_url = \"https://api.myprovider.example/v1\"\n"
+    );
+
+    let config =
+        load_config_from_str(&config_text).expect("one custom id sharing one ref is allowed");
+
+    assert_eq!(
+        config
+            .agent
+            .subagent
+            .as_ref()
+            .and_then(|subagent| subagent.provider.as_ref())
+            .and_then(|provider| provider.api_key_ref.as_deref()),
+        Some("CUSTOM_API_KEY")
+    );
+}
+
+#[test]
 fn parses_subagent_provider_config() {
     let config_text = format!(
         "{VALID_CONFIG}\n\

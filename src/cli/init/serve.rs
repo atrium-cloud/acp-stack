@@ -949,7 +949,7 @@ mod tests {
     use crate::secrets::SecretStore;
     // The two init-side seams the MCP hosted lift exercises: the wizard the
     // `mcp_configure` step drives, and the secret collection that follows it.
-    use super::super::provider::collect_mcp_secret_refs_for_init;
+    use super::super::provider::{collect_mcp_secret_refs_for_init, collect_missing_provider_refs};
     use super::super::starter_config::{mcp_servers_from_prompted, prompt_mcp_servers};
 
     use axum::body::to_bytes;
@@ -1959,10 +1959,6 @@ mod tests {
             (HostedPromptKind::McpRowAction, HostedPromptStyle::Select),
             (HostedPromptKind::McpAdd, HostedPromptStyle::Confirm),
             (
-                HostedPromptKind::CustomProviderConfirm,
-                HostedPromptStyle::Confirm,
-            ),
-            (
                 HostedPromptKind::TestflightConfirm,
                 HostedPromptStyle::Confirm,
             ),
@@ -2425,6 +2421,60 @@ mod tests {
         assert!(
             !events.contains(SECRET),
             "a collected secret value must never reach the stream"
+        );
+    }
+
+    #[test]
+    fn hosted_null_provider_key_answer_defers_to_managed_credential_push() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let session = test_session("init_provider_key_soft_pass");
+        let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
+            session: session.clone(),
+        });
+        let home_path = home.path().to_path_buf();
+        let collector = std::thread::spawn(move || {
+            let mut store = SecretStore::open_or_create(&home_path).expect("secret store");
+            let mut config = config::load_config_from_str(include_str!(
+                "../../../tests/fixtures/valid-opencode-stack.toml"
+            ))
+            .expect("fixture config");
+            config.agent.provider = Some(config::AgentProviderConfig {
+                id: "my-custom".to_owned(),
+                model: Some("my-model".to_owned()),
+                api_key_ref: Some("CUSTOM_KEY".to_owned()),
+                custom: Some(config::AgentCustomProviderConfig {
+                    name: "My Custom".to_owned(),
+                    base_url: "https://example.test/v1".to_owned(),
+                    api: config::CustomProviderApi::default(),
+                    model_name: None,
+                    context: config::DEFAULT_CUSTOM_MODEL_CONTEXT,
+                    output_max_tokens: config::DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
+                }),
+            });
+            prompt::with_hosted_driver(driver, || {
+                collect_missing_provider_refs(
+                    true,
+                    &mut store,
+                    &config,
+                    Some("my-custom"),
+                    &["CUSTOM_KEY".to_owned()],
+                )
+            })
+        });
+
+        let mut transcript = HostedPromptTranscript::new(session.clone());
+        let pending = transcript.answer(HostedPromptKind::ProviderApiKeyValue, Value::Null);
+        assert_eq!(pending.style, "password");
+        assert_eq!(pending.prompt, "CUSTOM_KEY");
+
+        collector
+            .join()
+            .expect("collector thread")
+            .expect("null answer soft-passes the provider ref");
+        let events = serde_json::to_string(&session.events_after(0)).expect("events");
+        assert!(
+            events.contains("not present yet"),
+            "deferral progress must reach the stream: {events}"
         );
     }
 

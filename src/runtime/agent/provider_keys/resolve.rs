@@ -58,6 +58,163 @@ pub fn target_uses_provider(agent: &AgentConfig, provider_id: &str) -> bool {
             .is_some_and(|providers| providers.selected_aliases.contains_key(provider_id))
 }
 
+fn selected_alias_for<'a>(config: &'a Config, provider_id: &str) -> Option<&'a str> {
+    config
+        .agent
+        .providers
+        .as_ref()
+        .and_then(|providers| providers.selected_aliases.get(provider_id))
+        .map(String::as_str)
+}
+
+/// True when the credential catalog will inject `env_ref` for `provider_id` at
+/// spawn time. This is the exact mirror of the injection logic in
+/// [`resolve_agent_environment`]; the init secret gate relies on it so that a
+/// passing gate always implies a resolvable spawn environment. Changing one
+/// side without the other breaks that lockstep.
+pub fn catalog_covers_env_ref(
+    secrets: &SecretStore,
+    agent_id: &str,
+    provider_id: &str,
+    selected_alias: Option<&str>,
+    configured_api_key_ref: Option<&str>,
+    env_ref: &str,
+) -> bool {
+    let Some(credentials) = secrets.provider_credential_set(provider_id) else {
+        return false;
+    };
+    // A promoted set with no selected alias errors at resolve time, so it
+    // must not satisfy the gate either.
+    let Some((credential, _alias)) = credentials.selected(selected_alias) else {
+        return false;
+    };
+    if !provider_id_is_known(provider_id) {
+        return configured_api_key_ref == Some(env_ref) && credential.values.contains_key(env_ref);
+    }
+    if provider_uses_agent_native_auth(agent_id, provider_id) {
+        return false;
+    }
+    let Some(canonical_primary) = env_var_for_provider_id(provider_id) else {
+        return false;
+    };
+    if env_var_for_agent_provider_id(agent_id, provider_id) == Some(env_ref) {
+        return credential.values.contains_key(canonical_primary);
+    }
+    let companion =
+        companion_env_refs_for_agent_provider_id(agent_id, provider_id).contains(&env_ref);
+    let optional =
+        optional_env_refs_for_agent_provider_id(agent_id, provider_id).contains(&env_ref);
+    (companion || optional) && credential.values.contains_key(env_ref)
+}
+
+/// The single satisfiability predicate for provider secret refs: the flat
+/// secret store or the structured credential catalog can supply `env_ref`.
+pub fn env_ref_is_satisfiable(
+    secrets: &SecretStore,
+    agent_id: &str,
+    provider_id: &str,
+    selected_alias: Option<&str>,
+    configured_api_key_ref: Option<&str>,
+    env_ref: &str,
+) -> bool {
+    secrets.contains(env_ref)
+        || catalog_covers_env_ref(
+            secrets,
+            agent_id,
+            provider_id,
+            selected_alias,
+            configured_api_key_ref,
+            env_ref,
+        )
+}
+
+/// Config-derived wrapper over [`env_ref_is_satisfiable`], deriving the agent
+/// id, the selected credential alias, and the configured custom-provider
+/// api-key ref from `config`. The custom lookup is agent-local (primary agent
+/// and its subagent), matching what the injection below will actually use — a
+/// custom provider declared only on another array target must not satisfy
+/// here.
+pub fn env_ref_is_satisfiable_for_config(
+    config: &Config,
+    secrets: &SecretStore,
+    provider_id: &str,
+    env_ref: &str,
+) -> bool {
+    env_ref_is_satisfiable(
+        secrets,
+        &config.agent.id,
+        provider_id,
+        selected_alias_for(config, provider_id),
+        agent_custom_provider_api_key_ref(&config.agent, provider_id),
+        env_ref,
+    )
+}
+
+fn agent_custom_provider_api_key_ref<'a>(
+    agent: &'a AgentConfig,
+    provider_id: &str,
+) -> Option<&'a str> {
+    custom_provider_config(agent, provider_id).and_then(|provider| provider.api_key_ref.as_deref())
+}
+
+/// The api-key ref of a custom provider configured anywhere in the config:
+/// the primary agent, its subagent, or any array target (and their
+/// subagents). Managed-state apply uses this as the env contract for
+/// provider ids outside the registry mapping.
+pub fn configured_custom_provider_api_key_ref<'a>(
+    config: &'a Config,
+    provider_id: &str,
+) -> Option<&'a str> {
+    std::iter::once(&config.agent)
+        .chain(config.array.targets.iter().map(|target| &target.agent))
+        .find_map(|agent| {
+            custom_provider_config(agent, provider_id)
+                .and_then(|provider| provider.api_key_ref.as_deref())
+        })
+}
+
+/// Env vars the credential catalog will inject at spawn for the active
+/// provider set. Bare `[agent].env` refs for these vars are skipped during
+/// resolution: the catalog is the authoritative rotation channel, so it wins
+/// over a flat secret of the same name.
+fn catalog_owned_env_vars(config: &Config, secrets: &SecretStore) -> BTreeSet<String> {
+    let mut owned = BTreeSet::new();
+    for provider_id in effective_active_provider_ids(&config.agent) {
+        let configured_api_key_ref = agent_custom_provider_api_key_ref(&config.agent, &provider_id);
+        let mut candidates: Vec<String> = Vec::new();
+        if provider_id_is_known(&provider_id) {
+            candidates.extend(
+                env_var_for_agent_provider_id(&config.agent.id, &provider_id).map(str::to_owned),
+            );
+            candidates.extend(
+                companion_env_refs_for_agent_provider_id(&config.agent.id, &provider_id)
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            );
+            candidates.extend(
+                optional_env_refs_for_agent_provider_id(&config.agent.id, &provider_id)
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            );
+        } else {
+            candidates.extend(configured_api_key_ref.map(str::to_owned));
+        }
+        for candidate in candidates {
+            if catalog_covers_env_ref(
+                secrets,
+                &config.agent.id,
+                &provider_id,
+                selected_alias_for(config, &provider_id),
+                configured_api_key_ref,
+                &candidate,
+            ) {
+                owned.insert(candidate);
+            }
+        }
+    }
+    owned
+}
+
 pub fn resolve_agent_environment_without_secrets(
     config: &Config,
 ) -> Option<ResolvedAgentEnvironment> {
@@ -92,20 +249,76 @@ pub fn resolve_agent_environment(
 ) -> Result<ResolvedAgentEnvironment> {
     let mut env = HashMap::with_capacity(config.agent.env.len());
     let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+    let catalog_owned = catalog_owned_env_vars(config, secrets);
     for entry in &config.agent.env {
-        let (var_name, value) = crate::config::resolve_env_entry("[agent].env", entry, secrets)?;
+        // A bare ref whose var the catalog injects is skipped: the catalog is
+        // the managed rotation channel and wins over a flat secret of the same
+        // name (a differing flat value would otherwise be a hard owner
+        // conflict, not a precedence choice). Templated `VAR=...` entries are
+        // explicit operator compositions and keep flat-store semantics.
+        if crate::config::env_entry_var_name(entry) == entry.as_str()
+            && catalog_owned.contains(entry.as_str())
+        {
+            continue;
+        }
+        let (var_name, value) = crate::config::resolve_env_entry("[agent].env", entry, secrets)
+            .map_err(|error| remap_pending_provider_credential(config, entry, error))?;
         insert_resolved_env(&mut env, &mut owners, &var_name, value, "[agent].env")?;
     }
 
     let mut snapshots = Vec::new();
     for provider_id in effective_active_provider_ids(&config.agent) {
         if !provider_id_is_known(&provider_id) {
-            // Custom (BYOK) providers are absent from the catalog, but their
-            // api-key ref is already injected via the `[agent].env` loop above.
-            // Surface them in the snapshot (env-name references only, no
-            // revision) so status/API reflects custom-provider key rotation.
-            // Genuinely unknown ids are left out.
+            // Custom (BYOK) providers inject their configured api-key ref from
+            // the credential catalog when a managed credential exists, else
+            // from the flat store via the `[agent].env` loop above. Genuinely
+            // unknown ids are left out of the snapshot.
             if let Some(provider) = custom_provider_config(&config.agent, &provider_id) {
+                let api_key_ref = provider.api_key_ref.as_deref();
+                if let (Some(api_key_ref), Some(credentials)) =
+                    (api_key_ref, secrets.provider_credential_set(&provider_id))
+                {
+                    let selected_alias = selected_alias_for(config, &provider_id);
+                    let Some((credential, alias)) = credentials.selected(selected_alias) else {
+                        // No CLI hint here: the catalog CLI commands reject
+                        // non-mapped provider ids, so the mapped branch's
+                        // `credential select` remediation would refuse to run.
+                        let reason = if credentials.is_promoted() && selected_alias.is_none() {
+                            format!(
+                                "custom provider `{provider_id}` has backup credential aliases and none is selected in agent.providers.selected_aliases"
+                            )
+                        } else {
+                            format!(
+                                "selected credential alias for provider `{provider_id}` does not exist"
+                            )
+                        };
+                        return Err(StackError::InvalidParam {
+                            field: "agent.providers.selected_aliases",
+                            reason,
+                        });
+                    };
+                    let value = credential.values.get(api_key_ref).ok_or_else(|| {
+                        StackError::SecretStorePlaintextInvalid {
+                            reason: format!(
+                                "provider credential `{provider_id}` is missing `{api_key_ref}`"
+                            ),
+                        }
+                    })?;
+                    insert_resolved_env(
+                        &mut env,
+                        &mut owners,
+                        api_key_ref,
+                        value.clone(),
+                        &provider_id,
+                    )?;
+                    snapshots.push(ResolvedProviderSnapshot {
+                        provider_id,
+                        alias: alias.map(str::to_owned),
+                        revision: Some(credential.revision.clone()),
+                        env_names: vec![api_key_ref.to_owned()],
+                    });
+                    continue;
+                }
                 let mut env_names: Vec<String> = provider
                     .api_key_ref
                     .iter()
@@ -311,6 +524,37 @@ fn custom_provider_config<'a>(
                 .and_then(|subagent| subagent.provider.as_ref())
                 .filter(|provider| provider.id == provider_id && provider.custom.is_some())
         })
+}
+
+/// A hosted init soft-passes a custom provider's api-key ref expecting a
+/// managed-state credential push after init; if the agent spawns before that
+/// push lands, the raw `SecretNotFound` from the env loop would name the ref
+/// but not the remediation. Name both.
+fn remap_pending_provider_credential(
+    config: &Config,
+    entry: &str,
+    error: StackError,
+) -> StackError {
+    if !matches!(error, StackError::SecretNotFound { .. })
+        || crate::config::env_entry_var_name(entry) != entry
+    {
+        return error;
+    }
+    let pending_provider = effective_active_provider_ids(&config.agent)
+        .into_iter()
+        .filter(|provider_id| !provider_id_is_known(provider_id))
+        .find(|provider_id| {
+            agent_custom_provider_api_key_ref(&config.agent, provider_id) == Some(entry)
+        });
+    match pending_provider {
+        Some(provider_id) => StackError::InvalidParam {
+            field: "agent.provider.api_key_ref",
+            reason: format!(
+                "provider `{provider_id}` has no credential yet: `{entry}` is not in the secret store and no managed credential has been applied; push one through the managed-state extension or run `acps secrets set {entry}`"
+            ),
+        },
+        None => error,
+    }
 }
 
 fn insert_resolved_env(
@@ -748,22 +992,9 @@ restart = "on-crash"
 
     #[test]
     fn custom_provider_appears_in_resolved_snapshot() {
-        use crate::config::{AgentCustomProviderConfig, CustomProviderApi};
         let mut config = resolver_config("opencode");
         config.agent.env = vec!["CUSTOM_KEY".to_owned()];
-        config.agent.provider = Some(AgentProviderConfig {
-            id: "my-custom".to_owned(),
-            model: None,
-            api_key_ref: Some("CUSTOM_KEY".to_owned()),
-            custom: Some(AgentCustomProviderConfig {
-                name: "My Custom".to_owned(),
-                base_url: "https://example.test/v1".to_owned(),
-                api: CustomProviderApi::default(),
-                model_name: None,
-                context: 128_000,
-                output_max_tokens: 8_192,
-            }),
-        });
+        config.agent.provider = Some(custom_provider("my-custom", "CUSTOM_KEY"));
         let home = tempfile::tempdir().expect("home");
         let mut store = SecretStore::open_or_create(home.path()).expect("secret store");
         store.set("CUSTOM_KEY", "custom-secret").expect("flat key");
@@ -778,5 +1009,190 @@ restart = "on-crash"
         assert_eq!(snapshot.env_names, vec!["CUSTOM_KEY".to_owned()]);
         assert!(snapshot.revision.is_none());
         assert!(snapshot.alias.is_none());
+    }
+
+    fn custom_provider(provider_id: &str, api_key_ref: &str) -> AgentProviderConfig {
+        use crate::config::{AgentCustomProviderConfig, CustomProviderApi};
+        AgentProviderConfig {
+            id: provider_id.to_owned(),
+            model: None,
+            api_key_ref: Some(api_key_ref.to_owned()),
+            custom: Some(AgentCustomProviderConfig {
+                name: "My Custom".to_owned(),
+                base_url: "https://example.test/v1".to_owned(),
+                api: CustomProviderApi::default(),
+                model_name: None,
+                context: 128_000,
+                output_max_tokens: 8_192,
+            }),
+        }
+    }
+
+    #[test]
+    fn satisfiability_predicate_mirrors_catalog_injection() {
+        // opencode emits CLOUDFLARE_API_TOKEN while the canonical catalog key
+        // is CLOUDFLARE_API_KEY; the emitted name must satisfy off the
+        // canonical value, exactly as resolve injects it.
+        let mut config = resolver_config("opencode");
+        config.agent.provider = Some(mapped_provider("cloudflare-ai-gateway", None));
+        let (_home, store) = catalog_store(BTreeMap::from([(
+            "cloudflare-ai-gateway".to_owned(),
+            ProviderCredentialSet::aliasless(credential("CLOUDFLARE_API_KEY", "cf-key")),
+        )]));
+        let emitted = env_var_for_agent_provider_id("opencode", "cloudflare-ai-gateway")
+            .expect("emitted var");
+        assert_eq!(emitted, "CLOUDFLARE_API_TOKEN");
+        assert!(env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "cloudflare-ai-gateway",
+            emitted
+        ));
+        // Companion refs are keyed by their own names and absent here.
+        assert!(!env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "cloudflare-ai-gateway",
+            "CLOUDFLARE_ACCOUNT_ID"
+        ));
+        assert!(!env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "cloudflare-ai-gateway",
+            "UNRELATED_KEY"
+        ));
+
+        // A promoted set with no selected alias errors at resolve time, so it
+        // must not satisfy the gate.
+        let (_home, store) = catalog_store(BTreeMap::from([(
+            "opencode-go".to_owned(),
+            ProviderCredentialSet::promoted(BTreeMap::from([(
+                "go_1".to_owned(),
+                credential("OPENCODE_API_KEY", "go-key"),
+            )])),
+        )]));
+        let mut config = resolver_config("opencode");
+        config.agent.provider = Some(mapped_provider("opencode-go", None));
+        assert!(!env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "opencode-go",
+            "OPENCODE_API_KEY"
+        ));
+    }
+
+    #[test]
+    fn satisfiability_predicate_matches_custom_provider_api_key_ref_only() {
+        let mut config = resolver_config("opencode");
+        config.agent.provider = Some(custom_provider("my-custom", "CUSTOM_KEY"));
+        let (_home, store) = catalog_store(BTreeMap::from([(
+            "my-custom".to_owned(),
+            ProviderCredentialSet::aliasless(credential("CUSTOM_KEY", "custom-secret")),
+        )]));
+        assert!(env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "my-custom",
+            "CUSTOM_KEY"
+        ));
+        assert!(!env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "my-custom",
+            "OTHER_KEY"
+        ));
+
+        // Credential keyed by a name other than the configured ref does not
+        // satisfy — resolve would not inject it.
+        let (_home, store) = catalog_store(BTreeMap::from([(
+            "my-custom".to_owned(),
+            ProviderCredentialSet::aliasless(credential("OTHER_KEY", "custom-secret")),
+        )]));
+        assert!(!env_ref_is_satisfiable_for_config(
+            &config,
+            &store,
+            "my-custom",
+            "CUSTOM_KEY"
+        ));
+    }
+
+    #[test]
+    fn custom_provider_resolves_catalog_credential_with_revision() {
+        let mut config = resolver_config("opencode");
+        config.agent.env = vec!["CUSTOM_KEY".to_owned()];
+        config.agent.provider = Some(custom_provider("my-custom", "CUSTOM_KEY"));
+        let (_home, store) = catalog_store(BTreeMap::from([(
+            "my-custom".to_owned(),
+            ProviderCredentialSet::aliasless(credential("CUSTOM_KEY", "catalog-secret")),
+        )]));
+
+        let resolved = resolve_agent_environment(&config, &store).expect("resolve");
+
+        assert_eq!(resolved.env["CUSTOM_KEY"], "catalog-secret");
+        let snapshot = resolved
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == "my-custom")
+            .expect("custom provider snapshot present");
+        assert_eq!(snapshot.env_names, vec!["CUSTOM_KEY".to_owned()]);
+        assert!(snapshot.revision.is_some());
+    }
+
+    #[test]
+    fn catalog_credential_shadows_bare_agent_env_ref() {
+        // Regression: a catalog-only credential with the ref still declared in
+        // `agent.env` (as init writes it) must not fail on the flat store.
+        let mut config = resolver_config("opencode");
+        config.agent.env = vec!["OPENCODE_API_KEY".to_owned()];
+        config.agent.provider = Some(mapped_provider("opencode-go", None));
+        let (_home, store) = catalog_store(BTreeMap::from([(
+            "opencode-go".to_owned(),
+            ProviderCredentialSet::aliasless(credential("OPENCODE_API_KEY", "catalog-key")),
+        )]));
+        let resolved = resolve_agent_environment(&config, &store).expect("resolve");
+        assert_eq!(resolved.env["OPENCODE_API_KEY"], "catalog-key");
+
+        // Precedence: with a differing flat secret present, the catalog value
+        // wins and there is no owner conflict.
+        let (_home, mut store) = catalog_store(BTreeMap::from([(
+            "opencode-go".to_owned(),
+            ProviderCredentialSet::aliasless(credential("OPENCODE_API_KEY", "rotated-key")),
+        )]));
+        store
+            .set("OPENCODE_API_KEY", "stale-flat-key")
+            .expect("flat");
+        let resolved = resolve_agent_environment(&config, &store).expect("resolve");
+        assert_eq!(resolved.env["OPENCODE_API_KEY"], "rotated-key");
+    }
+
+    #[test]
+    fn templated_agent_env_keeps_flat_semantics_when_catalog_covers_var() {
+        let mut config = resolver_config("opencode");
+        config.agent.env = vec!["OPENCODE_API_KEY=prefix-${RELAY_TOKEN}".to_owned()];
+        config.agent.provider = Some(mapped_provider("opencode-go", None));
+        let (_home, mut store) = catalog_store(BTreeMap::from([(
+            "opencode-go".to_owned(),
+            ProviderCredentialSet::aliasless(credential("OPENCODE_API_KEY", "prefix-tok-1")),
+        )]));
+        store.set("RELAY_TOKEN", "tok-1").expect("flat");
+        let resolved = resolve_agent_environment(&config, &store).expect("resolve");
+        // The template composed the same value; a differing template value
+        // would surface as an owner conflict, which is the intended guard.
+        assert_eq!(resolved.env["OPENCODE_API_KEY"], "prefix-tok-1");
+    }
+
+    #[test]
+    fn custom_provider_without_any_credential_reports_pending_error() {
+        let mut config = resolver_config("opencode");
+        config.agent.env = vec!["CUSTOM_KEY".to_owned()];
+        config.agent.provider = Some(custom_provider("my-custom", "CUSTOM_KEY"));
+        let home = tempfile::tempdir().expect("home");
+        let store = SecretStore::open_or_create(home.path()).expect("secret store");
+
+        let error = resolve_agent_environment(&config, &store).expect_err("pending");
+        let message = error.to_string();
+        assert!(message.contains("my-custom"));
+        assert!(message.contains("CUSTOM_KEY"));
+        assert!(message.contains("managed"));
     }
 }

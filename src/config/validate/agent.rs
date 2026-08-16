@@ -211,6 +211,20 @@ fn validate_agent_provider_at(
         validate_secret_ref_name_value(api_key_ref)?;
     }
     if let Some(custom) = provider.custom.as_ref() {
+        // Every runtime and apply site classifies a provider id by registry
+        // membership before it looks at `custom`, so a custom declaration
+        // reusing a registry id resolves down the mapped path and hard-fails at
+        // spawn. Reserve registry ids globally, including ids the registry knows
+        // but does not map for this harness.
+        if provider_id_is_known(&provider.id) {
+            return Err(StackError::InvalidParam {
+                field: fields.id,
+                reason: format!(
+                    "`{id}` is reserved by the mapped-provider registry; choose a distinct custom id such as `{id}-1`",
+                    id = provider.id
+                ),
+            });
+        }
         if provider.model.is_none() {
             return Err(StackError::MissingField {
                 field: fields.model,
@@ -409,6 +423,43 @@ mod tests {
         let error = validate_agent_providers("opencode", Some(&custom), None, &providers)
             .expect_err("custom default rejected");
         assert!(error.to_string().contains("custom providers"));
+    }
+
+    #[test]
+    fn custom_providers_reject_registry_known_ids() {
+        let custom = |provider_id: &str| AgentProviderConfig {
+            id: provider_id.to_owned(),
+            model: Some("some-model".to_owned()),
+            api_key_ref: Some("CUSTOM_API_KEY".to_owned()),
+            custom: Some(AgentCustomProviderConfig {
+                name: "Custom".to_owned(),
+                base_url: "https://example.com/v1".to_owned(),
+                api: CustomProviderApi::ChatCompletions,
+                model_name: None,
+                context: 128_000,
+                output_max_tokens: 8_192,
+            }),
+        };
+
+        let error = validate_agent_provider("opencode", &custom("anthropic"))
+            .expect_err("registry-known id rejected");
+        let message = error.to_string();
+        assert!(message.contains("reserved by the mapped-provider registry"));
+        assert!(message.contains("anthropic-1"));
+
+        validate_agent_provider("opencode", &custom("anthropic-1")).expect("distinct id accepted");
+
+        let subagent = AgentSubagentConfig {
+            disabled: false,
+            provider: Some(custom("anthropic")),
+        };
+        let error =
+            validate_agent_subagent("opencode", &subagent).expect_err("subagent id also reserved");
+        assert!(
+            error
+                .to_string()
+                .contains("reserved by the mapped-provider registry")
+        );
     }
 
     #[test]

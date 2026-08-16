@@ -684,7 +684,65 @@ fn init_custom_opencode_provider_writes_generated_config() {
 }
 
 #[test]
-fn init_custom_codex_provider_allows_known_mapped_provider_id() {
+fn init_custom_provider_succeeds_with_catalog_only_credential() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(tempdir.path(), &[]);
+    seed_catalog_only_provider_credential(
+        tempdir.path(),
+        "myprovider",
+        &[("CUSTOM_API_KEY", "catalog-secret")],
+    );
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "opencode",
+            "--provider",
+            "myprovider",
+            "--custom-provider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--model",
+            "my-model",
+            "--skip-workspace-init",
+        ])
+        .assert()
+        .success();
+
+    // Lockstep guarantee: the init gate passed off the catalog, so spawn-time
+    // resolution must inject the same credential.
+    let config = load_config_from_str(
+        &fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+            .expect("config should be readable"),
+    )
+    .expect("config should parse");
+    let store =
+        acp_stack::secrets::SecretStore::open(tempdir.path()).expect("secret store should reopen");
+    let resolved =
+        acp_stack::runtime::agent::provider_keys::resolve_agent_environment(&config, &store)
+            .expect("spawn environment should resolve from the catalog");
+    assert_eq!(resolved.env["CUSTOM_API_KEY"], "catalog-secret");
+    let snapshot = resolved
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == "myprovider")
+        .expect("custom provider snapshot present");
+    assert!(snapshot.revision.is_some());
+}
+
+/// Registry ids are reserved instance-wide: every runtime and apply site
+/// classifies by registry membership before it looks at `custom`, so a custom
+/// declaration under a registry id resolves down the mapped path and fails at
+/// spawn. Codex-with-Anthropic must use a distinct id such as `anthropic-1`.
+#[test]
+fn init_custom_codex_provider_rejects_known_mapped_provider_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(
         tempdir.path(),
@@ -712,24 +770,26 @@ fn init_custom_codex_provider_allows_known_mapped_provider_id() {
             "--skip-workspace-init",
         ])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("Codex config:"));
+        .failure()
+        .stderr(predicates::str::contains(
+            "reserved by the mapped-provider registry",
+        ))
+        .stderr(predicates::str::contains("anthropic-1"));
 
-    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
-        .expect("config should be readable");
-    assert!(config.contains(r#"id = "anthropic""#));
-    assert!(config.contains("[array.targets.agent.provider.custom]"));
-    assert!(config.contains(r#"api = "responses""#));
-
-    let codex_path = tempdir.path().join(".codex").join("config.toml");
-    let codex: toml::Value =
-        toml::from_str(&fs::read_to_string(codex_path).expect("codex config should be readable"))
-            .expect("codex config should parse");
-    assert_eq!(codex["model_provider"].as_str(), Some("anthropic"));
-    assert_eq!(
-        codex["model_providers"]["anthropic"]["wire_api"].as_str(),
-        Some("responses")
-    );
+    // The starter config is written before the provider step, so the file may
+    // exist; what must not exist is the rejected custom provider inside it.
+    let config_path = tempdir.path().join(".config/acp-stack/acps-config.toml");
+    if config_path.exists() {
+        let config = fs::read_to_string(&config_path).expect("config should be readable");
+        assert!(
+            !config.contains("provider.custom"),
+            "a rejected custom provider must not be written: {config}"
+        );
+        assert!(
+            !config.contains(r#"id = "anthropic""#),
+            "a rejected custom provider must not be written: {config}"
+        );
+    }
 }
 
 // L84-L87 cover the provisional ACP discovery flow during init: validate
@@ -1899,7 +1959,7 @@ fn init_rejects_model_for_agents_without_set_model_before_discovery() {
 }
 
 #[test]
-fn init_custom_codex_provider_allows_openai_provider_id() {
+fn init_custom_codex_provider_rejects_openai_provider_id() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(
         tempdir.path(),
@@ -1927,13 +1987,11 @@ fn init_custom_codex_provider_allows_openai_provider_id() {
             "--skip-workspace-init",
         ])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("Codex config:"));
-
-    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
-        .expect("config should be readable");
-    assert!(config.contains(r#"api_key_ref = "CUSTOM_OPENAI_API_KEY""#));
-    assert!(config.contains("[array.targets.agent.provider.custom]"));
+        .failure()
+        .stderr(predicates::str::contains(
+            "reserved by the mapped-provider registry",
+        ))
+        .stderr(predicates::str::contains("openai-1"));
 }
 
 #[test]

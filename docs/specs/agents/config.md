@@ -78,6 +78,8 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 - Root `agent.model` must be omitted when `[agent.provider].model` is set.
 - Mapped model and mode values are validated against ACP-advertised options, except Claude Code provider-profile, Kimi Code, and Hermes Agent model ids are accepted as supplied. Kimi requires its model before ACP discovery can start; Hermes advertises models only through the pre-1.0 session state this runtime does not read.
 - Custom-provider model ids are accepted as supplied.
+- Custom-provider ids must not collide with the mapped-provider registry, including ids the registry maps only for other harnesses; a distinct id such as `anthropic-1` is required instead.
+- One custom-provider id carries one `api_key_ref` instance-wide: every declaration of it across the primary agent, subagents, and Array targets must name the same ref, since the credential catalog stores one credential set per provider id.
 - Custom providers use `chat-completions` by default, `responses` for Codex, and `anthropic-messages` for Claude Code.
 - Credential aliases and source refs must be valid secret-ref identifiers.
 - Switch does not migrate custom providers in place; configure the target provider explicitly.

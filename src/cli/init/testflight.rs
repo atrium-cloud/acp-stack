@@ -1,14 +1,16 @@
 use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
+use crate::secrets::SecretStore;
 
+use super::provider::{pending_custom_provider_credential, pending_provider_credential_reason};
 use super::{InitArgs, prompt, prompts_enabled};
 
 /// What `acps init` should do with the post-init testflight phase. Resolved
 /// from the operator's flags + TTY state + agent registry support so the
 /// outer flow can render a clear log line for every path, and the test suite
 /// can assert each case without exercising the real ACP bridge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TestflightDecision {
     /// All preconditions met and the operator opted in (explicit flag or
     /// interactive yes).
@@ -23,12 +25,35 @@ pub(super) enum TestflightDecision {
     /// Selected agent isn't headless-compatible; the testflight would fail
     /// at spawn. Surface the skip so the operator isn't surprised.
     SkipUnsupported,
+    /// A configured custom provider's api-key ref has not arrived yet (hosted
+    /// init defers it to a managed credential push), so the real prompt has no
+    /// credential to spend.
+    SkipCredentialPending {
+        provider_id: String,
+        api_key_ref: String,
+    },
+}
+
+impl TestflightDecision {
+    /// Stable label for the recorded step payload. `Debug` would embed quotes
+    /// from the credential-pending variant's fields and break that JSON.
+    pub(super) fn label(&self) -> &'static str {
+        match self {
+            TestflightDecision::Run => "Run",
+            TestflightDecision::SkipExplicit => "SkipExplicit",
+            TestflightDecision::SkipNonInteractive => "SkipNonInteractive",
+            TestflightDecision::SkipDeclined => "SkipDeclined",
+            TestflightDecision::SkipUnsupported => "SkipUnsupported",
+            TestflightDecision::SkipCredentialPending { .. } => "SkipCredentialPending",
+        }
+    }
 }
 
 pub(super) fn resolve_testflight_decision(
     args: &InitArgs,
     config: &Config,
     registry: &RegistryCatalog,
+    secrets: &SecretStore,
 ) -> Result<Option<TestflightDecision>> {
     if args.skip_testflight {
         return Ok(Some(TestflightDecision::SkipExplicit));
@@ -53,6 +78,21 @@ pub(super) fn resolve_testflight_decision(
             });
         }
         return Ok(Some(TestflightDecision::SkipUnsupported));
+    }
+    // The testflight sends a real prompt, so it needs a resolvable provider
+    // credential. A hosted init defers a custom provider's ref to a managed
+    // push after init, which would surface here as an opaque spawn failure.
+    if let Some((provider_id, api_key_ref)) = pending_custom_provider_credential(config, secrets) {
+        if args.testflight {
+            return Err(StackError::InvalidParam {
+                field: "testflight",
+                reason: pending_provider_credential_reason(&provider_id, &api_key_ref),
+            });
+        }
+        return Ok(Some(TestflightDecision::SkipCredentialPending {
+            provider_id,
+            api_key_ref,
+        }));
     }
     if args.testflight {
         if !args.handoff_json {

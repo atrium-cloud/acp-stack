@@ -34,7 +34,6 @@ use super::state_signal::{InitCategory, InitStateSignal};
 pub(super) enum HostedPromptKind {
     Agent,
     ProviderId,
-    CustomProviderConfirm,
     ProviderName,
     BaseUrl,
     ApiKeyRef,
@@ -101,7 +100,6 @@ impl HostedPromptKind {
         match self {
             HostedPromptKind::Agent => "agent",
             HostedPromptKind::ProviderId => "provider_id",
-            HostedPromptKind::CustomProviderConfirm => "custom_provider_confirm",
             HostedPromptKind::ProviderName => "provider_name",
             HostedPromptKind::BaseUrl => "base_url",
             HostedPromptKind::ApiKeyRef => "api_key_ref",
@@ -173,7 +171,6 @@ impl HostedPromptKind {
         match self {
             HostedPromptKind::Agent => Some(InitCategory::Agent),
             HostedPromptKind::ProviderId
-            | HostedPromptKind::CustomProviderConfirm
             | HostedPromptKind::ProviderName
             | HostedPromptKind::BaseUrl
             | HostedPromptKind::ApiKeyRef
@@ -244,7 +241,6 @@ impl HostedPromptKind {
 pub(super) const ALL_HOSTED_PROMPT_KINDS: &[HostedPromptKind] = &[
     HostedPromptKind::Agent,
     HostedPromptKind::ProviderId,
-    HostedPromptKind::CustomProviderConfirm,
     HostedPromptKind::ProviderName,
     HostedPromptKind::BaseUrl,
     HostedPromptKind::ApiKeyRef,
@@ -821,10 +817,6 @@ mod tests {
         let mapped = [
             (HostedPromptKind::Agent, Some(InitCategory::Agent)),
             (HostedPromptKind::ProviderId, Some(InitCategory::Provider)),
-            (
-                HostedPromptKind::CustomProviderConfirm,
-                Some(InitCategory::Provider),
-            ),
             (HostedPromptKind::ProviderName, Some(InitCategory::Provider)),
             (HostedPromptKind::BaseUrl, Some(InitCategory::Provider)),
             (HostedPromptKind::ApiKeyRef, Some(InitCategory::Provider)),
@@ -861,7 +853,6 @@ mod tests {
                 kind,
                 HostedPromptKind::Agent
                     | HostedPromptKind::ProviderId
-                    | HostedPromptKind::CustomProviderConfirm
                     | HostedPromptKind::ProviderName
                     | HostedPromptKind::BaseUrl
                     | HostedPromptKind::ApiKeyRef

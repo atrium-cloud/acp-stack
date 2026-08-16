@@ -140,6 +140,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     validate_code_sources(&config.workspace.code_sources)?;
     validate_data_sources(&config.workspace.data_sources)?;
     validate_array(config)?;
+    validate_custom_provider_api_key_refs(config)?;
     validate_permissions(&config.permissions)?;
     validate_commands(&config.commands)?;
     validate_prompts(&config.prompts)?;
@@ -212,6 +213,54 @@ fn validate_array(config: &Config) -> Result<()> {
             field: "array.primary_target",
             reason: "must reference an entry in array.targets".to_owned(),
         });
+    }
+    Ok(())
+}
+
+/// The credential catalog holds one credential set per custom provider id
+/// instance-wide, and resolution reads the api-key ref first-wins across
+/// declarations. Two declarations of the same custom id with different refs
+/// would therefore make which ref receives the credential depend on iteration
+/// order, so the id → ref binding must be unique across the primary agent,
+/// subagents, and every array target. Sharing one ref across targets stays
+/// legal.
+fn validate_custom_provider_api_key_refs(config: &Config) -> Result<()> {
+    let mut bindings: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let agents = std::iter::once(&config.agent).chain(
+        config
+            .array
+            .targets
+            .iter()
+            .map(|target| &target.agent as &AgentConfig),
+    );
+    for agent in agents {
+        let providers = agent.provider.iter().chain(
+            agent
+                .subagent
+                .iter()
+                .filter(|subagent| !subagent.disabled)
+                .filter_map(|subagent| subagent.provider.as_ref()),
+        );
+        for provider in providers {
+            if provider.custom.is_none() {
+                continue;
+            }
+            let Some(api_key_ref) = provider.api_key_ref.as_deref() else {
+                continue;
+            };
+            match bindings.insert(provider.id.as_str(), api_key_ref) {
+                Some(existing) if existing != api_key_ref => {
+                    return Err(StackError::InvalidParam {
+                        field: "agent.provider.api_key_ref",
+                        reason: format!(
+                            "custom provider `{}` is declared with conflicting api_key_ref values `{existing}` and `{api_key_ref}`; one credential set is stored per provider id, so every declaration must share one ref",
+                            provider.id
+                        ),
+                    });
+                }
+                _ => {}
+            }
+        }
     }
     Ok(())
 }

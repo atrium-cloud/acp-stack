@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::secrets::{ManagedCredentialSelection, SecretStore};
 
@@ -110,6 +111,7 @@ pub struct ApplyResponse {
 /// namespace watermark atomically.
 pub fn apply(
     store: &mut SecretStore,
+    config: &Config,
     namespace: &str,
     request: ApplyRequest,
 ) -> Result<ApplyResponse> {
@@ -124,7 +126,7 @@ pub fn apply(
     }
     let DesiredState::ProviderCredential { selection } = request.desired;
     let selection = selection
-        .map(|selection| resolve_selection(store, selection))
+        .map(|selection| resolve_selection(store, config, selection))
         .transpose()?;
     let outcome = store.apply_managed_state_credential(
         namespace,
@@ -140,7 +142,9 @@ pub fn apply(
 
 /// Bound-check the selection, resolve `source_refs` against the flat secret
 /// store, and validate the merged env-keyed values against the provider's
-/// canonical env-var contract.
+/// env-var contract: the canonical mapping for registry providers, or the
+/// configured `api_key_ref` for a custom provider declared in the agent
+/// config.
 ///
 /// Refs resolve at apply time, so a ref-backed selection is replay-stable
 /// only while the referenced secrets are stable: if a ref rotates between an
@@ -150,6 +154,7 @@ pub fn apply(
 /// revision.
 fn resolve_selection(
     store: &SecretStore,
+    config: &Config,
     selection: CredentialSelection,
 ) -> Result<ManagedCredentialSelection> {
     validate_bounded(
@@ -204,11 +209,38 @@ fn resolve_selection(
         })?;
         values.insert(env_name.clone(), value.to_owned());
     }
-    crate::runtime::agent::provider_keys::validate_env_keyed_credential_values(
-        &selection.provider_id,
-        &values,
-        "desired.selection.values",
-    )?;
+    if crate::runtime::agent::provider_keys::env_var_for_provider_id(&selection.provider_id)
+        .is_some()
+    {
+        crate::runtime::agent::provider_keys::validate_env_keyed_credential_values(
+            &selection.provider_id,
+            &values,
+            "desired.selection.values",
+        )?;
+    } else if let Some(api_key_ref) =
+        crate::runtime::agent::provider_keys::configured_custom_provider_api_key_ref(
+            config,
+            &selection.provider_id,
+        )
+    {
+        crate::runtime::agent::provider_keys::validate_custom_provider_credential_values(
+            &selection.provider_id,
+            api_key_ref,
+            &values,
+            "desired.selection.values",
+        )?;
+    } else {
+        // Rejection happens before any watermark or catalog persist, so an
+        // orchestrator that applied before init wrote the custom provider can
+        // retry the same revision once the config lands.
+        return Err(StackError::InvalidParam {
+            field: "desired.selection.provider_id",
+            reason: format!(
+                "provider `{}` is neither a mapped provider nor a configured custom provider",
+                selection.provider_id
+            ),
+        });
+    }
     Ok(ManagedCredentialSelection {
         provider_id: selection.provider_id,
         values,
