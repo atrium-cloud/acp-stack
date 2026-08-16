@@ -90,7 +90,6 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 | Agent        | `session/list` | `session/load` | `session/resume` | `session/fork` |
 | ------------ | -------------- | -------------- | ---------------- | -------------- |
 | OpenCode     | discovered     | discovered     | discovered       | discovered     |
-| Cursor CLI   | discovered     | discovered     | discovered       | discovered     |
 | Amp Code     | discovered     | discovered     | discovered       | discovered     |
 | Pi Agent     | discovered     | discovered     | discovered       | discovered     |
 | Goose        | discovered     | discovered     | discovered       | discovered     |

@@ -50,7 +50,6 @@ Beyond the embedded catalog, operators can declare their own sources in `[[skill
 | ---------- | ------------------------------ |
 | Codex      | `~/.agents/skills`             |
 | OpenCode   | `~/.agents/skills`             |
-| Cursor CLI | `~/.agents/skills`             |
 | Amp Code   | `~/.agents/skills`             |
 | Pi Agent   | `~/.agents/skills`             |
 | Goose      | `~/.agents/skills`             |

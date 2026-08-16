@@ -109,7 +109,6 @@ fn embedded_registry_advertises_tested_headless_support() {
         supported,
         [
             "opencode",
-            "cursor",
             "amp",
             "pi",
             "goose",
@@ -179,7 +178,6 @@ fn embedded_registry_contains_only_curated_examples() {
         ids,
         [
             "opencode",
-            "cursor",
             "amp",
             "pi",
             "goose",
@@ -189,16 +187,6 @@ fn embedded_registry_contains_only_curated_examples() {
             "hermes"
         ]
     );
-    let cursor = catalog.lookup("cursor").expect("cursor entry exists");
-    assert_eq!(cursor.kind, RegistryKind::Native);
-    assert!(cursor.headless_compatible);
-    assert_eq!(cursor.stdio_framing, RegistryStdioFraming::JsonLines);
-    assert!(!cursor.set_provider);
-    assert!(cursor.set_model);
-    assert!(!cursor.allow_custom_provider);
-    assert!(!cursor.allow_custom_model);
-    assert!(cursor.set_mode);
-    assert_eq!(cursor.support_doc.as_deref(), Some("docs/agents/cursor.md"));
     let amp = catalog.lookup("amp").expect("amp entry exists");
     assert_eq!(amp.kind, RegistryKind::Adapter);
     assert!(amp.headless_compatible);

@@ -240,11 +240,11 @@ fn init_existing_provider_fills_default_api_key_ref_before_model_discovery() {
 #[test]
 fn init_rejects_imported_provider_that_agent_does_not_support() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    seed_init_secrets(tempdir.path(), &[("CURSOR_API_KEY", "test-cursor-key")]);
+    seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     let config = format!(
-        "{}\n\n[agent.provider]\nid = \"cursor\"\napi_key_ref = \"CURSOR_API_KEY\"\n",
+        "{}\n\n[agent.provider]\nid = \"amp-code\"\napi_key_ref = \"AMP_API_KEY\"\n",
         VALID_CONFIG.replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []")
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
@@ -255,7 +255,7 @@ fn init_rejects_imported_provider_that_agent_does_not_support() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "provider `cursor` is not supported for agent `opencode`",
+            "provider `amp-code` is not supported for agent `opencode`",
         ))
         .stderr(predicates::str::contains("failed step: provider_configure"));
 }
@@ -269,13 +269,13 @@ fn init_skips_stale_provider_block_when_agent_cannot_set_provider() {
     let config = format!(
         "{}\n\n[agent.provider]\nid = \"openai\"\nmodel = \"openai/gpt-5.5\"\napi_key_ref = \"OPENAI_API_KEY\"\n",
         VALID_CONFIG
-            .replace(r#"id = "opencode""#, r#"id = "cursor""#)
-            .replace(r#"name = "OpenCode""#, r#"name = "Cursor CLI""#)
-            .replace(r#"command = "opencode""#, r#"command = "cursor-agent""#)
+            .replace(r#"id = "opencode""#, r#"id = "kimi""#)
+            .replace(r#"name = "OpenCode""#, r#"name = "Kimi Code""#)
+            .replace(r#"command = "opencode""#, r#"command = "kimi""#)
             .replace(r#"env = ["OPENCODE_API_KEY"]"#, "env = []")
     );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
-    let options_path = write_acp_config_options(tempdir.path(), &["cursor/gpt-5.5"], &[]);
+    let options_path = write_acp_config_options(tempdir.path(), &["kimi-for-coding"], &[]);
 
     acps_command()
         .env("HOME", tempdir.path())
@@ -284,7 +284,7 @@ fn init_skips_stale_provider_block_when_agent_cannot_set_provider() {
             "dev",
             "init",
             "--model",
-            "cursor/gpt-5.5",
+            "kimi-for-coding",
             "--skip-workspace-init",
         ])
         .assert()
@@ -293,8 +293,8 @@ fn init_skips_stale_provider_block_when_agent_cannot_set_provider() {
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
     let config = load_config_from_str(&config).expect("config should parse");
-    assert_eq!(config.agent.id, "cursor");
-    assert_eq!(config.agent.model.as_deref(), Some("cursor/gpt-5.5"));
+    assert_eq!(config.agent.id, "kimi");
+    assert_eq!(config.agent.model.as_deref(), Some("kimi-for-coding"));
     assert!(config.agent.provider.is_none());
     assert!(
         !config.agent.env.iter().any(|name| name == "OPENAI_API_KEY"),

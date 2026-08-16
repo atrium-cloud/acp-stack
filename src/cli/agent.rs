@@ -333,7 +333,7 @@ pub struct AgentProviderCredentialDeleteArgs {
 
 #[derive(Debug, Args)]
 pub struct AgentSwitchArgs {
-    /// Target agent id, such as opencode, pi, goose, codex, cursor, amp, kimi, or hermes.
+    /// Target agent id, such as opencode, pi, goose, codex, amp, kimi, or hermes.
     pub(super) agent: String,
     /// Drop source agent-owned config after a successful switch.
     #[arg(long = "drop")]
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn build_agent_check_report_returns_unknown_for_shell_native_without_version() {
-        let entry = embedded_entry("cursor");
+        let entry = embedded_entry("goose");
         let resolver = MockResolver::new();
         let rows = vec![installer_row("install", None)];
         let report = build_agent_check_report(&entry, &rows, &resolver);
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn build_agent_check_report_marks_missing_native_install_not_installed() {
-        let entry = embedded_entry("cursor");
+        let entry = embedded_entry("goose");
         let resolver = MockResolver::new();
         let report = build_agent_check_report(&entry, &[], &resolver);
         assert_eq!(report.len(), 1);

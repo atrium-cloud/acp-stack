@@ -956,15 +956,7 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
 fn is_supported_agent_id(agent_id: &str) -> bool {
     matches!(
         agent_id,
-        "amp"
-            | "claude-code"
-            | "codex"
-            | "cursor"
-            | "goose"
-            | "hermes"
-            | "kimi"
-            | "opencode"
-            | "pi"
+        "amp" | "claude-code" | "codex" | "goose" | "hermes" | "kimi" | "opencode" | "pi"
     )
 }
 

@@ -593,16 +593,16 @@ mod tests {
             &config,
             &registry,
             AgentSwitchRequest {
-                target_agent: "cursor".to_owned(),
+                target_agent: "amp".to_owned(),
                 provider_id: None,
                 api_key_ref: None,
             },
         )
         .expect("switch planned");
 
-        assert_eq!(plan.target_agent_id, "cursor");
+        assert_eq!(plan.target_agent_id, "amp");
         assert_eq!(plan.config.mcp, expected_mcp);
-        assert_eq!(plan.required_env_refs, ["CURSOR_API_KEY"]);
+        assert_eq!(plan.required_env_refs, ["AMP_API_KEY"]);
     }
 
     #[test]

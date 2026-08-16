@@ -369,7 +369,7 @@ fn run_subagent_set(args: SubagentSetArgs) -> Result<()> {
 }
 
 // `acps subagent` only gates OpenCode's `small_model` today. Other harnesses
-// (pi, goose, amp, cursor, codex) have their own in-harness subagent/role
+// (pi, goose, amp, codex) have their own in-harness subagent/role
 // mechanisms that are out of scope until they're tested end-to-end. Keep this
 // guard tied to the built-in OpenCode id so a registry override cannot enable
 // an untested code path.

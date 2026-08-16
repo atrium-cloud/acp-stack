@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn unsupported_agent_has_no_generated_config() {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let config = config_with_agent("cursor", &["CURSOR_API_KEY"]);
+        let config = config_with_agent("amp", &["AMP_API_KEY"]);
 
         let provisioned =
             provision_agent_headless_config(&config, tempdir.path()).expect("provision");
