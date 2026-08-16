@@ -4,6 +4,20 @@ use http::StatusCode;
 
 use super::StackError;
 
+/// `Display` body for `WorkspaceCommandFailed`, shared with the
+/// `workspace_source` domain's public message so the two renderings of a
+/// failed command cannot drift.
+pub(super) fn workspace_command_failed_message(
+    command: &str,
+    exit: Option<i32>,
+    stderr_tail: &str,
+) -> String {
+    match exit {
+        Some(code) => format!("`{command}` exited with status {code}: {stderr_tail}"),
+        None => format!("`{command}` exited without a status: {stderr_tail}"),
+    }
+}
+
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
     Some(match err {

@@ -61,6 +61,8 @@ use crate::state::FailureClass;
 
 mod capabilities;
 mod process_env;
+mod sessions;
+mod spawn;
 
 use self::process_env::build_agent_process_env;
 
@@ -69,6 +71,11 @@ pub use self::capabilities::{
     IGNORED_FEATURE_MCP_SERVER, IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
 };
 pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
+// `spawn.rs` owns command resolution; `resolve_command_path` and
+// `agent_process_path` keep their pre-split paths for the CLI, supervisor and
+// terminal handlers that import them from this module.
+pub(super) use self::spawn::agent_process_path;
+pub(crate) use self::spawn::resolve_command_path;
 
 // External callers (CLI, supervisor, model_discovery, integration tests) wrote
 // `crate::runtime::agent::acp_bridge::{SessionEventSink, StateStoreSessionSink, session_*}`
@@ -255,458 +262,6 @@ impl Drop for NotificationGuard {
 }
 
 impl AcpBridge {
-    /// Spawn `[agent].command` and complete the ACP `initialize` handshake.
-    ///
-    /// `env` is the resolved secret-name -> value map for `[agent].env`. We
-    /// resolve the command path first, then `env_clear()` so only managed
-    /// runtime context and explicitly resolved secrets reach the child.
-    ///
-    /// `command_log` is the durable command-log target (state store plus live
-    /// event hub) for client terminals; `None` (discovery probes, most tests)
-    /// keeps terminals functional without `commands` rows or live events.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn spawn(
-        agent: &AgentConfig,
-        env: HashMap<String, String>,
-        cwd: PathBuf,
-        sink: Arc<dyn SessionEventSink>,
-        permissions: AcpPermissionPolicy,
-        sandbox: &crate::config::SandboxConfig,
-        network_provider: Option<&crate::extensions::NetworkProviderExtension>,
-        command_log: Option<TerminalCommandLog>,
-    ) -> Result<Self> {
-        let env = build_agent_process_env(agent, env)?;
-        let command_path = resolve_command_path(&agent.command, &cwd).ok_or_else(|| {
-            StackError::AgentInitializeFailed {
-                reason: format!("agent command `{}` not found on PATH", agent.command),
-            }
-        })?;
-        // `off` is a verbatim passthrough so single-process behavior is unchanged
-        // and HOME need not be resolvable; other modes wrap the spawn.
-        let wrapped = if matches!(sandbox.mode, crate::config::SandboxMode::Off) {
-            crate::runtime::sandbox::WrappedCommand {
-                program: command_path,
-                args: agent.args.clone(),
-            }
-        } else {
-            crate::runtime::sandbox::wrap(
-                sandbox,
-                network_provider,
-                &command_path,
-                &agent.args,
-                &crate::fs_util::home_dir()?,
-                &cwd,
-                crate::ownership::process_euid(),
-                crate::ownership::process_egid(),
-            )?
-        };
-        let mut command = Command::new(&wrapped.program);
-        command
-            .args(&wrapped.args)
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            // stderr is the agent's log channel per
-            // docs/ref/acp/protocol/transports.md:28; inherit so it shows up
-            // alongside our daemon logs without an extra plumbing layer.
-            .stderr(std::process::Stdio::inherit())
-            .env_clear();
-        // Runtime context is intentionally narrow: managed PATH so adapters
-        // can find registry-installed harnesses, and HOME so agent wrappers
-        // can find their own config/cache directories.
-        if let Some(path) = agent_process_path() {
-            command.env("PATH", path);
-        }
-        forward_host_env_tokio(&mut command, "HOME");
-        for (name, value) in &env {
-            if matches!(name.as_str(), "PATH" | "HOME") {
-                tracing::warn!(
-                    name = %name,
-                    "refusing to inject `{name}` from `[agent].env` into agent process: reserved",
-                );
-                continue;
-            }
-            command.env(name, value);
-        }
-        // Fresh process group so a future SIGTERM-during-shutdown also
-        // reaches MCP/tool grandchildren the agent forks.
-        #[cfg(unix)]
-        command.process_group(0);
-        command.kill_on_drop(true);
-        // Network-isolated spawns get the daemon's stderr at the supervisor's
-        // diagnostic fd (a no-op wrapper-detection pass for every other mode).
-        #[cfg(unix)]
-        let diag_handle = crate::runtime::sandbox::wire_supervise_diag_fd(
-            sandbox,
-            network_provider,
-            &mut command,
-            &wrapped.args,
-        )
-        .map_err(|source| StackError::AgentSpawnFailed { source })?;
-
-        let spawn_result = command.spawn();
-        #[cfg(unix)]
-        drop(diag_handle);
-        let mut child = spawn_result.map_err(|source| StackError::AgentSpawnFailed { source })?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| StackError::AgentInitializeFailed {
-                reason: "agent stdin was not piped".to_owned(),
-            })?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| StackError::AgentInitializeFailed {
-                reason: "agent stdout was not piped".to_owned(),
-            })?;
-
-        let transport =
-            agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat());
-
-        let (init_tx, init_rx) = oneshot::channel::<
-            std::result::Result<(InitializeResponse, ConnectionTo<Agent>), String>,
-        >();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let (exit_tx, exit_rx) = watch::channel(None);
-        let planned_shutdown = Arc::new(AtomicBool::new(false));
-        let planned_shutdown_for_task = Arc::clone(&planned_shutdown);
-        let spawn_pid = child.id();
-
-        // Notifications get persisted to the durable event log keyed by
-        // session_id and then fanned out live through the event hub.
-        // Non-session notifications are still logged-and-dropped.
-        let notification_drain = Arc::new(NotificationDrain::default());
-        let notification_queue = spawn_session_notification_queue(sink.clone());
-        let notification_drain_for_task = Arc::clone(&notification_drain);
-        let bridge_sink = sink.clone();
-        let permission_sink = sink.clone();
-
-        // One shared handler context per bridge; each terminal handler
-        // closure gets its own Arc clone below (closure-capture rule).
-        let terminals = Arc::new(TerminalRegistry::default());
-        let terminal_context = Arc::new(TerminalHandlerContext {
-            registry: Arc::clone(&terminals),
-            workspace_root: cwd.clone(),
-            sandbox: sandbox.clone(),
-            network_provider: network_provider.cloned(),
-            command_log,
-            sink: sink.clone(),
-        });
-        let create_context = Arc::clone(&terminal_context);
-        let output_context = Arc::clone(&terminal_context);
-        let wait_context = Arc::clone(&terminal_context);
-        let kill_context = Arc::clone(&terminal_context);
-        let release_context = Arc::clone(&terminal_context);
-        // The fs handlers reuse the same context: they need the workspace
-        // root, state, and sink but not the registry or sandbox.
-        let fs_read_context = Arc::clone(&terminal_context);
-        let fs_write_context = Arc::clone(&terminal_context);
-
-        // The SDK's Client.builder().connect_with(...) future drives the IO
-        // loop until the closure returns. We spawn it as a tokio task so the
-        // bridge handle can outlive the call site, and we use a oneshot
-        // shutdown signal to ask the closure to wrap up cleanly.
-        let permissions_for_task = permissions.clone();
-        let connection_exit_tx = exit_tx.clone();
-        let connection_task: JoinHandle<()> = tokio::spawn(async move {
-            let run = Client
-                .builder()
-                .on_receive_request(
-                    async move |request: RequestPermissionRequest, responder, cx| {
-                        let permissions = permissions_for_task.clone();
-                        let sink = permission_sink.clone();
-                        let cancellation = responder.cancellation();
-                        cx.spawn(async move {
-                            let outcome = match &permissions {
-                                AcpPermissionPolicy::Service(service) => {
-                                    resolve_acp_permission(
-                                        service,
-                                        &sink,
-                                        request,
-                                        Some(cancellation),
-                                    )
-                                    .await
-                                }
-                                AcpPermissionPolicy::AutoApprove => {
-                                    Ok(auto_approve_acp_permission(&request))
-                                }
-                                AcpPermissionPolicy::Cancel => {
-                                    Ok(RequestPermissionOutcome::Cancelled)
-                                }
-                            };
-                            match outcome {
-                                Ok(outcome) => {
-                                    responder.respond(RequestPermissionResponse::new(outcome))
-                                }
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                // Terminal handlers offload to spawned tasks: they can park
-                // for a long time (wait_for_exit on a slow child, kill grace)
-                // and handler callbacks run on the connection's single event
-                // loop, which must keep processing concurrent terminal calls
-                // and session/update notifications meanwhile.
-                .on_receive_request(
-                    async move |request: CreateTerminalRequest, responder, cx| {
-                        let context = Arc::clone(&create_context);
-                        cx.spawn(async move {
-                            match handle_create_terminal(&context, request).await {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: TerminalOutputRequest, responder, cx| {
-                        let context = Arc::clone(&output_context);
-                        cx.spawn(async move {
-                            match handle_terminal_output(&context.registry, request).await {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: WaitForTerminalExitRequest, responder, cx| {
-                        let context = Arc::clone(&wait_context);
-                        let cancellation = responder.cancellation();
-                        cx.spawn(async move {
-                            tokio::select! {
-                                result = handle_wait_for_terminal_exit(&context.registry, request) => {
-                                    match result {
-                                        Ok(response) => responder.respond(response),
-                                        Err(error) => responder.respond_with_error(error),
-                                    }
-                                }
-                                () = cancellation.cancelled() => {
-                                    responder.respond_with_error(agent_client_protocol::Error::request_cancelled())
-                                }
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: KillTerminalRequest, responder, cx| {
-                        let context = Arc::clone(&kill_context);
-                        cx.spawn(async move {
-                            match handle_kill_terminal(&context.registry, request).await {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: ReleaseTerminalRequest, responder, cx| {
-                        let context = Arc::clone(&release_context);
-                        cx.spawn(async move {
-                            match handle_release_terminal(&context.registry, request).await {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: ReadTextFileRequest, responder, cx| {
-                        let context = Arc::clone(&fs_read_context);
-                        cx.spawn(async move {
-                            match handle_read_text_file(
-                                &context.workspace_root,
-                                &context.sink,
-                                request,
-                            )
-                            .await
-                            {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_request(
-                    async move |request: WriteTextFileRequest, responder, cx| {
-                        let context = Arc::clone(&fs_write_context);
-                        cx.spawn(async move {
-                            match handle_write_text_file(
-                                &context.workspace_root,
-                                context.command_log.as_ref().map(|log| &log.state),
-                                &context.sink,
-                                request,
-                            )
-                            .await
-                            {
-                                Ok(response) => responder.respond(response),
-                                Err(error) => responder.respond_with_error(error),
-                            }
-                        })
-                    },
-                    agent_client_protocol::on_receive_request!(),
-                )
-                .on_receive_notification(
-                    async move |notification: AgentNotification, _cx| {
-                        match notification {
-                            AgentNotification::SessionNotification(session_note) => {
-                                enqueue_session_notification(
-                                    &notification_queue,
-                                    Arc::clone(&notification_drain_for_task),
-                                    session_note,
-                                )
-                                .await;
-                            }
-                            other => {
-                                tracing::debug!(
-                                    method = %other.method(),
-                                    "acp bridge dropped non-session notification"
-                                );
-                            }
-                        }
-                        Ok(())
-                    },
-                    agent_client_protocol::on_receive_notification!(),
-                )
-                .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
-                    let response = cx
-                        .send_request(
-                            InitializeRequest::new(ProtocolVersion::V1)
-                                .client_capabilities(client_capabilities())
-                                .client_info(Implementation::new(
-                                    "acp-stack",
-                                    env!("CARGO_PKG_VERSION"),
-                                )),
-                        )
-                        .block_task()
-                        .await
-                        .map_err(|err| err.to_string());
-                    match response {
-                        Ok(response) => {
-                            // Send the connection handle out so the bridge
-                            // can dispatch session methods after this closure
-                            // parks. `cx` is Clone, so we keep the original
-                            // here for any future closure-internal use.
-                            let _ = init_tx.send(Ok((response, cx.clone())));
-                        }
-                        Err(reason) => {
-                            let _ = init_tx.send(Err(reason));
-                            // Returning an error from the closure tears down
-                            // the connection. The caller has already seen
-                            // the initialize failure via the oneshot.
-                            return Err(agent_client_protocol::Error::internal_error());
-                        }
-                    }
-                    // Hold the connection open until shutdown is signaled.
-                    // Errors here are non-fatal: a dropped shutdown sender
-                    // (e.g. bridge dropped without explicit shutdown) means
-                    // "tear down now."
-                    let _ = shutdown_rx.await;
-                    Ok(())
-                })
-                .await;
-            let planned = planned_shutdown_for_task.load(Ordering::SeqCst);
-            let exit = match run {
-                Ok(()) if planned => AcpBridgeExit {
-                    pid: spawn_pid,
-                    planned,
-                    reason: AcpBridgeExitReason::Shutdown,
-                    message: None,
-                    exit_status: None,
-                },
-                Ok(()) => AcpBridgeExit {
-                    pid: spawn_pid,
-                    planned,
-                    reason: AcpBridgeExitReason::ConnectionEnded,
-                    message: None,
-                    exit_status: None,
-                },
-                Err(err) => {
-                    tracing::warn!(error = ?err, "acp bridge connection task exited with error");
-                    AcpBridgeExit {
-                        pid: spawn_pid,
-                        planned,
-                        reason: AcpBridgeExitReason::ConnectionError,
-                        message: Some(err.to_string()),
-                        exit_status: None,
-                    }
-                }
-            };
-            let _ = connection_exit_tx.send(Some(exit));
-        });
-
-        let (init_response, connection) = match timeout(INITIALIZE_TIMEOUT, init_rx).await {
-            Ok(Ok(Ok((response, connection)))) => (response, connection),
-            Ok(Ok(Err(reason))) => {
-                fail_spawn(&mut child, connection_task).await;
-                return Err(StackError::AgentInitializeFailed { reason });
-            }
-            Ok(Err(_)) => {
-                fail_spawn(&mut child, connection_task).await;
-                return Err(StackError::AgentInitializeFailed {
-                    reason: "connection ended before initialize completed".to_owned(),
-                });
-            }
-            Err(_) => {
-                fail_spawn(&mut child, connection_task).await;
-                return Err(StackError::AgentInitializeFailed {
-                    reason: format!(
-                        "initialize did not return within {}s",
-                        INITIALIZE_TIMEOUT.as_secs()
-                    ),
-                });
-            }
-        };
-
-        if init_response.protocol_version != ProtocolVersion::V1 {
-            let returned = init_response.protocol_version.as_u16();
-            fail_spawn(&mut child, connection_task).await;
-            return Err(StackError::AgentInitializeFailed {
-                reason: format!(
-                    "requested ACP protocol version {} but agent returned {returned}",
-                    ProtocolVersion::V1.as_u16()
-                ),
-            });
-        }
-        let capabilities = match AgentCapabilitiesDto::from_initialize_response(&init_response) {
-            Ok(capabilities) => capabilities,
-            Err(error) => {
-                fail_spawn(&mut child, connection_task).await;
-                return Err(error);
-            }
-        };
-        let child = Arc::new(TokioMutex::new(Some(child)));
-        spawn_child_exit_watcher(
-            Arc::clone(&child),
-            Arc::clone(&planned_shutdown),
-            exit_tx,
-            spawn_pid,
-        );
-
-        Ok(Self {
-            child,
-            capabilities,
-            connection: TokioMutex::new(Some(connection)),
-            shutdown_tx: TokioMutex::new(Some(shutdown_tx)),
-            connection_task: TokioMutex::new(Some(connection_task)),
-            planned_shutdown,
-            exit_rx,
-            spawn_pid,
-            sink: bridge_sink,
-            notification_drain,
-            terminals,
-        })
-    }
-
     pub fn capabilities(&self) -> &AgentCapabilitiesDto {
         &self.capabilities
     }
@@ -741,260 +296,27 @@ impl AcpBridge {
         Ok(status.code())
     }
 
-    async fn connection(&self) -> Result<ConnectionTo<Agent>> {
-        let guard = self.connection.lock().await;
-        guard.as_ref().cloned().ok_or(StackError::AgentNotRunning)
-    }
-
-    /// `session/new`. Always supported per ACP baseline.
-    pub async fn new_session(
-        &self,
-        cwd: PathBuf,
-        mcp_servers: Vec<McpServer>,
-    ) -> Result<NewSessionResponse> {
-        self.capabilities
-            .reject_unmodeled_mcp_servers(&mcp_servers)?;
-        let connection = self.connection().await?;
-        let mut request = NewSessionRequest::new(cwd);
-        request.mcp_servers = mcp_servers;
-        let response = connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/new",
-                message: err.to_string(),
-            })?;
-        Ok(response)
-    }
-
-    pub async fn fork_session(
-        &self,
-        session_id: SessionId,
-        cwd: PathBuf,
-        mcp_servers: Vec<McpServer>,
-        message_id: Option<String>,
-    ) -> Result<ForkSessionResponse> {
-        if !self.capabilities.supports_fork_session() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/fork",
-            });
-        }
-        if message_id.is_some() && !self.capabilities.supports_fork_message_id() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/fork.messageId",
-            });
-        }
-        self.capabilities
-            .reject_unmodeled_mcp_servers(&mcp_servers)?;
-        let connection = self.connection().await?;
-        let mut request = ForkSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        if let Some(message_id) = message_id {
-            request = request.meta(prompt_message_id_meta(&message_id));
-        }
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/fork",
-                message: err.to_string(),
-            })
-    }
-
-    /// `session/list`. Requires the `sessionCapabilities.list` capability.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        if !self.capabilities.supports_list_sessions() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/list",
-            });
-        }
-        let connection = self.connection().await?;
-        let mut sessions = Vec::new();
-        let mut cursor = None;
-        let mut seen_cursors = HashSet::new();
-        loop {
-            let request = ListSessionsRequest::new().cursor(cursor.clone());
-            let response: ListSessionsResponse = connection
-                .send_request(request)
-                .block_task()
-                .await
-                .map_err(|err| StackError::AgentRequestFailed {
-                    method: "session/list",
-                    message: err.to_string(),
-                })?;
-            sessions.extend(response.sessions);
-            let Some(next_cursor) = response.next_cursor else {
-                return Ok(sessions);
-            };
-            if !seen_cursors.insert(next_cursor.clone()) {
-                return Err(StackError::AgentRequestFailed {
-                    method: "session/list",
-                    message: format!("agent returned repeated pagination cursor `{next_cursor}`"),
-                });
-            }
-            cursor = Some(next_cursor);
-        }
-    }
-
-    pub async fn set_session_config_option(
-        &self,
-        session_id: SessionId,
-        config_id: &str,
-        value: &str,
-    ) -> Result<SetSessionConfigOptionResponse> {
-        let connection = self.connection().await?;
-        let request = SetSessionConfigOptionRequest::new(
-            session_id,
-            config_id.to_owned(),
-            SessionConfigValueId::new(value.to_owned()),
-        );
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/set_config_option",
-                message: err.to_string(),
-            })
-    }
-
-    /// `session/load`. Requires the `loadSession` capability.
-    pub async fn load_session(
-        &self,
-        session_id: SessionId,
-        cwd: PathBuf,
-        mcp_servers: Vec<McpServer>,
-    ) -> Result<()> {
-        if !self.capabilities.supports_load_session() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/load",
-            });
-        }
-        self.capabilities
-            .reject_unmodeled_mcp_servers(&mcp_servers)?;
-        let connection = self.connection().await?;
-        let request = LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/load",
-                message: err.to_string(),
-            })?;
-        Ok(())
-    }
-
-    /// `session/resume`. Stable in ACP v1; gated only by the agent's
-    /// advertised capability. The agent may still reject if it does not
-    /// implement resume — that surfaces as `agent.request_failed`.
-    pub async fn resume_session(
-        &self,
-        session_id: SessionId,
-        cwd: PathBuf,
-        mcp_servers: Vec<McpServer>,
-    ) -> Result<()> {
-        if !self.capabilities.supports_resume_session() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/resume",
-            });
-        }
-        self.capabilities
-            .reject_unmodeled_mcp_servers(&mcp_servers)?;
-        let connection = self.connection().await?;
-        let request = ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers);
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/resume",
-                message: err.to_string(),
-            })?;
-        Ok(())
-    }
-
-    /// `session/close`. Stable in ACP v1; gated only by the agent's
-    /// advertised capability.
-    pub async fn close_session(&self, session_id: SessionId) -> Result<()> {
-        if !self.capabilities.supports_close_session() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/close",
-            });
-        }
-        let connection = self.connection().await?;
-        let request = CloseSessionRequest::new(session_id);
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/close",
-                message: err.to_string(),
-            })?;
-        Ok(())
-    }
-
-    /// `session/delete`. Requires the `sessionCapabilities.delete`
-    /// capability. Unlike close, the agent removes the session from its own
-    /// history; repeat deletes are specified to succeed silently.
-    pub async fn delete_session(&self, session_id: SessionId) -> Result<()> {
-        if !self.capabilities.supports_delete_session() {
-            return Err(StackError::AgentUnsupportedCapability {
-                name: "session/delete",
-            });
-        }
-        let connection = self.connection().await?;
-        let request = DeleteSessionRequest::new(session_id);
-        connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/delete",
-                message: err.to_string(),
-            })?;
-        Ok(())
-    }
-
-    /// `session/prompt`. Awaits the turn's final response.
-    ///
-    /// On error, runs the inference-failure classifier so upstream HTTP
-    /// failures (5xx, 429, etc.) become a typed `InferenceRequestFailed`
-    /// variant; everything else falls back to `AgentRequestFailed`. The raw
-    /// `err.to_string()` is never persisted: 4xx/5xx paths surface only the
-    /// vetted reason label, and the generic fallback uses a sanitized message
-    /// to avoid leaking URLs / headers / bodies / secrets into the state row.
-    pub async fn prompt_session(&self, request: PromptRequest) -> Result<PromptResponse> {
-        self.capabilities.validate_prompt(&request.prompt)?;
-        let connection = self.connection().await?;
-        match connection.send_request(request).block_task().await {
-            Ok(response) => Ok(response),
-            Err(err) => {
-                let classified = inference_failure::classify(&err);
-                Err(map_prompt_error(classified))
-            }
-        }
-    }
-
-    /// `session/cancel` is a fire-and-forget notification.
-    pub async fn cancel_session(&self, session_id: SessionId) -> Result<()> {
-        let connection = self.connection().await?;
-        connection
-            .send_notification(CancelNotification::new(session_id))
-            .map_err(|err| StackError::AgentRequestFailed {
-                method: "session/cancel",
-                message: err.to_string(),
-            })?;
-        Ok(())
-    }
-
     /// Gracefully tear down the agent: signal the connection task to return,
     /// then close stdin / wait / SIGKILL the child on a bounded timeline.
     /// Returns the exit status if available. Idempotent: a second call sees
     /// every field already `None` and returns `Ok(None)`.
     pub async fn shutdown(&self) -> Result<Option<i32>> {
+        self.teardown(false).await
+    }
+
+    /// Tear down a provisional probe by killing the process group before the
+    /// client IO loop drops stdout. This keeps one-shot discovery from
+    /// surfacing adapter-side broken-pipe stack traces after values were read.
+    pub async fn terminate_probe(&self) -> Result<Option<i32>> {
+        self.teardown(true).await
+    }
+
+    /// Shared teardown for both exit paths. `kill_first` selects the probe
+    /// ordering: SIGKILL the process group before the client IO loop is asked
+    /// to stop. The graceful path instead stops the IO loop first, so the
+    /// child can notice stdin closure and exit on its own, and only escalates
+    /// to a kill when it does not.
+    async fn teardown(&self, kill_first: bool) -> Result<Option<i32>> {
         self.planned_shutdown.store(true, Ordering::SeqCst);
         // Clear the cloneable handle so any in-flight session calls fail
         // fast with `AgentNotRunning` rather than hanging on a dead IO loop.
@@ -1004,69 +326,59 @@ impl AcpBridge {
         // would orphan them. The supervisor's crash monitor also routes
         // through shutdown(), so this covers unplanned exits too.
         self.terminals.drain_all().await;
-        if let Some(tx) = self.shutdown_tx.lock().await.take() {
-            let _ = tx.send(());
+
+        if !kill_first {
+            self.stop_connection_task().await;
         }
-        self.wait_connection_task().await;
-        self.flush_notifications().await;
-
-        let mut child = match self.child.lock().await.take() {
-            Some(child) => child,
-            None => return Ok(None),
-        };
-
-        // First try to let the child notice stdin closure and exit on its
-        // own. If it doesn't, escalate to a process-group SIGKILL so any
-        // grandchildren the agent forked (MCP servers, tool subprocesses)
-        // also die with the daemon — the bridge spawned with
-        // `process_group(0)`, so the child is its own pgid leader.
-        let status = match timeout(SHUTDOWN_GRACE, child.wait()).await {
-            Ok(Ok(status)) => Some(status),
-            Ok(Err(err)) => {
-                tracing::warn!(error = ?err, "acp bridge: wait failed");
-                kill_tokio_process_group(&mut child);
-                None
-            }
-            Err(_) => {
-                kill_tokio_process_group(&mut child);
-                let _ = child.wait().await.ok();
-                None
-            }
-        };
-
-        Ok(status.and_then(|s| s.code()))
-    }
-
-    /// Tear down a provisional probe by killing the process group before the
-    /// client IO loop drops stdout. This keeps one-shot discovery from
-    /// surfacing adapter-side broken-pipe stack traces after values were read.
-    pub async fn terminate_probe(&self) -> Result<Option<i32>> {
-        self.planned_shutdown.store(true, Ordering::SeqCst);
-        self.clear_connection().await;
-        self.terminals.drain_all().await;
 
         let status = match self.child.lock().await.take() {
             Some(mut child) => {
-                kill_tokio_process_group(&mut child);
+                // Every kill here is a process-group SIGKILL rather than a
+                // plain child kill, so any grandchildren the agent forked (MCP
+                // servers, tool subprocesses) also die with the daemon — the
+                // bridge spawned with `process_group(0)`, so the child is its
+                // own pgid leader.
+                if kill_first {
+                    kill_tokio_process_group(&mut child);
+                }
                 match timeout(SHUTDOWN_GRACE, child.wait()).await {
                     Ok(Ok(status)) => Some(status),
                     Ok(Err(err)) => {
-                        tracing::warn!(error = ?err, "acp bridge: wait failed after probe kill");
+                        if kill_first {
+                            tracing::warn!(error = ?err, "acp bridge: wait failed after probe kill");
+                        } else {
+                            tracing::warn!(error = ?err, "acp bridge: wait failed");
+                            kill_tokio_process_group(&mut child);
+                        }
                         None
                     }
-                    Err(_) => None,
+                    Err(_) => {
+                        if !kill_first {
+                            kill_tokio_process_group(&mut child);
+                            let _ = child.wait().await.ok();
+                        }
+                        None
+                    }
                 }
             }
             None => None,
         };
 
+        if kill_first {
+            self.stop_connection_task().await;
+        }
+
+        Ok(status.and_then(|s| s.code()))
+    }
+
+    /// Signal the connect closure to return, wait for the connection task to
+    /// finish, then flush everything it queued.
+    async fn stop_connection_task(&self) {
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }
         self.wait_connection_task().await;
         self.flush_notifications().await;
-
-        Ok(status.and_then(|s| s.code()))
     }
 
     async fn clear_connection(&self) {
@@ -1100,155 +412,6 @@ impl AcpBridge {
         // enqueueing its row. Only then is it safe to close the sink.
         self.sink.flush().await;
     }
-}
-
-/// Capabilities advertised to every agent at initialize. Each flag flips only
-/// once its agent->client handlers exist: advertising ahead of the handlers
-/// would invite calls we cannot serve. `boolean` config options stay
-/// unadvertised until `set_session_config_option` can send boolean values
-/// (today it only sends `SessionConfigValueId`).
-fn client_capabilities() -> ClientCapabilities {
-    ClientCapabilities::new()
-        .fs(FileSystemCapabilities::new()
-            .read_text_file(true)
-            .write_text_file(true))
-        .terminal(true)
-        .session(
-            ClientSessionCapabilities::new()
-                .config_options(SessionConfigOptionsCapabilities::new()),
-        )
-}
-
-fn spawn_child_exit_watcher(
-    child: Arc<TokioMutex<Option<Child>>>,
-    planned_shutdown: Arc<AtomicBool>,
-    exit_tx: watch::Sender<Option<AcpBridgeExit>>,
-    spawn_pid: Option<u32>,
-) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(CHILD_EXIT_POLL_INTERVAL).await;
-            let exit_status = {
-                let mut guard = child.lock().await;
-                let Some(child) = guard.as_mut() else {
-                    return;
-                };
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        *guard = None;
-                        Some(status.code())
-                    }
-                    Ok(None) => None,
-                    Err(err) => {
-                        tracing::warn!(error = ?err, "acp bridge child exit poll failed");
-                        None
-                    }
-                }
-            };
-            let Some(exit_status) = exit_status else {
-                continue;
-            };
-            let planned = planned_shutdown.load(Ordering::SeqCst);
-            let _ = exit_tx.send(Some(AcpBridgeExit {
-                pid: spawn_pid,
-                planned,
-                reason: AcpBridgeExitReason::ProcessExited,
-                message: None,
-                exit_status,
-            }));
-            return;
-        }
-    });
-}
-
-/// Translate a classified prompt failure into the appropriate `StackError`
-/// variant. Only the classifier's vetted fields (status code + static reason
-/// label) cross into the error; the raw upstream message is dropped so the
-/// state row carries no URLs / headers / bodies / secrets.
-fn map_prompt_error(classified: Classified) -> StackError {
-    match classified.class {
-        FailureClass::Inference5xx | FailureClass::Inference4xx => match classified.status_code {
-            Some(code) if code != 0 => StackError::InferenceRequestFailed {
-                status_code: code,
-                reason_category: classified.reason_category,
-            },
-            // Defensive fallback: classifier returned an inference class but no
-            // status code. Treat as a generic agent failure rather than
-            // persisting `status_code = 0`, which would be a meaningless row.
-            _ => StackError::AgentRequestFailed {
-                method: "session/prompt",
-                message: "prompt request failed".to_owned(),
-            },
-        },
-        _ => StackError::AgentRequestFailed {
-            method: "session/prompt",
-            message: "prompt request failed".to_owned(),
-        },
-    }
-}
-
-/// Spawn-error path cleanup: abort the SDK task, kill the entire process
-/// group, then reap the child. Without the pgroup kill, any grandchildren
-/// the agent forked between spawn and initialize-failure survive the
-/// failure, defeating the whole point of `process_group(0)`.
-async fn fail_spawn(child: &mut tokio::process::Child, connection_task: JoinHandle<()>) {
-    connection_task.abort();
-    let _ = connection_task.await;
-    kill_tokio_process_group(child);
-    let _ = child.wait().await;
-}
-
-/// Resolve a configured command path the same way process spawning will:
-/// absolute paths as-is, relative paths with a slash against `cwd`, and bare
-/// names through the daemon's current PATH before the child environment is
-/// cleared.
-pub(crate) fn resolve_command_path(command: &str, cwd: &Path) -> Option<PathBuf> {
-    if command.is_empty() {
-        return None;
-    }
-    let as_path = Path::new(command);
-    if as_path.is_absolute() {
-        return if as_path.is_file() {
-            Some(as_path.to_path_buf())
-        } else {
-            None
-        };
-    }
-    if command.contains('/') {
-        let candidate = cwd.join(command);
-        return if candidate.is_file() {
-            Some(candidate)
-        } else {
-            None
-        };
-    }
-    for dir in command_search_paths() {
-        let candidate = dir.join(command);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-pub(super) fn agent_process_path() -> Option<std::ffi::OsString> {
-    let paths = command_search_paths();
-    if paths.is_empty() {
-        None
-    } else {
-        std::env::join_paths(paths).ok()
-    }
-}
-
-fn command_search_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join(".local").join("bin"));
-    }
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    paths
 }
 
 #[cfg(test)]

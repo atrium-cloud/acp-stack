@@ -40,6 +40,12 @@ use crate::state::{
     INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
 };
 
+mod escalation;
+mod shell;
+
+pub use escalation::*;
+pub(crate) use shell::*;
+
 /// Canonical `installer_runs.agent_id` and `installer_runs.step` value the
 /// deps-apply runner stamps onto every audit row. Centralized so the health
 /// report and CLI status that pivot on this label cannot drift from the
@@ -48,28 +54,6 @@ pub const DEPS_APPLY_AGENT_ID: &str = "deps_apply";
 pub const DEPS_APPLY_STEP: &str = "deps_apply";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// `sudo -n` never prompts: it exits non-zero immediately when a password
-/// would be required, so neither the probe nor an escalated run can block
-/// on stdin or a controlling terminal.
-const SUDO_PROGRAM: &str = "sudo";
-const SUDO_NON_INTERACTIVE_FLAG: &str = "-n";
-/// Upper bound on the `sudo -n true` probe. A healthy probe returns in
-/// milliseconds; the bound exists so a wedged sudoers backend (LDAP/SSSD)
-/// cannot stall an apply before a single dep has run.
-const SUDO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Grace period for reaping a killed action. An escalated action runs as
-/// root, so a non-root parent's SIGKILL is refused with EPERM; an unbounded
-/// `wait()` there would hang the whole apply.
-const KILL_REAP_GRACE: Duration = Duration::from_secs(5);
-/// Provenance line prepended to the persisted stdout of an escalated
-/// action. Keeps `installer_runs.method` stable at `shell` (health and
-/// `acps status` pivot on it) while `acps installer history` still shows
-/// sudo was used.
-const ESCALATED_STDOUT_MARKER: &str = "[acps] escalated via `sudo -n`";
-/// Per-stream cap on captured output before we start dropping bytes.
-/// Reuses the state-layer constant so a future bump in installer_runs
-/// row size automatically applies to deps_apply too.
-const STREAM_CAP_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
 
 /// One declared command dep filtered through the apply runner. Used to
 /// drive the confirmation prompt + per-row outcome reporting.
@@ -117,96 +101,6 @@ pub struct DepsApplyReport {
     pub before: Vec<DepStatus>,
     pub after: Vec<DepStatus>,
     pub results: Vec<DepApplyResult>,
-}
-
-/// How the apply runner reaches root for `scope = "system"` actions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrivilegeEscalation {
-    /// euid == 0 — system-scope actions run directly.
-    NotNeeded,
-    /// euid != 0 but `sudo -n true` succeeded. `sudo_path` is resolved
-    /// once at probe time so the probe and the actual run cannot pick
-    /// different binaries.
-    Sudo { sudo_path: PathBuf, uid: u32 },
-    /// euid != 0 and passwordless sudo is unavailable (missing binary,
-    /// password required, or probe timeout).
-    Unavailable { uid: u32 },
-}
-
-impl PrivilegeEscalation {
-    pub fn is_available(&self) -> bool {
-        !matches!(self, PrivilegeEscalation::Unavailable { .. })
-    }
-
-    pub fn uid(&self) -> u32 {
-        match self {
-            PrivilegeEscalation::NotNeeded => 0,
-            PrivilegeEscalation::Sudo { uid, .. } | PrivilegeEscalation::Unavailable { uid } => {
-                *uid
-            }
-        }
-    }
-}
-
-/// Probe how system-scope actions can reach root. Never returns Err: a
-/// missing `sudo`, a password-gated sudoers rule, and a hung probe are all
-/// environment facts, not acps failures — they collapse to `Unavailable`.
-/// Not cached process-wide: a long-lived daemon must not pin sudoers state
-/// across a config change, so callers probe once per apply invocation.
-pub fn probe_privilege_escalation() -> PrivilegeEscalation {
-    probe_privilege_escalation_with(current_uid(), resolve_command(SUDO_PROGRAM))
-}
-
-/// Testable core of [`probe_privilege_escalation`]: uid and resolved sudo
-/// path are injected so tests don't have to mutate the process-global PATH
-/// (which races with parallel tests spawning shells).
-fn probe_privilege_escalation_with(uid: u32, sudo_path: Option<PathBuf>) -> PrivilegeEscalation {
-    if uid == 0 {
-        return PrivilegeEscalation::NotNeeded;
-    }
-    let Some(sudo_path) = sudo_path else {
-        return PrivilegeEscalation::Unavailable { uid };
-    };
-    let mut command = Command::new(&sudo_path);
-    command
-        .arg(SUDO_NON_INTERACTIVE_FLAG)
-        .arg("true")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env_clear()
-        .envs(scrubbed_env());
-    apply_non_interactive_env(&mut command);
-    detach_into_new_session(&mut command);
-    let Ok(mut child) = command.spawn() else {
-        return PrivilegeEscalation::Unavailable { uid };
-    };
-    match wait_with_timeout(&mut child, Instant::now() + SUDO_PROBE_TIMEOUT) {
-        Ok(Some(status)) if status.success() => PrivilegeEscalation::Sudo { sudo_path, uid },
-        Ok(Some(_)) => PrivilegeEscalation::Unavailable { uid },
-        Ok(None) | Err(_) => {
-            // Timed out or wait failed — the probe child may still be
-            // alive; reap the group so it cannot outlive the probe.
-            kill_process_group(&mut child);
-            if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
-                tracing::warn!(
-                    "sudo probe outlived its timeout kill and was abandoned unreaped (pid={})",
-                    child.id(),
-                );
-            }
-            PrivilegeEscalation::Unavailable { uid }
-        }
-    }
-}
-
-/// Probe only when a pending system-scope action exists, so a satisfied
-/// config never shells out to sudo.
-fn escalation_for(config: &Config, feature: Option<&str>) -> PrivilegeEscalation {
-    if pending_system_candidates(config, feature).is_empty() {
-        PrivilegeEscalation::NotNeeded
-    } else {
-        probe_privilege_escalation()
-    }
 }
 
 /// Filter declared command deps down to those that:
@@ -351,6 +245,42 @@ fn compute_before_after_report(config: &Config) -> Vec<DepStatus> {
     report
 }
 
+/// Persist one `installer_runs` audit row for a deps-apply action. Every
+/// row this module writes shares the same agent/step/operation/method
+/// provenance, so only the per-outcome fields are parameters. A `None`
+/// store means the caller runs without state (CLI dry paths, tests).
+#[allow(clippy::too_many_arguments)]
+fn append_deps_run(
+    state: Option<&StateStore>,
+    apply_run_id: &str,
+    started_at: &str,
+    finished_at: &str,
+    status: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_status: Option<i32>,
+) -> Result<()> {
+    let Some(store) = state else {
+        return Ok(());
+    };
+    store.append_installer_run(InstallerRunInput {
+        agent_id: DEPS_APPLY_AGENT_ID,
+        started_at,
+        finished_at: Some(finished_at),
+        status,
+        stdout,
+        stderr,
+        exit_status,
+        step: DEPS_APPLY_STEP,
+        version: None,
+        operation: crate::state::INSTALLER_OPERATION_INSTALL,
+        method: Some(crate::state::INSTALLER_METHOD_SHELL),
+        log_dir: None,
+        apply_run_id: Some(apply_run_id),
+    })?;
+    Ok(())
+}
+
 fn apply_one(
     entry: &DependencyEntry,
     install: &crate::config::DependencyInstallAction,
@@ -364,7 +294,6 @@ fn apply_one(
         .clone()
         .unwrap_or_else(|| entry.name.clone());
     let started_at = current_timestamp();
-    let started_instant = Instant::now();
 
     // Idempotence shortcut: if `creates` already resolves, skip the
     // shell entirely. Same contract as the agent installer's
@@ -372,23 +301,16 @@ fn apply_one(
     // a successful run is a no-op.
     if let Some(_path) = resolve_command(&creates) {
         let finished_at = current_timestamp();
-        if let Some(store) = state {
-            store.append_installer_run(InstallerRunInput {
-                agent_id: DEPS_APPLY_AGENT_ID,
-                started_at: &started_at,
-                finished_at: Some(&finished_at),
-                status: "skipped",
-                stdout: "",
-                stderr: "",
-                exit_status: Some(0),
-                step: DEPS_APPLY_STEP,
-                version: None,
-                operation: crate::state::INSTALLER_OPERATION_INSTALL,
-                method: Some(crate::state::INSTALLER_METHOD_SHELL),
-                log_dir: None,
-                apply_run_id: Some(apply_run_id),
-            })?;
-        }
+        append_deps_run(
+            state,
+            apply_run_id,
+            &started_at,
+            &finished_at,
+            "skipped",
+            "",
+            "",
+            Some(0),
+        )?;
         let post_status = check_one(entry);
         return Ok(DepApplyResult {
             name: entry.name.clone(),
@@ -433,23 +355,16 @@ fn apply_one(
                     name = entry.name,
                     manual = manual_privileged_command(shell_program, &candidate),
                 );
-                if let Some(store) = state {
-                    store.append_installer_run(InstallerRunInput {
-                        agent_id: DEPS_APPLY_AGENT_ID,
-                        started_at: &started_at,
-                        finished_at: Some(&finished_at),
-                        status: "privilege_required",
-                        stdout: "",
-                        stderr: &cap_stream(&stderr_message),
-                        exit_status: None,
-                        step: DEPS_APPLY_STEP,
-                        version: None,
-                        operation: crate::state::INSTALLER_OPERATION_INSTALL,
-                        method: Some(crate::state::INSTALLER_METHOD_SHELL),
-                        log_dir: None,
-                        apply_run_id: Some(apply_run_id),
-                    })?;
-                }
+                append_deps_run(
+                    state,
+                    apply_run_id,
+                    &started_at,
+                    &finished_at,
+                    "privilege_required",
+                    "",
+                    &cap_stream(&stderr_message),
+                    None,
+                )?;
                 let post_status = check_one(entry);
                 return Ok(DepApplyResult {
                     name: entry.name.clone(),
@@ -469,7 +384,6 @@ fn apply_one(
     let (exit_code, stdout, stderr, timed_out, stderr_tail) =
         run_shell(shell_program, &install.shell, timeout, sudo)?;
     let finished_at = current_timestamp();
-    let _elapsed = started_instant.elapsed();
 
     let post_status = check_one(entry);
     let outcome = if timed_out {
@@ -499,36 +413,29 @@ fn apply_one(
         DepApplyOutcome::PrivilegeRequired { .. } => "privilege_required",
         DepApplyOutcome::Failed { .. } => "failed",
     };
-    if let Some(store) = state {
-        // Timed-out runs use `ExitStatus::default()` (success on
-        // every platform) because we never observed a real exit
-        // code from the killed process. Persisting `status.code()`
-        // for that case would let `acps installer history` show a
-        // failed timeout row with `exit_status = 0`, contradicting
-        // the operator-facing outcome which reports timeout as
-        // `exit_code: None`. Match the outcome contract instead.
-        let persisted_exit = if timed_out { None } else { exit_code };
-        let persisted_stdout = if sudo.is_some() {
-            cap_stream(&format!("{ESCALATED_STDOUT_MARKER}\n{stdout}"))
-        } else {
-            cap_stream(&stdout)
-        };
-        store.append_installer_run(InstallerRunInput {
-            agent_id: DEPS_APPLY_AGENT_ID,
-            started_at: &started_at,
-            finished_at: Some(&finished_at),
-            status: status_label,
-            stdout: &persisted_stdout,
-            stderr: &cap_stream(&stderr),
-            exit_status: persisted_exit,
-            step: DEPS_APPLY_STEP,
-            version: None,
-            operation: crate::state::INSTALLER_OPERATION_INSTALL,
-            method: Some(crate::state::INSTALLER_METHOD_SHELL),
-            log_dir: None,
-            apply_run_id: Some(apply_run_id),
-        })?;
-    }
+    // Timed-out runs use `ExitStatus::default()` (success on
+    // every platform) because we never observed a real exit
+    // code from the killed process. Persisting `status.code()`
+    // for that case would let `acps installer history` show a
+    // failed timeout row with `exit_status = 0`, contradicting
+    // the operator-facing outcome which reports timeout as
+    // `exit_code: None`. Match the outcome contract instead.
+    let persisted_exit = if timed_out { None } else { exit_code };
+    let persisted_stdout = if sudo.is_some() {
+        cap_stream(&format!("{ESCALATED_STDOUT_MARKER}\n{stdout}"))
+    } else {
+        cap_stream(&stdout)
+    };
+    append_deps_run(
+        state,
+        apply_run_id,
+        &started_at,
+        &finished_at,
+        status_label,
+        &persisted_stdout,
+        &cap_stream(&stderr),
+        persisted_exit,
+    )?;
     Ok(DepApplyResult {
         name: entry.name.clone(),
         outcome,
@@ -570,270 +477,8 @@ fn check_one(entry: &DependencyEntry) -> DepStatus {
     }
 }
 
-/// Return tuple: `(exit_code, stdout, stderr_prefix, timed_out,
-/// stderr_tail)` — see `read_to_cap_with_tail` for why `stderr_tail`
-/// is computed separately.
-fn run_shell(
-    shell_program: &str,
-    script: &str,
-    timeout: Duration,
-    sudo: Option<&Path>,
-) -> Result<(Option<i32>, String, String, bool, String)> {
-    let mut command = match sudo {
-        Some(sudo_path) => {
-            let mut command = Command::new(sudo_path);
-            command
-                .arg(SUDO_NON_INTERACTIVE_FLAG)
-                .arg(shell_program)
-                .arg("-c")
-                .arg(escalated_script(script));
-            command
-        }
-        None => {
-            let mut command = Command::new(shell_program);
-            command.arg("-c").arg(script);
-            command
-        }
-    };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .envs(scrubbed_env());
-    apply_non_interactive_env(&mut command);
-    // Detach into a fresh session so a timeout-induced kill reaches every
-    // grandchild the shell forked (without this, `child.kill()` only stops
-    // the shell — a `sleep 999` it spawned would keep the stdout/stderr
-    // pipes open and the join threads would block forever), and so a dep
-    // script probing /dev/tty cannot prompt. Same pattern as agent_installer.
-    detach_into_new_session(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|source| StackError::AgentSpawnFailed { source })?;
-
-    let stdout_handle = child.stdout.take().expect("piped stdout");
-    let stderr_handle = child.stderr.take().expect("piped stderr");
-
-    let stdout_thread = std::thread::spawn(move || read_to_cap(stdout_handle, STREAM_CAP_BYTES));
-    let stderr_thread = std::thread::spawn(move || {
-        read_to_cap_with_tail(stderr_handle, STREAM_CAP_BYTES, STDERR_TAIL_BYTES)
-    });
-
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    // On escalated runs the child is root-owned, so our
-                    // SIGKILL is refused with EPERM and an unbounded
-                    // `wait()` would hang the apply; the bounded reap
-                    // (plus the bounded reader joins below) keeps the
-                    // outcome reported as a timeout Failed either way.
-                    kill_process_group(&mut child);
-                    timed_out = true;
-                    if reap_with_grace(&mut child, KILL_REAP_GRACE).is_none() {
-                        // Root-owned (escalated) children ignore our SIGKILL,
-                        // so the unreaped child lingers as a zombie until the
-                        // process exits. Surface it rather than leak silently.
-                        tracing::warn!(
-                            "dep install action outlived its timeout kill and was abandoned unreaped (pid={})",
-                            child.id(),
-                        );
-                    }
-                    break std::process::ExitStatus::default();
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(err) => {
-                return Err(StackError::AgentSpawnFailed { source: err });
-            }
-        }
-    };
-    // Always kill the process group, even on a clean shell exit. If
-    // the shell forked a background grandchild that inherited
-    // stdout/stderr, the reader threads would block forever waiting
-    // for EOF on those pipes. Killing the group closes the pipes
-    // (the child's std handles get released), so the readers see
-    // EOF and the joins below return.
-    kill_process_group(&mut child);
-    // Bounded join: a double-forked daemon that escaped the process
-    // group could still hold our pipe descriptors open. We can't
-    // SIGKILL it (we don't have a pid), so we wait `READER_JOIN_GRACE`
-    // for the close to land and then abandon the thread if it didn't.
-    // Abandoning is fine here — the OS reaps the orphaned thread when
-    // `acps` exits, and dropping the captured output is preferable to
-    // hanging the entire `deps apply` call.
-    let stdout = join_reader_bounded(stdout_thread).unwrap_or_default();
-    let (stderr, stderr_tail) =
-        join_reader_bounded(stderr_thread).unwrap_or((String::new(), String::new()));
-    let exit_code = status.code();
-    Ok((exit_code, stdout, stderr, timed_out, stderr_tail))
-}
-
-/// sudo resets the environment (`env_reset` in sudoers), so the
-/// non-interactive vars set on the child are dropped before the operator's
-/// script runs — `apt-get` would go back to prompting. Re-export them inside
-/// the escalated shell instead of asking sudoers for `setenv`/`--preserve-env`
-/// permission we may not have. Names and values come from the compile-time
-/// [`NON_INTERACTIVE_ENV`] table (never operator input), so no quoting is
-/// needed; the operator's script is appended verbatim.
-fn escalated_script(script: &str) -> String {
-    let mut out = String::new();
-    for (name, value) in NON_INTERACTIVE_ENV {
-        writeln!(&mut out, "export {name}={value}").expect("write to String");
-    }
-    out.push_str(script);
-    out
-}
-
-/// Bounded reap after a group kill. A root-owned (escalated) child cannot be
-/// signalled by a non-root parent, so a plain `wait()` would block forever.
-/// Returns `None` when the child outlives the grace; callers already treat
-/// that as a timeout and the pipe-reader joins are separately bounded.
-fn reap_with_grace(
-    child: &mut std::process::Child,
-    grace: Duration,
-) -> Option<std::process::ExitStatus> {
-    wait_with_timeout(child, Instant::now() + grace)
-        .ok()
-        .flatten()
-}
-
-/// Copy-pasteable command that reproduces exactly what the runner would have
-/// run for a system-scope action, for hosts where acps cannot escalate.
-pub fn manual_privileged_command(shell_program: &str, candidate: &DepApplyCandidate) -> String {
-    format!(
-        "sudo {shell_program} -c {script}",
-        script = shell_single_quote(&candidate.shell),
-    )
-}
-
-/// POSIX single-quote escaping: wrap in `'…'` with embedded `'` rendered as
-/// `'\''`.
-fn shell_single_quote(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-/// Operator-facing escalation notice shared by `acps init` and `acps deps
-/// apply` so the two confirmation prompts cannot drift. Empty when no
-/// system-scope candidate is pending.
-pub fn escalation_notice_lines(
-    escalation: &PrivilegeEscalation,
-    shell_program: &str,
-    system_candidates: &[DepApplyCandidate],
-) -> Vec<String> {
-    if system_candidates.is_empty() {
-        return Vec::new();
-    }
-    let count = system_candidates.len();
-    match escalation {
-        PrivilegeEscalation::NotNeeded => vec![format!(
-            "note: {count} action(s) declare scope=system; the runtime is root and will run them directly."
-        )],
-        PrivilegeEscalation::Sudo { uid, .. } => vec![format!(
-            "note: {count} action(s) declare scope=system; passwordless sudo is available (uid={uid}), so they run through `sudo -n`."
-        )],
-        PrivilegeEscalation::Unavailable { uid } => {
-            let mut lines = vec![format!(
-                "warning: {count} action(s) declare scope=system but this host is uid={uid} with no passwordless sudo; they will be skipped and recorded as privilege_required."
-            )];
-            for candidate in system_candidates {
-                lines.push(format!(
-                    "  - {name}: {manual}",
-                    name = candidate.name,
-                    manual = manual_privileged_command(shell_program, candidate),
-                ));
-            }
-            // The follow-up instruction (resume vs re-run) is
-            // caller-specific; init and `acps deps apply` append their own.
-            lines
-        }
-    }
-}
-
-fn cap_stream(value: &str) -> String {
-    if value.len() <= STREAM_CAP_BYTES {
-        return value.to_owned();
-    }
-    let mut cutoff = STREAM_CAP_BYTES;
-    while cutoff > 0 && !value.is_char_boundary(cutoff) {
-        cutoff -= 1;
-    }
-    value[..cutoff].to_owned()
-}
-
 fn current_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
-}
-
-fn current_uid() -> u32 {
-    // SAFETY: `geteuid()` is always safe — no preconditions.
-    unsafe { libc::geteuid() }
-}
-
-fn scrubbed_env() -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    if let Ok(value) = std::env::var("PATH") {
-        env.insert("PATH".to_owned(), value);
-    }
-    if let Ok(value) = std::env::var("HOME") {
-        env.insert("HOME".to_owned(), value);
-    }
-    if let Ok(value) = std::env::var("LANG") {
-        env.insert("LANG".to_owned(), value);
-    }
-    env
-}
-
-fn resolve_command(name: &str) -> Option<std::path::PathBuf> {
-    if name.contains('/') {
-        let path = Path::new(name).to_path_buf();
-        return is_executable_file(&path).then_some(path);
-    }
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join(name);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// True when `path` is a regular file that has at least one execute
-/// bit set on Unix. A failed `chmod` after an `install` action would
-/// otherwise let the postcheck report success against a non-executable
-/// placeholder. On non-Unix targets, fall back to `is_file()` since
-/// there's no mode bit semantic.
-fn is_executable_file(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(path) {
-            Ok(meta) => (meta.mode() & 0o111) != 0,
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
 }
 
 pub fn candidate_summary_line(candidate: &DepApplyCandidate) -> String {

@@ -1,12 +1,21 @@
 //! Agent install/registry/release-asset error helpers.
 //!
 //! Covers the install-time half of the `agent.*` namespace plus `init.*` (the
-//! init-run state which exists to coordinate installation) and `deps.*` for
-//! the dependency-apply init step.
+//! init-run state which exists to coordinate installation), `deps.*` for
+//! the dependency-apply init step, and `stack.*` for the self-updater.
 
 use http::StatusCode;
 
 use super::StackError;
+
+/// Display tail for [`StackError::StackUpdateBinarySwap`]: silent when the
+/// rollback restored everything, explicit when the install dir may be broken.
+pub(super) fn stack_update_rollback_suffix(rollback_errors: &[String]) -> String {
+    if rollback_errors.is_empty() {
+        return String::new();
+    }
+    format!("; rollback errors: {}", rollback_errors.join("; "))
+}
 
 pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
     use StackError::*;
@@ -44,6 +53,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         GithubReleaseAssetAmbiguous { .. } => "agent.github_release_asset_ambiguous",
         GithubReleaseArchiveExtract { .. } => "agent.github_release_archive_extract_failed",
         GithubReleaseChecksumMismatch { .. } => "agent.github_release_checksum_mismatch",
+        StackUpdateBinarySwap { .. } => "stack.update_binary_swap_failed",
         UnsupportedHostArch { .. } => "agent.unsupported_host_arch",
         AgentSha256Mismatch { .. } => "agent.sha256_mismatch",
         _ => return None,
@@ -155,6 +165,14 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         } => format!(
             "release asset `{asset}` from {repo} failed sha256 verification: expected {expected}, got {actual}"
         ),
+        // Deliberately omits the path and OS error: local install-dir layout
+        // should not leave the host over the API.
+        StackUpdateBinarySwap { rollback_errors, .. } => if rollback_errors.is_empty() {
+            "stack update failed to replace binaries; the previous binaries were restored"
+        } else {
+            "stack update failed to replace binaries and rollback did not fully restore them"
+        }
+        .to_owned(),
         UnsupportedHostArch { arch } => {
             format!("unsupported host architecture `{arch}` for GitHub Release install")
         }
@@ -200,6 +218,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | GithubReleaseAssetAmbiguous { .. }
         | GithubReleaseArchiveExtract { .. }
         | GithubReleaseChecksumMismatch { .. }
+        | StackUpdateBinarySwap { .. }
         | UnsupportedHostArch { .. }
         | AgentSha256Mismatch { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         _ => return None,
