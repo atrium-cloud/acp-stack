@@ -84,6 +84,24 @@ pub fn plan_agent_switch(
             reason: format!("agent `{}` is already configured", entry.id),
         });
     }
+    // A stored endpoint override lives in the outgoing agent's native config.
+    // Switching to an agent with no field to write it into would silently drop
+    // a live routing decision, sending protected traffic back to the vendor.
+    if !entry.set_provider_base_url {
+        let home = crate::fs_util::home_dir()?;
+        if let Some(endpoint) = crate::secrets::managed_provider_endpoint_override_for_home(&home)?
+        {
+            return Err(StackError::InvalidParam {
+                field: "agent",
+                reason: format!(
+                    "agent `{}` cannot route a provider through a custom endpoint, but provider \
+                     `{}` is currently routed through one; clear the managed-state namespace's \
+                     credential endpoint before switching",
+                    entry.id, endpoint.provider_id
+                ),
+            });
+        }
+    }
 
     let old_agent_id = current.agent.id.clone();
     let mut config = current.clone();

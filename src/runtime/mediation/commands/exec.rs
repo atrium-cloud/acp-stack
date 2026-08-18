@@ -82,10 +82,14 @@ pub(crate) fn spawn_child(
     let diag_handle =
         crate::runtime::sandbox::wire_supervise_diag_fd(sandbox, network, &mut cmd, args)?;
     cmd.env_clear();
-    if let Some(env) = env {
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+    // One composed map rather than two passes over `cmd`: the network
+    // provider's declaration must land after the caller's env so it wins on
+    // conflict, and a caller that passes no env still needs the namespace's
+    // egress variables to reach the workload.
+    let mut workload_env = env.cloned().unwrap_or_default();
+    crate::extensions::apply_workload_env(&mut workload_env, network);
+    for (key, value) in &workload_env {
+        cmd.env(key, value);
     }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -112,6 +116,86 @@ pub(crate) enum GraceKillOutcome {
     /// The grace window elapsed; the whole process group was SIGKILLed and
     /// the child reaped.
     KilledAfterGrace,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::extensions::NetworkProviderExtension;
+    use std::collections::BTreeMap;
+
+    fn network_provider(entries: &[(&str, &str)]) -> NetworkProviderExtension {
+        NetworkProviderExtension {
+            name: "egress".to_owned(),
+            provider: Vec::new(),
+            provider_timeout: None,
+            provider_stderr: crate::config::SandboxProviderStderr::default(),
+            workload_env: entries
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    async fn run_echo(
+        variable: &str,
+        env: Option<&HashMap<String, String>>,
+        network: Option<&NetworkProviderExtension>,
+    ) -> String {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = super::super::policy::resolve_cwd_under_workspace(workspace.path(), ".")
+            .expect("workspace cwd");
+        let child = spawn_child(
+            Path::new("/bin/sh"),
+            &[
+                "-c".to_owned(),
+                format!("printf %s \"${variable}\""),
+                "workload".to_owned(),
+            ],
+            &cwd,
+            env,
+            &crate::config::SandboxConfig::default(),
+            network,
+        )
+        .expect("spawn workload");
+        let output = child.wait_with_output().await.expect("workload output");
+        String::from_utf8(output.stdout).expect("utf8 stdout")
+    }
+
+    #[tokio::test]
+    async fn workload_env_reaches_a_mediated_child_without_caller_env() {
+        let stdout = run_echo(
+            "HTTPS_PROXY",
+            None,
+            Some(&network_provider(&[(
+                "HTTPS_PROXY",
+                "http://127.0.0.1:3128",
+            )])),
+        )
+        .await;
+        assert_eq!(stdout, "http://127.0.0.1:3128");
+    }
+
+    #[tokio::test]
+    async fn workload_env_overrides_a_conflicting_caller_value() {
+        let caller = HashMap::from([("HTTPS_PROXY".to_owned(), "http://stale:1".to_owned())]);
+        let stdout = run_echo(
+            "HTTPS_PROXY",
+            Some(&caller),
+            Some(&network_provider(&[(
+                "HTTPS_PROXY",
+                "http://127.0.0.1:3128",
+            )])),
+        )
+        .await;
+        assert_eq!(stdout, "http://127.0.0.1:3128");
+    }
+
+    #[tokio::test]
+    async fn caller_env_survives_when_no_provider_is_declared() {
+        let caller = HashMap::from([("GREETING".to_owned(), "hi".to_owned())]);
+        assert_eq!(run_echo("GREETING", Some(&caller), None).await, "hi");
+    }
 }
 
 /// SIGTERM the child's process group, wait up to `grace`, then escalate to a

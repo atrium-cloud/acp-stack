@@ -360,6 +360,17 @@ The runtime never invents package-manager commands. Only install actions declare
 
 Log query filters include `limit`, `level`, `kind`, `source`, `session_id`, `command_id`, `permission_id`, `category`, `since`, `until`, `after`, and `order`. `order` accepts `asc` or `desc` (default `desc`). On `/v1/logs/security`, `order` applies to both `auth_failures` and `events`; `category` accepts the security-category labels documented in `docs/specs/state-logging.md` and constrains only the `events` stream.
 
+`GET /v1/status` and `GET /v1/health/live` both carry a `server` object with the running version and the capabilities this build advertises:
+
+```json
+{
+  "version": "0.1.9",
+  "features": ["network-provider-workload-env", "agent-test-json", "managed-credential-base-url"]
+}
+```
+
+`features` exists because `version` is not a usable capability signal: a nightly build carries its fourth version component only in the git tag, so a nightly with a feature and one without report the same three-part base version. Orchestrators that gate wire calls or config writes on a capability must test membership in `features`; an absent or empty list means none of the listed capabilities are present. The names are a stable contract — `network-provider-workload-env` for `[extensions.<name>.workload_env]`, `agent-test-json` for `acps agent test --format json`, and `managed-credential-base-url` for `base_url` on a managed-state credential selection.
+
 Readiness includes an `mcp` object for configured MCP declarations:
 
 ```json

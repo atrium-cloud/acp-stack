@@ -24,9 +24,36 @@ pub(crate) struct StatusResponse {
     server: ServerInfo,
 }
 
+// CONSTANTS
+
+/// Capability names advertised in [`ServerInfo::features`]. Orchestrators
+/// cannot infer capabilities from `version`: nightly builds carry their fourth
+/// component only in the git tag, so a nightly with and one without a feature
+/// both report the same three-part base version. An absent or empty `features`
+/// list means none of these capabilities are present.
+pub const FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV: &str = "network-provider-workload-env";
+pub const FEATURE_AGENT_TEST_JSON: &str = "agent-test-json";
+pub const FEATURE_MANAGED_CREDENTIAL_BASE_URL: &str = "managed-credential-base-url";
+
+const SERVER_FEATURES: &[&str] = &[
+    FEATURE_NETWORK_PROVIDER_WORKLOAD_ENV,
+    FEATURE_AGENT_TEST_JSON,
+    FEATURE_MANAGED_CREDENTIAL_BASE_URL,
+];
+
 #[derive(Serialize)]
 struct ServerInfo {
     version: &'static str,
+    features: &'static [&'static str],
+}
+
+impl ServerInfo {
+    fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            features: SERVER_FEATURES,
+        }
+    }
 }
 
 pub(crate) async fn status_handler(
@@ -39,9 +66,7 @@ pub(crate) async fn status_handler(
     Ok(ApiSuccess::new(StatusResponse {
         schema_version,
         latest_event,
-        server: ServerInfo {
-            version: env!("CARGO_PKG_VERSION"),
-        },
+        server: ServerInfo::current(),
     }))
 }
 
@@ -247,9 +272,7 @@ pub(crate) struct HealthLiveResponse {
 pub(crate) async fn health_live_handler() -> ApiSuccess<HealthLiveResponse> {
     ApiSuccess::new(HealthLiveResponse {
         ok: true,
-        server: ServerInfo {
-            version: env!("CARGO_PKG_VERSION"),
-        },
+        server: ServerInfo::current(),
     })
 }
 
@@ -288,6 +311,21 @@ mod tests {
             revision: Some(revision.to_owned()),
             env_names: vec!["OPENCODE_API_KEY".to_owned()],
         }
+    }
+
+    /// Feature names are a wire contract with orchestrators that gate calls and
+    /// config writes on them; a rename is a breaking change, not a refactor.
+    #[test]
+    fn advertised_feature_names_are_stable() {
+        let serialized = serde_json::to_value(ServerInfo::current()).expect("serialize");
+        assert_eq!(
+            serialized["features"],
+            serde_json::json!([
+                "network-provider-workload-env",
+                "agent-test-json",
+                "managed-credential-base-url",
+            ])
+        );
     }
 
     #[test]

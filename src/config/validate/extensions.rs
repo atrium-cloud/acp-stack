@@ -7,10 +7,14 @@
 //! `network-provider` instance switches every wrapped spawn to an isolated
 //! network namespace, which only the `unshare` backend can provide.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::config::Config;
-use crate::config::schema::{ExtensionConfig, ExtensionType};
+use crate::config::schema::{
+    ExtensionConfig, ExtensionType, MAX_WORKLOAD_ENV_COUNT, MAX_WORKLOAD_ENV_NAME_BYTES,
+    MAX_WORKLOAD_ENV_VALUE_BYTES,
+};
 use crate::error::{Result, StackError};
 
 // CONSTANTS
@@ -144,6 +148,71 @@ fn validate_network_provider_fields(name: &str, extension: &ExtensionConfig) -> 
             reason: format!("extension `{name}`: provider timeout must be greater than zero"),
         });
     }
+    validate_workload_env(name, &extension.workload_env)?;
+    Ok(())
+}
+
+/// `workload_env` entries go straight into the workload's `execve` envp, so the
+/// name charset is stricter than the managed-state credential check: anything a
+/// shell or libc would treat specially must fail at config load, not at spawn.
+fn validate_workload_env(name: &str, workload_env: &BTreeMap<String, String>) -> Result<()> {
+    if workload_env.len() > MAX_WORKLOAD_ENV_COUNT {
+        return Err(StackError::InvalidParam {
+            field: "extensions",
+            reason: format!(
+                "extension `{name}`: workload_env declares {} entries, exceeding the limit of \
+                 {MAX_WORKLOAD_ENV_COUNT}",
+                workload_env.len()
+            ),
+        });
+    }
+    for (env_name, value) in workload_env {
+        if env_name.is_empty() || env_name.len() > MAX_WORKLOAD_ENV_NAME_BYTES {
+            return Err(StackError::InvalidParam {
+                field: "extensions",
+                reason: format!(
+                    "extension `{name}`: workload_env variable names must be non-empty and at most \
+                     {MAX_WORKLOAD_ENV_NAME_BYTES} bytes"
+                ),
+            });
+        }
+        let valid_start = env_name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+        let valid_body = env_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_start || !valid_body {
+            return Err(StackError::InvalidParam {
+                field: "extensions",
+                reason: format!(
+                    "extension `{name}`: workload_env variable `{env_name}` must match \
+                     [A-Za-z_][A-Za-z0-9_]*"
+                ),
+            });
+        }
+        // PATH and HOME are runtime-managed at both spawn seams, which would
+        // silently drop the declared value. Fail loudly at load instead.
+        if matches!(env_name.as_str(), "PATH" | "HOME") {
+            return Err(StackError::InvalidParam {
+                field: "extensions",
+                reason: format!(
+                    "extension `{name}`: workload_env must not declare `{env_name}`; it is \
+                     runtime-managed for every sandboxed spawn"
+                ),
+            });
+        }
+        if value.is_empty() || value.len() > MAX_WORKLOAD_ENV_VALUE_BYTES {
+            return Err(StackError::InvalidParam {
+                field: "extensions",
+                reason: format!(
+                    "extension `{name}`: workload_env value for `{env_name}` must be non-empty and \
+                     at most {MAX_WORKLOAD_ENV_VALUE_BYTES} bytes"
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -155,6 +224,7 @@ fn validate_managed_state_fields(name: &str, extension: &ExtensionConfig) -> Res
             extension.provider_stderr != crate::config::SandboxProviderStderr::default(),
             "provider_stderr",
         ),
+        (!extension.workload_env.is_empty(), "workload_env"),
     ] {
         if field_configured {
             return Err(StackError::InvalidParam {

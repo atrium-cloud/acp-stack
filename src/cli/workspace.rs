@@ -890,6 +890,7 @@ mod tests {
                 provider: Vec::new(),
                 provider_timeout: None,
                 provider_stderr: config::SandboxProviderStderr::default(),
+                workload_env: Default::default(),
                 capability: None,
             },
         );

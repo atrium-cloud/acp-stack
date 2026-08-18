@@ -20,9 +20,9 @@ use crate::runtime::agent::config_io::{
     read_toml_table, read_yaml_mapping, write_json_object, write_toml_table, write_yaml_mapping,
 };
 use crate::runtime::agent::provider_keys::{
-    CLAUDE_CODE_AGENT_ID, ClaudeCodeProviderProfile, agent_provider_id_for_provider_id,
-    claude_code_profile_for_provider_id, effective_active_provider_ids,
-    env_var_for_agent_provider_id, provider_name_for_provider_id,
+    CLAUDE_CODE_AGENT_ID, CODEX_OPENAI_PROVIDER_ID, ClaudeCodeProviderProfile,
+    agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
+    effective_active_provider_ids, env_var_for_agent_provider_id, provider_name_for_provider_id,
 };
 
 mod claude_code;
@@ -246,11 +246,35 @@ pub fn provision_agent_headless_config_transition(
     provision_agent_headless_config_with_previous_pi_model(config, home, previous_pi_model)
 }
 
+/// The provider endpoint override in force for `home`, resolved from the
+/// secret store rather than passed in: every re-provisioning path (init, agent
+/// switch, provider set, subagent, native-config import) must observe the same
+/// override, and resolving it here is what makes that true without each call
+/// site remembering to carry it.
+fn resolved_endpoint_override(
+    home: &Path,
+) -> Result<Option<crate::secrets::ProviderEndpointOverride>> {
+    crate::secrets::managed_provider_endpoint_override_for_home(home)
+}
+
+/// The override that applies to `provider_id`, or `None` when a different
+/// provider is the rerouted one.
+pub(super) fn endpoint_base_url_for<'a>(
+    endpoint: Option<&'a crate::secrets::ProviderEndpointOverride>,
+    provider_id: &str,
+) -> Option<&'a str> {
+    endpoint
+        .filter(|endpoint| endpoint.provider_id == provider_id)
+        .map(|endpoint| endpoint.base_url.as_str())
+}
+
 fn provision_agent_headless_config_with_previous_pi_model(
     config: &Config,
     home: &Path,
     previous_pi_model: Option<&str>,
 ) -> Result<Vec<ProvisionedAgentConfig>> {
+    let endpoint = resolved_endpoint_override(home)?;
+    let endpoint = endpoint.as_ref();
     match config.agent.id.as_str() {
         "goose" => provision_goose_config(config, home).map(|paths| {
             paths
@@ -261,7 +285,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        OPENCODE_AGENT_ID => provision_opencode_config(config, home).map(|path| {
+        OPENCODE_AGENT_ID => provision_opencode_config(config, home, endpoint).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "OpenCode config",
@@ -269,7 +293,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        "codex" => provision_codex_config(config, home).map(|paths| {
+        "codex" => provision_codex_config(config, home, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -278,7 +302,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        CLAUDE_CODE_AGENT_ID => provision_claude_code_config(config, home).map(|paths| {
+        CLAUDE_CODE_AGENT_ID => provision_claude_code_config(config, home, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {
@@ -287,7 +311,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        "pi" => provision_pi_config(config, home, previous_pi_model).map(|path| {
+        "pi" => provision_pi_config(config, home, previous_pi_model, endpoint).map(|path| {
             path.into_iter()
                 .map(|path| ProvisionedAgentConfig {
                     label: "Pi settings",
@@ -312,12 +336,14 @@ pub fn cleanup_agent_headless_config(
     config: &Config,
     home: &Path,
 ) -> Result<Vec<CleanedAgentConfig>> {
+    let endpoint = resolved_endpoint_override(home)?;
+    let endpoint = endpoint.as_ref();
     match config.agent.id.as_str() {
         "goose" => cleanup_goose_config(config, home),
         OPENCODE_AGENT_ID => cleanup_opencode_config(config, home),
         "codex" => cleanup_codex_config(config, home),
-        CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, home),
-        "pi" => cleanup_pi_config(config, home),
+        CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, home, endpoint),
+        "pi" => cleanup_pi_config(config, home, endpoint),
         HERMES_AGENT_ID => cleanup_hermes_config(config, home),
         _ => Ok(Vec::new()),
     }

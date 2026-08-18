@@ -118,6 +118,10 @@ fn provider_env_is_exactly_the_contract() {
         &["/bin/true"],
     )
     .env("ACPS_TEST_AGENT_SECRET", "leak-me-if-you-can")
+    // The provider must not inherit the workload environment it sets up for,
+    // `workload_env` proxy variables included: it configures the namespace,
+    // it does not route through it.
+    .env("HTTPS_PROXY", "http://127.0.0.1:3128")
     .status()
     .expect("run supervise");
     assert_eq!(status.code(), Some(0));
@@ -129,6 +133,10 @@ fn provider_env_is_exactly_the_contract() {
         assert!(
             !env.contains("ACPS_TEST_AGENT_SECRET"),
             "agent env leaked into the provider: {env}"
+        );
+        assert!(
+            !env.contains("HTTPS_PROXY"),
+            "workload_env leaked into the provider: {env}"
         );
         assert!(env.contains("ACPS_SANDBOX_NETWORK_PROTOCOL=1"));
         assert!(env.contains("ACPS_SANDBOX_NETWORK_ID="));

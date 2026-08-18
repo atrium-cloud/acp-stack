@@ -65,6 +65,11 @@ pub(crate) struct AcpArgs {
     pub(crate) no_cap_close_session: bool,
     #[arg(long)]
     pub(crate) no_cap_delete_session: bool,
+    /// Advertise `session/delete` but fail the call. Separates "the agent
+    /// cannot delete sessions" from "the delete was attempted and failed",
+    /// which are distinct cleanup verdicts.
+    #[arg(long)]
+    pub(crate) fail_delete_session: bool,
     #[arg(long)]
     pub(crate) no_cap_fork_session: bool,
     #[arg(long)]

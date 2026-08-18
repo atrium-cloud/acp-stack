@@ -5,7 +5,11 @@ pub(crate) const OPENCODE_AGENT_ID: &str = "opencode";
 // implicit small model. This invalid id is the verified no-call sentinel.
 pub(crate) const OPENCODE_DISABLED_SMALL_MODEL: &str = "invalid/model";
 
-pub(super) fn provision_opencode_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
+pub(super) fn provision_opencode_config(
+    config: &Config,
+    home: &Path,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<Option<PathBuf>> {
     let path = home.join(".config").join("opencode").join("opencode.json");
     let active_providers = configured_active_provider_configs(config);
     if active_providers.is_empty() {
@@ -50,7 +54,8 @@ pub(super) fn provision_opencode_config(config: &Config, home: &Path) -> Result<
     let mut enabled_providers = BTreeSet::new();
     let providers = ensure_object_field(&mut root, "provider", &path)?;
     for provider in &active_providers {
-        let provider_key = write_opencode_provider_config(config, providers, provider, &path)?;
+        let provider_key =
+            write_opencode_provider_config(config, providers, provider, &path, endpoint)?;
         enabled_providers.insert(provider_key);
     }
     if enabled_providers.is_empty() {
@@ -123,14 +128,19 @@ fn write_opencode_provider_config(
     providers: &mut Map<String, serde_json::Value>,
     provider: &AgentProviderConfig,
     path: &Path,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<String> {
     let api_key_ref = require_agent_env_for_provider_config(config, provider, &provider.id, path)?;
+    let base_url_override = super::endpoint_base_url_for(endpoint, &provider.id);
     if let Some(custom) = provider.custom.as_ref() {
         let provider_config = ensure_object_field(providers, &provider.id, path)?;
         provider_config.insert("npm".to_owned(), json!("@ai-sdk/openai-compatible"));
         provider_config.insert("name".to_owned(), json!(custom.name.clone()));
         let options = ensure_object_field(provider_config, "options", path)?;
-        options.insert("baseURL".to_owned(), json!(custom.base_url.clone()));
+        options.insert(
+            "baseURL".to_owned(),
+            json!(base_url_override.unwrap_or(custom.base_url.as_str())),
+        );
         options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
         let models = ensure_object_field(provider_config, "models", path)?;
         if let Some(model) = provider
@@ -166,6 +176,17 @@ fn write_opencode_provider_config(
     insert_if_missing(provider_config, "models", json!({}), path)?;
     let options = ensure_object_field(provider_config, "options", path)?;
     options.insert("apiKey".to_owned(), json!(format!("{{env:{api_key_ref}}}")));
+    // acps owns `options.baseURL` for a mapped provider: writing it routes the
+    // provider at the override, and removing it on a re-provision without one
+    // is what restores the vendor endpoint when the override is cleared.
+    match base_url_override {
+        Some(base_url) => {
+            options.insert("baseURL".to_owned(), json!(base_url));
+        }
+        None => {
+            options.remove("baseURL");
+        }
+    }
     Ok(agent_provider_id.to_owned())
 }
 
@@ -253,6 +274,90 @@ mod tests {
             "{env:OPENAI_API_KEY}"
         );
         assert_eq!(value["provider"]["openai"]["options"]["timeout"], 600000);
+    }
+
+    fn endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
+        crate::secrets::ProviderEndpointOverride {
+            provider_id: provider_id.to_owned(),
+            base_url: "http://127.0.0.1:3129/openai".to_owned(),
+        }
+    }
+
+    fn opencode_config_value(home: &Path) -> Value {
+        let path = home.join(".config").join("opencode").join("opencode.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(path).expect("opencode config should be readable"),
+        )
+        .expect("opencode config json parses")
+    }
+
+    fn opencode_openai_config() -> Config {
+        let mut config = config_with_agent("opencode", &["OPENAI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("openai/gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    #[test]
+    fn opencode_mapped_provider_endpoint_is_written_and_restored() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = opencode_openai_config();
+
+        provision_opencode_config(&config, tempdir.path(), Some(&endpoint("openai")))
+            .expect("provision with override");
+        let value = opencode_config_value(tempdir.path());
+        assert_eq!(
+            value["provider"]["openai"]["options"]["baseURL"],
+            "http://127.0.0.1:3129/openai"
+        );
+        assert_eq!(
+            value["provider"]["openai"]["options"]["apiKey"],
+            "{env:OPENAI_API_KEY}"
+        );
+
+        // Clearing the override re-provisions without the key, which is what
+        // restores the vendor endpoint.
+        provision_opencode_config(&config, tempdir.path(), None).expect("provision without");
+        let value = opencode_config_value(tempdir.path());
+        assert!(
+            value["provider"]["openai"]["options"]["baseURL"].is_null(),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn opencode_endpoint_for_another_provider_is_ignored() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = opencode_openai_config();
+
+        provision_opencode_config(&config, tempdir.path(), Some(&endpoint("anthropic")))
+            .expect("provision");
+
+        let value = opencode_config_value(tempdir.path());
+        assert!(
+            value["provider"]["openai"]["options"]["baseURL"].is_null(),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn opencode_custom_provider_endpoint_overrides_the_declared_base_url() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("opencode", crate::config::CustomProviderApi::Responses);
+
+        provision_opencode_config(&config, tempdir.path(), Some(&endpoint("myprovider")))
+            .expect("provision");
+
+        let value = opencode_config_value(tempdir.path());
+        assert_eq!(
+            value["provider"]["myprovider"]["options"]["baseURL"],
+            "http://127.0.0.1:3129/openai"
+        );
     }
 
     #[test]

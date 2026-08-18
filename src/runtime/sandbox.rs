@@ -579,6 +579,7 @@ mod tests {
             provider,
             provider_timeout: provider_timeout.map(str::to_owned),
             provider_stderr: crate::config::SandboxProviderStderr::default(),
+            workload_env: std::collections::BTreeMap::new(),
         }
     }
 

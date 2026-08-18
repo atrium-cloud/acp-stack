@@ -239,6 +239,35 @@ acps agent update set --frequency 3d
 
 `acps agent test` sends a real prompt through the configured agent. It may use provider credits and should be run only when that is intentional. The testflight is non-interactive, so it auto-approves agent permission requests by selecting the first allow-kind option (allow-once preferred over allow-always so no durable grant is left behind, never a reject option); a request offering no allow option is cancelled.
 
+The run is disposable: before the agent process is shut down, the session it created is deleted through `session/delete` when the agent advertises that capability, and `acps agent test` opens no state store, so it writes no session row.
+
+`acps agent test --format json` prints one stable document to stdout, on success and on failure alike; a failed run additionally prints the human error to stderr and exits 1. Every key is always present:
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "phase": "done",
+  "code": "ok",
+  "elapsed_ms": 12345,
+  "agent": "opencode",
+  "prompt_source": "registry",
+  "stop_reason": "end_turn",
+  "updates": 7,
+  "fs_check": { "status": "ok", "bytes": 128 },
+  "cleanup": { "session_delete": "deleted", "process": "terminated" }
+}
+```
+
+- `phase` is one of `spawn`, `initialize`, `session_new`, `session_config`, `prompt`, `fs_check`, `cleanup`, `done`, and is derived from `code` so the two can never disagree.
+- `code` is one of `ok`, `agent_spawn_failed`, `agent_initialize_failed`, `session_create_failed`, `session_config_failed`, `prompt_failed`, `prompt_timeout`, `progress_timeout`, `unexpected_stop_reason`, `fs_check_missing`, `fs_check_empty`, `fs_check_not_regular_file`, `fs_check_outside_workspace`, `fs_check_failed`, `cleanup_failed`, `config_invalid`, `agent_unsupported`.
+- `prompt_source` is `provided`, `registry`, or `default`. `stop_reason` is `null` when the prompt phase was never reached.
+- `fs_check.status` is `ok`, `skipped`, or `failed`; `skipped` covers both a registry entry that declares no `testflight_expect_fs` and a run that failed before the check. `bytes` is `null` unless the status is `ok`.
+- `cleanup.session_delete` is `deleted`, `cleanup_failed`, `unsupported` (the agent does not advertise `session/delete`), or `skipped` (no session was ever created). The delete is bounded at 10 seconds: a run that failed on a progress timeout leaves the agent wedged mid-prompt on its single event loop, where the request would never be answered, so it is reported as `cleanup_failed` rather than awaited. `cleanup.process` is `terminated` or `terminate_failed`; `terminated` includes a spawn that failed before a child existed, since nothing is left running either way.
+- A failed session delete does **not** flip `ok`: the verdict is prompt completion plus the fs check, and a working agent with a flaky delete is not a failed test. A leaked agent child does flip it, reported as `phase: "cleanup"`, `code: "cleanup_failed"`.
+- `elapsed_ms` is measured against the wall clock, so a host suspend mid-run is reflected rather than lost.
+- The document deliberately carries no reason string, session id, prompt text, file contents, path, credential, or raw provider error. Reasons embed workspace paths and spawn argv; codes are the machine channel. A failure that happens before the harness can run at all — an unreadable config, an unresolvable home directory — emits no document, only the stderr error and exit 1.
+
 `acps agent default set <target>` repoints the Array primary target at an existing target without touching the others, so the default `acps agent *` surfaces follow it.
 
 ## Restart Levels

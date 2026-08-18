@@ -183,6 +183,7 @@ fn selection(provider_id: &str, env_name: &str, value: &str) -> ManagedCredentia
         provider_id: provider_id.to_owned(),
         values: BTreeMap::from([(env_name.to_owned(), value.to_owned())]),
         source_refs: BTreeMap::new(),
+        base_url: None,
     }
 }
 

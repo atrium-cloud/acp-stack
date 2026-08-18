@@ -279,6 +279,215 @@ fn agent_test_reports_progress_timeout_after_stall() {
         ));
 }
 
+/// Run `agent test --format json` and return the parsed stdout document.
+/// `expect_success` pins the process exit status, which is the other half of
+/// the machine contract: a failing run still prints its document to stdout.
+fn agent_test_json(home: &std::path::Path, extra_args: &[&str], expect_success: bool) -> Value {
+    let mut command = acps_command();
+    command
+        .env("HOME", home)
+        .args(["agent", "test", "--format", "json"])
+        .args(extra_args);
+    let assert = command.assert();
+    let assert = if expect_success {
+        assert.success()
+    } else {
+        assert.failure()
+    };
+    let stdout = assert.get_output().stdout.clone();
+    serde_json::from_slice(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "agent test json must parse: {error}\nstdout: {}",
+            String::from_utf8_lossy(&stdout)
+        )
+    })
+}
+
+fn json_keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("json object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn agent_test_json_success_document_has_the_full_schema() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &[]);
+
+    let document = agent_test_json(tempdir.path(), &["--prompt", "hello from cli"], true);
+
+    assert_eq!(
+        json_keys(&document),
+        [
+            "agent",
+            "cleanup",
+            "code",
+            "elapsed_ms",
+            "fs_check",
+            "ok",
+            "phase",
+            "prompt_source",
+            "schema_version",
+            "stop_reason",
+            "updates",
+        ]
+    );
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["phase"], "done");
+    assert_eq!(document["code"], "ok");
+    assert_eq!(document["agent"], "placebo");
+    assert_eq!(document["prompt_source"], "provided");
+    assert_eq!(document["stop_reason"], "end_turn");
+    assert_eq!(document["updates"], 2);
+    assert!(document["elapsed_ms"].is_u64());
+    assert_eq!(json_keys(&document["fs_check"]), ["bytes", "status"]);
+    assert_eq!(document["fs_check"]["status"], "skipped");
+    assert_eq!(document["fs_check"]["bytes"], Value::Null);
+    assert_eq!(
+        json_keys(&document["cleanup"]),
+        ["process", "session_delete"]
+    );
+    assert_eq!(document["cleanup"]["session_delete"], "deleted");
+    assert_eq!(document["cleanup"]["process"], "terminated");
+}
+
+#[test]
+fn agent_test_json_document_leaks_no_prompt_path_or_secret() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &[]);
+
+    let document = agent_test_json(
+        tempdir.path(),
+        &["--prompt", "unique-prompt-marker-42"],
+        true,
+    );
+    let raw = document.to_string();
+
+    assert!(!raw.contains("unique-prompt-marker-42"), "{raw}");
+    assert!(!raw.contains("sess_fake_0"), "{raw}");
+    assert!(
+        !raw.contains(&tempdir.path().to_string_lossy().to_string()),
+        "{raw}"
+    );
+    assert!(!raw.contains("workspace"), "{raw}");
+    assert!(!raw.contains("sk-test-secret"), "{raw}");
+    // Reason strings embed argv and workspace paths; codes are the only
+    // machine channel the document carries.
+    assert!(!raw.contains("\"reason\""), "{raw}");
+}
+
+#[test]
+fn agent_test_json_failure_document_reports_phase_and_code() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--session-new-error"]);
+
+    let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], false);
+
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["phase"], "session_new");
+    assert_eq!(document["code"], "session_create_failed");
+    assert_eq!(document["stop_reason"], Value::Null);
+    assert!(!document.to_string().contains("fake session/new failure"));
+    // Nothing was created, so nothing was deleted; the process still went down.
+    assert_eq!(document["cleanup"]["session_delete"], "skipped");
+    assert_eq!(document["cleanup"]["process"], "terminated");
+}
+
+#[test]
+fn agent_test_json_reports_initialize_failure_before_any_session() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--initialize-error"]);
+
+    let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], false);
+
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["phase"], "initialize");
+    assert_eq!(document["code"], "agent_initialize_failed");
+    assert_eq!(document["cleanup"]["session_delete"], "skipped");
+}
+
+#[test]
+fn agent_test_json_reports_progress_timeout_code() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--prompt-stall-after-update"]);
+
+    let document = agent_test_json(
+        tempdir.path(),
+        &[
+            "--prompt",
+            "hello",
+            "--progress-timeout",
+            "50ms",
+            "--timeout",
+            "2s",
+        ],
+        false,
+    );
+
+    assert_eq!(document["phase"], "prompt");
+    assert_eq!(document["code"], "progress_timeout");
+    // The agent is still wedged in the stalled prompt on its single event loop,
+    // so the bounded session delete cannot complete — but the process is still
+    // reclaimed, and a failed delete does not flip the verdict's own code.
+    assert_eq!(document["cleanup"]["session_delete"], "cleanup_failed");
+    assert_eq!(document["cleanup"]["process"], "terminated");
+}
+
+#[test]
+fn agent_test_json_reports_unsupported_delete_session() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--no-cap-delete-session"]);
+
+    let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], true);
+
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["cleanup"]["session_delete"], "unsupported");
+    assert_eq!(document["cleanup"]["process"], "terminated");
+}
+
+#[test]
+fn agent_test_json_failed_delete_session_does_not_flip_the_verdict() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &["--fail-delete-session"]);
+
+    // The verdict is prompt completion plus the fs check; a working agent with
+    // a flaky delete must not read as a failed test.
+    let document = agent_test_json(tempdir.path(), &["--prompt", "hello"], true);
+
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["phase"], "done");
+    assert_eq!(document["code"], "ok");
+    assert_eq!(document["cleanup"]["session_delete"], "cleanup_failed");
+    assert_eq!(document["cleanup"]["process"], "terminated");
+}
+
+#[test]
+fn agent_test_writes_no_session_row() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    write_fake_agent_home(tempdir.path(), &[]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "test", "--prompt", "hello"])
+        .assert()
+        .success();
+
+    // `agent test` is disposable: it opens no state store, so the run must not
+    // leave a database — let alone a session row — behind.
+    let state_path = tempdir.path().join(".local/share/acp-stack/state.sqlite");
+    assert!(
+        !state_path.exists(),
+        "agent test must not open the state store: {}",
+        state_path.display()
+    );
+}
+
 #[test]
 fn agent_status_reports_provider_with_unset_model_and_mode() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");

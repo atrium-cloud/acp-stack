@@ -23,3 +23,15 @@ pub fn operator_registry_override(home: &Path) -> PathBuf {
 pub fn local_bin_dir(home: &Path) -> PathBuf {
     home.join(".local").join("bin")
 }
+
+/// Whether `agent_id`'s registry entry declares a per-provider endpoint field
+/// acp-stack can write. Resolves the catalog the same way every other runtime
+/// caller does — embedded plus the operator override — so an operator entry
+/// that adds the capability is honored.
+pub fn agent_supports_provider_base_url(agent_id: &str) -> crate::error::Result<bool> {
+    let home = crate::fs_util::home_dir()?;
+    Ok(
+        agent_registry::RegistryCatalog::load_with_override(&operator_registry_override(&home))?
+            .supports_provider_base_url(agent_id),
+    )
+}

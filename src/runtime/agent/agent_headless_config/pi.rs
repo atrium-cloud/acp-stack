@@ -4,15 +4,23 @@ pub(super) fn provision_pi_config(
     config: &Config,
     home: &Path,
     previous_model: Option<&str>,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
 ) -> Result<Option<PathBuf>> {
     let path = home.join(".pi").join("agent").join("settings.json");
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
+    let base_url_override = super::endpoint_base_url_for(endpoint, &provider.id);
+    let models_path = home.join(".pi").join("agent").join("models.json");
     if let Some(custom) = provider.custom.as_ref() {
-        let models_path = home.join(".pi").join("agent").join("models.json");
         let api_key_ref = require_agent_env_for_provider(config, &provider.id, &models_path)?;
-        write_pi_custom_models_json(&models_path, provider, custom, api_key_ref)?;
+        write_pi_custom_models_json(
+            &models_path,
+            provider,
+            custom,
+            api_key_ref,
+            base_url_override,
+        )?;
     }
     let mut root = read_json_object(&path)?;
     remove_legacy_pi_enabled_models(&mut root, configured_provider_model(config), previous_model);
@@ -26,6 +34,9 @@ pub(super) fn provision_pi_config(
             }
         })?
     };
+    if provider.custom.is_none() {
+        write_pi_mapped_endpoint_override(&models_path, native_provider, base_url_override)?;
+    }
     root.insert("defaultProvider".to_owned(), json!(native_provider));
     match configured_provider_model(config) {
         Some(model) => {
@@ -43,7 +54,11 @@ pub(super) fn provision_pi_config(
     Ok(Some(path))
 }
 
-pub(super) fn cleanup_pi_config(config: &Config, home: &Path) -> Result<Vec<CleanedAgentConfig>> {
+pub(super) fn cleanup_pi_config(
+    config: &Config,
+    home: &Path,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<Vec<CleanedAgentConfig>> {
     let mut cleaned = Vec::new();
     let settings_path = home.join(".pi").join("agent").join("settings.json");
     if settings_path.exists() {
@@ -60,11 +75,20 @@ pub(super) fn cleanup_pi_config(config: &Config, home: &Path) -> Result<Vec<Clea
             });
         }
     }
-    if let Some(provider) = config.agent.provider.as_ref()
-        && provider.custom.is_some()
-    {
+    if let Some(provider) = config.agent.provider.as_ref() {
+        // A custom provider owns its whole models.json entry; a mapped one owns
+        // only the endpoint-override entry acps writes under its native id.
+        let owned_key = if provider.custom.is_some() {
+            Some(provider.id.clone())
+        } else {
+            super::endpoint_base_url_for(endpoint, &provider.id).and_then(|_| {
+                agent_provider_id_for_provider_id("pi", &provider.id).map(str::to_owned)
+            })
+        };
         let models_path = home.join(".pi").join("agent").join("models.json");
-        if models_path.exists() {
+        if let Some(owned_key) = owned_key
+            && models_path.exists()
+        {
             let mut root = read_json_object(&models_path)?;
             let mut changed = false;
             let mut remove_providers_object = false;
@@ -72,7 +96,7 @@ pub(super) fn cleanup_pi_config(config: &Config, home: &Path) -> Result<Vec<Clea
                 .get_mut("providers")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                changed |= providers.remove(&provider.id).is_some();
+                changed |= providers.remove(&owned_key).is_some();
                 remove_providers_object = providers.is_empty();
             }
             if remove_providers_object {
@@ -90,18 +114,64 @@ pub(super) fn cleanup_pi_config(config: &Config, home: &Path) -> Result<Vec<Clea
     Ok(cleaned)
 }
 
+/// Route a *mapped* pi provider at an override endpoint. Pi's models.json
+/// treats a providers entry that carries connection fields but no `models`
+/// array as an override of the built-in provider, keeping its model list — so
+/// a lone `baseUrl` is the whole write. Removing the entry when no override is
+/// in force is what restores the vendor endpoint.
+fn write_pi_mapped_endpoint_override(
+    path: &Path,
+    native_provider: &str,
+    base_url: Option<&str>,
+) -> Result<()> {
+    if base_url.is_none() && !path.exists() {
+        return Ok(());
+    }
+    let mut root = read_json_object(path)?;
+    match base_url {
+        Some(base_url) => {
+            let providers = ensure_object_field(&mut root, "providers", path)?;
+            providers.insert(native_provider.to_owned(), json!({ "baseUrl": base_url }));
+        }
+        None => {
+            let mut providers_empty = false;
+            if let Some(providers) = root
+                .get_mut("providers")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                // Only the acps-written shape is removed — an entry with any
+                // other key is an operator's own override, not ours to delete.
+                let acps_written = providers.get(native_provider).is_some_and(|entry| {
+                    entry
+                        .as_object()
+                        .is_some_and(|entry| entry.len() == 1 && entry.contains_key("baseUrl"))
+                });
+                if acps_written {
+                    providers.remove(native_provider);
+                }
+                providers_empty = providers.is_empty();
+            }
+            if providers_empty {
+                root.remove("providers");
+            }
+        }
+    }
+    write_or_remove_json_object(path, root)
+}
+
 fn write_pi_custom_models_json(
     path: &Path,
     provider: &crate::config::AgentProviderConfig,
     custom: &AgentCustomProviderConfig,
     api_key_ref: &str,
+    base_url_override: Option<&str>,
 ) -> Result<()> {
     let mut root = read_json_object(path)?;
     let providers = ensure_object_field(&mut root, "providers", path)?;
     providers.insert(
         provider.id.clone(),
         json!({
-            "baseUrl": custom.base_url.clone(),
+            "baseUrl": base_url_override.unwrap_or(custom.base_url.as_str()),
             "api": custom.api.as_pi_api(),
             "apiKey": api_key_ref,
             "models": [{
@@ -143,6 +213,120 @@ fn pi_bare_model_id<'a>(model: &'a str, provider_id: &str, native_provider: &str
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    fn pi_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
+        crate::secrets::ProviderEndpointOverride {
+            provider_id: provider_id.to_owned(),
+            base_url: "http://127.0.0.1:3129/anthropic".to_owned(),
+        }
+    }
+
+    fn pi_models_value(home: &Path) -> Option<Value> {
+        let path = home.join(".pi").join("agent").join("models.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| serde_json::from_str(&text).expect("pi models json parses"))
+    }
+
+    fn pi_anthropic_config() -> Config {
+        let mut config = config_with_agent("pi", &["ANTHROPIC_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "anthropic".to_owned(),
+            model: Some("anthropic/claude-sonnet-4-5".to_owned()),
+            api_key_ref: Some("ANTHROPIC_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    /// Pi treats a models.json provider entry that carries connection fields
+    /// but no `models` array as an override of the built-in provider, keeping
+    /// its model list — so a lone `baseUrl` is the whole write.
+    #[test]
+    fn pi_mapped_provider_endpoint_is_an_override_only_entry() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = pi_anthropic_config();
+
+        provision_pi_config(
+            &config,
+            tempdir.path(),
+            None,
+            Some(&pi_endpoint("anthropic")),
+        )
+        .expect("provision with override");
+
+        let value = pi_models_value(tempdir.path()).expect("models.json written");
+        assert_eq!(
+            value["providers"]["anthropic"],
+            json!({ "baseUrl": "http://127.0.0.1:3129/anthropic" })
+        );
+    }
+
+    #[test]
+    fn pi_mapped_provider_endpoint_is_removed_when_cleared() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = pi_anthropic_config();
+        provision_pi_config(
+            &config,
+            tempdir.path(),
+            None,
+            Some(&pi_endpoint("anthropic")),
+        )
+        .expect("provision with override");
+
+        provision_pi_config(&config, tempdir.path(), None, None).expect("provision without");
+
+        let value = pi_models_value(tempdir.path());
+        assert!(
+            value
+                .as_ref()
+                .is_none_or(|value| value["providers"]["anthropic"].is_null()),
+            "{value:?}"
+        );
+    }
+
+    #[test]
+    fn pi_leaves_an_operator_authored_provider_entry_alone() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let models_path = tempdir.path().join(".pi").join("agent").join("models.json");
+        std::fs::create_dir_all(models_path.parent().expect("path has parent"))
+            .expect("create parent");
+        std::fs::write(
+            &models_path,
+            r#"{"providers":{"anthropic":{"baseUrl":"https://operator.example","headers":{"X":"1"}}}}"#,
+        )
+        .expect("write operator models.json");
+
+        provision_pi_config(&pi_anthropic_config(), tempdir.path(), None, None)
+            .expect("provision without override");
+
+        let value = pi_models_value(tempdir.path()).expect("models.json survives");
+        assert_eq!(
+            value["providers"]["anthropic"]["baseUrl"],
+            "https://operator.example"
+        );
+    }
+
+    #[test]
+    fn pi_custom_provider_endpoint_overrides_the_declared_base_url() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config =
+            custom_provider_config("pi", crate::config::CustomProviderApi::ChatCompletions);
+
+        provision_pi_config(
+            &config,
+            tempdir.path(),
+            None,
+            Some(&pi_endpoint("myprovider")),
+        )
+        .expect("provision");
+
+        let value = pi_models_value(tempdir.path()).expect("models.json written");
+        assert_eq!(
+            value["providers"]["myprovider"]["baseUrl"],
+            "http://127.0.0.1:3129/anthropic"
+        );
+    }
 
     #[test]
     fn pi_cleanup_removes_managed_model_scope_and_custom_provider() {

@@ -125,6 +125,14 @@ impl RegistryCatalog {
         &self.agents
     }
 
+    /// An agent absent from the catalog is not in the registry at all, so
+    /// acp-stack manages none of its native config and has nowhere to write an
+    /// endpoint — the same answer as a registry agent without the flag.
+    pub fn supports_provider_base_url(&self, id: &str) -> bool {
+        self.lookup(id)
+            .is_some_and(|entry| entry.set_provider_base_url)
+    }
+
     /// Full-entry replacement by id; new ids are appended. The override file
     /// is intentionally coarse: a partial-field merge would invite drift
     /// where an upstream rename silently kept an operator's stale harness.
@@ -276,6 +284,11 @@ pub struct RegistryEntry {
     pub set_model: bool,
     #[serde(default)]
     pub allow_custom_provider: bool,
+    /// The agent's native config has a per-provider endpoint field acp-stack
+    /// can write, so a managed credential may carry a `base_url` that routes
+    /// this provider somewhere other than its vendor default.
+    #[serde(default)]
+    pub set_provider_base_url: bool,
     #[serde(default)]
     pub allow_custom_model: bool,
     #[serde(default)]
@@ -446,6 +459,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         multiple_active_providers: false,
         set_model: false,
         allow_custom_provider: false,
+        set_provider_base_url: false,
         allow_custom_model: false,
         set_mode: false,
         supports_agent_skills: false,

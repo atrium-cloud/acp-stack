@@ -19,17 +19,19 @@
 
 These harnesses are currently supported:
 
-| Agent       | ACP Compat |
-| ----------- | ---------- |
-| Claude Code | adapter    |
-| Codex CLI   | adapter    |
-| OpenCode    | native     |
-| Pi Agent    | adapter    |
-| Goose       | native     |
-| Amp Code    | adapter    |
-| Hermes Agent | native    |
+| Agent       | ACP Compat | Endpoint routing |
+| ----------- | ---------- | ---------------- |
+| Claude Code | adapter    | yes              |
+| Codex CLI   | adapter    | yes              |
+| OpenCode    | native     | yes              |
+| Pi Agent    | adapter    | yes              |
+| Goose       | native     | no               |
+| Amp Code    | adapter    | no               |
+| Hermes Agent | native    | no               |
 
 "native" means the agent harness is compatible with ACP natively; "adapter" means an ACP adapter must be installed alongside the harness to enable agent-ACP communication.
+
+"Endpoint routing" is the `set_provider_base_url` registry flag: the agent's native config has a per-provider endpoint field, so a managed-state credential may carry a `base_url` that sends that provider's traffic somewhere other than the vendor default. See [docs/specs/extensions.md](docs/specs/extensions.md).
 
 - Agent setup notes live under [docs/agents](docs/agents/).
 - The support policy and current unsupported list are in [docs/specs/agents/support.md](docs/specs/agents/support.md).

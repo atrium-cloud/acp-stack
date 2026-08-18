@@ -919,6 +919,142 @@ fn rejects_invalid_network_provider_timeout() {
 }
 
 #[test]
+fn workload_env_round_trips_on_the_network_provider() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         [extensions.egress.workload_env]\n\
+         HTTPS_PROXY = \"http://127.0.0.1:3128\"\n\
+         NO_PROXY = \"localhost,127.0.0.1\"\n"
+    );
+    let config = load_config_from_str(&config_text).expect("workload_env parses");
+    let network = acp_stack::extensions::resolve_network_provider(&config)
+        .expect("declared network-provider resolves");
+    assert_eq!(
+        network.workload_env.get("HTTPS_PROXY").map(String::as_str),
+        Some("http://127.0.0.1:3128")
+    );
+    assert_eq!(
+        network.workload_env.get("NO_PROXY").map(String::as_str),
+        Some("localhost,127.0.0.1")
+    );
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical workload_env parses");
+    assert_eq!(reparsed.extensions, config.extensions);
+}
+
+#[test]
+fn rejects_workload_env_on_managed_state_extension() {
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [extensions.platform-state]\n\
+         type = \"managed-state\"\n\
+         capability = \"provider-credential\"\n\
+         [extensions.platform-state.workload_env]\n\
+         HTTPS_PROXY = \"http://127.0.0.1:3128\"\n"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("workload_env on a managed-state extension must be rejected");
+    assert!(
+        err.to_string().contains("network-provider field"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn rejects_reserved_workload_env_names() {
+    for name in ["PATH", "HOME"] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"unshare\"\n\
+             [extensions.egress]\n\
+             type = \"network-provider\"\n\
+             [extensions.egress.workload_env]\n\
+             {name} = \"/attacker/bin\"\n"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("runtime-managed workload_env names must be rejected");
+        assert!(err.to_string().contains("runtime-managed"), "got: {err}");
+    }
+}
+
+#[test]
+fn rejects_malformed_workload_env_names() {
+    for name in ["\"1PROXY\"", "\"HTTP-PROXY\"", "\"HTTP PROXY\"", "\"\""] {
+        let config_text = format!(
+            "{VALID_CONFIG}\n\
+             [workspace.sandbox]\n\
+             mode = \"unshare\"\n\
+             [extensions.egress]\n\
+             type = \"network-provider\"\n\
+             [extensions.egress.workload_env]\n\
+             {name} = \"value\"\n"
+        );
+        let err = load_config_from_str(&config_text)
+            .expect_err("workload_env names outside the envp charset must be rejected");
+        assert!(
+            err.to_string().contains("[A-Za-z_][A-Za-z0-9_]*")
+                || err.to_string().contains("non-empty and at most"),
+            "name {name} got: {err}"
+        );
+    }
+}
+
+#[test]
+fn rejects_out_of_bounds_workload_env() {
+    let too_many = (0..17)
+        .map(|index| format!("VAR_{index} = \"value\"\n"))
+        .collect::<String>();
+    let config_text = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         [extensions.egress.workload_env]\n\
+         {too_many}"
+    );
+    let err = load_config_from_str(&config_text)
+        .expect_err("more workload_env entries than the limit must be rejected");
+    assert!(
+        err.to_string().contains("exceeding the limit"),
+        "got: {err}"
+    );
+
+    let empty_value = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         [extensions.egress.workload_env]\n\
+         HTTPS_PROXY = \"\"\n"
+    );
+    let err = load_config_from_str(&empty_value)
+        .expect_err("an empty workload_env value must be rejected");
+    assert!(err.to_string().contains("non-empty"), "got: {err}");
+
+    let oversized_value = "v".repeat(16 * 1024 + 1);
+    let oversized = format!(
+        "{VALID_CONFIG}\n\
+         [workspace.sandbox]\n\
+         mode = \"unshare\"\n\
+         [extensions.egress]\n\
+         type = \"network-provider\"\n\
+         [extensions.egress.workload_env]\n\
+         HTTPS_PROXY = \"{oversized_value}\"\n"
+    );
+    let err = load_config_from_str(&oversized)
+        .expect_err("an oversized workload_env value must be rejected");
+    assert!(err.to_string().contains("at most"), "got: {err}");
+}
+
+#[test]
 fn network_provider_extension_round_trips_and_defaults() {
     // Empty provider is legal (deny-all networking); timeout falls back to 30s.
     let config_text = format!(

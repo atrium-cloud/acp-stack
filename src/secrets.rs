@@ -60,6 +60,20 @@ pub fn secret_store_path(home: &Path) -> PathBuf {
     state_dir(home).join("secrets.age")
 }
 
+/// Resolve the stored provider endpoint override for `home`, treating a store
+/// that does not exist yet as "no override". Native-config provisioning runs at
+/// points in init where the store has not been created, and every provisioning
+/// call site must see the same override without threading it through fifteen
+/// signatures — so the lookup lives next to the store instead.
+pub fn managed_provider_endpoint_override_for_home(
+    home: &Path,
+) -> Result<Option<ProviderEndpointOverride>> {
+    if !age_key_path(home).exists() || !secret_store_path(home).exists() {
+        return Ok(None);
+    }
+    SecretStore::open_read_only(home)?.managed_provider_endpoint_override()
+}
+
 /// Loaded, decrypted view of the secret store. Mutations are written through
 /// to disk via `atomic_write_owner_only`; the in-memory copy and the
 /// ciphertext on disk stay in sync per operation.
@@ -119,6 +133,11 @@ pub struct ProviderCredential {
     /// unchanged and operator entries serialize byte-identically.
     #[serde(default, skip_serializing_if = "CredentialSource::is_operator")]
     pub source: CredentialSource,
+    /// Endpoint base this provider's traffic is routed to instead of the vendor
+    /// default. Only externally-sourced credentials carry one; absent on disk
+    /// for every other entry, so existing ciphertext loads unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 impl fmt::Debug for ProviderCredential {
@@ -128,6 +147,7 @@ impl fmt::Debug for ProviderCredential {
             .field("env_names", &self.values.keys().collect::<Vec<_>>())
             .field("source_refs", &self.source_refs)
             .field("source", &self.source)
+            .field("base_url", &self.base_url)
             .finish()
     }
 }
@@ -140,6 +160,7 @@ impl ProviderCredential {
             source_refs,
             migrated: false,
             source: CredentialSource::Operator,
+            base_url: None,
         }
     }
 
@@ -246,6 +267,7 @@ pub struct ManagedCredentialSelection {
     pub provider_id: String,
     pub values: BTreeMap<String, String>,
     pub source_refs: BTreeMap<String, String>,
+    pub base_url: Option<String>,
 }
 
 impl fmt::Debug for ManagedCredentialSelection {
@@ -255,8 +277,18 @@ impl fmt::Debug for ManagedCredentialSelection {
             .field("provider_id", &self.provider_id)
             .field("env_names", &self.values.keys().collect::<Vec<_>>())
             .field("source_refs", &self.source_refs)
+            .field("base_url", &self.base_url)
             .finish()
     }
+}
+
+/// A resolved instruction to route one provider's traffic at `base_url`
+/// instead of its vendor default. Consumed by the native-config provisioners,
+/// each of which writes it into whatever field its agent reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderEndpointOverride {
+    pub provider_id: String,
+    pub base_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +478,41 @@ impl SecretStore {
         self.provider_credentials.get(provider_id)
     }
 
+    /// The single externally-sourced credential that routes its provider away
+    /// from the vendor endpoint, if any. There is at most one because only a
+    /// managed-state namespace can set `base_url` and a namespace owns exactly
+    /// one provider entry; a second one would mean two orchestrators are
+    /// competing for the agent's native config, so it is a hard failure rather
+    /// than a silent first-wins pick.
+    pub fn managed_provider_endpoint_override(&self) -> Result<Option<ProviderEndpointOverride>> {
+        let mut found: Option<ProviderEndpointOverride> = None;
+        for (provider_id, set) in &self.provider_credentials {
+            let Some(credential) = set.sole.as_ref() else {
+                continue;
+            };
+            let (Some(base_url), CredentialSource::External(_)) =
+                (credential.base_url.as_deref(), &credential.source)
+            else {
+                continue;
+            };
+            if let Some(existing) = found.as_ref() {
+                return Err(StackError::InvalidParam {
+                    field: "desired.selection.base_url",
+                    reason: format!(
+                        "providers `{}` and `{provider_id}` both declare an endpoint override; \
+                         only one provider may be rerouted at a time",
+                        existing.provider_id
+                    ),
+                });
+            }
+            found = Some(ProviderEndpointOverride {
+                provider_id: provider_id.clone(),
+                base_url: base_url.to_owned(),
+            });
+        }
+        Ok(found)
+    }
+
     pub(crate) fn stage_provider_credentials(
         &mut self,
         provider_credentials: BTreeMap<String, ProviderCredentialSet>,
@@ -596,6 +663,7 @@ impl SecretStore {
                     source_refs: selection.source_refs,
                     migrated: false,
                     source: CredentialSource::External(namespace.to_owned()),
+                    base_url: selection.base_url,
                 };
                 catalog.insert(
                     selection.provider_id.clone(),
@@ -662,8 +730,13 @@ impl SecretStore {
                         "stored credential is not owned by this namespace".to_owned(),
                     ));
                 }
+                // `base_url` is compared alongside the values: without it, a
+                // replay at the applied revision carrying a different endpoint
+                // would no-op instead of conflicting, leaving the orchestrator
+                // believing it had rerouted the provider.
                 if credential.values != selection.values
                     || credential.source_refs != selection.source_refs
+                    || credential.base_url != selection.base_url
                 {
                     return Err(conflict("stored credential fields differ".to_owned()));
                 }

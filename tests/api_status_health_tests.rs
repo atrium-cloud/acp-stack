@@ -26,6 +26,19 @@ async fn status_returns_200_with_session_key() {
     assert_eq!(body["ok"], Value::Bool(true));
     assert!(body["data"]["schema_version"].is_number());
     assert!(body["data"]["server"]["version"].is_string());
+    let features = body["data"]["server"]["features"]
+        .as_array()
+        .expect("features array");
+    for feature in [
+        "network-provider-workload-env",
+        "agent-test-json",
+        "managed-credential-base-url",
+    ] {
+        assert!(
+            features.iter().any(|entry| entry == feature),
+            "missing advertised feature `{feature}`"
+        );
+    }
 }
 
 #[tokio::test]
@@ -173,6 +186,7 @@ async fn health_live_returns_200_with_server_version() {
     assert_eq!(body["ok"], Value::Bool(true));
     assert_eq!(body["data"]["ok"], Value::Bool(true));
     assert!(body["data"]["server"]["version"].is_string());
+    assert!(body["data"]["server"]["features"].is_array());
 }
 
 #[tokio::test]
