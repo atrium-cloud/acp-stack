@@ -1,4 +1,5 @@
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::support::*;
 
@@ -110,6 +111,61 @@ fn workload_namespace_matches_supervisor_handle_and_ids_are_unique() {
         handle_inodes, workload_inodes,
         "the supervisor handle must name the workload's own netns"
     );
+}
+
+#[test]
+#[ignore = "requires privileged Linux sandbox capabilities"]
+fn supervisor_stays_on_the_host_network_while_the_workload_is_isolated() {
+    require_capability(
+        unshare_net_usable(),
+        "unshare --net / CAP_SYS_ADMIN unavailable",
+    );
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let markdir = tmp.path();
+    let workload_ns = markdir.join("workload-ns");
+    // The supervisor is the process a prober reaches first, and it is NOT the
+    // isolated one: only the leaf under `unshare --net` is. Probing the wrong
+    // one reports isolation as broken when it is working.
+    let mut child = supervise_command(
+        &[],
+        "10s",
+        "daemon",
+        &[
+            "/bin/sh",
+            "-c",
+            &format!(
+                "readlink /proc/self/ns/net > {} && sleep 5",
+                workload_ns.display()
+            ),
+        ],
+    )
+    .spawn()
+    .expect("spawn supervise");
+    let supervisor_pid = child.id();
+
+    assert!(
+        wait_for_file(&workload_ns, Duration::from_secs(10)),
+        "workload must report its netns"
+    );
+    let workload_inode = std::fs::read_to_string(&workload_ns)
+        .expect("workload ns dump")
+        .trim()
+        .to_owned();
+    let supervisor_inode =
+        std::fs::read_link(format!("/proc/{supervisor_pid}/ns/net")).expect("supervisor netns");
+    let host_inode = std::fs::read_link("/proc/self/ns/net").expect("host netns");
+
+    assert_eq!(
+        supervisor_inode, host_inode,
+        "the supervisor must remain in the host network namespace"
+    );
+    assert_ne!(
+        supervisor_inode.to_string_lossy(),
+        workload_inode,
+        "the workload must not share the supervisor's network namespace"
+    );
+
+    assert!(child.wait().expect("wait supervise").success());
 }
 
 #[test]

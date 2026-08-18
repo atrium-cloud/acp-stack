@@ -4,6 +4,9 @@ pub(crate) const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // Codex uses OpenRouter's Responses-compatible endpoint instead of the chat
 // completions endpoint most OpenRouter clients configure by default.
 const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Routing prefix some clients carry in front of an OpenRouter slug. OpenRouter
+/// itself expects the provider-native `vendor/model` form.
+const CODEX_OPENROUTER_SLUG_PREFIX: &str = "openrouter/";
 
 pub(super) fn provision_codex_config(
     config: &Config,
@@ -139,6 +142,26 @@ fn provision_codex_main_config(
             path: path.clone(),
             reason: format!(
                 "codex OpenRouter requires provider-native env ref `{native_ref}`, got `{api_key_ref}`"
+            ),
+        });
+    }
+
+    // Codex writes the model string into config.toml verbatim and OpenRouter
+    // answers an unknown slug with an empty turn instead of an error, so a
+    // routing-prefixed slug fails invisibly at prompt time. Only the
+    // double-qualified shape is rejectable here: OpenRouter itself publishes
+    // single-slash ids under the `openrouter` vendor (`openrouter/auto`,
+    // `openrouter/free`), which the live catalog offers verbatim.
+    if let Some(model) = model_opt.as_deref().filter(|model| {
+        model
+            .strip_prefix(CODEX_OPENROUTER_SLUG_PREFIX)
+            .is_some_and(|remainder| remainder.contains('/'))
+    }) {
+        return Err(StackError::AgentConfigProvision {
+            path,
+            reason: format!(
+                "codex OpenRouter model `{model}` must be the provider-native slug \
+                 (e.g. `deepseek/deepseek-v4-flash-0731`), not `{CODEX_OPENROUTER_SLUG_PREFIX}`-prefixed"
             ),
         });
     }
@@ -472,6 +495,51 @@ mod tests {
             value["model_providers"]["openrouter"]["wire_api"].as_str(),
             Some("responses")
         );
+    }
+
+    #[test]
+    fn codex_openrouter_rejects_a_double_qualified_model_slug() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("openrouter/deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        let error = provision_agent_headless_config(&config, tempdir.path())
+            .expect_err("double-qualified slug must be refused");
+
+        assert!(
+            error
+                .to_string()
+                .contains("deepseek/deepseek-v4-flash-0731"),
+            "{error}"
+        );
+        assert!(
+            !tempdir.path().join(".codex").join("config.toml").exists(),
+            "a refused model must not leave a provisioned config behind"
+        );
+    }
+
+    #[test]
+    fn codex_openrouter_accepts_openrouter_vendor_router_models() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            // A genuine catalog id under OpenRouter's own vendor, not a routing prefix.
+            model: Some("openrouter/auto".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let written = std::fs::read_to_string(tempdir.path().join(".codex").join("config.toml"))
+            .expect("config written");
+        assert!(written.contains("model = \"openrouter/auto\""), "{written}");
     }
 
     #[test]
