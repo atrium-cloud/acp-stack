@@ -410,7 +410,11 @@ pub(super) fn handle_client_frame(
                     "input frame requires request_id",
                 );
             };
-            match session.submit_input(&request_id, frame.value.unwrap_or(Value::Null)) {
+            let answer = HostedAnswer {
+                value: frame.value.unwrap_or(Value::Null),
+                deferred: frame.deferred.unwrap_or(false),
+            };
+            match session.submit_answer(&request_id, answer) {
                 Ok(()) => ClientFrameOutcome::None,
                 Err(message) => protocol_error("init.input_rejected", &message),
             }
@@ -459,6 +463,10 @@ struct ClientFrame {
     frame_type: String,
     request_id: Option<String>,
     value: Option<Value>,
+    /// Sibling of `value` on an `input` frame: the answer is `false` because
+    /// the hosting backend will run the confirmed work itself later, not
+    /// because the operator declined. Only the testflight confirm reads it.
+    deferred: Option<bool>,
     reason: Option<String>,
 }
 

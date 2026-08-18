@@ -195,6 +195,7 @@ After config and secrets are present, init can run a testflight that starts the 
 - `--testflight` runs it without prompting; `--skip-testflight` skips it.
 - Non-interactive runs skip testflight unless `--testflight` is passed.
 - A configured custom provider whose api-key ref is still pending a managed credential push skips testflight, naming the provider and ref; an explicit `--testflight` fails with the same remediation instead of spending a prompt on an unresolvable credential.
+- A hosted run whose backend answers the credit-warning prompt with `value: false` and `deferred: true` (see [api.md](api/api.md)) reports `testflight: deferred (runs after setup)` rather than a decline: the backend intends to run the test itself once setup completes.
 
 Testflight hard-fails on unsupported paths (browser-OAuth agents, private Drive/Dropbox links, non-archive cloud folders, unsafe archives, missing required secrets) and fails if an agent appears active but emits no progress or terminal state within the configured timeout.
 

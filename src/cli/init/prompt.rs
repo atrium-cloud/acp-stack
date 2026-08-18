@@ -361,9 +361,43 @@ pub(super) enum HostedPromptOutcome<T> {
     Unhandled,
 }
 
+/// A confirm answer plus the hosted-only `deferred` sibling flag carried on the
+/// answer frame. A hosting backend that intends to run the confirmed work later
+/// answers `false` so this run does not do it inline, which is indistinguishable
+/// from an operator declining unless the flag rides along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConfirmAnswer {
+    pub(super) value: bool,
+    pub(super) deferred: bool,
+}
+
+impl ConfirmAnswer {
+    /// The terminal path and every driver that cannot receive the flag.
+    pub(super) fn plain(value: bool) -> Self {
+        Self {
+            value,
+            deferred: false,
+        }
+    }
+}
+
 pub(super) trait HostedPromptDriver: Send + Sync {
     fn select(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<usize>>>;
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>>;
+    /// Confirm answer with the frame's `deferred` sibling preserved. Defaulted
+    /// through `confirm` so only the driver that actually reads client frames
+    /// has to know about the flag.
+    fn confirm_with_deferral(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<ConfirmAnswer>> {
+        Ok(match self.confirm(request)? {
+            HostedPromptOutcome::Handled(value) => {
+                HostedPromptOutcome::Handled(ConfirmAnswer::plain(value))
+            }
+            HostedPromptOutcome::Unhandled => HostedPromptOutcome::Unhandled,
+        })
+    }
     fn text(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<String>>>;
     fn password(&self, request: HostedPromptRequest)
     -> Result<HostedPromptOutcome<Option<String>>>;
@@ -615,6 +649,18 @@ pub(super) fn confirm(
     prompt: &str,
     default: bool,
 ) -> Result<bool> {
+    confirm_with_deferral(kind, interactive, prompt, default).map(|answer| answer.value)
+}
+
+/// `confirm` for the one caller that must tell an operator's "no" apart from a
+/// hosting backend deferring the work to itself. Terminal answers are never
+/// deferred.
+pub(super) fn confirm_with_deferral(
+    kind: HostedPromptKind,
+    interactive: bool,
+    prompt: &str,
+    default: bool,
+) -> Result<ConfirmAnswer> {
     if let Some(driver) = HOSTED_DRIVER.with(|slot| slot.borrow().clone()) {
         let request = HostedPromptRequest {
             kind,
@@ -625,16 +671,16 @@ pub(super) fn confirm(
             items: Vec::new(),
             inspection: None,
         };
-        return match driver.confirm(request)? {
-            HostedPromptOutcome::Handled(value) => Ok(value),
-            HostedPromptOutcome::Unhandled => Ok(default),
+        return match driver.confirm_with_deferral(request)? {
+            HostedPromptOutcome::Handled(answer) => Ok(answer),
+            HostedPromptOutcome::Unhandled => Ok(ConfirmAnswer::plain(default)),
         };
     }
     if !interactive {
-        return Ok(default);
+        return Ok(ConfirmAnswer::plain(default));
     }
     match cliclack::confirm(prompt).initial_value(default).interact() {
-        Ok(value) => Ok(value),
+        Ok(value) => Ok(ConfirmAnswer::plain(value)),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(cancelled()),
         Err(error) => Err(map_interact_error(error)),
     }

@@ -75,6 +75,95 @@ fn hosted_driver_streams_testflight_confirmation() {
     assert_eq!(confirm, HostedPromptOutcome::Handled(true));
 }
 
+/// Answers a streamed testflight confirm with a raw client frame, so the answer
+/// goes through the same parser the websocket uses. `fields` is the frame body
+/// after `request_id`.
+fn testflight_confirm_answer(session_id: &str, fields: &str) -> ConfirmAnswer {
+    let session = test_session(session_id);
+    let driver = SessionPromptDriver {
+        session: session.clone(),
+    };
+    let request = HostedPromptRequest {
+        kind: HostedPromptKind::TestflightConfirm,
+        style: HostedPromptStyle::Confirm,
+        prompt: "run testflight now?".to_owned(),
+        required: true,
+        default: Some(false),
+        items: Vec::new(),
+        inspection: None,
+    };
+    let handle = std::thread::spawn(move || driver.confirm_with_deferral(request));
+    let pending = wait_for_pending_input(&session);
+    let frame = format!(
+        r#"{{"type":"input","request_id":"{}",{fields}}}"#,
+        pending.request_id
+    );
+    match handle_client_frame(&session, &frame) {
+        ClientFrameOutcome::None => {}
+        ClientFrameOutcome::Send(response) | ClientFrameOutcome::Close(response) => {
+            panic!("input frame was rejected: {response}")
+        }
+    }
+    match handle.join().expect("driver thread").expect("confirm") {
+        HostedPromptOutcome::Handled(answer) => answer,
+        HostedPromptOutcome::Unhandled => panic!("a streamed confirm must be handled"),
+    }
+}
+
+#[test]
+fn hosted_testflight_confirm_decodes_the_deferred_sibling() {
+    assert_eq!(
+        testflight_confirm_answer("init_confirm_accept", r#""value":true"#),
+        ConfirmAnswer {
+            value: true,
+            deferred: false
+        }
+    );
+    // No flag is a decline, which is what every client that predates the field
+    // sends and what the operator-facing terminal path means.
+    assert_eq!(
+        testflight_confirm_answer("init_confirm_decline", r#""value":false"#),
+        ConfirmAnswer {
+            value: false,
+            deferred: false
+        }
+    );
+    assert_eq!(
+        testflight_confirm_answer("init_confirm_deferred", r#""value":false,"deferred":true"#),
+        ConfirmAnswer {
+            value: false,
+            deferred: true
+        }
+    );
+    // Explicit `false` is a decline too, so a client can send the field always.
+    assert_eq!(
+        testflight_confirm_answer(
+            "init_confirm_not_deferred",
+            r#""value":false,"deferred":false"#
+        ),
+        ConfirmAnswer {
+            value: false,
+            deferred: false
+        }
+    );
+}
+
+/// The `deferred` rollout depends on this: a client frame carrying a field this
+/// binary does not know is accepted, not rejected.
+#[test]
+fn hosted_client_frames_tolerate_unknown_fields() {
+    assert_eq!(
+        testflight_confirm_answer(
+            "init_confirm_unknown_field",
+            r#""value":false,"deferred":true,"invented_by_a_newer_backend":42"#
+        ),
+        ConfirmAnswer {
+            value: false,
+            deferred: true
+        }
+    );
+}
+
 #[test]
 fn hosted_driver_streams_redacted_native_config_review() {
     let inspected = crate::runtime::agent::native_config_import::inspect_native_config(
