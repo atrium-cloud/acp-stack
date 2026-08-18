@@ -87,15 +87,22 @@ pub struct CredentialSelection {
     /// at apply time and the ref name is retained alongside the value.
     #[serde(default)]
     pub source_refs: BTreeMap<String, String>,
+    /// Endpoint base the agent must send this provider's traffic to instead of
+    /// the vendor default. Written into the agent's own native config, so the
+    /// configured agent must declare `set_provider_base_url` in the registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 impl std::fmt::Debug for CredentialSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never leak values via Debug; env names and ref names are not secret.
+        // A base URL is an endpoint, not a secret, so it is safe to show.
         f.debug_struct("CredentialSelection")
             .field("provider_id", &self.provider_id)
             .field("env_names", &self.values.keys().collect::<Vec<_>>())
             .field("source_refs", &self.source_refs)
+            .field("base_url", &self.base_url)
             .finish()
     }
 }
@@ -241,10 +248,83 @@ fn resolve_selection(
             ),
         });
     }
+    if let Some(base_url) = selection.base_url.as_deref() {
+        validate_base_url(base_url)?;
+        require_agent_supports_base_url(config)?;
+        require_provider_accepts_base_url(config, &selection.provider_id)?;
+    }
     Ok(ManagedCredentialSelection {
         provider_id: selection.provider_id,
         values,
         source_refs: selection.source_refs,
+        base_url: selection.base_url,
+    })
+}
+
+/// A provider endpoint base obeys the shared endpoint rule: https, or http to a
+/// loopback host (an in-guest relay listener), no credentials, no query or
+/// fragment, bounded. Stored verbatim — each agent module appends per its own
+/// native convention.
+fn validate_base_url(base_url: &str) -> Result<()> {
+    use crate::config::{EndpointUrlProblem, MAX_ENDPOINT_URL_BYTES, check_endpoint_url};
+
+    check_endpoint_url(base_url, false).map_err(|problem| StackError::InvalidParam {
+        field: "desired.selection.base_url",
+        reason: match problem {
+            EndpointUrlProblem::Unparseable => "base_url is not a valid URL".to_owned(),
+            EndpointUrlProblem::NotHttpsOrLoopback => {
+                "base_url must be an https:// URL with a host, or http:// to a loopback host"
+                    .to_owned()
+            }
+            EndpointUrlProblem::ContainsCredentials => {
+                "base_url must not include credentials".to_owned()
+            }
+            EndpointUrlProblem::ContainsQueryOrFragment => {
+                "base_url must not carry a query string or fragment".to_owned()
+            }
+            EndpointUrlProblem::TooLong => {
+                format!("base_url exceeds the {MAX_ENDPOINT_URL_BYTES}-byte limit")
+            }
+        },
+    })
+}
+
+/// Reject the endpoint override before any watermark or catalog persist when
+/// the configured agent has no native config surface to write it into —
+/// otherwise the revision applies and the endpoint silently never takes effect.
+fn require_agent_supports_base_url(config: &Config) -> Result<()> {
+    if crate::runtime::install::agent_supports_provider_base_url(&config.agent.id)? {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "desired.selection.base_url",
+        reason: format!(
+            "agent `{}` cannot route a provider through a custom endpoint; \
+             remove base_url or switch to an agent that supports it",
+            config.agent.id
+        ),
+    })
+}
+
+/// The registry endpoint capability is agent-level, but a few agent/provider
+/// pairs still have nowhere to write the override. Rejecting here, before any
+/// watermark or catalog persist, keeps the revision reusable — otherwise
+/// provisioning fails once the store is already durable and every retry at the
+/// same revision replays the same failure.
+fn require_provider_accepts_base_url(config: &Config, provider_id: &str) -> Result<()> {
+    if crate::runtime::agent::provider_keys::agent_provider_accepts_endpoint_override(
+        &config.agent.id,
+        provider_id,
+    ) {
+        return Ok(());
+    }
+    Err(StackError::InvalidParam {
+        field: "desired.selection.base_url",
+        reason: format!(
+            "agent `{}` cannot route provider `{provider_id}` through a custom endpoint; \
+             select `openrouter` or a configured custom provider, or remove base_url",
+            config.agent.id
+        ),
     })
 }
 

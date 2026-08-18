@@ -340,6 +340,56 @@ fn render_duration_prose(duration: std::time::Duration) -> String {
     format!("{} milliseconds", duration.as_millis())
 }
 
+/// Hosts for which plaintext http is accepted: a request to a loopback address
+/// never leaves the machine, so the no-plaintext-off-host rule that motivates
+/// https-only is not violated.
+pub(crate) const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "::1", "localhost"];
+
+/// Upper bound on any externally supplied endpoint URL.
+pub(crate) const MAX_ENDPOINT_URL_BYTES: usize = 2048;
+
+/// What is wrong with an endpoint URL. The caller owns the wording, because the
+/// same rules guard config-declared MCP servers and orchestrator-supplied
+/// provider endpoints, whose operators read very different messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointUrlProblem {
+    Unparseable,
+    NotHttpsOrLoopback,
+    ContainsCredentials,
+    ContainsQueryOrFragment,
+    TooLong,
+}
+
+/// The shared endpoint-URL rule: https, or http toward a loopback host; no
+/// embedded credentials; no query or fragment (both are meaningless on an
+/// endpoint base and are a smuggling surface); bounded length. The value is
+/// never normalized — callers store it verbatim and append per their own
+/// convention.
+pub(crate) fn check_endpoint_url(
+    url: &str,
+    allow_query_or_fragment: bool,
+) -> std::result::Result<(), EndpointUrlProblem> {
+    if url.len() > MAX_ENDPOINT_URL_BYTES {
+        return Err(EndpointUrlProblem::TooLong);
+    }
+    let parsed = reqwest::Url::parse(url).map_err(|_| EndpointUrlProblem::Unparseable)?;
+    // `host_str()` keeps the brackets around IPv6 literals (`[::1]`).
+    let http_loopback = parsed.scheme() == "http"
+        && parsed.host_str().is_some_and(|host| {
+            LOOPBACK_HOSTS.contains(&host.trim_start_matches('[').trim_end_matches(']'))
+        });
+    if (parsed.scheme() != "https" || parsed.host_str().is_none()) && !http_loopback {
+        return Err(EndpointUrlProblem::NotHttpsOrLoopback);
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(EndpointUrlProblem::ContainsCredentials);
+    }
+    if !allow_query_or_fragment && (parsed.query().is_some() || parsed.fragment().is_some()) {
+        return Err(EndpointUrlProblem::ContainsQueryOrFragment);
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_socket_address(field: &'static str, value: &str) -> Result<()> {
     value
         .parse::<SocketAddr>()

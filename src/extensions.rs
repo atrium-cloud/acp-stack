@@ -17,7 +17,7 @@ pub mod network_provider;
 
 use crate::config::Config;
 
-pub use self::network_provider::NetworkProviderExtension;
+pub use self::network_provider::{NetworkProviderExtension, apply_workload_env};
 
 /// Resolve the declared network-provider instance, if any. Config validation
 /// guarantees at most one and that the sandbox backend is `unshare`.

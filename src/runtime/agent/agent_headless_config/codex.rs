@@ -5,9 +5,13 @@ pub(crate) const CODEX_OPENROUTER_PROVIDER_ID: &str = "openrouter";
 // completions endpoint most OpenRouter clients configure by default.
 const CODEX_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-pub(super) fn provision_codex_config(config: &Config, home: &Path) -> Result<Vec<PathBuf>> {
+pub(super) fn provision_codex_config(
+    config: &Config,
+    home: &Path,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
-    if let Some(path) = provision_codex_main_config(config, home)? {
+    if let Some(path) = provision_codex_main_config(config, home, endpoint)? {
         written.push(path);
     }
     Ok(written)
@@ -60,11 +64,16 @@ fn codex_provider_config_key(config: &Config) -> Option<String> {
     provider.custom.as_ref().map(|_| provider.id.clone())
 }
 
-fn provision_codex_main_config(config: &Config, home: &Path) -> Result<Option<PathBuf>> {
+fn provision_codex_main_config(
+    config: &Config,
+    home: &Path,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> Result<Option<PathBuf>> {
     let path = home.join(".codex").join("config.toml");
     let Some(provider) = config.agent.provider.as_ref() else {
         return Ok(None);
     };
+    let base_url_override = super::endpoint_base_url_for(endpoint, &provider.id);
     if let Some(custom) = provider.custom.as_ref() {
         if custom.api != CustomProviderApi::Responses {
             return Err(StackError::AgentConfigProvision {
@@ -84,11 +93,25 @@ fn provision_codex_main_config(config: &Config, home: &Path) -> Result<Option<Pa
             custom,
             api_key_ref,
             &path,
+            base_url_override,
         )?;
         write_toml_table(&path, root)?;
         return Ok(Some(path));
     }
-    if provider.id == "openai" {
+    if provider.id == CODEX_OPENAI_PROVIDER_ID {
+        // Codex reserves the `openai` provider id for its built-in definition,
+        // whose required shape (wire_api, auth mode) is version-dependent and
+        // not modeled here. Synthesizing a `[model_providers.openai]` table to
+        // carry an endpoint would be a guess that fails at request time rather
+        // than at apply time, so the override is refused instead.
+        if base_url_override.is_some() {
+            return Err(StackError::AgentConfigProvision {
+                path,
+                reason: "codex cannot route the built-in `openai` provider through a custom \
+                         endpoint; select `openrouter` or a custom provider instead"
+                    .to_owned(),
+            });
+        }
         return provision_codex_openai_config(config, &path);
     }
     if provider.id != CODEX_OPENROUTER_PROVIDER_ID {
@@ -154,7 +177,11 @@ fn provision_codex_main_config(config: &Config, home: &Path) -> Result<Option<Pa
     );
     openrouter.insert(
         "base_url".to_owned(),
-        TomlValue::String(CODEX_OPENROUTER_RESPONSES_BASE_URL.to_owned()),
+        TomlValue::String(
+            base_url_override
+                .unwrap_or(CODEX_OPENROUTER_RESPONSES_BASE_URL)
+                .to_owned(),
+        ),
     );
     // Command-based auth instead of env_key: per the OpenRouter Codex
     // cookbook, a plain env_key authenticates but skips Codex's model-catalog
@@ -186,6 +213,7 @@ fn write_codex_custom_provider_selection(
     custom: &AgentCustomProviderConfig,
     api_key_ref: &str,
     path: &Path,
+    base_url_override: Option<&str>,
 ) -> Result<()> {
     root.insert("model".to_owned(), TomlValue::String(model.to_owned()));
     root.insert(
@@ -197,7 +225,7 @@ fn write_codex_custom_provider_selection(
     custom_provider.insert("name".to_owned(), TomlValue::String(custom.name.clone()));
     custom_provider.insert(
         "base_url".to_owned(),
-        TomlValue::String(custom.base_url.clone()),
+        TomlValue::String(base_url_override.unwrap_or(&custom.base_url).to_owned()),
     );
     custom_provider.insert(
         "env_key".to_owned(),
@@ -304,6 +332,92 @@ fn unique_codex_backup_path(parent: &Path, provider_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn codex_endpoint(provider_id: &str) -> crate::secrets::ProviderEndpointOverride {
+        crate::secrets::ProviderEndpointOverride {
+            provider_id: provider_id.to_owned(),
+            base_url: "http://127.0.0.1:3129/openrouter".to_owned(),
+        }
+    }
+
+    fn codex_config_value(home: &Path) -> toml::Value {
+        let path = home.join(".codex").join("config.toml");
+        toml::from_str(&std::fs::read_to_string(path).expect("codex config should be readable"))
+            .expect("codex config toml parses")
+    }
+
+    fn codex_openrouter_config() -> Config {
+        let mut config = config_with_agent("codex", &["OPENROUTER_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        config
+    }
+
+    #[test]
+    fn codex_openrouter_endpoint_replaces_the_provider_base_url() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = codex_openrouter_config();
+
+        provision_codex_config(&config, tempdir.path(), Some(&codex_endpoint("openrouter")))
+            .expect("provision with override");
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(
+            value["model_providers"]["openrouter"]["base_url"].as_str(),
+            Some("http://127.0.0.1:3129/openrouter")
+        );
+        // The rest of the provider table is untouched by the override.
+        assert_eq!(
+            value["model_providers"]["openrouter"]["wire_api"].as_str(),
+            Some("responses")
+        );
+
+        provision_codex_config(&config, tempdir.path(), None).expect("provision without");
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(
+            value["model_providers"]["openrouter"]["base_url"].as_str(),
+            Some("https://openrouter.ai/api/v1")
+        );
+    }
+
+    /// Codex reserves the `openai` provider id for its built-in definition,
+    /// whose required shape is version-dependent; refusing at provision time
+    /// beats writing a guessed table that fails at request time.
+    #[test]
+    fn codex_refuses_an_endpoint_for_the_built_in_openai_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("codex", &["OPENAI_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        let error =
+            provision_codex_config(&config, tempdir.path(), Some(&codex_endpoint("openai")))
+                .expect_err("built-in openai endpoint must be refused");
+
+        assert!(error.to_string().contains("openrouter"), "{error}");
+    }
+
+    #[test]
+    fn codex_custom_provider_endpoint_overrides_the_declared_base_url() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config = custom_provider_config("codex", crate::config::CustomProviderApi::Responses);
+
+        provision_codex_config(&config, tempdir.path(), Some(&codex_endpoint("myprovider")))
+            .expect("provision");
+
+        let value = codex_config_value(tempdir.path());
+        assert_eq!(
+            value["model_providers"]["myprovider"]["base_url"].as_str(),
+            Some("http://127.0.0.1:3129/openrouter")
+        );
+    }
 
     #[test]
     fn codex_openrouter_writes_responses_provider_config() {

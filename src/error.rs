@@ -646,8 +646,15 @@ pub enum StackError {
         reason_category: &'static str,
     },
 
+    /// `stage`/`reason` are the human channel; `code` is the machine channel
+    /// that `agent test --format json` reports instead of `reason`, which
+    /// embeds workspace paths and spawn argv.
     #[error("agent test failed at {stage}: {reason}")]
-    AgentTestFailed { stage: String, reason: String },
+    AgentTestFailed {
+        stage: String,
+        reason: String,
+        code: &'static str,
+    },
 
     // === session / prompt ===
     #[error("session `{id}` was not found")]

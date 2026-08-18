@@ -46,6 +46,13 @@ pub enum SandboxMode {
 
 pub const DEFAULT_NETWORK_PROVIDER_TIMEOUT: &str = "30s";
 
+/// `workload_env` bounds. The count allows the proxy/CA/no-proxy set a real
+/// provider declaration needs; name and value bounds mirror the managed-state
+/// credential limits so both externally-declared env surfaces agree.
+pub const MAX_WORKLOAD_ENV_COUNT: usize = 16;
+pub const MAX_WORKLOAD_ENV_NAME_BYTES: usize = 128;
+pub const MAX_WORKLOAD_ENV_VALUE_BYTES: usize = 16 * 1024;
+
 /// A typed, data-declared extension seam. An `[extensions.<name>]` table
 /// declares one instance of an acp-stack-defined extension type; acp-stack
 /// supervises or serves the type's generic contract and never learns the
@@ -69,6 +76,14 @@ pub struct ExtensionConfig {
     /// stderr diagnostic channel, or discarded. Stdout is always discarded.
     #[serde(default, skip_serializing_if = "SandboxProviderStderr::is_default")]
     pub provider_stderr: SandboxProviderStderr,
+    /// `network-provider` only. Environment variables injected into every
+    /// workload spawned inside the provider's namespace (agent harness,
+    /// mediated commands, ACP terminals) so the workload can reach whatever
+    /// egress path the provider set up — proxy endpoints, CA bundle paths.
+    /// Never passed to the provider executable itself, and never in argv.
+    /// `BTreeMap` for deterministic ordering across serialization round-trips.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workload_env: BTreeMap<String, String>,
     /// `managed-state` only. The state contract the namespace applies;
     /// `provider-credential` is the only capability today.
     #[serde(default, skip_serializing_if = "Option::is_none")]

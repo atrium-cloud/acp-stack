@@ -50,7 +50,7 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             status_code,
             reason_category,
         } => format!("inference endpoint returned {status_code} ({reason_category})"),
-        AgentTestFailed { stage, reason } => format!("agent test failed at {stage}: {reason}"),
+        AgentTestFailed { stage, reason, .. } => format!("agent test failed at {stage}: {reason}"),
         _ => return None,
     })
 }

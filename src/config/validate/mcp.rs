@@ -9,38 +9,32 @@ use crate::config::secret_template::{
 use crate::config::validate::primitives::validate_secret_ref_name_value;
 use crate::error::{Result, StackError};
 
-const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "::1", "localhost"];
-
-/// MCP HTTP URLs must be https, or http toward a loopback host (a local
-/// relay never leaves the host, so the no-plaintext-off-host rule that
-/// motivates https-only is not violated). Shared by config validation and
-/// the init declaration paths so a hand-edited config and an init flag obey
-/// the same rule.
+/// MCP HTTP URLs obey the shared endpoint rule in
+/// [`crate::config::validate::primitives::check_endpoint_url`], with
+/// MCP-specific wording. Query strings and fragments stay legal here: an MCP
+/// endpoint is a full request URL, not an API base. Shared by config
+/// validation and the init declaration paths so a hand-edited config and an
+/// init flag obey the same rule.
 pub(crate) fn validate_mcp_http_url(field: &'static str, name: &str, url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| StackError::InvalidParam {
+    use crate::config::{EndpointUrlProblem, check_endpoint_url};
+
+    check_endpoint_url(url, true).map_err(|problem| StackError::InvalidParam {
         field,
-        reason: format!("MCP HTTP server `{name}` URL is not valid"),
-    })?;
-    // `host_str()` keeps the brackets around IPv6 literals (`[::1]`).
-    let http_loopback = parsed.scheme() == "http"
-        && parsed.host_str().is_some_and(|host| {
-            LOOPBACK_HOSTS.contains(&host.trim_start_matches('[').trim_end_matches(']'))
-        });
-    if (parsed.scheme() != "https" || parsed.host_str().is_none()) && !http_loopback {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: format!(
+        reason: match problem {
+            EndpointUrlProblem::Unparseable | EndpointUrlProblem::TooLong => {
+                format!("MCP HTTP server `{name}` URL is not valid")
+            }
+            EndpointUrlProblem::NotHttpsOrLoopback => format!(
                 "MCP HTTP server `{name}` must use an https:// URL with a host (or http:// to a loopback host)"
             ),
-        });
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(StackError::InvalidParam {
-            field,
-            reason: format!("MCP HTTP server `{name}` URL must not include credentials"),
-        });
-    }
-    Ok(())
+            EndpointUrlProblem::ContainsCredentials => {
+                format!("MCP HTTP server `{name}` URL must not include credentials")
+            }
+            EndpointUrlProblem::ContainsQueryOrFragment => {
+                format!("MCP HTTP server `{name}` URL is not valid")
+            }
+        },
+    })
 }
 
 pub(crate) fn validate_mcp(mcp: &McpConfig) -> Result<()> {

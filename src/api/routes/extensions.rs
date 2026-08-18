@@ -42,6 +42,16 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let response =
         crate::extensions::managed_state::apply(&mut store, &runtime_config, &name, body)?;
 
+    // The agent reads its native config at process start, so the endpoint must
+    // be on disk before the restart the orchestrator triggers after a
+    // credential push. This runs on `noop` too: the store write above is
+    // already durable, so a retry after a failed provisioning would otherwise
+    // replay as a no-op and leave the endpoint permanently unapplied.
+    crate::runtime::agent::agent_headless_config::provision_agent_headless_config(
+        &runtime_config,
+        &home,
+    )?;
+
     let payload = serde_json::json!({
         "namespace": name,
         "outcome": response.outcome,

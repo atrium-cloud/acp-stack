@@ -198,11 +198,17 @@ pub(crate) async fn handle_close_session(
 }
 
 pub(crate) async fn handle_delete_session(
-    _state: SharedState,
+    state: SharedState,
     _request: DeleteSessionRequest,
     responder: Responder<DeleteSessionResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
+    if state.lock().await.args.fail_delete_session {
+        return responder.respond_with_error(Error::new(
+            -32000,
+            "placebo agent refuses session/delete".to_owned(),
+        ));
+    }
     responder.respond(DeleteSessionResponse::new())
 }
 

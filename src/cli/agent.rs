@@ -365,10 +365,7 @@ pub(super) fn run_agent_command(command: AgentCommand, output: OutputFormatChoic
         AgentCommand::Status => self::status::run_agent_status(output.effective()),
         AgentCommand::Check => self::check::run_agent_check(output.effective()),
         AgentCommand::Update(args) => self::update::run_agent_update(args, output.effective()),
-        AgentCommand::Test(args) => {
-            output.reject_json("agent test")?;
-            self::test::run_agent_test(args)
-        }
+        AgentCommand::Test(args) => self::test::run_agent_test(args, output.effective()),
         AgentCommand::Set(args) => {
             output.reject_json("agent set")?;
             self::set::run_agent_set(args)
@@ -665,13 +662,9 @@ mod tests {
         let workspace = TempDir::new().expect("tempdir");
         let err = verify_testflight_expect_fs(workspace.path(), "missing.txt")
             .expect_err("missing file must fail");
-        match err {
-            StackError::AgentTestFailed { stage, reason } => {
-                assert_eq!(stage, "fs_check");
-                assert!(reason.contains("stat failed"), "reason: {reason}");
-            }
-            other => panic!("expected AgentTestFailed, got {other:?}"),
-        }
+        assert_eq!(err.stage(), "fs_check");
+        assert_eq!(err.code(), "fs_check_missing");
+        assert!(err.reason().contains("stat failed"), "reason: {err:?}");
     }
 
     #[test]
@@ -681,7 +674,7 @@ mod tests {
         std::fs::write(&target, b"").expect("write");
         let err = verify_testflight_expect_fs(workspace.path(), "empty.txt")
             .expect_err("empty file must fail");
-        assert!(matches!(err, StackError::AgentTestFailed { .. }));
+        assert_eq!(err.code(), "fs_check_empty");
     }
 
     #[test]
@@ -689,12 +682,11 @@ mod tests {
         let workspace = TempDir::new().expect("tempdir");
         let err = verify_testflight_expect_fs(workspace.path(), "/etc/passwd")
             .expect_err("absolute path must be rejected");
-        match err {
-            StackError::AgentTestFailed { reason, .. } => {
-                assert!(reason.contains("workspace-relative"), "reason: {reason}");
-            }
-            other => panic!("expected AgentTestFailed, got {other:?}"),
-        }
+        assert_eq!(err.code(), "config_invalid");
+        assert!(
+            err.reason().contains("workspace-relative"),
+            "reason: {err:?}"
+        );
     }
 
     #[test]
@@ -702,7 +694,7 @@ mod tests {
         let workspace = TempDir::new().expect("tempdir");
         let err = verify_testflight_expect_fs(workspace.path(), "sub/../escape.txt")
             .expect_err("`..` segment must be rejected");
-        assert!(matches!(err, StackError::AgentTestFailed { .. }));
+        assert_eq!(err.code(), "config_invalid");
     }
 
     #[test]
@@ -726,12 +718,8 @@ mod tests {
 
         let err = prepare_testflight_expect_fs(workspace.path(), "marker.txt")
             .expect_err("symlink marker must fail");
-        match err {
-            StackError::AgentTestFailed { reason, .. } => {
-                assert!(reason.contains("symlink"), "reason: {reason}");
-            }
-            other => panic!("expected AgentTestFailed, got {other:?}"),
-        }
+        assert_eq!(err.code(), "fs_check_not_regular_file");
+        assert!(err.reason().contains("symlink"), "reason: {err:?}");
     }
 
     #[cfg(unix)]
@@ -745,11 +733,10 @@ mod tests {
 
         let err = verify_testflight_expect_fs(workspace.path(), "linked/marker.txt")
             .expect_err("canonical escape must fail");
-        match err {
-            StackError::AgentTestFailed { reason, .. } => {
-                assert!(reason.contains("outside workspace"), "reason: {reason}");
-            }
-            other => panic!("expected AgentTestFailed, got {other:?}"),
-        }
+        assert_eq!(err.code(), "fs_check_outside_workspace");
+        assert!(
+            err.reason().contains("outside workspace"),
+            "reason: {err:?}"
+        );
     }
 }

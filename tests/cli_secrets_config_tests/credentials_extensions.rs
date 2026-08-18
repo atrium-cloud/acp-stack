@@ -282,6 +282,7 @@ fn extensions_status_reports_managed_state_watermark_without_values() {
                         secret_value.to_owned(),
                     )]),
                     source_refs: BTreeMap::new(),
+                    base_url: None,
                 }),
             )
             .expect("managed apply should persist");

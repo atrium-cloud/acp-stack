@@ -25,7 +25,11 @@ const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
 pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
 pub const CODEX_AGENT_ID: &str = "codex";
-const CODEX_NATIVE_AUTH_PROVIDER_ID: &str = "openai";
+/// Codex reserves this provider id for its own built-in definition: it
+/// authenticates through Codex's own login rather than an acp-stack-written
+/// provider table, and the built-in table's required shape is version-dependent,
+/// so acp-stack cannot synthesize one to carry an endpoint override.
+pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
     ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
@@ -582,10 +586,20 @@ pub fn is_claude_code_profiled_provider(provider_id: &str) -> bool {
 }
 
 pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
-    (agent_id == CODEX_AGENT_ID && provider_id == CODEX_NATIVE_AUTH_PROVIDER_ID)
+    (agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID)
         || (agent_id == CLAUDE_CODE_AGENT_ID
             && claude_code_profile_for_provider_id(provider_id)
                 .is_some_and(|profile| profile.agent_native_auth))
+}
+
+/// Codex plus the built-in `openai` id is the only pair that cannot carry an
+/// operator-supplied endpoint: every other pair either writes the endpoint into
+/// the agent's native config or is rejected earlier by the registry capability
+/// check. Deliberately not `provider_uses_agent_native_auth`, which also covers
+/// Claude Code's agent-native providers — those do honour an override, via
+/// `ANTHROPIC_BASE_URL`.
+pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &str) -> bool {
+    !(agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID)
 }
 
 pub fn models_url_for_provider_id(provider_id: &str) -> Option<&'static str> {

@@ -41,7 +41,8 @@ pub use self::secret_template::{
 pub(crate) use self::validate::agent::AGENT_UPDATE_FREQUENCY_LIMITS;
 pub(crate) use self::validate::mcp::validate_mcp_http_url;
 pub(crate) use self::validate::primitives::{
-    DurationLimits, normalize_duration, validate_secret_ref_name_value,
+    DurationLimits, EndpointUrlProblem, MAX_ENDPOINT_URL_BYTES, check_endpoint_url,
+    normalize_duration, validate_secret_ref_name_value,
 };
 pub use self::validate::primitives::{is_valid_secret_ref_name, parse_duration_string};
 pub(crate) use self::validate::skills::{is_valid_github_owner, is_valid_github_repo};

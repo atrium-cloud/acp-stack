@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, StopReason, TextContent};
+use agent_client_protocol::schema::v1::{
+    ContentBlock, PromptRequest, SessionId, StopReason, TextContent,
+};
 use tokio::sync::Notify;
 
 use crate::config::{self, Config};
@@ -22,6 +24,137 @@ use super::{
     AgentTestArgs, DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT, DEFAULT_AGENT_TEST_PROMPT,
     DEFAULT_AGENT_TEST_TIMEOUT,
 };
+use crate::cli::core::{OutputFormat, print_json};
+
+// CONSTANTS
+
+/// Version of the `agent test --format json` document. Machine readers pin it;
+/// removing a field or changing an existing field's meaning bumps it.
+const AGENT_TEST_SCHEMA_VERSION: i64 = 1;
+
+/// Phases, in run order. Derived from the outcome code so text and JSON never
+/// disagree about where a run stopped.
+const PHASE_SPAWN: &str = "spawn";
+const PHASE_INITIALIZE: &str = "initialize";
+const PHASE_SESSION_NEW: &str = "session_new";
+const PHASE_SESSION_CONFIG: &str = "session_config";
+const PHASE_PROMPT: &str = "prompt";
+const PHASE_FS_CHECK: &str = "fs_check";
+const PHASE_CLEANUP: &str = "cleanup";
+const PHASE_DONE: &str = "done";
+
+/// Outcome codes. These are the machine channel: an orchestrator classifies a
+/// failed testflight from `code`, never from the human `reason`.
+const CODE_OK: &str = "ok";
+const CODE_AGENT_SPAWN_FAILED: &str = "agent_spawn_failed";
+const CODE_AGENT_INITIALIZE_FAILED: &str = "agent_initialize_failed";
+const CODE_SESSION_CREATE_FAILED: &str = "session_create_failed";
+const CODE_SESSION_CONFIG_FAILED: &str = "session_config_failed";
+const CODE_PROMPT_FAILED: &str = "prompt_failed";
+const CODE_PROMPT_TIMEOUT: &str = "prompt_timeout";
+const CODE_PROGRESS_TIMEOUT: &str = "progress_timeout";
+const CODE_UNEXPECTED_STOP_REASON: &str = "unexpected_stop_reason";
+const CODE_FS_CHECK_MISSING: &str = "fs_check_missing";
+const CODE_FS_CHECK_EMPTY: &str = "fs_check_empty";
+const CODE_FS_CHECK_NOT_REGULAR_FILE: &str = "fs_check_not_regular_file";
+const CODE_FS_CHECK_OUTSIDE_WORKSPACE: &str = "fs_check_outside_workspace";
+const CODE_FS_CHECK_FAILED: &str = "fs_check_failed";
+const CODE_CLEANUP_FAILED: &str = "cleanup_failed";
+const CODE_CONFIG_INVALID: &str = "config_invalid";
+const CODE_AGENT_UNSUPPORTED: &str = "agent_unsupported";
+
+/// `fs_check.status` values. `skipped` covers both "the registry entry declares
+/// no artifact" and "the run failed before the check could run".
+const FS_CHECK_OK: &str = "ok";
+const FS_CHECK_SKIPPED: &str = "skipped";
+const FS_CHECK_FAILED: &str = "failed";
+
+/// `cleanup.session_delete` values.
+const SESSION_DELETE_DELETED: &str = "deleted";
+const SESSION_DELETE_CLEANUP_FAILED: &str = "cleanup_failed";
+const SESSION_DELETE_UNSUPPORTED: &str = "unsupported";
+const SESSION_DELETE_SKIPPED: &str = "skipped";
+
+/// `cleanup.process` values. `terminated` means no agent child remains, which
+/// includes a spawn that failed before a child existed.
+const PROCESS_TERMINATED: &str = "terminated";
+const PROCESS_TERMINATE_FAILED: &str = "terminate_failed";
+
+const STAGE_FS_CHECK: &str = "fs_check";
+
+/// How long the disposable-session delete may take before the run gives up and
+/// falls through to process termination. Generous relative to a healthy
+/// round-trip, short relative to the run's own prompt budget.
+const SESSION_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A typed `agent test` failure. Every fallible step inside the run converts
+/// into this before it leaves, so the reported `code` is always present and is
+/// never recovered by string-matching a stage label.
+#[derive(Debug)]
+pub(super) struct AgentTestFailure {
+    stage: &'static str,
+    reason: String,
+    code: &'static str,
+}
+
+impl AgentTestFailure {
+    fn new(stage: &'static str, code: &'static str, reason: String) -> Self {
+        Self {
+            stage,
+            reason,
+            code,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn stage(&self) -> &str {
+        self.stage
+    }
+
+    #[cfg(test)]
+    pub(super) fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    #[cfg(test)]
+    pub(super) fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl From<AgentTestFailure> for StackError {
+    fn from(failure: AgentTestFailure) -> Self {
+        StackError::AgentTestFailed {
+            stage: failure.stage.to_owned(),
+            reason: failure.reason,
+            code: failure.code,
+        }
+    }
+}
+
+type TestResult<T> = std::result::Result<T, AgentTestFailure>;
+
+fn phase_for_code(code: &str) -> &'static str {
+    match code {
+        CODE_AGENT_INITIALIZE_FAILED => PHASE_INITIALIZE,
+        CODE_SESSION_CREATE_FAILED => PHASE_SESSION_NEW,
+        CODE_SESSION_CONFIG_FAILED => PHASE_SESSION_CONFIG,
+        CODE_PROMPT_FAILED
+        | CODE_PROMPT_TIMEOUT
+        | CODE_PROGRESS_TIMEOUT
+        | CODE_UNEXPECTED_STOP_REASON => PHASE_PROMPT,
+        CODE_FS_CHECK_MISSING
+        | CODE_FS_CHECK_EMPTY
+        | CODE_FS_CHECK_NOT_REGULAR_FILE
+        | CODE_FS_CHECK_OUTSIDE_WORKSPACE
+        | CODE_FS_CHECK_FAILED => PHASE_FS_CHECK,
+        CODE_CLEANUP_FAILED => PHASE_CLEANUP,
+        CODE_OK => PHASE_DONE,
+        // `agent_spawn_failed`, `config_invalid` and `agent_unsupported` all
+        // stop the run before a child is up.
+        _ => PHASE_SPAWN,
+    }
+}
 
 struct AgentTestSessionEventSink {
     updates: AtomicUsize,
@@ -66,10 +199,92 @@ impl SessionEventSink for AgentTestSessionEventSink {
     }
 }
 
-struct AgentTestReport {
-    session_id: String,
-    stop_reason: StopReason,
+#[derive(Clone, Copy)]
+struct CleanupOutcome {
+    session_delete: &'static str,
+    process: &'static str,
+}
+
+impl CleanupOutcome {
+    /// The pre-spawn state: nothing was created, and no agent child remains.
+    fn nothing_to_clean() -> Self {
+        Self {
+            session_delete: SESSION_DELETE_SKIPPED,
+            process: PROCESS_TERMINATED,
+        }
+    }
+}
+
+/// What one `agent test` run observed. Carries no reason strings, prompt text,
+/// paths, credentials, or raw provider errors — reasons embed workspace paths
+/// and spawn argv, so the JSON document reports codes only. `session_id` is
+/// kept for the human text summary and is deliberately absent from JSON.
+struct AgentTestOutcome {
+    ok: bool,
+    code: &'static str,
+    elapsed_ms: u64,
+    agent: String,
+    prompt_source: AgentTestPromptSource,
+    session_id: Option<String>,
+    stop_reason: Option<StopReason>,
     updates: usize,
+    fs_check_status: &'static str,
+    fs_check_bytes: Option<u64>,
+    fs_check_path: Option<PathBuf>,
+    cleanup: CleanupOutcome,
+}
+
+impl AgentTestOutcome {
+    fn starting(agent: String, prompt_provided: bool) -> Self {
+        Self {
+            ok: false,
+            code: CODE_OK,
+            elapsed_ms: 0,
+            agent,
+            // Without the registry entry the run cannot tell a registry prompt
+            // from the built-in default, so an explicit `--prompt` is the only
+            // source knowable this early.
+            prompt_source: if prompt_provided {
+                AgentTestPromptSource::CliFlag
+            } else {
+                AgentTestPromptSource::Default
+            },
+            session_id: None,
+            stop_reason: None,
+            updates: 0,
+            fs_check_status: FS_CHECK_SKIPPED,
+            fs_check_bytes: None,
+            fs_check_path: None,
+            cleanup: CleanupOutcome::nothing_to_clean(),
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": AGENT_TEST_SCHEMA_VERSION,
+            "ok": self.ok,
+            "phase": phase_for_code(self.code),
+            "code": self.code,
+            "elapsed_ms": self.elapsed_ms,
+            "agent": self.agent,
+            "prompt_source": self.prompt_source.label(),
+            "stop_reason": self.stop_reason.map(stop_reason_label),
+            "updates": self.updates,
+            "fs_check": {
+                "status": self.fs_check_status,
+                "bytes": self.fs_check_bytes,
+            },
+            "cleanup": {
+                "session_delete": self.cleanup.session_delete,
+                "process": self.cleanup.process,
+            },
+        })
+    }
+}
+
+struct AgentTestRun {
+    outcome: AgentTestOutcome,
+    error: Option<StackError>,
 }
 
 /// Run a real-prompt testflight at the tail of `acps init`. Uses the registry
@@ -89,14 +304,49 @@ pub(in crate::cli) fn run_init_testflight(
         timeout: DEFAULT_AGENT_TEST_TIMEOUT.to_owned(),
         progress_timeout: DEFAULT_AGENT_TEST_PROGRESS_TIMEOUT.to_owned(),
     };
-    run_agent_test_with(home, config, registry, args, print_summary)
+    let run = run_agent_test_with(home, config, registry, args);
+    if print_summary && run.error.is_none() {
+        print_agent_test_summary(&run.outcome);
+    }
+    match run.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
-pub(super) fn run_agent_test(args: AgentTestArgs) -> Result<()> {
+pub(super) fn run_agent_test(args: AgentTestArgs, format: OutputFormat) -> Result<()> {
     let home = home_dir()?;
     let config = Config::load_from_default_path()?;
     let registry = RegistryCatalog::load_with_override(&operator_registry_override(&home))?;
-    run_agent_test_with(&home, &config, &registry, args, true)
+    let run = run_agent_test_with(&home, &config, &registry, args);
+    if format.is_json() {
+        // Both outcomes render the same document on stdout; on failure the
+        // error itself still goes to stderr with exit status 1 from `main`, so
+        // machine readers parse stdout and humans read stderr.
+        print_json(&run.outcome.to_json())?;
+    } else if run.error.is_none() {
+        print_agent_test_summary(&run.outcome);
+    }
+    match run.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn print_agent_test_summary(outcome: &AgentTestOutcome) {
+    println!("agent test: ok");
+    println!("agent: {}", outcome.agent);
+    println!("prompt: {}", outcome.prompt_source.label());
+    if let Some(session_id) = outcome.session_id.as_deref() {
+        println!("session_id: {session_id}");
+    }
+    if let Some(stop_reason) = outcome.stop_reason {
+        println!("stop_reason: {}", stop_reason_label(stop_reason));
+    }
+    println!("updates: {}", outcome.updates);
+    if let (Some(bytes), Some(path)) = (outcome.fs_check_bytes, outcome.fs_check_path.as_ref()) {
+        println!("fs_check: ok ({bytes} bytes at {})", path.display());
+    }
 }
 
 fn run_agent_test_with(
@@ -104,10 +354,55 @@ fn run_agent_test_with(
     config: &Config,
     registry: &RegistryCatalog,
     args: AgentTestArgs,
-    print_summary: bool,
-) -> Result<()> {
-    let entry = registry.lookup_required(&config.agent.id)?;
-    entry.ensure_supported()?;
+) -> AgentTestRun {
+    // Wall clock, not `Instant`: this can run inside a VM whose monotonic
+    // clock stalls across a host suspend, which would under-report the
+    // duration an orchestrator budgets against.
+    let started = SystemTime::now();
+    let mut outcome = AgentTestOutcome::starting(config.agent.id.clone(), args.prompt.is_some());
+    let failure = execute_agent_test(home, config, registry, args, &mut outcome).err();
+    outcome.elapsed_ms = SystemTime::now()
+        .duration_since(started)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    match failure {
+        None => {
+            outcome.ok = true;
+            outcome.code = CODE_OK;
+            AgentTestRun {
+                outcome,
+                error: None,
+            }
+        }
+        Some(failure) => {
+            outcome.ok = false;
+            outcome.code = failure.code;
+            AgentTestRun {
+                outcome,
+                error: Some(failure.into()),
+            }
+        }
+    }
+}
+
+fn execute_agent_test(
+    home: &Path,
+    config: &Config,
+    registry: &RegistryCatalog,
+    args: AgentTestArgs,
+    outcome: &mut AgentTestOutcome,
+) -> TestResult<()> {
+    let entry = registry
+        .lookup_required(&config.agent.id)
+        .and_then(|entry| entry.ensure_supported().map(|()| entry))
+        .map_err(|error| {
+            AgentTestFailure::new(
+                "spawn/start",
+                CODE_AGENT_UNSUPPORTED,
+                format!("agent `{}` is not testable: {error}", config.agent.id),
+            )
+        })?;
 
     let prompt_source = if args.prompt.is_some() {
         AgentTestPromptSource::CliFlag
@@ -116,6 +411,7 @@ fn run_agent_test_with(
     } else {
         AgentTestPromptSource::Default
     };
+    outcome.prompt_source = prompt_source;
     let prompt = args
         .prompt
         .clone()
@@ -129,7 +425,13 @@ fn run_agent_test_with(
     let timeout = parse_agent_test_duration("agent test --timeout", &args.timeout)?;
     let progress_timeout =
         parse_agent_test_duration("agent test --progress-timeout", &args.progress_timeout)?;
-    let env = resolve_agent_env_for_cli(home, config)?;
+    let env = resolve_agent_env_for_cli(home, config).map_err(|error| {
+        AgentTestFailure::new(
+            "spawn/start",
+            CODE_CONFIG_INVALID,
+            format!("resolve agent launch environment failed: {error}"),
+        )
+    })?;
     let cwd = config
         .agent
         .cwd
@@ -145,7 +447,13 @@ fn run_agent_test_with(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|source| StackError::ServeIo { source })?;
+        .map_err(|source| {
+            AgentTestFailure::new(
+                "spawn/start",
+                CODE_CONFIG_INVALID,
+                format!("build agent test runtime failed: {source}"),
+            )
+        })?;
     let sandbox = config.workspace.sandbox.clone();
     let network_provider = crate::extensions::resolve_network_provider(config);
     let report = runtime.block_on(async move {
@@ -160,26 +468,29 @@ fn run_agent_test_with(
             network_provider,
         )
         .await
-    })?;
+    });
 
-    let fs_outcome = match expect_fs.as_deref() {
-        Some(rel) => Some(verify_testflight_expect_fs(&workspace_root, rel)?),
-        None => None,
-    };
+    // Cleanup is observed on every exit path, so it is recorded before the
+    // run's own failure is propagated.
+    outcome.cleanup = report.cleanup;
+    outcome.session_id = report.session_id;
+    outcome.stop_reason = report.stop_reason;
+    outcome.updates = report.updates;
+    if let Some(failure) = report.failure {
+        return Err(failure);
+    }
 
-    if print_summary {
-        println!("agent test: ok");
-        println!("agent: {}", config.agent.id);
-        println!("prompt: {}", prompt_source.label());
-        println!("session_id: {}", report.session_id);
-        println!("stop_reason: {}", stop_reason_label(report.stop_reason));
-        println!("updates: {}", report.updates);
-        if let Some(outcome) = fs_outcome {
-            println!(
-                "fs_check: ok ({} bytes at {})",
-                outcome.bytes,
-                outcome.path.display()
-            );
+    if let Some(rel) = expect_fs.as_deref() {
+        match verify_testflight_expect_fs(&workspace_root, rel) {
+            Ok(fs_outcome) => {
+                outcome.fs_check_status = FS_CHECK_OK;
+                outcome.fs_check_bytes = Some(fs_outcome.bytes);
+                outcome.fs_check_path = Some(fs_outcome.path);
+            }
+            Err(failure) => {
+                outcome.fs_check_status = FS_CHECK_FAILED;
+                return Err(failure);
+            }
         }
     }
     Ok(())
@@ -213,23 +524,30 @@ pub(super) struct TestflightFsOutcome {
 /// failures so the operator can distinguish "agent did not run the tool"
 /// from "agent ran the tool successfully". Uses canonical paths to reject
 /// an agent that resolved a symlink out of the workspace.
-pub(super) fn prepare_testflight_expect_fs(workspace_root: &Path, relative: &str) -> Result<()> {
+pub(super) fn prepare_testflight_expect_fs(
+    workspace_root: &Path,
+    relative: &str,
+) -> TestResult<()> {
     let path = testflight_expect_fs_path(workspace_root, relative)?;
     ensure_testflight_parent_within_workspace(workspace_root, &path)?;
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => {
-            std::fs::remove_file(&path).map_err(|source| StackError::AgentTestFailed {
-                stage: "fs_check".to_owned(),
-                reason: format!(
-                    "remove stale testflight artifact `{}` failed: {source}",
-                    path.display()
-                ),
+            std::fs::remove_file(&path).map_err(|source| {
+                AgentTestFailure::new(
+                    STAGE_FS_CHECK,
+                    CODE_FS_CHECK_FAILED,
+                    format!(
+                        "remove stale testflight artifact `{}` failed: {source}",
+                        path.display()
+                    ),
+                )
             })?;
             Ok(())
         }
-        Ok(metadata) => Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        Ok(metadata) => Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_NOT_REGULAR_FILE,
+            format!(
                 "pre-existing testflight artifact `{}` is {}; remove it before running testflight",
                 path.display(),
                 if metadata.file_type().is_symlink() {
@@ -238,87 +556,95 @@ pub(super) fn prepare_testflight_expect_fs(workspace_root: &Path, relative: &str
                     "not a regular file"
                 }
             ),
-        }),
+        )),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        Err(source) => Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_FAILED,
+            format!(
                 "stat pre-existing testflight artifact `{}` failed: {source}",
                 path.display()
             ),
-        }),
+        )),
     }
 }
 
 pub(super) fn verify_testflight_expect_fs(
     workspace_root: &Path,
     relative: &str,
-) -> Result<TestflightFsOutcome> {
+) -> TestResult<TestflightFsOutcome> {
     let path = testflight_expect_fs_path(workspace_root, relative)?;
-    let workspace =
-        workspace_root
-            .canonicalize()
-            .map_err(|source| StackError::AgentTestFailed {
-                stage: "fs_check".to_owned(),
-                reason: format!(
-                    "canonicalize workspace root `{}` failed: {source}",
-                    workspace_root.display()
-                ),
-            })?;
-    let metadata =
-        std::fs::symlink_metadata(&path).map_err(|source| StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+    let workspace = workspace_root.canonicalize().map_err(|source| {
+        AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_FAILED,
+            format!(
+                "canonicalize workspace root `{}` failed: {source}",
+                workspace_root.display()
+            ),
+        )
+    })?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|source| {
+        AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_MISSING,
+            format!(
                 "expected agent to create `{}` (workspace-relative `{}`) but stat failed: {source}",
                 path.display(),
                 relative
             ),
-        })?;
+        )
+    })?;
     if metadata.file_type().is_symlink() {
-        return Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        return Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_NOT_REGULAR_FILE,
+            format!(
                 "expected agent to create regular file `{}`, but it is a symlink",
                 path.display()
             ),
-        });
+        ));
     }
     if !metadata.is_file() {
-        return Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        return Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_NOT_REGULAR_FILE,
+            format!(
                 "expected agent to create regular file `{}`, but it is not a regular file",
                 path.display()
             ),
-        });
+        ));
     }
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|source| StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+    let canonical_path = path.canonicalize().map_err(|source| {
+        AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_FAILED,
+            format!(
                 "canonicalize testflight artifact `{}` failed: {source}",
                 path.display()
             ),
-        })?;
+        )
+    })?;
     if !canonical_path.starts_with(&workspace) {
-        return Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        return Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_OUTSIDE_WORKSPACE,
+            format!(
                 "testflight artifact `{}` resolved outside workspace `{}`",
                 canonical_path.display(),
                 workspace.display()
             ),
-        });
+        ));
     }
     if metadata.len() == 0 {
-        return Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        return Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_EMPTY,
+            format!(
                 "agent created `{}` but the file is empty; treating as no tool action",
                 path.display()
             ),
-        });
+        ));
     }
     Ok(TestflightFsOutcome {
         path,
@@ -326,63 +652,79 @@ pub(super) fn verify_testflight_expect_fs(
     })
 }
 
-fn testflight_expect_fs_path(workspace_root: &Path, relative: &str) -> Result<PathBuf> {
+fn testflight_expect_fs_path(workspace_root: &Path, relative: &str) -> TestResult<PathBuf> {
     if Path::new(relative).is_absolute() || relative.split('/').any(|seg| seg == "..") {
-        return Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        return Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_CONFIG_INVALID,
+            format!(
                 "testflight_expect_fs `{relative}` must be a workspace-relative path with no `..` segments"
             ),
-        });
+        ));
     }
     Ok(workspace_root.join(relative))
 }
 
-fn ensure_testflight_parent_within_workspace(workspace_root: &Path, path: &Path) -> Result<()> {
+fn ensure_testflight_parent_within_workspace(workspace_root: &Path, path: &Path) -> TestResult<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    let workspace =
-        workspace_root
-            .canonicalize()
-            .map_err(|source| StackError::AgentTestFailed {
-                stage: "fs_check".to_owned(),
-                reason: format!(
-                    "canonicalize workspace root `{}` failed: {source}",
-                    workspace_root.display()
-                ),
-            })?;
+    let workspace = workspace_root.canonicalize().map_err(|source| {
+        AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_FAILED,
+            format!(
+                "canonicalize workspace root `{}` failed: {source}",
+                workspace_root.display()
+            ),
+        )
+    })?;
     let parent = match parent.canonicalize() {
         Ok(parent) => parent,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(StackError::AgentTestFailed {
-                stage: "fs_check".to_owned(),
-                reason: format!("canonicalize `{}` failed: {source}", parent.display()),
-            });
+            return Err(AgentTestFailure::new(
+                STAGE_FS_CHECK,
+                CODE_FS_CHECK_FAILED,
+                format!("canonicalize `{}` failed: {source}", parent.display()),
+            ));
         }
     };
     if parent.starts_with(&workspace) {
         Ok(())
     } else {
-        Err(StackError::AgentTestFailed {
-            stage: "fs_check".to_owned(),
-            reason: format!(
+        Err(AgentTestFailure::new(
+            STAGE_FS_CHECK,
+            CODE_FS_CHECK_OUTSIDE_WORKSPACE,
+            format!(
                 "testflight artifact parent `{}` resolved outside workspace `{}`",
                 parent.display(),
                 workspace.display()
             ),
-        })
+        ))
     }
 }
 
-fn parse_agent_test_duration(field: &'static str, value: &str) -> Result<Duration> {
-    let duration =
-        config::parse_duration_string(value).ok_or(StackError::InvalidDurationField { field })?;
-    if duration.is_zero() {
-        return Err(StackError::InvalidDurationField { field });
-    }
-    Ok(duration)
+fn parse_agent_test_duration(field: &'static str, value: &str) -> TestResult<Duration> {
+    let duration = config::parse_duration_string(value).filter(|parsed| !parsed.is_zero());
+    duration.ok_or_else(|| {
+        AgentTestFailure::new(
+            "spawn/start",
+            CODE_CONFIG_INVALID,
+            format!("`{field}` must be a non-zero duration"),
+        )
+    })
+}
+
+/// What the ACP side of the run produced. Unlike the fallible steps around it
+/// this is total: cleanup is observed whether the run succeeded or failed, so
+/// the failure travels as a field rather than as `Err`.
+struct AgentTestInnerReport {
+    session_id: Option<String>,
+    stop_reason: Option<StopReason>,
+    updates: usize,
+    cleanup: CleanupOutcome,
+    failure: Option<AgentTestFailure>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -395,9 +737,9 @@ async fn run_agent_test_inner(
     progress_timeout: Duration,
     sandbox: crate::config::SandboxConfig,
     network_provider: Option<crate::extensions::NetworkProviderExtension>,
-) -> Result<AgentTestReport> {
+) -> AgentTestInnerReport {
     let sink = Arc::new(AgentTestSessionEventSink::new());
-    let bridge = AcpBridge::spawn(
+    let bridge = match AcpBridge::spawn(
         &agent,
         env,
         cwd.clone(),
@@ -408,50 +750,131 @@ async fn run_agent_test_inner(
         None,
     )
     .await
-    .map_err(agent_test_spawn_error)?;
-
-    let result = async {
-        let session = bridge
-            .new_session(cwd, Vec::new())
-            .await
-            .map_err(|err| agent_test_error("session creation", err))?;
-        apply_agent_test_session_config(&bridge, &agent, &session)
-            .await
-            .map_err(|err| agent_test_error("session creation", err))?;
-        let request = PromptRequest::new(
-            session.session_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(prompt))],
-        );
-        let stop_reason = run_agent_test_prompt(
-            &bridge,
-            request,
-            sink.clone(),
-            prompt_timeout,
-            progress_timeout,
-        )
-        .await?;
-        if stop_reason != StopReason::EndTurn {
-            return Err(StackError::AgentTestFailed {
-                stage: "prompt completion".to_owned(),
-                reason: format!(
-                    "expected stop_reason end_turn, got {}",
-                    stop_reason_label(stop_reason)
-                ),
-            });
+    {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            // `AcpBridge::spawn` kills its own child on every failure path, so
+            // nothing is left running to clean up here.
+            return AgentTestInnerReport {
+                session_id: None,
+                stop_reason: None,
+                updates: 0,
+                cleanup: CleanupOutcome::nothing_to_clean(),
+                failure: Some(agent_test_spawn_error(error)),
+            };
         }
-        Ok(AgentTestReport {
-            session_id: session.session_id.to_string(),
-            stop_reason,
-            updates: sink.update_count(),
-        })
-    }
-    .await;
+    };
 
-    let shutdown = bridge.shutdown().await;
-    match (result, shutdown) {
-        (Ok(report), Ok(_)) => Ok(report),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(agent_test_error("shutdown", err)),
+    let mut created_session: Option<SessionId> = None;
+    let mut stop_reason = None;
+    let result = {
+        let created_session: &mut Option<SessionId> = &mut created_session;
+        let stop_reason = &mut stop_reason;
+        async {
+            let session = bridge.new_session(cwd, Vec::new()).await.map_err(|err| {
+                agent_test_error("session creation", CODE_SESSION_CREATE_FAILED, err)
+            })?;
+            *created_session = Some(session.session_id.clone());
+            apply_agent_test_session_config(&bridge, &agent, &session)
+                .await
+                .map_err(|err| {
+                    agent_test_error("session creation", CODE_SESSION_CONFIG_FAILED, err)
+                })?;
+            let request = PromptRequest::new(
+                session.session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new(prompt))],
+            );
+            let reason = run_agent_test_prompt(
+                &bridge,
+                request,
+                sink.clone(),
+                prompt_timeout,
+                progress_timeout,
+            )
+            .await?;
+            *stop_reason = Some(reason);
+            if reason != StopReason::EndTurn {
+                return Err(AgentTestFailure::new(
+                    "prompt completion",
+                    CODE_UNEXPECTED_STOP_REASON,
+                    format!(
+                        "expected stop_reason end_turn, got {}",
+                        stop_reason_label(reason)
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        .await
+    };
+
+    // The disposable session is deleted before the process goes down: once the
+    // bridge is shut down the agent can no longer be asked to forget it, and a
+    // testflight must not leave state behind in the agent's own store.
+    let session_id = created_session
+        .as_ref()
+        .map(|session_id| session_id.to_string());
+    let session_delete = match created_session {
+        None => SESSION_DELETE_SKIPPED,
+        Some(_) if !bridge.capabilities().supports_delete_session() => SESSION_DELETE_UNSUPPORTED,
+        // Bounded, because the run reaching cleanup is no evidence the agent is
+        // healthy: a run that failed on a progress timeout leaves the agent
+        // wedged mid-prompt on its single event loop, where a `session/delete`
+        // request is never answered. `shutdown()` below still reclaims the
+        // process, so a cleanup that cannot complete is reported, not awaited.
+        Some(session_id) => {
+            match tokio::time::timeout(SESSION_DELETE_TIMEOUT, bridge.delete_session(session_id))
+                .await
+            {
+                Ok(Ok(())) => SESSION_DELETE_DELETED,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        error = %error,
+                        "agent test could not delete its disposable session"
+                    );
+                    SESSION_DELETE_CLEANUP_FAILED
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "agent test timed out deleting its disposable session; \
+                         terminating the agent process anyway"
+                    );
+                    SESSION_DELETE_CLEANUP_FAILED
+                }
+            }
+        }
+    };
+    let process = match bridge.shutdown().await {
+        Ok(_) => PROCESS_TERMINATED,
+        Err(error) => {
+            tracing::warn!(error = %error, "agent test could not terminate the agent process");
+            PROCESS_TERMINATE_FAILED
+        }
+    };
+    let cleanup = CleanupOutcome {
+        session_delete,
+        process,
+    };
+
+    // A failed session delete does not flip the verdict: the test measures
+    // prompt completion and the fs check, and a working agent with a flaky
+    // delete must not read as a failed run. A leaked agent child does flip it.
+    let failure = match (result, process) {
+        (Err(failure), _) => Some(failure),
+        (Ok(()), PROCESS_TERMINATE_FAILED) => Some(AgentTestFailure::new(
+            "shutdown",
+            CODE_CLEANUP_FAILED,
+            "agent process did not terminate after the test".to_owned(),
+        )),
+        (Ok(()), _) => None,
+    };
+
+    AgentTestInnerReport {
+        session_id,
+        stop_reason,
+        updates: sink.update_count(),
+        cleanup,
+        failure,
     }
 }
 
@@ -461,7 +884,7 @@ async fn run_agent_test_prompt(
     sink: Arc<AgentTestSessionEventSink>,
     prompt_timeout: Duration,
     progress_timeout: Duration,
-) -> Result<StopReason> {
+) -> TestResult<StopReason> {
     let prompt_call = async {
         let prompt_future = bridge.prompt_session(request);
         tokio::pin!(prompt_future);
@@ -473,19 +896,20 @@ async fn run_agent_test_prompt(
                 result = &mut prompt_future => {
                     return result
                         .map(|response| response.stop_reason)
-                        .map_err(|err| agent_test_error("prompt completion", err));
+                        .map_err(|err| agent_test_error("prompt completion", CODE_PROMPT_FAILED, err));
                 }
                 _ = sink.wait_for_update_after(observed_updates) => {
                     observed_updates = sink.update_count();
                 }
                 _ = &mut progress_timer => {
-                    return Err(StackError::AgentTestFailed {
-                        stage: "prompt/progress timeout".to_owned(),
-                        reason: format!(
+                    return Err(AgentTestFailure::new(
+                        "prompt/progress timeout",
+                        CODE_PROGRESS_TIMEOUT,
+                        format!(
                             "no new session/update or terminal prompt response within {}",
                             human_duration(progress_timeout)
                         ),
-                    });
+                    ));
                 }
             }
         }
@@ -493,12 +917,15 @@ async fn run_agent_test_prompt(
 
     tokio::time::timeout(prompt_timeout, prompt_call)
         .await
-        .map_err(|_| StackError::AgentTestFailed {
-            stage: "prompt/progress timeout".to_owned(),
-            reason: format!(
-                "prompt did not complete within {}",
-                human_duration(prompt_timeout)
-            ),
+        .map_err(|_| {
+            AgentTestFailure::new(
+                "prompt/progress timeout",
+                CODE_PROMPT_TIMEOUT,
+                format!(
+                    "prompt did not complete within {}",
+                    human_duration(prompt_timeout)
+                ),
+            )
         })?
 }
 
@@ -542,20 +969,22 @@ async fn apply_agent_test_session_config(
     Ok(())
 }
 
-fn agent_test_spawn_error(error: StackError) -> StackError {
-    let stage = match error {
-        StackError::AgentSpawnFailed { .. } => "spawn/start",
-        StackError::AgentInitializeFailed { .. } => "ACP initialize",
-        _ => "spawn/start",
+fn agent_test_spawn_error(error: StackError) -> AgentTestFailure {
+    let (stage, code) = match error {
+        StackError::AgentInitializeFailed { .. } => {
+            ("ACP initialize", CODE_AGENT_INITIALIZE_FAILED)
+        }
+        _ => ("spawn/start", CODE_AGENT_SPAWN_FAILED),
     };
-    agent_test_error(stage, error)
+    agent_test_error(stage, code, error)
 }
 
-fn agent_test_error(stage: &'static str, error: StackError) -> StackError {
-    StackError::AgentTestFailed {
-        stage: stage.to_owned(),
-        reason: error.to_string(),
-    }
+fn agent_test_error(
+    stage: &'static str,
+    code: &'static str,
+    error: StackError,
+) -> AgentTestFailure {
+    AgentTestFailure::new(stage, code, error.to_string())
 }
 
 fn stop_reason_label(reason: StopReason) -> String {

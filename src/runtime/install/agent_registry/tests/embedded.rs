@@ -9,6 +9,28 @@ fn embedded_registry_parses() {
     );
 }
 
+/// The flag gates whether a managed credential may carry a `base_url`, so an
+/// agent listed here without a native endpoint field would accept a routing
+/// instruction it silently never applies.
+#[test]
+fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
+    let catalog = RegistryCatalog::load_embedded().expect("registry");
+    for id in ["opencode", "pi", "codex", "claude-code"] {
+        assert!(
+            catalog.supports_provider_base_url(id),
+            "`{id}` writes a per-provider endpoint and must declare set_provider_base_url"
+        );
+    }
+    for id in ["goose", "amp", "kimi", "hermes"] {
+        assert!(
+            !catalog.supports_provider_base_url(id),
+            "`{id}` has no per-provider endpoint field and must not declare set_provider_base_url"
+        );
+    }
+    // An agent outside the registry has no acps-managed native config at all.
+    assert!(!catalog.supports_provider_base_url("not-a-registered-agent"));
+}
+
 #[test]
 fn opencode_keeps_an_npm_fallback_behind_its_github_backed_shell_installer() {
     // The shell recipe runs opencode's upstream installer, which resolves its
