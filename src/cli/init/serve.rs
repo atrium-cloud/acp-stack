@@ -28,8 +28,8 @@ use crate::runtime::init_runner::step_kind;
 use crate::state::default_state_path;
 
 use super::prompt::{
-    self, HostedPromptDriver, HostedPromptKind, HostedPromptOutcome, HostedPromptRequest,
-    HostedPromptStyle,
+    self, ConfirmAnswer, HostedPromptDriver, HostedPromptKind, HostedPromptOutcome,
+    HostedPromptRequest, HostedPromptStyle,
 };
 use super::state_signal::{
     ApplicabilitySource, InitCategory, InitStateSignal, category_for_step_kind,

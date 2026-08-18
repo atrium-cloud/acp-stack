@@ -6,30 +6,44 @@ pub(super) struct SessionPromptDriver {
 
 impl HostedPromptDriver for SessionPromptDriver {
     fn select(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<usize>>> {
-        let Some(value) = self.session.request_input(request.clone())? else {
+        let Some(answer) = self.session.request_input(request.clone())? else {
             return Ok(HostedPromptOutcome::Unhandled);
         };
-        let selection = parse_optional_index(&value, &request)?;
+        let selection = parse_optional_index(&answer.value, &request)?;
         Ok(HostedPromptOutcome::Handled(selection))
     }
 
     fn confirm(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<bool>> {
-        let Some(value) = self.session.request_input(request.clone())? else {
+        Ok(match self.confirm_with_deferral(request)? {
+            HostedPromptOutcome::Handled(answer) => HostedPromptOutcome::Handled(answer.value),
+            HostedPromptOutcome::Unhandled => HostedPromptOutcome::Unhandled,
+        })
+    }
+
+    fn confirm_with_deferral(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<HostedPromptOutcome<ConfirmAnswer>> {
+        let Some(answer) = self.session.request_input(request)? else {
             return Ok(HostedPromptOutcome::Unhandled);
         };
-        let Some(value) = value.as_bool() else {
+        let Some(value) = answer.value.as_bool() else {
             return Err(StackError::InvalidParam {
                 field: "init",
                 reason: "confirm input must be a boolean".to_owned(),
             });
         };
-        Ok(HostedPromptOutcome::Handled(value))
+        Ok(HostedPromptOutcome::Handled(ConfirmAnswer {
+            value,
+            deferred: answer.deferred,
+        }))
     }
 
     fn text(&self, request: HostedPromptRequest) -> Result<HostedPromptOutcome<Option<String>>> {
-        let Some(value) = self.session.request_input(request)? else {
+        let Some(answer) = self.session.request_input(request)? else {
             return Ok(HostedPromptOutcome::Unhandled);
         };
+        let value = answer.value;
         if value.is_null() {
             return Ok(HostedPromptOutcome::Handled(None));
         }
@@ -61,11 +75,11 @@ impl HostedPromptDriver for SessionPromptDriver {
                 field: "native_config",
                 reason: "native config review omitted inspection".to_owned(),
             })?;
-        let Some(value) = self.session.request_input(request)? else {
+        let Some(answer) = self.session.request_input(request)? else {
             return Ok(HostedPromptOutcome::Unhandled);
         };
         let selection: NativeConfigSelection =
-            serde_json::from_value(value).map_err(|_| StackError::InvalidParam {
+            serde_json::from_value(answer.value).map_err(|_| StackError::InvalidParam {
                 field: "native_config",
                 reason: "native config review response is invalid".to_owned(),
             })?;

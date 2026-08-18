@@ -22,6 +22,9 @@ pub(super) enum TestflightDecision {
     /// Interactive run and the operator answered no at the credit-warning
     /// prompt.
     SkipDeclined,
+    /// A hosting backend answered no because it will run the testflight itself
+    /// after setup, which it marks with the `deferred` flag on its answer.
+    SkipDeferred,
     /// Selected agent isn't headless-compatible; the testflight would fail
     /// at spawn. Surface the skip so the operator isn't surprised.
     SkipUnsupported,
@@ -43,9 +46,40 @@ impl TestflightDecision {
             TestflightDecision::SkipExplicit => "SkipExplicit",
             TestflightDecision::SkipNonInteractive => "SkipNonInteractive",
             TestflightDecision::SkipDeclined => "SkipDeclined",
+            TestflightDecision::SkipDeferred => "SkipDeferred",
             TestflightDecision::SkipUnsupported => "SkipUnsupported",
             TestflightDecision::SkipCredentialPending { .. } => "SkipCredentialPending",
         }
+    }
+
+    /// The line the finalize step prints for a decision that did not run the
+    /// testflight. `None` for `Run`, which prints its own progress instead.
+    pub(super) fn skip_message(&self) -> Option<String> {
+        let message = match self {
+            TestflightDecision::Run => return None,
+            TestflightDecision::SkipExplicit => {
+                "testflight: skipped (--skip-testflight)".to_owned()
+            }
+            TestflightDecision::SkipNonInteractive => {
+                "testflight: skipped (non-interactive run; pass --testflight to opt in)".to_owned()
+            }
+            TestflightDecision::SkipDeclined => {
+                "testflight: skipped (declined at prompt)".to_owned()
+            }
+            TestflightDecision::SkipDeferred => {
+                "testflight: deferred (runs after setup)".to_owned()
+            }
+            TestflightDecision::SkipUnsupported => {
+                "testflight: skipped (agent does not support headless testflight)".to_owned()
+            }
+            TestflightDecision::SkipCredentialPending {
+                provider_id,
+                api_key_ref,
+            } => format!(
+                "testflight: skipped (provider `{provider_id}` credential `{api_key_ref}` is pending a managed push)"
+            ),
+        };
+        Some(message)
     }
 }
 
@@ -103,16 +137,22 @@ pub(super) fn resolve_testflight_decision(
     if !interactive {
         return Ok(Some(TestflightDecision::SkipNonInteractive));
     }
-    if confirm_testflight_credit_warning(interactive, entry)? {
-        Ok(Some(TestflightDecision::Run))
-    } else {
-        Ok(Some(TestflightDecision::SkipDeclined))
+    let answer = confirm_testflight_credit_warning(interactive, entry)?;
+    if answer.value {
+        return Ok(Some(TestflightDecision::Run));
     }
+    if answer.deferred {
+        return Ok(Some(TestflightDecision::SkipDeferred));
+    }
+    Ok(Some(TestflightDecision::SkipDeclined))
 }
 
-fn confirm_testflight_credit_warning(interactive: bool, entry: &RegistryEntry) -> Result<bool> {
+fn confirm_testflight_credit_warning(
+    interactive: bool,
+    entry: &RegistryEntry,
+) -> Result<prompt::ConfirmAnswer> {
     print_testflight_credit_warning(entry);
-    prompt::confirm(
+    prompt::confirm_with_deferral(
         prompt::HostedPromptKind::TestflightConfirm,
         interactive,
         "run testflight now?",

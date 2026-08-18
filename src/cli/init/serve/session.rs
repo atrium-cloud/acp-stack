@@ -142,6 +142,26 @@ impl HostedInitManager {
     }
 }
 
+/// One client answer: the answer value plus the optional `deferred` sibling
+/// flag from the input frame. The flag is meaningful only to a confirm prompt
+/// whose caller distinguishes a decline from a backend-run-it-later answer;
+/// every other prompt ignores it.
+#[derive(Debug, Clone)]
+pub(super) struct HostedAnswer {
+    pub(super) value: Value,
+    pub(super) deferred: bool,
+}
+
+#[cfg(test)]
+impl HostedAnswer {
+    pub(super) fn plain(value: Value) -> Self {
+        Self {
+            value,
+            deferred: false,
+        }
+    }
+}
+
 pub(super) struct HostedInitSession {
     pub(super) id: String,
     pub(super) inner: Mutex<SessionInner>,
@@ -160,7 +180,7 @@ pub(super) struct SessionInner {
     /// Identity of the prompt occupying `pending_input`, kept beside it so the
     /// category waiting on the client is derived rather than stored.
     pending_kind: Option<HostedPromptKind>,
-    pending_response: Option<(String, Value)>,
+    pending_response: Option<(String, HostedAnswer)>,
     current_step: Option<&'static str>,
     /// Whether `current_step` is still running. `current_step` itself stays put
     /// after a step finishes because the wire wants the last step the run was
@@ -404,7 +424,10 @@ impl HostedInitSession {
         frame
     }
 
-    pub(super) fn request_input(&self, request: HostedPromptRequest) -> Result<Option<Value>> {
+    pub(super) fn request_input(
+        &self,
+        request: HostedPromptRequest,
+    ) -> Result<Option<HostedAnswer>> {
         if !should_handle_hosted_prompt(&request) {
             return Ok(None);
         }
@@ -432,11 +455,11 @@ impl HostedInitSession {
             let _ = self.events.send(frame.to_string());
         }
 
-        let (value, state_frame) = {
+        let (answer, state_frame) = {
             let mut inner = lock_unpoisoned(&self.inner);
             loop {
                 terminal_status_error(&inner)?;
-                if let Some((request_id, value)) = inner.pending_response.take()
+                if let Some((request_id, answer)) = inner.pending_response.take()
                     && request_id == public.request_id
                 {
                     inner.status = "running".to_owned();
@@ -445,7 +468,7 @@ impl HostedInitSession {
                     // The answer itself settles nothing: settlement comes from
                     // the config-write sites, which know what was actually
                     // written and never carry a secret value.
-                    break (value, self.emit_state_locked(&mut inner));
+                    break (answer, self.emit_state_locked(&mut inner));
                 }
                 inner = self
                     .input_ready
@@ -456,13 +479,24 @@ impl HostedInitSession {
         if let Some(frame) = state_frame {
             let _ = self.events.send(frame.to_string());
         }
-        Ok(Some(value))
+        Ok(Some(answer))
     }
 
+    /// Answer shorthand for tests that do not exercise the `deferred` sibling.
+    /// The wire path always goes through `submit_answer`.
+    #[cfg(test)]
     pub(super) fn submit_input(
         &self,
         request_id: &str,
         value: Value,
+    ) -> std::result::Result<(), String> {
+        self.submit_answer(request_id, HostedAnswer::plain(value))
+    }
+
+    pub(super) fn submit_answer(
+        &self,
+        request_id: &str,
+        answer: HostedAnswer,
     ) -> std::result::Result<(), String> {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
@@ -475,7 +509,7 @@ impl HostedInitSession {
                     pending.request_id
                 ));
             }
-            inner.pending_response = Some((request_id.to_owned(), value));
+            inner.pending_response = Some((request_id.to_owned(), answer));
             self.emit_event_locked(
                 &mut inner,
                 ServerEvent::InputAccepted {

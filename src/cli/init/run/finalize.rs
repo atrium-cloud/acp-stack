@@ -157,8 +157,9 @@ pub(super) fn run_testflight_step(flow: &mut InitFlow) -> Result<()> {
         step_kind::TESTFLIGHT,
         || Ok(!matches!(decision, TestflightDecision::Run)),
         || {
-            match &decision {
-                TestflightDecision::Run => {
+            match decision.skip_message() {
+                Some(message) => init_println!(output_mode, "{message}"),
+                None => {
                     init_println!(output_mode, "---");
                     init_println!(output_mode, "running real-prompt agent testflight");
                     crate::cli::agent::run_init_testflight(
@@ -167,33 +168,6 @@ pub(super) fn run_testflight_step(flow: &mut InitFlow) -> Result<()> {
                         registry,
                         output_mode.is_text(),
                     )?;
-                }
-                TestflightDecision::SkipExplicit => {
-                    init_println!(output_mode, "testflight: skipped (--skip-testflight)");
-                }
-                TestflightDecision::SkipNonInteractive => {
-                    init_println!(
-                        output_mode,
-                        "testflight: skipped (non-interactive run; pass --testflight to opt in)"
-                    );
-                }
-                TestflightDecision::SkipDeclined => {
-                    init_println!(output_mode, "testflight: skipped (declined at prompt)");
-                }
-                TestflightDecision::SkipUnsupported => {
-                    init_println!(
-                        output_mode,
-                        "testflight: skipped (agent does not support headless testflight)"
-                    );
-                }
-                TestflightDecision::SkipCredentialPending {
-                    provider_id,
-                    api_key_ref,
-                } => {
-                    init_println!(
-                        output_mode,
-                        "testflight: skipped (provider `{provider_id}` credential `{api_key_ref}` is pending a managed push)"
-                    );
                 }
             }
             Ok(StepOutcome::with_payload(format!(

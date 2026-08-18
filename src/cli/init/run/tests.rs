@@ -760,3 +760,101 @@ fn testflight_skips_or_errors_on_a_pending_provider_credential() {
     .expect_err("an explicit --testflight cannot run without a credential");
     assert!(error.to_string().contains("PENDING_CUSTOM_KEY"));
 }
+
+/// Answers every prompt with one scripted confirm answer, so the testflight
+/// resolver sees a hosted client and the deferral flag under test.
+struct ScriptedConfirmDriver(prompt::ConfirmAnswer);
+
+impl prompt::HostedPromptDriver for ScriptedConfirmDriver {
+    fn select(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<usize>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn confirm(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<bool>> {
+        Ok(prompt::HostedPromptOutcome::Handled(self.0.value))
+    }
+
+    fn confirm_with_deferral(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<prompt::ConfirmAnswer>> {
+        Ok(prompt::HostedPromptOutcome::Handled(self.0))
+    }
+
+    fn text(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn password(
+        &self,
+        _request: prompt::HostedPromptRequest,
+    ) -> Result<prompt::HostedPromptOutcome<Option<String>>> {
+        Ok(prompt::HostedPromptOutcome::Unhandled)
+    }
+
+    fn progress(&self, _message: String) {}
+
+    fn result(&self, _payload: serde_json::Value) {}
+}
+
+#[test]
+fn a_deferred_testflight_answer_is_not_a_decline() {
+    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let config = config_for_agent("opencode");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let secrets = SecretStore::open_or_create(tempdir.path()).expect("secret store");
+    let args = parse_init_args(&[]);
+    let resolve = |answer: prompt::ConfirmAnswer| {
+        prompt::with_hosted_driver(Arc::new(ScriptedConfirmDriver(answer)), || {
+            resolve_testflight_decision(&args, &config, &registry, &secrets)
+        })
+        .expect("hosted answer resolves a decision")
+    };
+
+    assert_eq!(
+        resolve(prompt::ConfirmAnswer::plain(true)),
+        Some(TestflightDecision::Run)
+    );
+    assert_eq!(
+        resolve(prompt::ConfirmAnswer::plain(false)),
+        Some(TestflightDecision::SkipDeclined)
+    );
+    assert_eq!(
+        resolve(prompt::ConfirmAnswer {
+            value: false,
+            deferred: true
+        }),
+        Some(TestflightDecision::SkipDeferred)
+    );
+    // An accepted answer is a run whatever the flag says: the backend defers by
+    // declining, so a `true` that also claims deferral would run it twice.
+    assert_eq!(
+        resolve(prompt::ConfirmAnswer {
+            value: true,
+            deferred: true
+        }),
+        Some(TestflightDecision::Run)
+    );
+}
+
+#[test]
+fn testflight_decisions_report_their_own_finalize_line() {
+    assert_eq!(TestflightDecision::Run.skip_message(), None);
+    assert_eq!(
+        TestflightDecision::SkipDeferred.skip_message().as_deref(),
+        Some("testflight: deferred (runs after setup)")
+    );
+    assert_eq!(
+        TestflightDecision::SkipDeclined.skip_message().as_deref(),
+        Some("testflight: skipped (declined at prompt)")
+    );
+}
