@@ -5,8 +5,8 @@
 # [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
 # [Amp manual](https://ampcode.com/manual)
 # [models.dev](https://models.dev/api.json)
-# [Hermes Agent configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
-# Last updated on 2026-08-05
+# [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
+# Last updated on 2026-08-19
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
@@ -22,7 +22,7 @@
 [[providers]]
 id = ["anthropic"]
 name = "Anthropic"
-agents = ["pi", "opencode", "goose", "claude-code"]
+agents = ["pi", "opencode", "goose", "claude-code", "hermes"]
 
 # First-party Anthropic API needs no provisioning extras; the empty sub-table
 # marks the provider as Claude Code-profiled.
@@ -41,7 +41,7 @@ agents = ["pi", "opencode", "goose", "codex", "hermes"]
 [[providers]]
 id = ["deepseek"]
 name = "DeepSeek"
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude-code", "hermes"]
 models_url = "https://api.deepseek.com/models"
 
 [providers.claude_code]
@@ -55,7 +55,7 @@ env = { CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash", CLAUDE_CODE_EFFORT_LEV
 [[providers]]
 id = ["google"]
 name = "Google AI Studio"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "hermes"]
 
 [[providers]]
 id = ["mistral"]
@@ -91,7 +91,7 @@ agents = ["pi", "opencode"]
 [[providers]]
 id = ["xai"]
 name = "xAI"
-agents = ["pi", "opencode", "goose"]
+agents = ["pi", "opencode", "goose", "hermes"]
 
 [[providers]]
 id = ["openrouter"]
@@ -100,19 +100,20 @@ agents = ["pi", "opencode", "goose", "codex", "hermes"]
 models_url = "https://openrouter.ai/api/v1/models"
 
 [[providers]]
-id = ["vercel-ai-gateway", "vercel"]
+id = ["vercel-ai-gateway", "vercel", "ai-gateway"]
 name = "Vercel AI Gateway"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "hermes"]
 
 [providers.provider_ids]
 vercel-ai-gateway = "pi"
 vercel = "opencode"
+ai-gateway = "hermes"
 
 [[providers]]
 id = ["zai"]
 name = "Z.AI"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude-code", "hermes"]
 # No models_url: GET /api/paas/v4/models answers 401 but is absent from
 # Z.AI's API reference and OpenAPI spec (checked 2026-08-01), so the
 # response shape is unverified.
@@ -125,31 +126,43 @@ default_sonnet_model = "glm-5.2[1m]"
 default_haiku_model = "GLM-4.7"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
+[providers.api_key_env_vars]
+hermes = "GLM_API_KEY"
+
 [[providers]]
 id = ["opencode"]
 name = "OpenCode Zen"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "hermes"]
+
+[providers.api_key_env_vars]
+hermes = "OPENCODE_ZEN_API_KEY"
 
 [[providers]]
 id = ["opencode-go"]
 name = "OpenCode Go"
 # does not appear to have a status page
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "hermes"]
+
+[providers.api_key_env_vars]
+hermes = "OPENCODE_GO_API_KEY"
 
 [[providers]]
 id = ["huggingface"]
 name = "Hugging Face"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "hermes"]
 
 [[providers]]
-id = ["fireworks", "fireworks-ai"]
+id = ["fireworks", "fireworks-ai", "fw"]
 name = "Fireworks"
-agents = ["pi", "opencode"]
+agents = ["pi", "opencode", "hermes"]
 
+# Hermes' own `fireworks`/`fireworks-ai` ids are already claimed by pi and
+# opencode above; `fw` is its remaining documented alias.
 [providers.provider_ids]
 fireworks = "pi"
 fireworks-ai = "opencode"
+fw = "hermes"
 
 [[providers]]
 id = ["together", "togetherai"]
@@ -161,9 +174,9 @@ together = "pi"
 togetherai = "opencode"
 
 [[providers]]
-id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan"]
+id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi"]
 name = "Kimi For Coding"
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude-code", "hermes"]
 
 # Kimi For Coding's Claude Code endpoint speaks Anthropic Messages at the
 # /coding/ root (no /anthropic suffix). Tier-universal defaults: the
@@ -179,11 +192,12 @@ env = { CLAUDE_CODE_EFFORT_LEVEL = "high", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "26
 kimi-coding = "pi"
 kimi-for-coding = "opencode"
 kimi-coding-plan = "claude-code"
+kimi = "hermes"
 
 [[providers]]
 id = ["minimax"]
 name = "MiniMax"
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
@@ -193,7 +207,7 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
@@ -204,7 +218,7 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 id = ["xiaomi"]
 name = "Xiaomi"
 # does not appear to have a status page
-agents = ["pi", "opencode", "claude-code"]
+agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.xiaomimimo.com/anthropic"
@@ -305,6 +319,43 @@ id = ["amp-code"]
 name = "Amp Code"
 agents = ["amp"]
 
+# Hermes-only providers from the Hermes Agent providers doc
+# (https://hermes-agent.nousresearch.com/docs/integrations/providers).
+# Hermes-documented providers deliberately not tagged for hermes:
+# - github-copilot (Hermes auth is OAuth device flow / GitHub tokens; no plain API key)
+# - google-vertex, amazon-bedrock (OAuth2/service-account and AWS credential chains; no acps-managed API key and no hermes native-auth path)
+# - lmstudio (local server with optional LM_API_KEY only; no canonical key to provision)
+# - zhipuai, zai-coding-plan (no such Hermes provider ids; Hermes' single `zai` provider auto-probes the global/China/coding endpoints)
+# - moonshotai, moonshotai-cn (Hermes reaches the Moonshot platform as `kimi-coding`/`kimi-coding-cn` with KIMI_API_KEY; `moonshotai`/`MOONSHOT_API_KEY` are not recognized)
+# - microsoft-foundry, azure-foundry (Hermes azure-foundry needs endpoint+key config beyond id+key; microsoft-foundry is the Anthropic-Foundry endpoint)
+# - mistral, groq, cerebras, together (not explicitly documented by Hermes; reachable only via its generic custom endpoint)
+# - Nous Portal, qwen-oauth, minimax-oauth, xAI OAuth (OAuth-only; acp-stack provisions API keys only)
+
+[[providers]]
+id = ["arcee"]
+name = "Arcee AI"
+agents = ["hermes"]
+
+[[providers]]
+id = ["actual"]
+name = "Actual Computer"
+agents = ["hermes"]
+
+[[providers]]
+id = ["commandcode"]
+name = "CommandCode"
+agents = ["hermes"]
+
+[[providers]]
+id = ["kilocode"]
+name = "Kilo Code"
+agents = ["hermes"]
+
+[[providers]]
+id = ["meta-ai"]
+name = "Meta Model API"
+agents = ["hermes"]
+
 # OpenCode-only providers from models.dev
 # Excluded:
 # - abliteration-ai (one obscure model is listed)
@@ -329,7 +380,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["alibaba"]
 name = "Alibaba"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["alibaba-cn"]
@@ -339,7 +390,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["alibaba-coding-plan"]
 name = "Alibaba Coding Plan"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["alibaba-coding-plan-cn"]
@@ -484,7 +535,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["gmicloud"]
 name = "GMI Cloud"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["helicone"]
@@ -657,17 +708,17 @@ agents = ["opencode"]
 [[providers]]
 id = ["novita-ai"]
 name = "NovitaAI"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["nvidia"]
 name = "Nvidia" # NIM
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["ollama-cloud"]
 name = "Ollama Cloud"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["orcarouter"]
@@ -757,7 +808,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["stepfun"]
 name = "StepFun"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["stepfun-ai"]
@@ -782,7 +833,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["tencent-tokenhub"]
 name = "Tencent TokenHub"
-agents = ["opencode"]
+agents = ["opencode", "hermes"]
 
 [[providers]]
 id = ["the-grid-ai"]

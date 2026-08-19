@@ -5,9 +5,9 @@
 # [Pi Agent Docs - Providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)
 # [Amp manual](https://ampcode.com/manual)
 # [Kimi Code environment variables](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html)
-# [Hermes Agent configuration docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
+# [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-08-05
+# Last updated on 2026-08-19
 
 # Provider env vars
 
@@ -83,7 +83,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "AI_GATEWAY_API_KEY"
-provider_ids = ["vercel"]
+provider_ids = ["vercel", "ai-gateway"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -107,7 +107,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "FIREWORKS_API_KEY"
-provider_ids = ["fireworks", "fireworks-ai"]
+provider_ids = ["fireworks", "fireworks-ai", "fw"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -119,7 +119,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "KIMI_API_KEY"
-provider_ids = ["kimi-coding", "kimi-for-coding"]
+provider_ids = ["kimi-coding", "kimi-for-coding", "kimi"]
 agent_ids = ["kimi"]
 companion_env_vars = []
 optional_env_vars = []
@@ -169,6 +169,78 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "XIAOMI_TOKEN_PLAN_SGP_API_KEY"
 provider_ids = ["xiaomi-token-plan-sgp"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ARCEEAI_API_KEY"
+provider_ids = ["arcee"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ACTUAL_API_KEY"
+provider_ids = ["actual"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "COMMANDCODE_API_KEY"
+provider_ids = ["commandcode"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "KILOCODE_API_KEY"
+provider_ids = ["kilocode"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "MODEL_API_KEY"
+provider_ids = ["meta-ai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "DASHSCOPE_API_KEY"
+provider_ids = ["alibaba", "alibaba-coding-plan"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "GMI_API_KEY"
+provider_ids = ["gmicloud"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "NOVITA_API_KEY"
+provider_ids = ["novita-ai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "NVIDIA_API_KEY"
+provider_ids = ["nvidia"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "OLLAMA_API_KEY"
+provider_ids = ["ollama-cloud"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "STEPFUN_API_KEY"
+provider_ids = ["stepfun"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "TOKENHUB_API_KEY"
+provider_ids = ["tencent-tokenhub"]
 companion_env_vars = []
 optional_env_vars = []
 
