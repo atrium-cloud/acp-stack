@@ -25,6 +25,7 @@ async fn status_returns_200_with_session_key() {
     let body: Value = response.json().await.expect("json");
     assert_eq!(body["ok"], Value::Bool(true));
     assert!(body["data"]["schema_version"].is_number());
+    assert_eq!(body["data"]["deps_apply_in_flight"], false);
     assert!(body["data"]["server"]["version"].is_string());
     let features = body["data"]["server"]["features"]
         .as_array()

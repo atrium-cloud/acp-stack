@@ -365,6 +365,8 @@ The runtime never invents package-manager commands. Only install actions declare
 
 Log query filters include `limit`, `level`, `kind`, `source`, `session_id`, `command_id`, `permission_id`, `category`, `since`, `until`, `after`, and `order`. `order` accepts `asc` or `desc` (default `desc`). On `/v1/logs/security`, `order` applies to both `auth_failures` and `events`; `category` accepts the security-category labels documented in `docs/specs/state-logging.md` and constrains only the `events` stream.
 
+`GET /v1/status` also carries `deps_apply_in_flight`, true while a `POST /v1/deps/apply` is still running its install actions. The apply keeps running after the HTTP client that started it goes away, so this is the only way to observe one. It is advisory: a caller that intends to restart or reconfigure the runtime should wait for it to clear, because a restart signals the process group and tears the install down mid-flight, leaving a half-applied package set and an unfinalized `installer_runs` row.
+
 `GET /v1/status` and `GET /v1/health/live` both carry a `server` object with the running version and the capabilities this build advertises:
 
 ```json

@@ -21,6 +21,13 @@ use super::agent::open_agent_environment;
 pub(crate) struct StatusResponse {
     schema_version: i64,
     latest_event: Option<String>,
+    /// True while a `POST /v1/deps/apply` is running install snippets. The
+    /// apply outlives the HTTP client that started it, so this is the only way
+    /// to see one in flight. Advisory: a caller about to restart or reconfigure
+    /// the runtime should wait for it to clear, because a restart signals the
+    /// process group and tears the install down mid-flight, leaving a
+    /// half-applied package set and an unfinalized `installer_runs` row.
+    deps_apply_in_flight: bool,
     server: ServerInfo,
 }
 
@@ -56,6 +63,14 @@ impl ServerInfo {
     }
 }
 
+/// Non-blocking probe of the deps-apply lock. The lock is held for the whole
+/// apply, so a failed `try_lock` is the in-flight signal; a successful one
+/// releases immediately and never delays a queued apply. Deliberately not an
+/// `await`: the status route must answer while an apply is running.
+fn deps_apply_in_flight(state: &AppState) -> bool {
+    state.deps_apply_lock.try_lock().is_err()
+}
+
 pub(crate) async fn status_handler(
     State(state): State<AppState>,
 ) -> std::result::Result<ApiSuccess<StatusResponse>, StackError> {
@@ -66,6 +81,7 @@ pub(crate) async fn status_handler(
     Ok(ApiSuccess::new(StatusResponse {
         schema_version,
         latest_event,
+        deps_apply_in_flight: deps_apply_in_flight(&state),
         server: ServerInfo::current(),
     }))
 }
