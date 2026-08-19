@@ -10,7 +10,7 @@ Hermes advertises session models and modes through the pre-1.0 `models`/`modes` 
 
 ```sh
 acps secrets set OPENROUTER_API_KEY
-acps init --agent hermes --provider openrouter --model deepseek/deepseek-v4-flash
+acps init --agent hermes --provider openrouter --model deepseek/deepseek-v4-flash-0731
 ```
 
 Agent config shape:
@@ -26,7 +26,7 @@ restart = "on-crash"
 
 [agent.provider]
 id = "openrouter"
-model = "deepseek/deepseek-v4-flash"
+model = "deepseek/deepseek-v4-flash-0731"
 api_key_ref = "OPENROUTER_API_KEY"
 ```
 
