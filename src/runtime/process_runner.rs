@@ -36,6 +36,12 @@ pub const STDERR_TAIL_BYTES: usize = 2 * 1024;
 /// where the close is delayed, so a stuck thread cannot wedge an HTTP request.
 pub const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
 
+/// Upper bound for any operator- or catalog-supplied install timeout. 24
+/// hours is already far past any real install; the cap exists because
+/// `run_captured` computes its deadline as `Instant::now() + timeout`, and
+/// that addition panics on overflow for a near-u64::MAX value.
+pub const MAX_INSTALL_TIMEOUT_SECS: u64 = 86_400;
+
 /// Forward a single named host env var to a sync `Command`, if present on the
 /// daemon. Unset on the host means unset on the child — never fabricated.
 pub fn forward_host_env(command: &mut Command, name: &str) {
@@ -140,6 +146,80 @@ pub fn apply_non_interactive_env(command: &mut Command) {
     for (name, value) in NON_INTERACTIVE_ENV {
         command.env(name, value);
     }
+}
+
+/// The real interpreter behind `python3`, resolved against `path_env` (the
+/// PATH the child will run with, so this resolves the same `python3` the child
+/// would). `None` when there is no usable `python3`.
+///
+/// This exists for node-gyp, which spawns `python3` once per native module it
+/// configures. Where that name is a wrapper script rather than a binary — the
+/// shim a Python version manager installs is exactly that — every one of those
+/// spawns pays the wrapper's cost, and a package tree with many native modules
+/// can burn an entire install budget without a compiler ever running. Asking
+/// the interpreter for its own path costs one wrapper invocation and leaves
+/// node-gyp calling the binary directly.
+///
+/// Inert where `python3` is already a binary: `sys.executable` then names that
+/// same file, so the caller sets the variable to the value node-gyp would have
+/// resolved anyway.
+///
+/// The probe is bounded by [`PYTHON_PROBE_TIMEOUT`]: it runs before the
+/// installer's step deadline is computed, so a hung version-manager shim would
+/// otherwise wedge the install thread outside every budget. The correct
+/// degradation for a shim that cannot answer in seconds is leaving
+/// `npm_config_python` unset.
+pub fn resolved_python_interpreter(path_env: Option<&OsString>) -> Option<PathBuf> {
+    resolved_python_interpreter_with_timeout(path_env, PYTHON_PROBE_TIMEOUT)
+}
+
+/// Upper bound on the `python3 -c 'sys.executable'` probe. One interpreter
+/// startup is all the probe needs; past a few seconds the `python3` on PATH is
+/// a hung version-manager shim, and the correct degradation is leaving
+/// `npm_config_python` unset rather than waiting on it.
+const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Stream cap for the probe: `sys.executable` prints a single path, so
+/// anything beyond a few KiB is a misbehaving shim, not an answer.
+const PYTHON_PROBE_STREAM_CAP: usize = 4 * 1024;
+
+/// The timeout-parameterized body of [`resolved_python_interpreter`], split
+/// out so tests can shrink the bound instead of sleeping past the real one.
+pub(crate) fn resolved_python_interpreter_with_timeout(
+    path_env: Option<&OsString>,
+    timeout: Duration,
+) -> Option<PathBuf> {
+    let mut probe = Command::new("python3");
+    probe.args(["-c", "import sys; print(sys.executable)"]);
+    if let Some(path) = path_env {
+        probe.env("PATH", path);
+    }
+    let outcome = run_captured(&mut probe, timeout, PYTHON_PROBE_STREAM_CAP).ok()?;
+    let stdout = match outcome {
+        CaptureOutcome::Exited { status, stdout, .. } if status.success() => stdout,
+        CaptureOutcome::Exited { .. } => return None,
+        CaptureOutcome::TimedOut { mut child, .. } => {
+            // The shim hung: kill the group and degrade to "no override".
+            kill_process_group(&mut child);
+            if let Err(error) = child.wait() {
+                tracing::debug!(%error, "timed-out python probe reap failed");
+            }
+            return None;
+        }
+        CaptureOutcome::WaitFailed { mut child, .. } => {
+            // `CaptureOutcome` hands back the live child on a wait failure;
+            // leaving it running would leak the probe.
+            kill_process_group(&mut child);
+            if let Err(error) = child.wait() {
+                tracing::debug!(%error, "unwaitable python probe reap failed");
+            }
+            return None;
+        }
+    };
+    let resolved = PathBuf::from(stdout.trim());
+    // A frozen or embedded interpreter reports an empty `sys.executable`;
+    // pointing node-gyp at that would be worse than leaving it to search.
+    resolved.is_file().then_some(resolved)
 }
 
 /// Unix process-group kill for a synchronous child. The child MUST have been

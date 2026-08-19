@@ -32,6 +32,7 @@ exit 9
             script: "exit 1".to_owned(),
             creates: "fallback-agent".to_owned(),
             required_tools: Vec::new(),
+            timeout_secs: None,
         }),
         npm: Some(crate::runtime::install::agent_registry::NpmInstall {
             package: "@acp-stack/definitely-not-published".to_owned(),
@@ -130,6 +131,7 @@ exit 1
             script: "exit 1".to_owned(),
             creates: "opencode".to_owned(),
             required_tools: Vec::new(),
+            timeout_secs: None,
         }),
         npm: Some(crate::runtime::install::agent_registry::NpmInstall {
             package: "opencode-ai".to_owned(),
@@ -208,6 +210,7 @@ fn missing_shell_required_tool_fails_when_no_fallback_is_runnable() {
             script: "missing-tool-command".to_owned(),
             creates: "agent".to_owned(),
             required_tools: vec!["definitely-missing-acp-stack-tool".to_owned()],
+            timeout_secs: None,
         }),
         ..InstallSet::default()
     };
@@ -259,6 +262,7 @@ exit 9
             script: "missing-tool-command".to_owned(),
             creates: "agent".to_owned(),
             required_tools: vec!["definitely-missing-acp-stack-tool".to_owned()],
+            timeout_secs: None,
         }),
         npm: Some(crate::runtime::install::agent_registry::NpmInstall {
             package: "@scope/agent".to_owned(),
@@ -340,6 +344,7 @@ fn single_path_failure_keeps_its_typed_error() {
             script: "exit 3".to_owned(),
             creates: "agent".to_owned(),
             required_tools: Vec::new(),
+            timeout_secs: None,
         }),
         ..InstallSet::default()
     };

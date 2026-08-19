@@ -92,6 +92,92 @@ required_tools = ["/usr/bin/curl"]
 }
 
 #[test]
+fn shell_install_carries_an_optional_timeout_override() {
+    let body = r#"
+[[agents]]
+id = "slow"
+name = "Slow"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/slow.md"
+
+[agents.harness]
+id = "slow"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "slow"
+timeout_secs = 2700
+"#;
+    let catalog = RegistryCatalog::from_toml(body).expect("timeout_secs must parse");
+    let shell = catalog
+        .lookup("slow")
+        .and_then(|entry| entry.harness.as_ref())
+        .and_then(|harness| harness.install.shell.as_ref())
+        .expect("shell install");
+    assert_eq!(shell.timeout_secs, Some(2700));
+}
+
+#[test]
+fn validate_rejects_zero_shell_timeout() {
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "bad"
+timeout_secs = 0
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject a zero budget");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(reason.contains("timeout_secs = 0"), "reason: {reason}");
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_shell_timeout_past_the_cap() {
+    // A near-u64::MAX budget would overflow the `Instant::now() + timeout`
+    // deadline arithmetic in `run_captured`; the 24h cap rejects it at parse.
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "bad"
+timeout_secs = 9999999999
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject an over-cap budget");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("timeout_secs = 9999999999 exceeds the 86400-second"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
 fn github_values_accept_path_shorthand_and_derive_repo() {
     assert_eq!(
         github_repo_from_url(

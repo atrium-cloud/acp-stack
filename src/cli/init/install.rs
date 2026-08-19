@@ -113,7 +113,8 @@ const INSTALL_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 const INSTALL_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const INSTALL_RETRY_MAX_EXPONENT: u32 = 5;
 /// Wall-clock ceiling on RETRIES: checked between attempts, so the worst case
-/// is the budget plus one in-flight attempt (up to `INSTALLER_TIMEOUT`).
+/// is the budget plus one in-flight attempt (up to that step's install budget,
+/// which a registry entry may raise above the installer default).
 /// The attempt cap alone lets a pathological installer that times out every
 /// try hold init hostage for attempts x timeout; the budget bounds that
 /// regardless of how the individual attempts fail.

@@ -54,6 +54,23 @@ pub(crate) fn shell_install_set(script: &str, creates: &str) -> InstallSet {
             script: script.to_owned(),
             creates: creates.to_owned(),
             required_tools: Vec::new(),
+            timeout_secs: None,
+        }),
+        ..InstallSet::default()
+    }
+}
+
+pub(crate) fn shell_install_set_with_timeout(
+    script: &str,
+    creates: &str,
+    timeout_secs: u64,
+) -> InstallSet {
+    InstallSet {
+        shell: Some(ShellInstall {
+            script: script.to_owned(),
+            creates: creates.to_owned(),
+            required_tools: Vec::new(),
+            timeout_secs: Some(timeout_secs),
         }),
         ..InstallSet::default()
     }

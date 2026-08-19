@@ -88,6 +88,58 @@ pub(crate) fn validate_dependencies(deps: &DependenciesConfig) -> Result<()> {
                 ),
             });
         }
+        // Same cap as the agent registry: an unbounded value would panic the
+        // deadline arithmetic in `run_captured` when the apply runs.
+        if let Some(timeout_secs) = install.timeout_secs
+            && timeout_secs > crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS
+        {
+            return Err(StackError::InvalidParam {
+                field: "dependencies",
+                reason: format!(
+                    "dependency `{name}` has [install].timeout_secs = {timeout_secs}, \
+                     which exceeds the {MAX_INSTALL_TIMEOUT_SECS}-second (24 hour) cap",
+                    name = entry.name,
+                    MAX_INSTALL_TIMEOUT_SECS =
+                        crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS,
+                ),
+            });
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::DependencyInstallAction;
+    use crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS;
+
+    fn deps_with_timeout(timeout_secs: Option<u64>) -> DependenciesConfig {
+        DependenciesConfig {
+            commands: vec![DependencyEntry {
+                name: "tool".to_owned(),
+                required: true,
+                feature: None,
+                install: Some(DependencyInstallAction {
+                    shell: "true".to_owned(),
+                    creates: None,
+                    scope: Default::default(),
+                    timeout_secs,
+                }),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_install_timeout_past_the_cap() {
+        let result = validate_dependencies(&deps_with_timeout(Some(MAX_INSTALL_TIMEOUT_SECS + 1)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_install_timeout_at_the_cap() {
+        validate_dependencies(&deps_with_timeout(Some(MAX_INSTALL_TIMEOUT_SECS)))
+            .expect("at-cap timeout is valid");
+    }
 }

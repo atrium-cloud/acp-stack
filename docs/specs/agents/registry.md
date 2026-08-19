@@ -26,6 +26,8 @@ Install metadata may describe shell, npm, or GitHub Release sources. Native agen
 
 Shell install paths declare `required_tools` for external commands they invoke. Npm install paths require `npm`. GitHub Release install paths use the runtime downloader and do not require host fetch tools. The installer preflights declared paths and uses a fallback path when one is available.
 
+One budget covers a shell install path's whole run — fetch, upstream installer, and any follow-up work. Shell install paths may declare `timeout_secs` to override the 600s default for recipes that cannot fit it, such as one whose upstream installer provisions a language toolchain; the field must be positive, and omitting it keeps the default. Npm and GitHub Release paths always use the default.
+
 The installer verifies declared executables after each managed step. Provider secrets are never passed to install steps.
 
 Adapter `sync_id` is a maintainer-only ACP registry comparison alias for adapters whose upstream registry id differs from the local launch command. Entry-level `sync_exempt` is a maintainer-only flag for agents the ACP project documents but the upstream registry index does not list yet; `sync-registry-check` skips the upstream-existence requirement for exempt entries while reporting them, and the flag has no runtime effect. Remove it once the upstream index carries the id.
