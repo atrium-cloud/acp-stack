@@ -7,13 +7,19 @@
 # [Kimi Code environment variables](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html)
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
 # [models.dev](https://models.dev/api.json)
-# Last updated on 2026-08-19
+# Last updated on 2026-08-20
 
 # Provider env vars
 
 [[api_keys]]
 env_var = "ANTHROPIC_API_KEY"
 provider_ids = ["anthropic"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ANT_LING_API_KEY"
+provider_ids = ["ant-ling"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -89,13 +95,33 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "ZAI_API_KEY"
-provider_ids = ["zai", "zhipuai"]
+provider_ids = ["zai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ZAI_CODING_CN_API_KEY"
+provider_ids = ["zai-coding-cn"]
+companion_env_vars = []
+optional_env_vars = []
+
+# Zhipu China (open.bigmodel.cn) and Z.AI global (api.z.ai) are separate
+# platforms with non-interchangeable keys, so zhipuai gets its own key.
+[[api_keys]]
+env_var = "ZHIPU_API_KEY"
+provider_ids = ["zhipuai"]
 companion_env_vars = []
 optional_env_vars = []
 
 [[api_keys]]
 env_var = "OPENCODE_API_KEY"
 provider_ids = ["opencode", "opencode-go"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "RADIUS_API_KEY"
+provider_ids = ["radius"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -114,6 +140,12 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "TOGETHER_API_KEY"
 provider_ids = ["together", "togetherai"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "BASETEN_API_KEY"
+provider_ids = ["baseten"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -137,6 +169,18 @@ companion_env_vars = []
 optional_env_vars = []
 
 [[api_keys]]
+env_var = "QWEN_TOKEN_PLAN_API_KEY"
+provider_ids = ["qwen-token-plan", "qwen-token-plan-individual"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "QWEN_TOKEN_PLAN_CN_API_KEY"
+provider_ids = ["qwen-token-plan-cn"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
 env_var = "MOONSHOT_API_KEY"
 provider_ids = ["moonshotai", "moonshotai-cn"]
 companion_env_vars = []
@@ -146,7 +190,7 @@ optional_env_vars = []
 env_var = "ANTHROPIC_FOUNDRY_API_KEY"
 provider_ids = ["microsoft-foundry"]
 companion_env_vars = ["ANTHROPIC_FOUNDRY_BASE_URL"]
-optional_env_vars = ["ANTHROPIC_FOUNDRY_RESOURCE"]
+optional_env_vars = ["ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_AUTH_TOKEN"]
 
 [[api_keys]]
 env_var = "XIAOMI_API_KEY"
@@ -173,7 +217,7 @@ companion_env_vars = []
 optional_env_vars = []
 
 [[api_keys]]
-env_var = "ARCEEAI_API_KEY"
+env_var = "ARCEE_API_KEY"
 provider_ids = ["arcee"]
 companion_env_vars = []
 optional_env_vars = []
@@ -196,9 +240,11 @@ provider_ids = ["kilocode"]
 companion_env_vars = []
 optional_env_vars = []
 
+# MODEL_API_KEY (Hermes' `meta-ai` key) stays out of this list: it is
+# declared as the hermes override in providers.toml, following the zai pattern.
 [[api_keys]]
-env_var = "MODEL_API_KEY"
-provider_ids = ["meta-ai"]
+env_var = "META_MODEL_API_KEY"
+provider_ids = ["meta"]
 companion_env_vars = []
 optional_env_vars = []
 
@@ -234,13 +280,61 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "STEPFUN_API_KEY"
-provider_ids = ["stepfun"]
+provider_ids = ["stepfun", "stepfun-ai-step-plan", "stepfun-step-plan"]
 companion_env_vars = []
 optional_env_vars = []
 
 [[api_keys]]
 env_var = "TOKENHUB_API_KEY"
 provider_ids = ["tencent-tokenhub"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "ALIBABA_TOKEN_PLAN_API_KEY"
+provider_ids = ["alibaba-token-plan", "alibaba-token-plan-cn"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "CLINE_API_KEY"
+provider_ids = ["cline-pass"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "HETZNER_API_KEY"
+provider_ids = ["hetzner"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "LONGCAT_API_KEY"
+provider_ids = ["longcat"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "MODAL_PROXY_TOKEN"
+provider_ids = ["modal"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "POOLSIDE_API_KEY"
+provider_ids = ["poolside"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "TENCENT_TOKEN_PLAN_API_KEY"
+provider_ids = ["tencent-token-plan"]
+companion_env_vars = []
+optional_env_vars = []
+
+[[api_keys]]
+env_var = "TINKER_API_KEY"
+provider_ids = ["thinkingmachines"]
 companion_env_vars = []
 optional_env_vars = []
 

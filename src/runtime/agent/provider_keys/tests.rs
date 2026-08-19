@@ -95,6 +95,7 @@ fn provider_ids_resolve_to_primary_api_key_env_vars() {
     );
     assert_eq!(env_var_for_provider_id("huggingface"), Some("HF_TOKEN"));
     assert_eq!(env_var_for_provider_id("zai"), Some("ZAI_API_KEY"));
+    assert_eq!(env_var_for_provider_id("zhipuai"), Some("ZHIPU_API_KEY"));
     assert_eq!(
         env_var_for_provider_id("moonshotai"),
         Some("MOONSHOT_API_KEY")
@@ -408,6 +409,13 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "claude-code",
         "amazon-bedrock"
     ));
+    // The Claude Code profile declares an explicit optional list so the
+    // Pi-only auth overrides do not leak in via provider-level fallback.
+    let bedrock_optional = optional_env_refs_for_agent_provider_id("claude-code", "amazon-bedrock");
+    assert!(bedrock_optional.contains(&"AWS_PROFILE"));
+    assert!(!bedrock_optional.contains(&"AWS_BEDROCK_SKIP_AUTH"));
+    assert!(!bedrock_optional.contains(&"AWS_BEDROCK_FORCE_HTTP1"));
+    assert!(!bedrock_optional.contains(&"AWS_BEDROCK_FORCE_CACHE"));
     assert!(provider_uses_agent_native_auth(
         "claude-code",
         "google-vertex-anthropic"
@@ -703,10 +711,17 @@ fn claude_code_profiles_declare_role_model_defaults() {
         ),
         (
             "zai",
-            "glm-5.2[1m]",
-            "glm-5.2[1m]",
-            "glm-5.2[1m]",
-            "GLM-4.7",
+            "glm-5.3[1m]",
+            "glm-5.3[1m]",
+            "glm-5.3[1m]",
+            "glm-4.7",
+        ),
+        (
+            "zhipuai",
+            "glm-5.3[1m]",
+            "glm-5.3[1m]",
+            "glm-5.3[1m]",
+            "glm-4.7",
         ),
     ];
 
