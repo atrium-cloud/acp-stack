@@ -781,20 +781,20 @@ mod tests {
             settings["env"]["ANTHROPIC_BASE_URL"],
             "https://api.z.ai/api/anthropic"
         );
-        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "glm-5.2[1m]");
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "glm-5.3[1m]");
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
-            "glm-5.2[1m]"
+            "glm-5.3[1m]"
         );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"],
-            "glm-5.2[1m]"
+            "glm-5.3[1m]"
         );
         assert_eq!(
             settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
-            "glm-5.2[1m]"
+            "glm-5.3[1m]"
         );
-        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "GLM-4.7");
+        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-4.7");
         assert_eq!(
             settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
             "1000000"
@@ -805,6 +805,37 @@ mod tests {
             "1"
         );
         assert_eq!(settings["apiKeyHelper"], "printenv ZAI_API_KEY");
+    }
+
+    #[test]
+    fn claude_code_zhipuai_writes_china_endpoint_and_zhipu_key() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_agent("claude-code", &["ZHIPU_API_KEY"]);
+        config.agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "zhipuai".to_owned(),
+            model: None,
+            api_key_ref: Some("ZHIPU_API_KEY".to_owned()),
+            custom: None,
+        });
+
+        provision_agent_headless_config(&config, tempdir.path()).expect("provision");
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tempdir.path().join(".claude/settings.json"))
+                .expect("settings"),
+        )
+        .expect("settings parse");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://open.bigmodel.cn/api/anthropic"
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "glm-5.3[1m]");
+        assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "glm-4.7");
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+            "1000000"
+        );
+        assert_eq!(settings["apiKeyHelper"], "printenv ZHIPU_API_KEY");
     }
 
     #[test]
@@ -835,6 +866,7 @@ mod tests {
             "deepseek-v4-flash"
         );
         assert_eq!(settings["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max");
+        assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "786432");
 
         config.agent.provider.as_mut().expect("provider").model =
             Some("deepseek-v4-pro[1m]".to_owned());

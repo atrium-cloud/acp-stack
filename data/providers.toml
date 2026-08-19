@@ -6,7 +6,7 @@
 # [Amp manual](https://ampcode.com/manual)
 # [models.dev](https://models.dev/api.json)
 # [Hermes Agent providers docs](https://hermes-agent.nousresearch.com/docs/integrations/providers)
-# Last updated on 2026-08-19
+# Last updated on 2026-08-20
 #
 # A `[providers.claude_code]` sub-table carries Claude Code-specific headless
 # provisioning metadata (endpoint, model defaults, env). When the sub-table
@@ -27,6 +27,11 @@ agents = ["pi", "opencode", "goose", "claude-code", "hermes"]
 # First-party Anthropic API needs no provisioning extras; the empty sub-table
 # marks the provider as Claude Code-profiled.
 [providers.claude_code]
+
+[[providers]]
+id = ["ant-ling"]
+name = "Ant Ling"
+agents = ["pi"]
 
 [[providers]]
 id = ["azure-openai-responses"]
@@ -50,7 +55,7 @@ default_model = "deepseek-v4-pro[1m]"
 default_opus_model = "deepseek-v4-pro[1m]"
 default_sonnet_model = "deepseek-v4-pro[1m]"
 default_haiku_model = "deepseek-v4-flash"
-env = { CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash", CLAUDE_CODE_EFFORT_LEVEL = "max" }
+env = { CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash", CLAUDE_CODE_EFFORT_LEVEL = "max", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "786432" }
 
 [[providers]]
 id = ["google"]
@@ -120,14 +125,22 @@ agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.z.ai/api/anthropic"
-default_model = "glm-5.2[1m]"
-default_opus_model = "glm-5.2[1m]"
-default_sonnet_model = "glm-5.2[1m]"
-default_haiku_model = "GLM-4.7"
+default_model = "glm-5.3[1m]"
+default_opus_model = "glm-5.3[1m]"
+default_sonnet_model = "glm-5.3[1m]"
+default_haiku_model = "glm-4.7"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [providers.api_key_env_vars]
 hermes = "GLM_API_KEY"
+
+# Pi's China variant of the Z.AI Coding Plan; kept as a separate entry from
+# the models.dev `zai-coding-plan` (opencode) entry, matching the
+# minimax/minimax-cn regional-variant pattern.
+[[providers]]
+id = ["zai-coding-cn"]
+name = "Z.AI Coding Plan (China)"
+agents = ["pi"]
 
 [[providers]]
 id = ["opencode"]
@@ -146,6 +159,11 @@ agents = ["pi", "opencode", "hermes"]
 
 [providers.api_key_env_vars]
 hermes = "OPENCODE_GO_API_KEY"
+
+[[providers]]
+id = ["radius"]
+name = "Radius"
+agents = ["pi"]
 
 [[providers]]
 id = ["huggingface"]
@@ -181,7 +199,8 @@ agents = ["pi", "opencode", "claude-code", "hermes"]
 # Kimi For Coding's Claude Code endpoint speaks Anthropic Messages at the
 # /coding/ root (no /anthropic suffix). Tier-universal defaults: the
 # `kimi-for-coding` model and 256K windows are available on every plan;
-# higher tiers can pin k3-256k or k3[1m] per the Kimi Code docs.
+# higher tiers can pin k3-256k (Moderato tier and up) or k3[1m] (1M
+# context, Allegretto tier and up) per the Kimi Code docs.
 [providers.claude_code]
 base_url = "https://api.kimi.com/coding/"
 default_model = "kimi-for-coding"
@@ -201,7 +220,7 @@ agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
-default_model = "MiniMax-M3"
+default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
@@ -211,8 +230,23 @@ agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
-default_model = "MiniMax-M3"
+default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
+
+[[providers]]
+id = ["qwen-token-plan"]
+name = "Qwen Token Plan"
+agents = ["pi"]
+
+[[providers]]
+id = ["qwen-token-plan-individual"]
+name = "Qwen Token Plan (Individual)"
+agents = ["pi"]
+
+[[providers]]
+id = ["qwen-token-plan-cn"]
+name = "Qwen Token Plan (China)"
+agents = ["pi"]
 
 [[providers]]
 id = ["xiaomi"]
@@ -222,7 +256,7 @@ agents = ["pi", "opencode", "claude-code", "hermes"]
 
 [providers.claude_code]
 base_url = "https://api.xiaomimimo.com/anthropic"
-default_model = "mimo-v2.5-pro"
+default_model = "mimo-v2.5-pro[1m]"
 
 [[providers]]
 id = ["xiaomi-token-plan-cn"]
@@ -232,7 +266,7 @@ agents = ["pi", "opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://token-plan-cn.xiaomimimo.com/anthropic"
-default_model = "mimo-v2.5-pro"
+default_model = "mimo-v2.5-pro[1m]"
 
 [[providers]]
 id = ["xiaomi-token-plan-ams"]
@@ -242,7 +276,7 @@ agents = ["pi", "opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://token-plan-ams.xiaomimimo.com/anthropic"
-default_model = "mimo-v2.5-pro"
+default_model = "mimo-v2.5-pro[1m]"
 
 [[providers]]
 id = ["xiaomi-token-plan-sgp"]
@@ -252,7 +286,7 @@ agents = ["pi", "opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://token-plan-sgp.xiaomimimo.com/anthropic"
-default_model = "mimo-v2.5-pro"
+default_model = "mimo-v2.5-pro[1m]"
 
 [[providers]]
 id = ["google-vertex"]
@@ -299,10 +333,27 @@ optional_env_vars = [
   "AWS_BEDROCK_FORCE_CACHE",
 ]
 
-# Optional AWS env vars fall back to the provider-level list above.
+# AWS_BEDROCK_SKIP_AUTH / AWS_BEDROCK_FORCE_HTTP1 / AWS_BEDROCK_FORCE_CACHE
+# are Pi-only auth overrides; the explicit list below keeps them out of the
+# Claude Code profile instead of falling back to the provider-level list.
 [providers.claude_code]
 agent_native_auth = true
 env = { CLAUDE_CODE_USE_BEDROCK = "1" }
+optional_env_vars = [
+  "AWS_PROFILE",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_REGION",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+]
 
 [[providers]]
 id = ["microsoft-foundry"]
@@ -332,11 +383,6 @@ agents = ["amp"]
 # - Nous Portal, qwen-oauth, minimax-oauth, xAI OAuth (OAuth-only; acp-stack provisions API keys only)
 
 [[providers]]
-id = ["arcee"]
-name = "Arcee AI"
-agents = ["hermes"]
-
-[[providers]]
 id = ["actual"]
 name = "Actual Computer"
 agents = ["hermes"]
@@ -349,11 +395,6 @@ agents = ["hermes"]
 [[providers]]
 id = ["kilocode"]
 name = "Kilo Code"
-agents = ["hermes"]
-
-[[providers]]
-id = ["meta-ai"]
-name = "Meta Model API"
 agents = ["hermes"]
 
 # OpenCode-only providers from models.dev
@@ -398,6 +439,16 @@ name = "Alibaba Coding Plan (China)"
 agents = ["opencode"]
 
 [[providers]]
+id = ["alibaba-token-plan"]
+name = "Alibaba Token Plan"
+agents = ["opencode"]
+
+[[providers]]
+id = ["alibaba-token-plan-cn"]
+name = "Alibaba Token Plan (China)"
+agents = ["opencode"]
+
+[[providers]]
 id = ["ambient"]
 name = "Ambient"
 agents = ["opencode"]
@@ -406,6 +457,16 @@ agents = ["opencode"]
 id = ["atomic-chat"]
 name = "Atomic Chat"
 agents = ["opencode"]
+
+[[providers]]
+id = ["arcee"]
+name = "Arcee"
+agents = ["opencode", "hermes"]
+
+# models.dev (OpenCode) authenticates with ARCEE_API_KEY; Hermes' `arcee`
+# provider reads ARCEEAI_API_KEY instead.
+[providers.api_key_env_vars]
+hermes = "ARCEEAI_API_KEY"
 
 [[providers]]
 id = ["auriko"]
@@ -430,7 +491,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["baseten"]
 name = "Baseten"
-agents = ["opencode"]
+agents = ["pi", "opencode"]
 
 [[providers]]
 id = ["berget"]
@@ -445,6 +506,11 @@ agents = ["opencode"]
 [[providers]]
 id = ["clarifai"]
 name = "Clarifai"
+agents = ["opencode"]
+
+[[providers]]
+id = ["cline-pass"]
+name = "ClinePass"
 agents = ["opencode"]
 
 [[providers]]
@@ -543,6 +609,11 @@ name = "Helicone"
 agents = ["opencode"]
 
 [[providers]]
+id = ["hetzner"]
+name = "Hetzner"
+agents = ["opencode"]
+
+[[providers]]
 id = ["hpc-ai"]
 name = "HPC-AI"
 agents = ["opencode"]
@@ -608,6 +679,11 @@ name = "LMStudio"
 agents = ["opencode"]
 
 [[providers]]
+id = ["longcat"]
+name = "LongCat"
+agents = ["opencode"]
+
+[[providers]]
 id = ["lucidquery"]
 name = "LucidQuery AI"
 agents = ["opencode"]
@@ -618,13 +694,27 @@ name = "Meganova"
 agents = ["opencode"]
 
 [[providers]]
+id = ["meta", "meta-ai"]
+name = "Meta"
+agents = ["opencode", "hermes"]
+
+# Hermes reaches the Meta Model API as `meta-ai`; models.dev (OpenCode) uses
+# `meta`. Hermes reads MODEL_API_KEY, models.dev lists META_MODEL_API_KEY.
+[providers.provider_ids]
+meta = "opencode"
+meta-ai = "hermes"
+
+[providers.api_key_env_vars]
+hermes = "MODEL_API_KEY"
+
+[[providers]]
 id = ["minimax-cn-coding-plan"]
 name = "MiniMax Token Plan (minimaxi.com)"
 agents = ["opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://api.minimaxi.com/anthropic"
-default_model = "MiniMax-M3"
+default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
@@ -634,7 +724,7 @@ agents = ["opencode", "claude-code"]
 
 [providers.claude_code]
 base_url = "https://api.minimax.io/anthropic"
-default_model = "MiniMax-M3"
+default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
@@ -645,6 +735,11 @@ agents = ["opencode"]
 [[providers]]
 id = ["moark"]
 name = "Moark"
+agents = ["opencode"]
+
+[[providers]]
+id = ["modal"]
+name = "Modal"
 agents = ["opencode"]
 
 [[providers]]
@@ -662,6 +757,8 @@ models_url = "https://api.moonshot.ai/v1/models"
 base_url = "https://api.moonshot.ai/anthropic"
 default_model = "kimi-k3[1m]"
 set_subagent_model = true
+# ENABLE_TOOL_SEARCH=false is a local defensive choice, not Moonshot-documented
+# (Moonshot's docs list it only as a stale var to delete).
 env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576", CLAUDE_CODE_EFFORT_LEVEL = "max" }
 
 [[providers]]
@@ -673,6 +770,8 @@ agents = ["opencode", "claude-code"]
 base_url = "https://api.moonshot.cn/anthropic"
 default_model = "kimi-k3[1m]"
 set_subagent_model = true
+# ENABLE_TOOL_SEARCH=false is a local defensive choice, not Moonshot-documented
+# (Moonshot's docs list it only as a stale var to delete).
 env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576", CLAUDE_CODE_EFFORT_LEVEL = "max" }
 
 [[providers]]
@@ -713,7 +812,7 @@ agents = ["opencode", "hermes"]
 [[providers]]
 id = ["nvidia"]
 name = "Nvidia" # NIM
-agents = ["opencode", "hermes"]
+agents = ["pi", "opencode", "hermes"]
 
 [[providers]]
 id = ["ollama-cloud"]
@@ -743,6 +842,11 @@ agents = ["opencode"]
 [[providers]]
 id = ["poe"]
 name = "Poe"
+agents = ["opencode"]
+
+[[providers]]
+id = ["poolside"]
+name = "Poolside"
 agents = ["opencode"]
 
 [[providers]]
@@ -816,6 +920,16 @@ name = "StepFun AI"
 agents = ["opencode"]
 
 [[providers]]
+id = ["stepfun-ai-step-plan"]
+name = "StepFun Step Plan (Global)"
+agents = ["opencode"]
+
+[[providers]]
+id = ["stepfun-step-plan"]
+name = "StepFun Step Plan (China)"
+agents = ["opencode"]
+
+[[providers]]
 id = ["submodel"]
 name = "submodel"
 agents = ["opencode"]
@@ -831,6 +945,11 @@ name = "Tencent Coding Plan (China)"
 agents = ["opencode"]
 
 [[providers]]
+id = ["tencent-token-plan"]
+name = "Tencent Token Plan"
+agents = ["opencode"]
+
+[[providers]]
 id = ["tencent-tokenhub"]
 name = "Tencent TokenHub"
 agents = ["opencode", "hermes"]
@@ -838,6 +957,11 @@ agents = ["opencode", "hermes"]
 [[providers]]
 id = ["the-grid-ai"]
 name = "The Grid AI"
+agents = ["opencode"]
+
+[[providers]]
+id = ["thinkingmachines"]
+name = "Thinking Machines"
 agents = ["opencode"]
 
 [[providers]]
@@ -896,11 +1020,11 @@ name = "Zhipu AI"
 agents = ["opencode", "claude-code"]
 
 [providers.claude_code]
-base_url = "https://api.z.ai/api/anthropic"
-default_model = "glm-5.2[1m]"
-default_opus_model = "glm-5.2[1m]"
-default_sonnet_model = "glm-5.2[1m]"
-default_haiku_model = "GLM-4.7"
+base_url = "https://open.bigmodel.cn/api/anthropic"
+default_model = "glm-5.3[1m]"
+default_opus_model = "glm-5.3[1m]"
+default_sonnet_model = "glm-5.3[1m]"
+default_haiku_model = "glm-4.7"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
 [[providers]]
