@@ -307,6 +307,7 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         std::collections::HashMap::new(),
         dest_dir.path(),
         dest_dir.path(),
+        None,
     );
 
     let outcome = result
@@ -406,6 +407,7 @@ fn install_resolved_records_failure_when_release_endpoint_missing() {
         std::collections::HashMap::new(),
         dest_dir.path(),
         dest_dir.path(),
+        None,
     );
 
     assert!(

@@ -16,6 +16,7 @@ use crate::api::routes::commands::{
 };
 use crate::api::routes::config::{config_export_handler, config_validate_handler};
 use crate::api::routes::deps::{deps_check_handler, deps_get_handler};
+use crate::api::routes::installer::installer_runs_handler;
 use crate::api::routes::logs::{
     logs_commands_handler, logs_events_handler, logs_permissions_handler, logs_security_handler,
     logs_sessions_handler,
@@ -82,6 +83,9 @@ pub fn build_local_router(state: AppState) -> Router {
         .route("/v1/logs/security", get(logs_security_handler))
         .route("/v1/logs/sessions", get(logs_sessions_handler))
         .route("/v1/metrics/summary", get(metrics_summary_handler))
+        // Same observability class as logs/metrics: mounted for keyless-mode
+        // session readers, but not on the always-keyless allowlist.
+        .route("/v1/installer/runs", get(installer_runs_handler))
         .route(
             "/v1/sessions",
             get(sessions_list_handler).post(sessions_create_handler),
@@ -284,6 +288,7 @@ mod tests {
             (Method::GET, "/v1/agent/skills/catalog"),
             (Method::GET, "/v1/agent/skills/source?source=anthropic"),
             (Method::GET, "/v1/logs/events"),
+            (Method::GET, "/v1/installer/runs"),
             (Method::GET, "/v1/files?path=."),
             (Method::PUT, "/v1/files/content"),
             (Method::GET, "/v1/commands"),

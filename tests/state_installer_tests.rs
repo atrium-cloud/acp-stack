@@ -1,7 +1,8 @@
 use acp_stack::state::{
     INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
-    INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED, INSTALLER_METHOD_GITHUB, INSTALLER_OPERATION_INSTALL,
-    InstallerRunInput, NewInitRun, NewInitStep, NewStackUpdateRun, STACK_UPDATE_OPERATION_CHECK,
+    INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_SHELL,
+    INSTALLER_OPERATION_INSTALL, INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput,
+    NewInitRun, NewInitStep, NewStackUpdateRun, STACK_UPDATE_OPERATION_CHECK,
     STACK_UPDATE_STATUS_SUCCEEDED, StateStore,
 };
 
@@ -457,4 +458,238 @@ fn duplicate_ordinal_within_run_is_rejected() {
         })
         .expect_err("duplicate ordinal should fail UNIQUE");
     assert!(error.to_string().to_lowercase().contains("unique"));
+}
+
+fn running_installer_input<'a>(
+    agent_id: &'a str,
+    started_at: &'a str,
+    step: &'a str,
+) -> InstallerRunInput<'a> {
+    InstallerRunInput {
+        agent_id,
+        started_at,
+        finished_at: None,
+        status: INSTALLER_STATUS_RUNNING,
+        stdout: "",
+        stderr: "",
+        exit_status: None,
+        step,
+        version: None,
+        operation: INSTALLER_OPERATION_INSTALL,
+        method: Some(INSTALLER_METHOD_SHELL),
+        log_dir: None,
+        apply_run_id: None,
+    }
+}
+
+#[test]
+fn installer_run_running_row_is_visible_then_finalized_in_place() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let running = store
+        .append_installer_run(running_installer_input(
+            "test-agent",
+            "2026-05-21T00:00:00.000000000Z",
+            "harness",
+        ))
+        .expect("running row should insert");
+
+    // While the step runs, the row is visible to the active query and the
+    // history query alike, with no finish timestamp yet.
+    let active = store
+        .query_active_installer_runs(None)
+        .expect("active query");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, running.id);
+    assert_eq!(active[0].status, INSTALLER_STATUS_RUNNING);
+    assert!(active[0].finished_at.is_none());
+    assert_eq!(active[0].method.as_deref(), Some(INSTALLER_METHOD_SHELL));
+
+    store
+        .finish_installer_run(
+            &running.id,
+            InstallerRunFinish {
+                started_at: "2026-05-21T00:00:00.000000000Z",
+                finished_at: Some("2026-05-21T00:00:42.000000000Z"),
+                status: "ran",
+                stdout: "done",
+                stderr: "",
+                exit_status: Some(0),
+                version: Some("v1.2.3"),
+                log_dir: Some("/tmp/installer-logs/test-agent/step"),
+            },
+        )
+        .expect("finish should update the running row");
+
+    // The same row id now carries the terminal state; no second row appears.
+    assert!(
+        store
+            .query_active_installer_runs(None)
+            .expect("active query")
+            .is_empty()
+    );
+    let history = store.query_installer_runs(10).expect("history");
+    assert_eq!(history.len(), 1);
+    let row = &history[0];
+    assert_eq!(row.id, running.id);
+    assert_eq!(row.status, "ran");
+    assert_eq!(
+        row.finished_at.as_deref(),
+        Some("2026-05-21T00:00:42.000000000Z")
+    );
+    assert_eq!(row.stdout, "done");
+    assert_eq!(row.exit_status, Some(0));
+    assert_eq!(row.version.as_deref(), Some("v1.2.3"));
+    assert_eq!(
+        row.log_dir.as_deref(),
+        Some("/tmp/installer-logs/test-agent/step")
+    );
+    // Identity fields fixed at insert time survive the update untouched.
+    assert_eq!(row.agent_id.as_deref(), Some("test-agent"));
+    assert_eq!(row.step, "harness");
+    assert_eq!(row.operation, INSTALLER_OPERATION_INSTALL);
+}
+
+#[test]
+fn installer_run_concurrent_steps_track_independently() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    // Adapter-backed installs run harness and adapter steps on parallel
+    // threads; both running rows must be visible and independently finalizable.
+    let harness = store
+        .append_installer_run(running_installer_input(
+            "test-agent",
+            "2026-05-21T00:00:00.000000000Z",
+            "harness",
+        ))
+        .expect("harness running row");
+    let adapter = store
+        .append_installer_run(running_installer_input(
+            "test-agent",
+            "2026-05-21T00:00:00.000000001Z",
+            "adapter",
+        ))
+        .expect("adapter running row");
+
+    let active = store
+        .query_active_installer_runs(Some("test-agent"))
+        .expect("active query");
+    assert_eq!(active.len(), 2);
+    // Oldest first, so a progress view renders steps in start order.
+    assert_eq!(active[0].step, "harness");
+    assert_eq!(active[1].step, "adapter");
+    // Other agents see nothing.
+    assert!(
+        store
+            .query_active_installer_runs(Some("other-agent"))
+            .expect("active query")
+            .is_empty()
+    );
+
+    store
+        .finish_installer_run(
+            &harness.id,
+            InstallerRunFinish {
+                started_at: "2026-05-21T00:00:00.000000000Z",
+                finished_at: Some("2026-05-21T00:00:07.000000000Z"),
+                status: "ran",
+                stdout: "",
+                stderr: "",
+                exit_status: Some(0),
+                version: None,
+                log_dir: None,
+            },
+        )
+        .expect("finish harness");
+
+    let active = store
+        .query_active_installer_runs(Some("test-agent"))
+        .expect("active query");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, adapter.id);
+}
+
+#[test]
+fn finish_installer_run_rejects_unknown_and_completed_rows() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let finish = InstallerRunFinish {
+        started_at: "2026-05-21T00:00:00.000000000Z",
+        finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+        status: "failed",
+        stdout: "",
+        stderr: "boom",
+        exit_status: Some(1),
+        version: None,
+        log_dir: None,
+    };
+    store
+        .finish_installer_run("run-nonexistent", finish.clone())
+        .expect_err("finishing an unknown row must fail");
+
+    let running = store
+        .append_installer_run(running_installer_input(
+            "test-agent",
+            "2026-05-21T00:00:00.000000000Z",
+            "install",
+        ))
+        .expect("running row");
+    store
+        .finish_installer_run(&running.id, finish.clone())
+        .expect("first finish");
+    // A second finish must not rewrite the completed audit row: the row no
+    // longer matches `status = 'running'`.
+    store
+        .finish_installer_run(&running.id, finish)
+        .expect_err("double finish must fail");
+    let history = store.query_installer_runs(10).expect("history");
+    assert_eq!(history[0].status, "failed");
+    assert_eq!(history[0].stderr, "boom");
+}
+
+#[test]
+fn finish_installer_run_truncates_oversize_streams() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let running = store
+        .append_installer_run(running_installer_input(
+            "test-agent",
+            "2026-05-21T00:00:00.000000000Z",
+            "install",
+        ))
+        .expect("running row");
+    let oversize = "x".repeat(acp_stack::state::INSTALLER_OUTPUT_CAP_BYTES + 4096);
+    store
+        .finish_installer_run(
+            &running.id,
+            InstallerRunFinish {
+                started_at: "2026-05-21T00:00:00.000000000Z",
+                finished_at: Some("2026-05-21T00:00:01.000000000Z"),
+                status: "ran",
+                stdout: &oversize,
+                stderr: "",
+                exit_status: Some(0),
+                version: None,
+                log_dir: None,
+            },
+        )
+        .expect("finish");
+    let history = store.query_installer_runs(10).expect("history");
+    assert!(
+        history[0].stdout.len() < oversize.len(),
+        "finish must apply the same defense-in-depth cap as insert"
+    );
+    assert!(history[0].stdout.contains("[truncated,"));
 }

@@ -16,6 +16,7 @@ fn persist_step_logs_writes_files_and_sets_log_dir() {
         method: Some(INSTALL_METHOD_GITHUB.to_owned()),
         version: Some("v1.0.0".into()),
         log_dir: None,
+        persisted_run_id: None,
     };
     persist_step_logs_to_disk(&mut row, "test-agent", Some(tempdir.path()))
         .expect("logs should persist");
@@ -42,6 +43,7 @@ fn persist_step_logs_skips_when_streams_empty() {
         method: Some(INSTALL_METHOD_SHELL.to_owned()),
         version: None,
         log_dir: None,
+        persisted_run_id: None,
     };
     persist_step_logs_to_disk(&mut row, "test-agent", Some(tempdir.path()))
         .expect("empty streams should be a no-op");
@@ -64,6 +66,7 @@ fn persist_step_logs_is_a_no_op_when_log_base_is_none() {
         method: Some(INSTALL_METHOD_SHELL.to_owned()),
         version: None,
         log_dir: None,
+        persisted_run_id: None,
     };
     persist_step_logs_to_disk(&mut row, "test-agent", None)
         .expect("missing log base should be a no-op");
@@ -93,9 +96,20 @@ fn installer_log_persist_failure_prevents_history_row() {
     .expect_err("log persistence failure must fail install wrapper");
 
     assert!(matches!(err, StackError::AgentInstallerLogPersist { .. }));
+    // The step's `running` row is inserted at step start by design; when the
+    // audit-log write then fails, the row is finalized as `error` (never a
+    // success status) and carries no `log_dir` — history must not claim a
+    // completed run whose audit copy was lost.
     let runs = store.query_installer_runs(10).expect("query");
+    assert_eq!(runs.len(), 1, "the running row is finalized in place");
+    assert_eq!(runs[0].status, "error");
+    assert!(runs[0].log_dir.is_none());
+    assert!(runs[0].stderr.contains("finalize failed"));
     assert!(
-        runs.is_empty(),
-        "installer history must not record a row without the audit log"
+        store
+            .query_active_installer_runs(None)
+            .expect("active query")
+            .is_empty(),
+        "no step may be left reading as in-flight"
     );
 }

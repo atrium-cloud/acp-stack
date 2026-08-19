@@ -9,8 +9,9 @@ use crate::config::{AgentConfig, Config};
 use crate::error::{Result, StackError};
 
 use crate::runtime::install::agent_installer::{
-    INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL,
-    install_one_with_fallback, persist_step_logs_to_disk, resolve_creates,
+    INSTALL_METHOD_APT, INSTALL_METHOD_NATIVE, InstallProgress, ReconnectingInstallerSink,
+    STEP_ADAPTER, STEP_HARNESS, STEP_INSTALL, begin_tracked_step, finalize_tracked_step,
+    install_one_with_fallback, persist_untracked_installer_row, resolve_creates,
 };
 use crate::runtime::install::agent_registry::{
     AdapterSpec, AptUpdate, HarnessSpec, InstallSet, RegistryEntry, RegistryKind,
@@ -24,7 +25,7 @@ use crate::runtime::process_runner::{
 use crate::state::{
     INSTALLER_METHOD_APT, INSTALLER_METHOD_GITHUB, INSTALLER_METHOD_NATIVE, INSTALLER_METHOD_NPM,
     INSTALLER_METHOD_SHELL, INSTALLER_OPERATION_UPDATE, INSTALLER_OUTPUT_CAP_BYTES, InstallerRun,
-    InstallerRunInput, StateStore,
+    StateStore,
 };
 
 const UPDATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -223,6 +224,19 @@ fn update_component(
         });
     }
 
+    // Publish step-boundary progress (a `running` row per executed step,
+    // finalized in place) via a second short-lived connection; the updater's
+    // own store handle cannot cross the installer's scoped harness/adapter
+    // threads. Apt and native steps share the same sink so a minutes-long
+    // update is visible in the active-runs API while it executes instead of
+    // appearing only after completion.
+    let sink = ReconnectingInstallerSink::new(context.state.path().to_path_buf());
+    let progress = InstallProgress {
+        sink: &sink,
+        agent_id: &agent.id,
+        operation: INSTALLER_OPERATION_UPDATE,
+        log_base: context.log_base,
+    };
     let mut rows = match plan.kind {
         UpdatePlanKind::InstallSet => {
             let version_pin = plan.latest.as_deref();
@@ -239,6 +253,7 @@ fn update_component(
                 // The update path has no `expected_sha256` verification step,
                 // so the step-level spawn probe must keep running here.
                 false,
+                Some(&progress),
             );
             if let Some(err) = chain.terminal_error {
                 let mut rows = chain.rows;
@@ -254,22 +269,32 @@ fn update_component(
             }
             chain.rows
         }
-        UpdatePlanKind::Apt(apt) => {
-            vec![run_apt_update_step(
-                component.step,
-                apt,
-                context.workspace_root,
-                context.dest_dir,
-            )]
-        }
-        UpdatePlanKind::Native { command } => {
-            vec![run_native_update_step(
-                component.step,
-                &command,
-                context.workspace_root,
-                context.dest_dir,
-            )]
-        }
+        UpdatePlanKind::Apt(apt) => vec![run_tracked_update_step(
+            &progress,
+            component.step,
+            INSTALL_METHOD_APT,
+            || {
+                run_apt_update_step(
+                    component.step,
+                    apt,
+                    context.workspace_root,
+                    context.dest_dir,
+                )
+            },
+        )],
+        UpdatePlanKind::Native { command } => vec![run_tracked_update_step(
+            &progress,
+            component.step,
+            INSTALL_METHOD_NATIVE,
+            || {
+                run_native_update_step(
+                    component.step,
+                    &command,
+                    context.workspace_root,
+                    context.dest_dir,
+                )
+            },
+        )],
     };
 
     persist_update_rows(&mut rows, agent, context.state, context.log_base)?;
@@ -296,25 +321,16 @@ fn persist_update_rows(
     state: &StateStore,
     log_base: Option<&Path>,
 ) -> Result<()> {
+    // Rows the progress sink already finalized (their `running` row updated
+    // in place) are skipped inside; the rest keep the end-of-run append.
     for row in rows.iter_mut() {
-        persist_step_logs_to_disk(row, &agent.id, log_base)?;
-    }
-    for row in rows {
-        state.append_installer_run(InstallerRunInput {
-            agent_id: &agent.id,
-            started_at: &row.started_at,
-            finished_at: row.finished_at.as_deref(),
-            status: &row.status,
-            stdout: &row.stdout,
-            stderr: &row.stderr,
-            exit_status: row.exit_status,
-            step: &row.step,
-            version: row.version.as_deref(),
-            operation: INSTALLER_OPERATION_UPDATE,
-            method: row.method.as_deref(),
-            log_dir: row.log_dir.as_deref(),
-            apply_run_id: None,
-        })?;
+        persist_untracked_installer_row(
+            state,
+            row,
+            &agent.id,
+            INSTALLER_OPERATION_UPDATE,
+            log_base,
+        )?;
     }
     Ok(())
 }
@@ -535,6 +551,23 @@ fn native_probe_target(component: &UpdateComponent<'_>) -> String {
                 .map(|shell| shell.creates.clone())
         })
         .unwrap_or_else(|| component.command_id.to_owned())
+}
+
+/// Run one apt/native update step with step-boundary progress: a `running`
+/// row is inserted before the step's first spawn and finalized in place when
+/// the step exits, so the active-runs API sees the update in flight. The
+/// finalized draft carries `persisted_run_id`, so the caller's end-of-run
+/// persistence skips re-appending it.
+fn run_tracked_update_step(
+    progress: &InstallProgress<'_>,
+    step: &'static str,
+    method: &'static str,
+    run: impl FnOnce() -> crate::runtime::install::agent_installer::InstallerRowDraft,
+) -> crate::runtime::install::agent_installer::InstallerRowDraft {
+    let run_id = begin_tracked_step(progress, step, Some(method));
+    let mut row = run();
+    finalize_tracked_step(progress, run_id, &mut row);
+    row
 }
 
 fn run_apt_update_step(
@@ -793,6 +826,7 @@ fn run_command_step_with_started_at(
             method: Some(method.to_owned()),
             version: None,
             log_dir: None,
+            persisted_run_id: None,
         },
         CaptureOutcome::TimedOut {
             mut child,
@@ -819,6 +853,7 @@ fn run_command_step_with_started_at(
                 method: Some(method.to_owned()),
                 version: None,
                 log_dir: None,
+                persisted_run_id: None,
             }
         }
         CaptureOutcome::WaitFailed {
@@ -847,6 +882,7 @@ fn command_error_row(
         method: Some(method.to_owned()),
         version: None,
         log_dir: None,
+        persisted_run_id: None,
     }
 }
 

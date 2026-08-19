@@ -37,7 +37,8 @@ use crate::runtime::process_runner::{
     join_reader_bounded, kill_process_group, wait_with_timeout,
 };
 use crate::state::{
-    INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore, next_deps_apply_run_id,
+    INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_RUNNING, InstallerRunFinish, InstallerRunInput,
+    StateStore, next_deps_apply_run_id,
 };
 
 mod escalation;
@@ -281,6 +282,68 @@ fn append_deps_run(
     Ok(())
 }
 
+/// Insert the `running` row for a deps-apply action whose shell is about to
+/// spawn; the row is finalized in place by `finish_deps_run` so an in-flight
+/// action is visible to concurrent readers. Returns the row id, or `None`
+/// when running without state.
+fn begin_deps_run(
+    state: Option<&StateStore>,
+    apply_run_id: &str,
+    started_at: &str,
+) -> Result<Option<String>> {
+    let Some(store) = state else {
+        return Ok(None);
+    };
+    let run = store.append_installer_run(InstallerRunInput {
+        agent_id: DEPS_APPLY_AGENT_ID,
+        started_at,
+        finished_at: None,
+        status: INSTALLER_STATUS_RUNNING,
+        stdout: "",
+        stderr: "",
+        exit_status: None,
+        step: DEPS_APPLY_STEP,
+        version: None,
+        operation: crate::state::INSTALLER_OPERATION_INSTALL,
+        method: Some(crate::state::INSTALLER_METHOD_SHELL),
+        log_dir: None,
+        apply_run_id: Some(apply_run_id),
+    })?;
+    Ok(Some(run.id))
+}
+
+/// Finalize the `running` row for a finished deps-apply action. Without a
+/// store there is no row to update and nothing to do.
+#[allow(clippy::too_many_arguments)]
+fn finish_deps_run(
+    state: Option<&StateStore>,
+    run_id: &str,
+    started_at: &str,
+    finished_at: &str,
+    status: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_status: Option<i32>,
+) -> Result<()> {
+    let Some(store) = state else {
+        return Ok(());
+    };
+    store.finish_installer_run(
+        run_id,
+        InstallerRunFinish {
+            started_at,
+            finished_at: Some(finished_at),
+            status,
+            stdout,
+            stderr,
+            exit_status,
+            version: None,
+            log_dir: None,
+        },
+    )?;
+    Ok(())
+}
+
 fn apply_one(
     entry: &DependencyEntry,
     install: &crate::config::DependencyInstallAction,
@@ -381,8 +444,34 @@ fn apply_one(
         .timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_TIMEOUT);
-    let (exit_code, stdout, stderr, timed_out, stderr_tail) =
-        run_shell(shell_program, &install.shell, timeout, sudo)?;
+    // The running row makes the in-flight action visible to concurrent
+    // readers; it is finalized in place below once the shell exits.
+    let running_run_id = begin_deps_run(state, apply_run_id, &started_at)?;
+    let shell_result = run_shell(shell_program, &install.shell, timeout, sudo);
+    let (exit_code, stdout, stderr, timed_out, stderr_tail) = match shell_result {
+        Ok(captured) => captured,
+        Err(error) => {
+            // A spawn/IO failure must not leave the row reading as in-flight
+            // forever: finalize it as `error` before propagating. A failed
+            // finalize is warn-logged — the original error is the one the
+            // caller needs.
+            if let Some(run_id) = &running_run_id
+                && let Err(finish_error) = finish_deps_run(
+                    state,
+                    run_id,
+                    &started_at,
+                    &current_timestamp(),
+                    "error",
+                    "",
+                    &cap_stream(&error.to_string()),
+                    None,
+                )
+            {
+                tracing::warn!(error = %finish_error, run_id, "deps apply: failed to finalize running row after shell error");
+            }
+            return Err(error);
+        }
+    };
     let finished_at = current_timestamp();
 
     let post_status = check_one(entry);
@@ -426,16 +515,51 @@ fn apply_one(
     } else {
         cap_stream(&stdout)
     };
-    append_deps_run(
-        state,
-        apply_run_id,
-        &started_at,
-        &finished_at,
-        status_label,
-        &persisted_stdout,
-        &cap_stream(&stderr),
-        persisted_exit,
-    )?;
+    match running_run_id {
+        Some(run_id) => {
+            if let Err(error) = finish_deps_run(
+                state,
+                &run_id,
+                &started_at,
+                &finished_at,
+                status_label,
+                &persisted_stdout,
+                &cap_stream(&stderr),
+                persisted_exit,
+            ) {
+                // A failed finalize must neither abort the remaining actions
+                // nor leave the row reading as in-flight: warn-log it and
+                // mark the row `error` best-effort (mirrors the agent
+                // installer's finalize_tracked_step). The step's own outcome
+                // still surfaces in the report below.
+                tracing::warn!(%error, run_id, dep = %entry.name, "deps apply: failed to finalize running row");
+                let reason = format!("deps apply finalize failed: {error}");
+                if let Err(mark_error) = finish_deps_run(
+                    state,
+                    &run_id,
+                    &started_at,
+                    &finished_at,
+                    "error",
+                    "",
+                    &cap_stream(&reason),
+                    persisted_exit,
+                ) {
+                    tracing::warn!(error = %mark_error, run_id, "deps apply: failed to mark unfinalizable row as error");
+                }
+            }
+        }
+        // No store handle (dry paths, tests): nothing was inserted at start.
+        None => append_deps_run(
+            state,
+            apply_run_id,
+            &started_at,
+            &finished_at,
+            status_label,
+            &persisted_stdout,
+            &cap_stream(&stderr),
+            persisted_exit,
+        )?,
+    }
     Ok(DepApplyResult {
         name: entry.name.clone(),
         outcome,

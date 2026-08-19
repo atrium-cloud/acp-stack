@@ -80,8 +80,30 @@ pub struct InstallerRunInput<'a> {
     pub apply_run_id: Option<&'a str>,
 }
 
+/// Final state written over a `running` installer row when its step finishes.
+/// Identity fields (agent, step, operation, apply_run_id) were fixed at INSERT
+/// time and are deliberately not updatable here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallerRunFinish<'a> {
+    /// The step's own start timestamp; re-written so the row carries the
+    /// execution layer's canonical value rather than the (microseconds
+    /// earlier) insert-time one.
+    pub started_at: &'a str,
+    pub finished_at: Option<&'a str>,
+    pub status: &'a str,
+    pub stdout: &'a str,
+    pub stderr: &'a str,
+    pub exit_status: Option<i32>,
+    pub version: Option<&'a str>,
+    pub log_dir: Option<&'a str>,
+}
+
 pub const INSTALLER_OPERATION_INSTALL: &str = "install";
 pub const INSTALLER_OPERATION_UPDATE: &str = "update";
+/// In-flight step marker: the row was inserted when the step started and is
+/// updated in place to its terminal status when the step finishes. A row that
+/// stays `running` means the daemon died (or was killed) mid-step.
+pub const INSTALLER_STATUS_RUNNING: &str = "running";
 pub const INSTALLER_METHOD_SHELL: &str = "shell";
 pub const INSTALLER_METHOD_NPM: &str = "npm";
 pub const INSTALLER_METHOD_GITHUB: &str = "github";
@@ -394,6 +416,70 @@ impl StateStore {
         )?;
 
         Ok(run)
+    }
+
+    /// Update the row a `running` insert created with the step's terminal
+    /// state. Matching on `status = 'running'` keeps a double-finish (or a
+    /// finish against a historical row id) from silently rewriting a
+    /// completed audit row; zero matched rows surfaces as an error instead.
+    pub fn finish_installer_run(&self, id: &str, finish: InstallerRunFinish<'_>) -> Result<()> {
+        let stdout = truncate_for_storage(finish.stdout);
+        let stderr = truncate_for_storage(finish.stderr);
+        let updated = self.connection().execute(
+            r#"
+            UPDATE installer_runs
+            SET started_at = ?2, finished_at = ?3, status = ?4, stdout = ?5,
+                stderr = ?6, exit_status = ?7, version = ?8, log_dir = ?9
+            WHERE id = ?1 AND status = ?10
+            "#,
+            params![
+                id,
+                finish.started_at,
+                finish.finished_at,
+                finish.status,
+                stdout,
+                stderr,
+                finish.exit_status,
+                finish.version,
+                finish.log_dir,
+                INSTALLER_STATUS_RUNNING,
+            ],
+        )?;
+        if updated == 0 {
+            return Err(StackError::State(rusqlite::Error::StatementChangedRows(0)));
+        }
+        Ok(())
+    }
+
+    /// In-flight installer steps (`status = 'running'`), oldest first so a
+    /// progress view renders steps in start order. `agent_id` scopes the
+    /// result to one agent when provided.
+    pub fn query_active_installer_runs(&self, agent_id: Option<&str>) -> Result<Vec<InstallerRun>> {
+        if let Some(agent_id) = agent_id {
+            let mut statement = self.connection().prepare(
+                r#"
+                SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+                FROM installer_runs
+                WHERE status = ?1 AND agent_id = ?2
+                ORDER BY started_at ASC, id ASC
+                "#,
+            )?;
+            let rows = statement.query_map(
+                params![INSTALLER_STATUS_RUNNING, agent_id],
+                row_to_installer_run,
+            )?;
+            return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        let mut statement = self.connection().prepare(
+            r#"
+            SELECT id, agent_id, started_at, finished_at, status, stdout, stderr, exit_status, step, version, log_dir, apply_run_id, operation, method
+            FROM installer_runs
+            WHERE status = ?1
+            ORDER BY started_at ASC, id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![INSTALLER_STATUS_RUNNING], row_to_installer_run)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn query_installer_runs(&self, limit: u32) -> Result<Vec<InstallerRun>> {

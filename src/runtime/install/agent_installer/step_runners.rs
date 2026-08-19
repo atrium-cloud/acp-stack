@@ -262,6 +262,7 @@ pub(super) fn shell_step_with_creates(
                 method: method.clone(),
                 version: version.clone(),
                 log_dir: None,
+                persisted_run_id: None,
             };
             if !exit_ok {
                 return StepResult {
@@ -315,6 +316,7 @@ pub(super) fn shell_step_with_creates(
                 method: method.clone(),
                 version: version.clone(),
                 log_dir: None,
+                persisted_run_id: None,
             },
         },
         Err(err) => StepResult {
@@ -330,6 +332,7 @@ pub(super) fn shell_step_with_creates(
                 method,
                 version,
                 log_dir: None,
+                persisted_run_id: None,
             },
         },
     }
@@ -374,6 +377,7 @@ pub(super) fn github_release_step(
                 method: Some(INSTALL_METHOD_GITHUB.to_owned()),
                 version: Some(outcome.release_tag),
                 log_dir: None,
+                persisted_run_id: None,
             };
             if let Err(err) = &gate {
                 row.status = "failed".to_owned();
@@ -396,6 +400,7 @@ pub(super) fn github_release_step(
                     method: Some(INSTALL_METHOD_GITHUB.to_owned()),
                     version: version_pin.map(str::to_owned),
                     log_dir: None,
+                    persisted_run_id: None,
                 },
             }
         }
@@ -425,6 +430,7 @@ pub(super) fn finalize_shell_step(
                 method: Some(INSTALL_METHOD_SHELL.to_owned()),
                 version: None,
                 log_dir: None,
+                persisted_run_id: None,
             };
             if !exit_ok {
                 return InstallerResult {
@@ -468,6 +474,7 @@ pub(super) fn finalize_shell_step(
                 method: Some(INSTALL_METHOD_SHELL.to_owned()),
                 version: None,
                 log_dir: None,
+                persisted_run_id: None,
             },
         },
         Err(err) => InstallerResult {
@@ -483,6 +490,7 @@ pub(super) fn finalize_shell_step(
                 method: Some(INSTALL_METHOD_SHELL.to_owned()),
                 version: None,
                 log_dir: None,
+                persisted_run_id: None,
             },
         },
     }
@@ -591,6 +599,7 @@ fn resolve_npm_package_version(
                     method: Some(INSTALL_METHOD_NPM.to_owned()),
                     version: None,
                     log_dir: None,
+                    persisted_run_id: None,
                 },
             }))
         }
@@ -607,6 +616,7 @@ fn resolve_npm_package_version(
                 method: Some(INSTALL_METHOD_NPM.to_owned()),
                 version: None,
                 log_dir: None,
+                persisted_run_id: None,
             },
         })),
     }
@@ -663,6 +673,7 @@ fn npm_version_failure_step(
             method: Some(INSTALL_METHOD_NPM.to_owned()),
             version: None,
             log_dir: None,
+            persisted_run_id: None,
         },
     }
 }

@@ -57,6 +57,7 @@ use super::routes::config::{
 };
 use super::routes::deps::{deps_apply_handler, deps_check_handler, deps_get_handler};
 use super::routes::extensions::extension_managed_state_apply_handler;
+use super::routes::installer::installer_runs_handler;
 use super::routes::logs::{
     logs_commands_handler, logs_events_handler, logs_permissions_handler, logs_security_handler,
     logs_sessions_handler,
@@ -594,6 +595,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/logs/security", get(logs_security_handler))
         .route("/v1/logs/sessions", get(logs_sessions_handler))
         .route("/v1/metrics/summary", get(metrics_summary_handler))
+        // Session-tier read, same as the other observability surfaces
+        // (logs/*, metrics/summary): step metadata only, never log contents.
+        .route("/v1/installer/runs", get(installer_runs_handler))
         .route("/v1/ws", get(ws_handler))
         .route("/v1/ws/connections", get(ws_connections_handler))
         .route("/v1/ws/sessions", get(ws_sessions_handler))

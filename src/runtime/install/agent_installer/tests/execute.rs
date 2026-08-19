@@ -117,7 +117,7 @@ fn missing_workspace_root_returns_typed_installer_error() {
     let missing_workspace = tempdir.path().join("missing-workspace");
     let install = install_config("true", "definitely-not-a-real-binary-xyz123");
 
-    let result = run_installer_capture(&install, None, HashMap::new(), &missing_workspace);
+    let result = run_installer_capture(&install, None, HashMap::new(), &missing_workspace, None);
     let err = result.outcome.expect_err("missing cwd must fail");
 
     assert!(matches!(
@@ -221,6 +221,7 @@ fn unsupported_registry_entry_fails_before_running_steps() {
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
+        None,
     );
     assert!(result.rows.is_empty());
     let err = result.outcome.expect_err("must reject unsupported agent");
@@ -253,6 +254,7 @@ fn final_verification_searches_managed_bin_dir() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
     let outcome = result.outcome.expect("managed binary should resolve");
     assert_eq!(outcome.path(), binary_path.as_path());
@@ -286,6 +288,7 @@ fn registry_installs_do_not_receive_agent_runtime_secrets() {
         agent_env,
         tempdir.path(),
         tempdir.path(),
+        None,
     );
 
     let outcome = result
@@ -324,10 +327,118 @@ fn bootstrap_can_install_directly_into_managed_bin() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     let outcome = result.outcome.expect("managed opencode link should verify");
     assert_eq!(outcome.path(), managed_opencode.as_path());
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0].status, "ran");
+}
+
+#[test]
+fn running_row_is_visible_while_step_executes() {
+    let (tempdir, store) = open_store();
+    let workspace_root = workspace_root();
+    // The script blocks until the test releases it, so the test can observe
+    // the `running` row while the step is genuinely in flight.
+    let proceed = tempdir.path().join("proceed");
+    let script = format!(
+        "for i in $(seq 1 200); do [ -f {proceed} ] && break; sleep 0.05; done",
+        proceed = shell_quote_path(&proceed),
+    );
+    let install = install_config(&script, "definitely-not-a-real-binary-xyz123");
+    let state_path = store.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        let worker_store = StateStore::open(&state_path).expect("worker store");
+        run_installer(
+            "test-agent",
+            &install,
+            None,
+            HashMap::new(),
+            &workspace_root,
+            &worker_store,
+            None,
+        )
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let active = loop {
+        let active = store
+            .query_active_installer_runs(Some("test-agent"))
+            .expect("active query");
+        if !active.is_empty() {
+            break active;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "running row never appeared while the step was blocked"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].step, "install");
+    assert_eq!(active[0].status, crate::state::INSTALLER_STATUS_RUNNING);
+    assert!(active[0].finished_at.is_none());
+
+    std::fs::write(&proceed, b"go").expect("release installer");
+    // The script produces no `creates` binary, so the step finalizes as
+    // failed; the point is the running row was updated in place, not
+    // duplicated by a second insert.
+    let outcome = worker.join().expect("worker join");
+    outcome.expect_err("no creates binary produced");
+    let runs = store.query_installer_runs(10).expect("history");
+    assert_eq!(
+        runs.len(),
+        1,
+        "the running row must be finalized in place, not duplicated"
+    );
+    assert_eq!(runs[0].id, active[0].id);
+    assert_eq!(runs[0].status, "failed");
+    assert!(runs[0].finished_at.is_some());
+    assert!(
+        store
+            .query_active_installer_runs(None)
+            .expect("active query")
+            .is_empty()
+    );
+}
+
+#[test]
+fn panicking_step_finalizes_its_running_row_before_unwinding() {
+    let (_tempdir, store) = open_store();
+    let sink = ReconnectingInstallerSink::new(store.path().to_path_buf());
+    let progress = InstallProgress {
+        sink: &sink,
+        agent_id: "test-agent",
+        operation: INSTALLER_OPERATION_INSTALL,
+        log_base: None,
+    };
+
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::super::execute::run_guarded_install_step(
+            STEP_INSTALL,
+            INSTALL_METHOD_SHELL,
+            Some(&progress),
+            || {
+                panic!("simulated worker panic");
+            },
+        );
+    }))
+    .expect_err("the panic must keep unwinding to the thread-join fallback");
+    drop(payload);
+
+    assert!(
+        store
+            .query_active_installer_runs(None)
+            .expect("active query")
+            .is_empty(),
+        "a panicked step must not stay active forever"
+    );
+    let runs = store.query_installer_runs(10).expect("history");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "error");
+    assert_eq!(runs[0].step, "install");
+    assert!(runs[0].finished_at.is_some());
+    assert!(runs[0].stderr.contains("panicked"), "{:?}", runs[0].stderr);
 }
