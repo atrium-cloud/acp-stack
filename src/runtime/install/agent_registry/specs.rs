@@ -178,6 +178,14 @@ pub struct ShellInstall {
     pub creates: String,
     #[serde(default)]
     pub required_tools: Vec<String>,
+    /// Whole-run budget for this recipe, overriding the installer default.
+    /// Recipes are not comparable: one is a download plus a symlink, another
+    /// drives an upstream installer that provisions a language toolchain and
+    /// a source checkout. Raising the shared default to fit the slowest one
+    /// would make every genuinely hung install wait just as long, so the
+    /// recipe that needs the room declares it.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 impl ShellInstall {
@@ -186,6 +194,27 @@ impl ShellInstall {
         validate_nonempty(agent_id, &format!("{field}.creates"), &self.creates)?;
         for tool in &self.required_tools {
             validate_required_tool(agent_id, &format!("{field}.required_tools"), tool)?;
+        }
+        // A zero budget would kill the recipe the instant it spawns, which
+        // reads as a mysterious install failure rather than a bad catalog.
+        if self.timeout_secs == Some(0) {
+            return Err(StackError::RegistryLoad {
+                reason: format!(
+                    "agent `{agent_id}` {field}.timeout_secs = 0; omit the field for the default budget, or set a positive value"
+                ),
+            });
+        }
+        // The cap keeps the `Instant::now() + timeout` deadline arithmetic in
+        // `run_captured` from overflowing on a near-u64::MAX value.
+        if let Some(timeout_secs) = self.timeout_secs
+            && timeout_secs > crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS
+        {
+            return Err(StackError::RegistryLoad {
+                reason: format!(
+                    "agent `{agent_id}` {field}.timeout_secs = {timeout_secs} exceeds the {}-second (24 hour) cap",
+                    crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS
+                ),
+            });
         }
         Ok(())
     }

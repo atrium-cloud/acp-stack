@@ -443,6 +443,7 @@ fn development_placebo_install(placebo_path: &str) -> InstallSet {
             script: format!("test -x {}", shell_quote_str(placebo_path)),
             creates: placebo_path.to_owned(),
             required_tools: Vec::new(),
+            timeout_secs: None,
         }),
         ..InstallSet::default()
     }

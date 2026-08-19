@@ -64,7 +64,8 @@ pub struct DependencyInstallAction {
     #[serde(default)]
     pub scope: DependencyInstallScope,
     /// Optional timeout override in seconds. Defaults to 600s
-    /// (10 minutes) — same cap as the agent installer.
+    /// (10 minutes) — same cap as the agent installer. Bounded above at
+    /// validation by `MAX_INSTALL_TIMEOUT_SECS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 }

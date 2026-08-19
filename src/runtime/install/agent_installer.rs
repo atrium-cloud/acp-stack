@@ -13,8 +13,9 @@
 //! Hardening (see `docs/specs/security.md`) applies to every shell-based step
 //! (shell escape hatch, npx, uvx):
 //!
-//! - Timeout (`INSTALLER_TIMEOUT`) so a runaway script cannot wedge the
-//!   install RPC indefinitely.
+//! - Timeout (`DEFAULT_INSTALLER_TIMEOUT`, or the registry entry's
+//!   `install.shell.timeout_secs` when it declares one) so a runaway script
+//!   cannot wedge the install RPC indefinitely.
 //! - Per-stream output cap (`MAX_INSTALLER_STREAM_BYTES`) so a chatty
 //!   installer cannot bloat `installer_runs`. The state repo also
 //!   re-truncates at INSERT time as defense-in-depth.
@@ -38,6 +39,7 @@ mod step_runners;
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
@@ -56,7 +58,9 @@ pub(crate) use self::execute::install_one_with_fallback;
 pub use self::execute::install_resolved_capture;
 pub use self::step_logs::persist_step_logs_to_disk;
 
-use self::step_runners::{finalize_shell_step, run_install_step, run_shell_install};
+use self::step_runners::{
+    DEFAULT_INSTALLER_TIMEOUT, finalize_shell_step, run_install_step, run_shell_install,
+};
 
 pub const MAX_INSTALLER_STREAM_BYTES: usize = INSTALLER_OUTPUT_CAP_BYTES;
 
@@ -499,7 +503,14 @@ pub fn run_installer_capture(
     let run_id = progress.and_then(|progress| {
         begin_tracked_step(progress, STEP_INSTALL, Some(INSTALL_METHOD_SHELL))
     });
-    let run_result = run_shell_install(shell, &agent_env, workspace_root, &[]);
+    // The escape hatch declares no budget of its own, so it keeps the default.
+    let run_result = run_shell_install(
+        shell,
+        &agent_env,
+        workspace_root,
+        &[],
+        DEFAULT_INSTALLER_TIMEOUT,
+    );
     let mut result = finalize_shell_step(
         STEP_INSTALL,
         started_at,
@@ -597,6 +608,10 @@ pub(super) enum ResolvedInstallSpec {
         script: String,
         creates: String,
         required_tools: Vec<String>,
+        /// Whole-run budget for this recipe: the registry entry's
+        /// `install.shell.timeout_secs` when it declares one, otherwise
+        /// `DEFAULT_INSTALLER_TIMEOUT`.
+        timeout: Duration,
     },
     Npm {
         package: String,

@@ -14,7 +14,7 @@ use crate::runtime::install::agent_registry::{GithubInstall, InstallSet, github_
 use crate::runtime::install::github_release::{self, GithubReleaseInstall};
 use crate::runtime::process_runner::{
     CaptureOutcome, apply_non_interactive_env, forward_host_env, join_reader_bounded,
-    kill_process_group, path_env_with_extra_dirs, run_captured,
+    kill_process_group, path_env_with_extra_dirs, resolved_python_interpreter, run_captured,
 };
 
 use super::{
@@ -24,7 +24,11 @@ use super::{
     verify_executable_header, verify_expected_sha256,
 };
 
-const INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Whole-run budget for one install step when nothing declares its own. It
+/// covers the entire `/bin/sh -c <script>` (fetch, upstream installer, and any
+/// follow-up work), so a recipe whose upstream installer provisions a
+/// toolchain needs `install.shell.timeout_secs` rather than a bigger default.
+pub(super) const DEFAULT_INSTALLER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STDERR_TAIL_BYTES: usize = 2 * 1024;
 /// npm 12 skips lifecycle scripts that no `allowScripts` entry covers, and the
 /// skip is soft: npm still exits 0 and links the bin. Agents like `opencode-ai`
@@ -70,6 +74,9 @@ pub(super) fn select_install_path(
             script: shell.script.clone(),
             creates: shell.creates.clone(),
             required_tools: shell.required_tools.clone(),
+            timeout: shell
+                .timeout_secs
+                .map_or(DEFAULT_INSTALLER_TIMEOUT, Duration::from_secs),
         });
     }
     if let Some(npm) = &install.npm {
@@ -150,8 +157,10 @@ pub(super) fn run_install_step(
             script,
             creates,
             required_tools: _,
+            timeout,
         } => {
-            let result = run_shell_install(&script, agent_env, workspace_root, &[dest_dir]);
+            let result =
+                run_shell_install(&script, agent_env, workspace_root, &[dest_dir], timeout);
             shell_step_with_creates(
                 step_label,
                 started_at,
@@ -250,6 +259,20 @@ pub(super) fn shell_step_with_creates(
     let finished_at = current_timestamp();
     match run_result {
         Ok(captured) => {
+            if let Some(timeout) = captured.timed_out_after {
+                return StepResult {
+                    outcome: Err(StackError::AgentInstallerTimeout),
+                    row: timed_out_row(
+                        step_label,
+                        started_at,
+                        finished_at,
+                        captured,
+                        timeout,
+                        method,
+                        version,
+                    ),
+                };
+            }
             let exit_ok = captured.exit_status == Some(0);
             let mut row = InstallerRowDraft {
                 started_at,
@@ -303,22 +326,6 @@ pub(super) fn shell_step_with_creates(
             }
             StepResult { outcome, row }
         }
-        Err(StackError::AgentInstallerTimeout) => StepResult {
-            outcome: Err(StackError::AgentInstallerTimeout),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "timeout".into(),
-                stdout: String::new(),
-                stderr: "[installer timed out]".into(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                method: method.clone(),
-                version: version.clone(),
-                log_dir: None,
-                persisted_run_id: None,
-            },
-        },
         Err(err) => StepResult {
             outcome: Err(err),
             row: InstallerRowDraft {
@@ -418,6 +425,20 @@ pub(super) fn finalize_shell_step(
     let finished_at = current_timestamp();
     match run_result {
         Ok(captured) => {
+            if let Some(timeout) = captured.timed_out_after {
+                return InstallerResult {
+                    outcome: Err(StackError::AgentInstallerTimeout),
+                    row: timed_out_row(
+                        step_label,
+                        started_at,
+                        finished_at,
+                        captured,
+                        timeout,
+                        Some(INSTALL_METHOD_SHELL.to_owned()),
+                        None,
+                    ),
+                };
+            }
             let exit_ok = captured.exit_status == Some(0);
             let mut row = InstallerRowDraft {
                 started_at,
@@ -461,22 +482,6 @@ pub(super) fn finalize_shell_step(
             }
             InstallerResult { outcome, row }
         }
-        Err(StackError::AgentInstallerTimeout) => InstallerResult {
-            outcome: Err(StackError::AgentInstallerTimeout),
-            row: InstallerRowDraft {
-                started_at,
-                finished_at: Some(finished_at),
-                status: "timeout".into(),
-                stdout: String::new(),
-                stderr: "[installer timed out]".into(),
-                exit_status: None,
-                step: step_label.to_owned(),
-                method: Some(INSTALL_METHOD_SHELL.to_owned()),
-                version: None,
-                log_dir: None,
-                persisted_run_id: None,
-            },
-        },
         Err(err) => InstallerResult {
             outcome: Err(err),
             row: InstallerRowDraft {
@@ -500,6 +505,13 @@ pub(super) struct CapturedOutput {
     pub(super) stdout: String,
     pub(super) stderr: String,
     pub(super) exit_status: Option<i32>,
+    /// Budget the run exceeded, when it was killed for hitting it. Carried on
+    /// the capture rather than folded into a bare typed error so the output
+    /// drained up to the kill survives into the persisted row — a timed-out
+    /// install is exactly the case where there is nothing else to read. The
+    /// accompanying `exit_status` is `None`, so a caller that ignores this
+    /// field still treats the step as failed, never as success.
+    pub(super) timed_out_after: Option<Duration>,
 }
 
 pub(super) fn run_shell_install(
@@ -507,6 +519,7 @@ pub(super) fn run_shell_install(
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
+    timeout: Duration,
 ) -> Result<CapturedOutput> {
     run_program_install(
         "/bin/sh",
@@ -514,6 +527,7 @@ pub(super) fn run_shell_install(
         agent_env,
         workspace_root,
         extra_path_dirs,
+        timeout,
     )
 }
 
@@ -547,7 +561,14 @@ fn run_npm_install(
     let _guard = NPM_INSTALL_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir])
+    run_program_install(
+        "npm",
+        &args,
+        agent_env,
+        workspace_root,
+        &[dest_dir],
+        DEFAULT_INSTALLER_TIMEOUT,
+    )
 }
 
 fn resolve_npm_package_version(
@@ -564,7 +585,14 @@ fn resolve_npm_package_version(
         "version".to_owned(),
         "--json".to_owned(),
     ];
-    let result = run_program_install("npm", &args, agent_env, workspace_root, &[dest_dir]);
+    let result = run_program_install(
+        "npm",
+        &args,
+        agent_env,
+        workspace_root,
+        &[dest_dir],
+        DEFAULT_INSTALLER_TIMEOUT,
+    );
     match result {
         Ok(captured) if captured.exit_status == Some(0) => {
             let parsed = parse_npm_view_version(captured.stdout.trim()).map_err(|err| {
@@ -584,6 +612,22 @@ fn resolve_npm_package_version(
             }
         }
         Ok(captured) => {
+            // A version lookup that hit the budget is a timeout, not an
+            // ordinary non-zero exit; it keeps its typed error and its output.
+            if let Some(timeout) = captured.timed_out_after {
+                return Err(Box::new(StepResult {
+                    outcome: Err(StackError::AgentInstallerTimeout),
+                    row: timed_out_row(
+                        step_label,
+                        started_at,
+                        current_timestamp(),
+                        captured,
+                        timeout,
+                        Some(INSTALL_METHOD_NPM.to_owned()),
+                        None,
+                    ),
+                }));
+            }
             let exit = captured.exit_status;
             let stderr_tail = tail_bytes(&captured.stderr, STDERR_TAIL_BYTES);
             Err(Box::new(StepResult {
@@ -682,6 +726,37 @@ fn npm_package_with_version(package: &str, version: &str) -> String {
     format!("{package}@{version}")
 }
 
+/// Row for a step killed for exceeding its budget. The drained stdout/stderr
+/// are kept and the marker is appended rather than substituted: the run that
+/// timed out is the one an operator most needs to read, and a bare marker
+/// makes a ten-minute install indistinguishable from one that printed
+/// nothing. The budget is in the marker because it is what turns "it stopped"
+/// into "it stopped because it was given N seconds".
+fn timed_out_row(
+    step_label: &'static str,
+    started_at: String,
+    finished_at: String,
+    captured: CapturedOutput,
+    timeout: Duration,
+    method: Option<String>,
+    version: Option<String>,
+) -> InstallerRowDraft {
+    let marker = format!("[installer timed out after {}s]", timeout.as_secs());
+    InstallerRowDraft {
+        started_at,
+        finished_at: Some(finished_at),
+        status: "timeout".into(),
+        stdout: captured.stdout,
+        stderr: append_stderr_detail(&captured.stderr, marker),
+        exit_status: None,
+        step: step_label.to_owned(),
+        method,
+        version,
+        log_dir: None,
+        persisted_run_id: None,
+    }
+}
+
 fn append_stderr_detail(stderr: &str, detail: impl std::fmt::Display) -> String {
     if stderr.is_empty() {
         detail.to_string()
@@ -696,6 +771,7 @@ fn run_program_install(
     agent_env: &HashMap<String, String>,
     workspace_root: &Path,
     extra_path_dirs: &[&Path],
+    timeout: Duration,
 ) -> Result<CapturedOutput> {
     if !workspace_root.is_dir() {
         return Err(StackError::AgentInstallerWorkingDirectoryMissing {
@@ -710,12 +786,20 @@ fn run_program_install(
     // PATH is required so `creates` lookups resolve. HOME lets installers
     // place dotfiles in the operator's home if they need to. LANG keeps
     // tools that read locale from producing mojibake.
-    if let Some(path) = path_env_with_extra_dirs(extra_path_dirs) {
+    let path_env = path_env_with_extra_dirs(extra_path_dirs);
+    if let Some(path) = &path_env {
         command.env("PATH", path);
     }
     forward_host_env(&mut command, "HOME");
     forward_host_env(&mut command, "LANG");
     apply_non_interactive_env(&mut command);
+    // Point node-gyp at the interpreter binary rather than whatever wrapper
+    // `python3` happens to be on this host. Set before `[agent].env` so an
+    // entry that knows better can still override it, unlike the reserved names
+    // below.
+    if let Some(interpreter) = resolved_python_interpreter(path_env.as_ref()) {
+        command.env("npm_config_python", interpreter);
+    }
     // Inject `[agent].env` values, but refuse to let them override
     // PATH/HOME/LANG (the same security argument as in the bridge: the
     // daemon's environment is the source of truth for where to find binaries
@@ -748,7 +832,7 @@ fn run_program_install(
     // (e.g. ~/.pi) exists. It also owns the capped reader threads: without
     // dedicated drainers, a chatty installer can fill the pipe buffer and
     // wedge the shell once it tries to write more.
-    let outcome = run_captured(&mut command, INSTALLER_TIMEOUT, MAX_INSTALLER_STREAM_BYTES)
+    let outcome = run_captured(&mut command, timeout, MAX_INSTALLER_STREAM_BYTES)
         .map_err(|source| StackError::AgentSpawnFailed { source })?;
 
     match outcome {
@@ -761,28 +845,42 @@ fn run_program_install(
             stdout,
             stderr,
             exit_status: status.code(),
+            timed_out_after: None,
         }),
         CaptureOutcome::TimedOut {
             mut child,
             stdout_reader,
             stderr_reader,
         } => {
-            // Timeout: kill the whole process group, then drain readers. The
-            // captured output is dropped because the typed timeout error
-            // carries no output.
+            // Timeout: kill the whole process group, then drain readers. A
+            // timeout still produces a persisted row, so the captured output
+            // is carried out rather than discarded — everything the installer
+            // printed before the kill is the only record of what it was doing.
             kill_process_group(&mut child);
-            // Best-effort: ensure the kernel reaps the child.
-            let _ = child.wait();
-            // Threads will exit once the pipes close from the kill.
-            let _ = stdout_reader.and_then(join_reader_bounded);
-            let _ = stderr_reader.and_then(join_reader_bounded);
-            Err(StackError::AgentInstallerTimeout)
+            if let Err(error) = child.wait() {
+                tracing::debug!(%error, program, "timed-out installer child reap failed");
+            }
+            // Threads exit once the pipes close from the kill.
+            let stdout = stdout_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            let (stderr, _) = stderr_reader
+                .and_then(join_reader_bounded)
+                .unwrap_or_default();
+            Ok(CapturedOutput {
+                stdout,
+                stderr,
+                exit_status: None,
+                timed_out_after: Some(timeout),
+            })
         }
         CaptureOutcome::WaitFailed {
             source, mut child, ..
         } => {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_process_group(&mut child);
+            if let Err(error) = child.wait() {
+                tracing::debug!(%error, program, "unwaitable installer child reap failed");
+            }
             Err(StackError::AgentSpawnFailed { source })
         }
     }

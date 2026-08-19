@@ -363,6 +363,35 @@ fn embedded_registry_contains_only_curated_examples() {
     );
     assert!(hermes_shell.script.contains("--skip-browser"));
     assert!(hermes_shell.script.contains("'.[acp]'"));
+    // The recipe drives an upstream installer that provisions a Python
+    // toolchain, a virtualenv and a source checkout under one budget, and all
+    // of it fits the shared default: measured at 185s end to end on a fresh
+    // 8-core host. An earlier override here was fitted to a host whose
+    // `python3` was a wrapper script, which made the upstream installer's
+    // node-gyp step unbounded — a defect no budget could have absorbed.
+    assert_eq!(hermes_shell.timeout_secs, None);
+    for entry in catalog.entries() {
+        for shell in [
+            entry
+                .harness
+                .as_ref()
+                .and_then(|harness| harness.install.shell.as_ref()),
+            entry
+                .adapter
+                .as_ref()
+                .and_then(|adapter| adapter.install.shell.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert_eq!(
+                shell.timeout_secs, None,
+                "the budget override is per-recipe and no shipped recipe needs one; `{}` must not \
+                 carry a value on a harness or adapter shell recipe without a measurement behind it",
+                entry.id
+            );
+        }
+    }
     for entry in catalog.entries() {
         assert_eq!(
             entry.sync_exempt,

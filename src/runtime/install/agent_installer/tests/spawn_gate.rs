@@ -76,6 +76,7 @@ exit 99
             script: shell_script,
             creates: "chain-agent".to_owned(),
             required_tools: Vec::new(),
+            timeout_secs: None,
         }),
         npm: Some(crate::runtime::install::agent_registry::NpmInstall {
             package: "chain-agent".to_owned(),
