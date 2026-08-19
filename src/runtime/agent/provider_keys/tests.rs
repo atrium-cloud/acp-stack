@@ -60,6 +60,7 @@ fn provider_ids_collect_from_configured_secret_refs() {
     assert_eq!(
         providers.into_iter().collect::<Vec<_>>(),
         [
+            "ai-gateway",
             "cloudflare-ai-gateway",
             "cloudflare-workers-ai",
             "openai",
@@ -369,7 +370,7 @@ fn hermes_maps_api_key_providers_only() {
         Some("openrouter")
     );
     // OAuth-only Hermes providers are deliberately unmapped.
-    assert!(!provider_id_supports_agent("anthropic", "hermes"));
+    assert!(!provider_id_supports_agent("github-copilot", "hermes"));
 }
 
 #[test]
