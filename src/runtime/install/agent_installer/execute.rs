@@ -9,14 +9,18 @@
 
 use super::*;
 
-/// Run the resolved-registry installer WITHOUT touching the state store.
-/// Returns all rows that should be persisted (in order) and the final outcome.
+/// Run the resolved-registry installer WITHOUT holding the state store across
+/// steps. Returns all rows that should be persisted (in order) and the final
+/// outcome. When `progress` is provided, each executed step is inserted as a
+/// `running` row at start and finalized in place at finish (its draft then
+/// carries `persisted_run_id` so the caller skips re-appending it).
 pub fn install_resolved_capture(
     agent: &AgentConfig,
     entry: &RegistryEntry,
     _agent_env: HashMap<String, String>,
     workspace_root: &Path,
     dest_dir: &Path,
+    progress: Option<&InstallProgress<'_>>,
 ) -> InstallerSequenceResult {
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
@@ -76,6 +80,7 @@ pub fn install_resolved_capture(
                 workspace_root,
                 dest_dir,
                 pin_declared,
+                progress,
             );
             rows.extend(adapter_chain.rows);
             if let Some(err) = adapter_chain.terminal_error {
@@ -105,45 +110,56 @@ pub fn install_resolved_capture(
         let adapter_install = adapter.install.clone();
         let adapter_github = adapter.github.clone();
         let adapter_id = entry.id.clone();
-        let harness_thread = std::thread::spawn(move || {
-            install_one_with_fallback(
-                &harness_id,
-                "harness.install",
-                STEP_HARNESS,
-                &harness_install,
-                harness_github.as_deref(),
-                harness_version.as_deref(),
-                &harness_env,
-                &harness_workspace,
-                &harness_dest,
-                pin_declared,
-            )
-        });
-        let adapter_thread = std::thread::spawn(move || {
-            install_one_with_fallback(
-                &adapter_id,
-                "adapter.install",
-                STEP_ADAPTER,
-                &adapter_install,
-                adapter_github.as_deref(),
-                None,
-                &adapter_env,
-                &adapter_workspace,
-                &adapter_dest,
-                pin_declared,
-            )
-        });
-        let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
-            rows: vec![InstallerRowDraft::config_error(STEP_HARNESS)],
-            terminal_error: Some(StackError::AgentInitializeFailed {
-                reason: "harness installer thread panicked".to_owned(),
-            }),
-        });
-        let adapter_chain = adapter_thread.join().unwrap_or_else(|_| FallbackChain {
-            rows: vec![InstallerRowDraft::config_error(STEP_ADAPTER)],
-            terminal_error: Some(StackError::AgentInitializeFailed {
-                reason: "adapter installer thread panicked".to_owned(),
-            }),
+        // Scoped threads (not `thread::spawn`) so the borrowed `progress`
+        // sink can cross; both handles are joined manually inside the scope,
+        // so a panicking installer thread still lands in the `unwrap_or_else`
+        // fallback instead of propagating at scope exit. The step guard in
+        // `install_one_with_fallback` finalizes the panic's `running` row
+        // before the unwind reaches the join.
+        let (harness_chain, adapter_chain) = std::thread::scope(|scope| {
+            let harness_thread = scope.spawn(move || {
+                install_one_with_fallback(
+                    &harness_id,
+                    "harness.install",
+                    STEP_HARNESS,
+                    &harness_install,
+                    harness_github.as_deref(),
+                    harness_version.as_deref(),
+                    &harness_env,
+                    &harness_workspace,
+                    &harness_dest,
+                    pin_declared,
+                    progress,
+                )
+            });
+            let adapter_thread = scope.spawn(move || {
+                install_one_with_fallback(
+                    &adapter_id,
+                    "adapter.install",
+                    STEP_ADAPTER,
+                    &adapter_install,
+                    adapter_github.as_deref(),
+                    None,
+                    &adapter_env,
+                    &adapter_workspace,
+                    &adapter_dest,
+                    pin_declared,
+                    progress,
+                )
+            });
+            let harness_chain = harness_thread.join().unwrap_or_else(|_| FallbackChain {
+                rows: vec![InstallerRowDraft::config_error(STEP_HARNESS)],
+                terminal_error: Some(StackError::AgentInitializeFailed {
+                    reason: "harness installer thread panicked".to_owned(),
+                }),
+            });
+            let adapter_chain = adapter_thread.join().unwrap_or_else(|_| FallbackChain {
+                rows: vec![InstallerRowDraft::config_error(STEP_ADAPTER)],
+                terminal_error: Some(StackError::AgentInitializeFailed {
+                    reason: "adapter installer thread panicked".to_owned(),
+                }),
+            });
+            (harness_chain, adapter_chain)
         });
         rows.extend(harness_chain.rows);
         rows.extend(adapter_chain.rows);
@@ -174,6 +190,7 @@ pub fn install_resolved_capture(
         workspace_root,
         dest_dir,
         pin_declared,
+        progress,
     );
     rows.extend(chain.rows);
     if let Some(err) = chain.terminal_error {
@@ -228,7 +245,10 @@ fn terminal_error_from(
 /// (shell → npm → github_release for floating versions; github → npm for
 /// pinned). Returns once one succeeds, or once all declared paths have
 /// been exhausted. Each attempt is recorded so the operator can see the
-/// fallback chain after the fact via `acps installer history`.
+/// fallback chain after the fact via `acps installer history`. When
+/// `progress` is provided, every executed attempt is also visible
+/// in-flight: a `running` row is inserted before the step spawns and
+/// finalized in place when it exits.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_one_with_fallback(
     agent_id: &str,
@@ -241,6 +261,7 @@ pub(crate) fn install_one_with_fallback(
     workspace_root: &Path,
     dest_dir: &Path,
     pin_declared: bool,
+    progress: Option<&InstallProgress<'_>>,
 ) -> FallbackChain {
     let mut remaining = install.clone();
     let mut rows = Vec::new();
@@ -309,14 +330,16 @@ pub(crate) fn install_one_with_fallback(
             }
             continue;
         }
-        let step = run_install_step(
-            step_label,
-            spec,
-            env,
-            workspace_root,
-            dest_dir,
-            pin_declared,
-        );
+        let step = run_guarded_install_step(step_label, path_label_of(kind), progress, || {
+            run_install_step(
+                step_label,
+                spec,
+                env,
+                workspace_root,
+                dest_dir,
+                pin_declared,
+            )
+        });
         rows.push(step.row);
         match step.outcome {
             Ok(_) => {
@@ -346,6 +369,50 @@ pub(crate) fn install_one_with_fallback(
             };
         }
     }
+}
+
+/// Run one resolved step behind a panic guard. A panicking step would
+/// otherwise strand its `running` row: the thread-join fallback at the call
+/// site only sees the dead thread, not the row id, and the active-runs query
+/// has no age cutoff, so the row would read as in-flight forever even though
+/// the daemon survived. The guard finalizes the row as `error` — associating
+/// it with the panic — then resumes the unwind so the join fallback still
+/// records the panic as the install's terminal error.
+pub(super) fn run_guarded_install_step(
+    step_label: &'static str,
+    method: &'static str,
+    progress: Option<&InstallProgress<'_>>,
+    run: impl FnOnce() -> StepResult,
+) -> StepResult {
+    let run_id =
+        progress.and_then(|progress| begin_tracked_step(progress, step_label, Some(method)));
+    let step = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(step) => step,
+        Err(payload) => {
+            let mut row = InstallerRowDraft {
+                started_at: current_timestamp(),
+                finished_at: Some(current_timestamp()),
+                status: "error".to_owned(),
+                stdout: String::new(),
+                stderr: format!("installer step `{step_label}` panicked"),
+                exit_status: None,
+                step: step_label.to_owned(),
+                method: Some(method.to_owned()),
+                version: None,
+                log_dir: None,
+                persisted_run_id: None,
+            };
+            if let Some(progress) = progress {
+                finalize_tracked_step(progress, run_id, &mut row);
+            }
+            std::panic::resume_unwind(payload);
+        }
+    };
+    let mut step = step;
+    if let Some(progress) = progress {
+        finalize_tracked_step(progress, run_id, &mut step.row);
+    }
+    step
 }
 
 pub(super) fn exhausted_after_missing_prerequisites(

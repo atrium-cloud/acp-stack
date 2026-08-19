@@ -106,6 +106,7 @@ exit 99
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     result.outcome.expect("npm install should pass");
@@ -161,6 +162,7 @@ exit 99
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     result.outcome.expect("array version output should pass");
@@ -205,6 +207,7 @@ exit 99
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     assert!(matches!(
@@ -253,6 +256,7 @@ exit 99
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     assert!(matches!(
@@ -301,6 +305,7 @@ exit 99
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     assert!(matches!(

@@ -47,7 +47,10 @@ use crate::error::{Result, StackError};
 use crate::runtime::install::agent_registry::{
     ArchiveKind, InstallSet, RegistryEntry, RegistryKind,
 };
-use crate::state::{INSTALLER_OUTPUT_CAP_BYTES, InstallerRunInput, StateStore};
+use crate::state::{
+    INSTALLER_OPERATION_INSTALL, INSTALLER_OUTPUT_CAP_BYTES, INSTALLER_STATUS_RUNNING,
+    InstallerRunFinish, InstallerRunInput, StateStore,
+};
 
 pub(crate) use self::execute::install_one_with_fallback;
 pub use self::execute::install_resolved_capture;
@@ -121,6 +124,10 @@ pub struct InstallerRowDraft {
     /// the persisting wrappers (`run_installer`, `install_resolved`, and
     /// the HTTP route equivalents) set it after they write the files.
     pub log_dir: Option<String>,
+    /// `installer_runs` id when the progress sink already persisted this step
+    /// (its `running` row was finalized in place). Persisting wrappers skip
+    /// re-appending such rows; `None` rows still need the end-of-run append.
+    pub persisted_run_id: Option<String>,
 }
 
 impl InstallerRowDraft {
@@ -136,6 +143,7 @@ impl InstallerRowDraft {
             method: None,
             version: None,
             log_dir: None,
+            persisted_run_id: None,
         }
     }
 
@@ -151,8 +159,214 @@ impl InstallerRowDraft {
             method: None,
             version: None,
             log_dir: None,
+            persisted_run_id: None,
         }
     }
+}
+
+// =================================================================
+// Step-boundary progress (in-flight visibility in `installer_runs`)
+// =================================================================
+//
+// The `*_capture` functions hold no store handle, so the HTTP path never
+// holds the state lock across a (potentially 10-minute) shell/HTTP step.
+// Callers that want live progress instead pass an [`InstallProgress`] sink:
+// the execution layer inserts a `running` row as each step starts and
+// finalizes that same row when the step finishes, locking the store only
+// for the duration of one statement.
+
+/// Store access for step-boundary writes. `Sync` because adapter-backed
+/// installs run harness and adapter steps on parallel scoped threads that
+/// share one sink.
+pub trait InstallerRunSink: Sync {
+    /// Run `f` against a state store. Implementations serialize the call
+    /// however their store handle requires; `f` must do one brief write and
+    /// never outlive the call.
+    fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()>;
+}
+
+/// Sink over the daemon's shared store handle. Uses `blocking_lock`, so it is
+/// only legal off the async executor — every install path that uses it runs
+/// its steps inside `spawn_blocking` (same pattern as the deps-apply route).
+pub struct SharedInstallerSink {
+    state: std::sync::Arc<tokio::sync::Mutex<StateStore>>,
+}
+
+impl SharedInstallerSink {
+    pub fn new(state: std::sync::Arc<tokio::sync::Mutex<StateStore>>) -> Self {
+        Self { state }
+    }
+}
+
+impl InstallerRunSink for SharedInstallerSink {
+    fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()> {
+        let guard = self.state.blocking_lock();
+        f(&guard)
+    }
+}
+
+/// Sink that opens a short-lived second connection per boundary write, for
+/// callers whose `&StateStore` cannot cross the installer's scoped threads
+/// (a rusqlite connection is `!Sync`). WAL plus the store busy-timeout make
+/// the brief insert/update safe alongside the primary connection — the agent
+/// updater already runs on a second connection for the same reason.
+pub struct ReconnectingInstallerSink {
+    state_path: PathBuf,
+}
+
+impl ReconnectingInstallerSink {
+    pub fn new(state_path: PathBuf) -> Self {
+        Self { state_path }
+    }
+}
+
+impl InstallerRunSink for ReconnectingInstallerSink {
+    fn with_store(&self, f: &mut dyn FnMut(&StateStore) -> Result<()>) -> Result<()> {
+        let store = StateStore::open(&self.state_path)?;
+        f(&store)
+    }
+}
+
+/// Everything the execution layer needs to publish step-boundary progress:
+/// the sink plus the provenance stamped onto the `running` row.
+pub struct InstallProgress<'a> {
+    pub sink: &'a dyn InstallerRunSink,
+    pub agent_id: &'a str,
+    pub operation: &'static str,
+    pub log_base: Option<&'a Path>,
+}
+
+/// Insert the `running` row for a step that is about to execute; returns the
+/// row id to finalize with. A store failure is warn-logged and the step runs
+/// untracked — progress visibility must never abort the install itself.
+pub(crate) fn begin_tracked_step(
+    progress: &InstallProgress<'_>,
+    step_label: &'static str,
+    method: Option<&str>,
+) -> Option<String> {
+    let started_at = current_timestamp();
+    let mut inserted_id = None;
+    let result = progress.sink.with_store(&mut |store| {
+        let run = store.append_installer_run(InstallerRunInput {
+            agent_id: progress.agent_id,
+            started_at: &started_at,
+            finished_at: None,
+            status: INSTALLER_STATUS_RUNNING,
+            stdout: "",
+            stderr: "",
+            exit_status: None,
+            step: step_label,
+            version: None,
+            operation: progress.operation,
+            method,
+            log_dir: None,
+            apply_run_id: None,
+        })?;
+        inserted_id = Some(run.id);
+        Ok(())
+    });
+    match result {
+        Ok(()) => inserted_id,
+        Err(error) => {
+            tracing::warn!(%error, step = step_label, "installer progress: running-row insert failed; step continues untracked");
+            None
+        }
+    }
+}
+
+/// Finalize a step's `running` row with the finished draft. The full log
+/// capture is written to disk first so the same update can record `log_dir`.
+/// On success the draft is stamped with `persisted_run_id` so the caller's
+/// end-of-run persistence skips it; on failure (warn-logged) the draft stays
+/// unstamped so the caller's legacy append still records the audit row. A
+/// failed finalize additionally marks the row `error` (best-effort): the step
+/// is over, so it must not keep reading as in-flight — and an `error` row
+/// makes no completion claim, preserving the rule that a run without its
+/// audit log copy never records success.
+pub(crate) fn finalize_tracked_step(
+    progress: &InstallProgress<'_>,
+    run_id: Option<String>,
+    row: &mut InstallerRowDraft,
+) {
+    let Some(run_id) = run_id else {
+        return;
+    };
+    let result = (|| -> Result<()> {
+        persist_step_logs_to_disk(row, progress.agent_id, progress.log_base)?;
+        progress.sink.with_store(&mut |store| {
+            store.finish_installer_run(
+                &run_id,
+                InstallerRunFinish {
+                    started_at: &row.started_at,
+                    finished_at: row.finished_at.as_deref(),
+                    status: &row.status,
+                    stdout: &row.stdout,
+                    stderr: &row.stderr,
+                    exit_status: row.exit_status,
+                    version: row.version.as_deref(),
+                    log_dir: row.log_dir.as_deref(),
+                },
+            )
+        })
+    })();
+    match result {
+        Ok(()) => row.persisted_run_id = Some(run_id),
+        Err(error) => {
+            tracing::warn!(%error, run_id, "installer progress: running-row finalize failed; row falls back to end-of-run append");
+            let finished_now = current_timestamp();
+            let reason = format!("installer progress finalize failed: {error}");
+            let mark = progress.sink.with_store(&mut |store| {
+                store.finish_installer_run(
+                    &run_id,
+                    InstallerRunFinish {
+                        started_at: &row.started_at,
+                        finished_at: Some(&finished_now),
+                        status: "error",
+                        stdout: &row.stdout,
+                        stderr: &reason,
+                        exit_status: row.exit_status,
+                        version: row.version.as_deref(),
+                        log_dir: row.log_dir.as_deref(),
+                    },
+                )
+            });
+            if let Err(mark_error) = mark {
+                tracing::warn!(error = %mark_error, run_id, "installer progress: failed to mark unfinalizable row as error");
+            }
+        }
+    }
+}
+
+/// Persist a row the progress sink did not finalize (skipped/config_error
+/// placeholders, or steps whose sink writes failed). The full log capture
+/// goes to disk first; the state row is the index into it.
+pub fn persist_untracked_installer_row(
+    state: &StateStore,
+    row: &mut InstallerRowDraft,
+    agent_id: &str,
+    operation: &'static str,
+    log_base: Option<&Path>,
+) -> Result<()> {
+    if row.persisted_run_id.is_some() {
+        return Ok(());
+    }
+    persist_step_logs_to_disk(row, agent_id, log_base)?;
+    state.append_installer_run(InstallerRunInput {
+        agent_id,
+        started_at: &row.started_at,
+        finished_at: row.finished_at.as_deref(),
+        status: &row.status,
+        stdout: &row.stdout,
+        stderr: &row.stderr,
+        exit_status: row.exit_status,
+        step: &row.step,
+        version: row.version.as_deref(),
+        operation,
+        method: row.method.as_deref(),
+        log_dir: row.log_dir.as_deref(),
+        apply_run_id: None,
+    })?;
+    Ok(())
 }
 
 /// Operator escape-hatch single-step result. Returned by
@@ -181,6 +395,11 @@ pub struct InstallerSequenceResult {
 /// to a per-step subdirectory and records the path on the row; pass
 /// `state::default_installer_log_base(&home)` to land logs under the
 /// canonical `~/.local/share/acp-stack/installer-logs/` tree.
+///
+/// Progress is published through a [`ReconnectingInstallerSink`] (the
+/// borrowed store cannot cross the installer's scoped threads): the step's
+/// `running` row lands when the shell starts and is finalized in place when
+/// it exits, so a concurrent reader sees the in-flight step.
 pub fn run_installer(
     agent_id: &str,
     install: &AgentInstallConfig,
@@ -190,33 +409,41 @@ pub fn run_installer(
     state: &StateStore,
     log_base: Option<&Path>,
 ) -> Result<InstallerOutcome> {
-    let mut result = run_installer_capture(install, expected_sha256, agent_env, workspace_root);
-    persist_step_logs_to_disk(&mut result.row, agent_id, log_base)?;
-    state.append_installer_run(InstallerRunInput {
+    let sink = ReconnectingInstallerSink::new(state.path().to_path_buf());
+    let progress = InstallProgress {
+        sink: &sink,
         agent_id,
-        started_at: &result.row.started_at,
-        finished_at: result.row.finished_at.as_deref(),
-        status: &result.row.status,
-        stdout: &result.row.stdout,
-        stderr: &result.row.stderr,
-        exit_status: result.row.exit_status,
-        step: &result.row.step,
-        version: result.row.version.as_deref(),
-        operation: crate::state::INSTALLER_OPERATION_INSTALL,
-        method: result.row.method.as_deref(),
-        log_dir: result.row.log_dir.as_deref(),
-        apply_run_id: None,
-    })?;
+        operation: INSTALLER_OPERATION_INSTALL,
+        log_base,
+    };
+    let mut result = run_installer_capture(
+        install,
+        expected_sha256,
+        agent_env,
+        workspace_root,
+        Some(&progress),
+    );
+    persist_untracked_installer_row(
+        state,
+        &mut result.row,
+        agent_id,
+        INSTALLER_OPERATION_INSTALL,
+        log_base,
+    )?;
     result.outcome
 }
 
-/// Run the escape-hatch installer WITHOUT touching the state store. Returns
-/// the outcome alongside the row draft the caller should persist.
+/// Run the escape-hatch installer WITHOUT holding the state store across the
+/// shell run. Returns the outcome alongside the row draft the caller should
+/// persist. When `progress` is provided, the executed step's row is inserted
+/// as `running` at start and finalized in place at finish; the returned
+/// draft's `persisted_run_id` then tells the caller the row is already stored.
 pub fn run_installer_capture(
     install: &AgentInstallConfig,
     expected_sha256: Option<&str>,
     agent_env: HashMap<String, String>,
     workspace_root: &Path,
+    progress: Option<&InstallProgress<'_>>,
 ) -> InstallerResult {
     if install.install_type.as_str() != "shell" {
         return InstallerResult {
@@ -269,25 +496,35 @@ pub fn run_installer_capture(
         }
     }
 
+    let run_id = progress.and_then(|progress| {
+        begin_tracked_step(progress, STEP_INSTALL, Some(INSTALL_METHOD_SHELL))
+    });
     let run_result = run_shell_install(shell, &agent_env, workspace_root, &[]);
-    finalize_shell_step(
+    let mut result = finalize_shell_step(
         STEP_INSTALL,
         started_at,
         run_result,
         &install.creates,
         expected_sha256,
         workspace_root,
-    )
+    );
+    if let Some(progress) = progress {
+        finalize_tracked_step(progress, run_id, &mut result.row);
+    }
+    result
 }
 
 // =================================================================
 // Registry-resolved path (one step for native, two for adapter-backed)
 // =================================================================
 
-/// Run the resolved-registry installer and persist every row under a brief
-/// state-store lock per step. Used by the CLI which already holds the state
-/// store. The HTTP path uses [`install_resolved_capture`] so it can drop the
-/// state lock during each shell/HTTP step.
+/// Run the resolved-registry installer and persist every row. Steps publish
+/// `running` rows at their boundaries through a [`ReconnectingInstallerSink`]
+/// (the borrowed store cannot cross the scoped harness/adapter threads);
+/// rows the sink did not finalize are appended at the end as before. Used by
+/// the CLI which already holds the state store. The HTTP path uses
+/// [`install_resolved_capture`] with its own sink so it can drop the state
+/// lock during each shell/HTTP step.
 pub fn install_resolved(
     agent: &AgentConfig,
     entry: &RegistryEntry,
@@ -297,26 +534,29 @@ pub fn install_resolved(
     state: &StateStore,
     log_base: Option<&Path>,
 ) -> Result<InstallerOutcome> {
-    let mut result = install_resolved_capture(agent, entry, agent_env, workspace_root, dest_dir);
+    let sink = ReconnectingInstallerSink::new(state.path().to_path_buf());
+    let progress = InstallProgress {
+        sink: &sink,
+        agent_id: &agent.id,
+        operation: INSTALLER_OPERATION_INSTALL,
+        log_base,
+    };
+    let mut result = install_resolved_capture(
+        agent,
+        entry,
+        agent_env,
+        workspace_root,
+        dest_dir,
+        Some(&progress),
+    );
     for row in result.rows.iter_mut() {
-        persist_step_logs_to_disk(row, &agent.id, log_base)?;
-    }
-    for row in &result.rows {
-        state.append_installer_run(InstallerRunInput {
-            agent_id: &agent.id,
-            started_at: &row.started_at,
-            finished_at: row.finished_at.as_deref(),
-            status: &row.status,
-            stdout: &row.stdout,
-            stderr: &row.stderr,
-            exit_status: row.exit_status,
-            step: &row.step,
-            version: row.version.as_deref(),
-            operation: crate::state::INSTALLER_OPERATION_INSTALL,
-            method: row.method.as_deref(),
-            log_dir: row.log_dir.as_deref(),
-            apply_run_id: None,
-        })?;
+        persist_untracked_installer_row(
+            state,
+            row,
+            &agent.id,
+            INSTALLER_OPERATION_INSTALL,
+            log_base,
+        )?;
     }
     result.outcome
 }

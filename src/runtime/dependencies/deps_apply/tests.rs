@@ -643,3 +643,85 @@ fn stderr_tail_captures_actual_tail_when_stream_blows_past_cap() {
         other => panic!("expected Failed; got {other:?}"),
     }
 }
+
+#[test]
+fn finish_failure_does_not_abort_apply() {
+    // Hold a write lock on a second connection past the apply store's busy
+    // timeout while the dep's shell runs, so both the finish and the
+    // best-effort error mark hit SQLITE_BUSY. The apply must still report
+    // the step's real outcome instead of aborting, and exactly one row must
+    // exist (no duplicate fallback append).
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("state.sqlite");
+    let store = StateStore::open(&path).expect("open");
+    store.migrate().expect("migrate");
+    store
+        .set_busy_timeout_for_test(Duration::from_millis(100))
+        .expect("lower busy timeout");
+    let bin = tempdir.path().join("finish-blocked-marker");
+    let bin_str = bin.to_string_lossy().into_owned();
+    let config = config_with_dep(DependencyEntry {
+        name: "finish-blocked-marker".into(),
+        required: true,
+        feature: None,
+        install: Some(DependencyInstallAction {
+            // The sleep leaves a window for the test to take the write lock
+            // after the running row lands but before the step finishes.
+            shell: format!(
+                "sleep 0.5; printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}"
+            ),
+            creates: Some(bin_str),
+            scope: DependencyInstallScope::User,
+            timeout_secs: None,
+        }),
+    });
+
+    let worker =
+        std::thread::spawn(move || apply_dependencies(&config, None, Some(&store), "/bin/sh"));
+
+    // Wait for the dep's `running` row (written before the shell spawns),
+    // then hold the write lock until well past the finish attempt.
+    let reader = StateStore::open(&path).expect("reader connection");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !reader
+            .query_active_installer_runs(None)
+            .expect("active query")
+            .is_empty()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "running row never appeared while the dep shell was blocked"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let blocker = rusqlite::Connection::open(&path).expect("blocker connection");
+    blocker
+        .busy_timeout(Duration::from_secs(5))
+        .expect("blocker busy timeout");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("blocker takes write lock");
+    std::thread::sleep(Duration::from_millis(1200));
+    blocker.execute_batch("COMMIT").expect("release write lock");
+
+    let report = worker
+        .join()
+        .expect("worker join")
+        .expect("finalize failure must not abort the apply");
+    assert_eq!(report.results.len(), 1);
+    assert!(
+        matches!(report.results[0].outcome, DepApplyOutcome::Installed),
+        "the step itself succeeded; got {:?}",
+        report.results[0].outcome,
+    );
+    // One row total: the running row is never duplicated by a fallback
+    // append. Here the contention outlasted even the error-mark attempt, so
+    // it is still `running` — the documented residual worst case.
+    let runs = reader
+        .query_installer_runs_filtered(None, 10)
+        .expect("history");
+    assert_eq!(runs.len(), 1);
+}

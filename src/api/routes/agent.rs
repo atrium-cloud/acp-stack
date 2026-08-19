@@ -29,7 +29,8 @@ use crate::runtime::agent::switch::{
     adapter_from_registry_entry, plan_agent_switch,
 };
 use crate::runtime::install::agent_installer::{
-    InstallerSequenceResult, install_resolved_capture, run_installer_capture,
+    InstallProgress, InstallerSequenceResult, SharedInstallerSink, install_resolved_capture,
+    persist_untracked_installer_row, run_installer_capture,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::runtime::install::skill_installer::{
@@ -37,7 +38,6 @@ use crate::runtime::install::skill_installer::{
 };
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
-use crate::state::InstallerRunInput;
 
 mod lifecycle;
 mod switch;
@@ -177,38 +177,44 @@ async fn install_agent_for_config(
     let log_base = crate::state::default_installer_log_base(&home);
 
     let outcome = if let Some(install) = config.agent.install.clone() {
-        // Escape-hatch shell recipe. One row, persisted after the shell runs.
+        // Escape-hatch shell recipe. The step's `running` row is inserted when
+        // the shell starts and finalized in place when it exits, so polling
+        // readers see the in-flight install; anything the sink did not
+        // finalize (skipped rows) is appended after the run.
         let env = open_agent_env(config)?;
         let expected_sha256 = config.agent.expected_sha256.clone();
+        let agent_id = config.agent.id.clone();
+        let store_handle = state.state.clone();
+        let step_log_base = log_base.clone();
         let mut result = tokio::task::spawn_blocking(move || {
-            run_installer_capture(&install, expected_sha256.as_deref(), env, &workspace_root)
+            let sink = SharedInstallerSink::new(store_handle);
+            let progress = InstallProgress {
+                sink: &sink,
+                agent_id: &agent_id,
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                log_base: Some(&step_log_base),
+            };
+            run_installer_capture(
+                &install,
+                expected_sha256.as_deref(),
+                env,
+                &workspace_root,
+                Some(&progress),
+            )
         })
         .await
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
-        crate::runtime::install::agent_installer::persist_step_logs_to_disk(
-            &mut result.row,
-            &config.agent.id,
-            Some(&log_base),
-        )?;
         {
             let store = state.state.lock().await;
-            store.append_installer_run(InstallerRunInput {
-                agent_id: &config.agent.id,
-                started_at: &result.row.started_at,
-                finished_at: result.row.finished_at.as_deref(),
-                status: &result.row.status,
-                stdout: &result.row.stdout,
-                stderr: &result.row.stderr,
-                exit_status: result.row.exit_status,
-                step: &result.row.step,
-                version: result.row.version.as_deref(),
-                operation: crate::state::INSTALLER_OPERATION_INSTALL,
-                method: result.row.method.as_deref(),
-                log_dir: result.row.log_dir.as_deref(),
-                apply_run_id: None,
-            })?;
+            persist_untracked_installer_row(
+                &store,
+                &mut result.row,
+                &config.agent.id,
+                crate::state::INSTALLER_OPERATION_INSTALL,
+                Some(&log_base),
+            )?;
         }
         result.outcome?
     } else {
@@ -217,44 +223,40 @@ async fn install_agent_for_config(
         let registry = RegistryCatalog::load_with_override(&override_path)?;
         let entry = registry.lookup_required(&config.agent.id)?.clone();
         let agent = config.agent.clone();
+        let agent_id = config.agent.id.clone();
+        let store_handle = state.state.clone();
+        let step_log_base = log_base.clone();
         let mut result: InstallerSequenceResult = tokio::task::spawn_blocking(move || {
+            let sink = SharedInstallerSink::new(store_handle);
+            let progress = InstallProgress {
+                sink: &sink,
+                agent_id: &agent_id,
+                operation: crate::state::INSTALLER_OPERATION_INSTALL,
+                log_base: Some(&step_log_base),
+            };
             install_resolved_capture(
                 &agent,
                 &entry,
                 Default::default(),
                 &workspace_root,
                 &local_bin,
+                Some(&progress),
             )
         })
         .await
         .map_err(|err| StackError::AgentInitializeFailed {
             reason: format!("installer thread join failed: {err}"),
         })?;
-        for row in result.rows.iter_mut() {
-            crate::runtime::install::agent_installer::persist_step_logs_to_disk(
-                row,
-                &config.agent.id,
-                Some(&log_base),
-            )?;
-        }
         {
             let store = state.state.lock().await;
-            for row in &result.rows {
-                store.append_installer_run(InstallerRunInput {
-                    agent_id: &config.agent.id,
-                    started_at: &row.started_at,
-                    finished_at: row.finished_at.as_deref(),
-                    status: &row.status,
-                    stdout: &row.stdout,
-                    stderr: &row.stderr,
-                    exit_status: row.exit_status,
-                    step: &row.step,
-                    version: row.version.as_deref(),
-                    operation: crate::state::INSTALLER_OPERATION_INSTALL,
-                    method: row.method.as_deref(),
-                    log_dir: row.log_dir.as_deref(),
-                    apply_run_id: None,
-                })?;
+            for row in result.rows.iter_mut() {
+                persist_untracked_installer_row(
+                    &store,
+                    row,
+                    &config.agent.id,
+                    crate::state::INSTALLER_OPERATION_INSTALL,
+                    Some(&log_base),
+                )?;
             }
         }
         result.outcome?

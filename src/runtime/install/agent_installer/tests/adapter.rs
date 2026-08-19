@@ -31,6 +31,7 @@ fn adapter_entry_installs_harness_then_adapter_and_verifies_adapter_command() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     let outcome = result.outcome.expect("adapter should install");
@@ -80,6 +81,7 @@ fn adapter_entry_runs_harness_and_adapter_install_steps_concurrently() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
     let elapsed = started.elapsed();
 
@@ -117,6 +119,7 @@ fn adapter_entry_skips_harness_step_when_harness_is_provided_by_adapter() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     let outcome = result.outcome.expect("adapter should install");
@@ -153,6 +156,7 @@ fn adapter_entry_runs_adapter_even_when_harness_fails() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     assert!(matches!(

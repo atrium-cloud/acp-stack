@@ -52,6 +52,7 @@ exit 9
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
+        None,
     );
 
     // The chain exhausted both paths, so the overall outcome is Err.
@@ -148,6 +149,7 @@ exit 1
         tempdir.path(),
         &dest_dir,
         false,
+        None,
     );
 
     assert!(
@@ -187,6 +189,7 @@ fn shell_install_records_no_version() {
         HashMap::new(),
         tempdir.path(),
         tempdir.path(),
+        None,
     );
     result.outcome.expect("install ok");
     assert_eq!(result.rows.len(), 1);
@@ -220,6 +223,7 @@ fn missing_shell_required_tool_fails_when_no_fallback_is_runnable() {
         tempdir.path(),
         tempdir.path(),
         false,
+        None,
     );
 
     match chain.terminal_error.expect("missing prerequisite") {
@@ -274,6 +278,7 @@ exit 9
         tempdir.path(),
         tempdir.path(),
         false,
+        None,
     );
 
     match chain.terminal_error.expect("chain should fail") {
@@ -350,6 +355,7 @@ fn single_path_failure_keeps_its_typed_error() {
         tempdir.path(),
         tempdir.path(),
         false,
+        None,
     );
 
     assert!(

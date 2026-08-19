@@ -26,6 +26,7 @@ fn spawn_gate_fails_step_on_unrunnable_binary() {
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     let err = result
@@ -95,6 +96,7 @@ exit 99
         HashMap::new(),
         tempdir.path(),
         &dest_dir,
+        None,
     );
 
     result
@@ -138,7 +140,7 @@ fn escape_hatch_reinstalls_over_unrunnable_existing_binary() {
     );
     let install = install_config(&script, binary.to_str().expect("utf8 tempdir path"));
 
-    let result = run_installer_capture(&install, None, HashMap::new(), tempdir.path());
+    let result = run_installer_capture(&install, None, HashMap::new(), tempdir.path(), None);
 
     match result
         .outcome
@@ -211,8 +213,14 @@ fn declared_pin_keeps_step_gate_from_executing_binary() {
     let mut agent = agent_config("pin-agent");
     agent.expected_sha256 = Some("deadbeef".to_owned());
 
-    let result =
-        install_resolved_capture(&agent, &entry, HashMap::new(), tempdir.path(), &dest_dir);
+    let result = install_resolved_capture(
+        &agent,
+        &entry,
+        HashMap::new(),
+        tempdir.path(),
+        &dest_dir,
+        None,
+    );
 
     let err = result
         .outcome
@@ -241,8 +249,14 @@ fn declared_pin_step_gate_still_rejects_shebang_less_stub() {
     let mut agent = agent_config("pin-stub-agent");
     agent.expected_sha256 = Some("deadbeef".to_owned());
 
-    let result =
-        install_resolved_capture(&agent, &entry, HashMap::new(), tempdir.path(), &dest_dir);
+    let result = install_resolved_capture(
+        &agent,
+        &entry,
+        HashMap::new(),
+        tempdir.path(),
+        &dest_dir,
+        None,
+    );
 
     let err = result
         .outcome

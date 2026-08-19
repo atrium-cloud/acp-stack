@@ -49,6 +49,12 @@ Every rejected authentication writes one row. The attempted token value is never
 | `route`        | rejected route                                                            |
 | `payload_json` | forward-compatible structured payload (validated JSON)                    |
 
+## Installer Runs
+
+`installer_runs` is the audit table for agent install/update steps and `deps_apply` actions: one row per executed step attempt (fallback-chain attempts are separate rows). Terminal `status` values are `ran`, `failed`, `timeout`, `error`, `skipped`, `config_error`, and (deps apply only) `installed`, `privilege_required`.
+
+A step that actually executes first inserts a `running` row (`finished_at` NULL, empty stream previews) and updates that same row in place to its terminal status when it finishes — so in-flight installs are observable step-by-step via `GET /v1/installer/runs?active=true` (see [api/api.md](api/api.md)) without holding the daemon's state lock for the length of the step. This covers update operations too: apt and native update steps publish the same `running` row while they execute. If a step's worker thread panics, the installer finalizes the row as `error` before the unwind propagates, so a surviving daemon never leaves a false-active row behind. A row still `running` long after its step's timeout means the process died mid-step; such rows are never finalized retroactively.
+
 ## Prompt Lifecycle Columns
 
 The `prompts` table carries message identity fields plus terminal failure classification beyond `error_code` / `error_message`:
