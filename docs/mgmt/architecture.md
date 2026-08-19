@@ -35,7 +35,7 @@ flowchart LR
 | ACP terminals    | client-side `terminal/*` handlers: per-terminal owning task, registry, capped output buffer, and command-log recording (`src/runtime/agent/acp_terminal.rs`, sharing spawn/kill/read primitives with the command gateway via `src/runtime/mediation/commands/exec.rs`) |
 | Model catalog    | cached `models.dev` model metadata for prompt modality gating     |
 | Provider model catalog | live provider `GET /models` fetch and per-provider cache (`src/runtime/agent/provider_model_catalog.rs`, cache at `~/.config/acp-stack/provider-models.json`) backing `settings.json` `availableModels` provisioning and `GET /v1/models` |
-| Agent switch     | harness migration planning and provider/API-key compatibility     |
+| Agent switch     | harness migration planning, provider/API-key compatibility, and the pending-switch journal (`src/runtime/agent/switch_journal.rs`) that makes same-target retries converge after a post-commit failure |
 | Provider CLI     | target activation and status, credential catalog mutation, legacy credential migration, and shared provider validation |
 | Native config import | redacted inspection and transactional semantic replacement of supported harness global config |
 | Install catalogs | curated agent registry, Agent Skills source registry, and skills installer (init install plus day-2 list/add/remove via `acps skills` and `/v1/agent/skills`) |

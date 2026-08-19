@@ -28,6 +28,8 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
             }
         }
         AgentTestFailed { .. } => "agent.test_failed",
+        AgentSwitchConflict { .. } => "agent.switch_conflict",
+        AgentSwitchJournalCorrupt { .. } => "agent.switch_journal_corrupt",
         _ => return None,
     })
 }
@@ -51,6 +53,12 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
             reason_category,
         } => format!("inference endpoint returned {status_code} ({reason_category})"),
         AgentTestFailed { stage, reason, .. } => format!("agent test failed at {stage}: {reason}"),
+        AgentSwitchConflict { reason } => format!("agent switch conflict: {reason}"),
+        // The on-disk path stays out of the public message; the Display text
+        // carries it for local logs and CLI diagnostics.
+        AgentSwitchJournalCorrupt { .. } => {
+            "the pending agent-switch journal is corrupt local state".to_owned()
+        }
         _ => return None,
     })
 }
@@ -58,13 +66,16 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
 pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
-        AgentAlreadyRunning | AgentNotRunning => StatusCode::CONFLICT,
+        AgentAlreadyRunning | AgentNotRunning | AgentSwitchConflict { .. } => StatusCode::CONFLICT,
         AgentNotInitialized => StatusCode::NOT_FOUND,
         AgentUnsupportedCapability { .. } => StatusCode::NOT_IMPLEMENTED,
         AgentInitializeFailed { .. } => StatusCode::BAD_GATEWAY,
         AgentSpawnFailed { .. } | AgentApiRequest { .. } | AgentApiStatus { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
+        // Corrupt local state is unrecoverable by the client; it must repair
+        // or remove the journal file before switching again.
+        AgentSwitchJournalCorrupt { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         AgentRequestFailed { .. } | AgentTestFailed { .. } => StatusCode::BAD_GATEWAY,
         InferenceRequestFailed { status_code, .. } => {
             // 4xx variants are surfaced as "failed dependency": the upstream

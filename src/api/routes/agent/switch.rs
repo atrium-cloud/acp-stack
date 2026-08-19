@@ -1,6 +1,10 @@
 //! Agent switch: repoint the default target to a different harness.
 
 use super::*;
+use crate::runtime::agent::switch_journal::{
+    SwitchJournal, SwitchJournalPhase, candidate_fingerprint, load_switch_journal,
+    persist_switch_journal, remove_switch_journal,
+};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AgentSwitchRequest {
@@ -26,7 +30,11 @@ pub(crate) struct AgentSwitchResponse {
     required_env_refs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     secret_migrations: Vec<AgentSwitchSecretMigrationJson>,
-    install: AgentInstallResponse,
+    /// Absent on resumed/no-op retries: install is a pre-commit step that the
+    /// interrupted attempt already ran, and re-running it on every retry
+    /// would re-burn minutes for no state change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install: Option<AgentInstallResponse>,
     restarted: bool,
     restart_started: bool,
     set_model: bool,
@@ -93,8 +101,39 @@ pub(crate) async fn agent_switch_handler(
     let registry = RegistryCatalog::load_with_override(
         &home.join(".config").join("acp-stack").join("agents.toml"),
     )?;
+    // The journal gates dispatch: a same-target retry of an interrupted or
+    // completed switch must be recognized before the fresh-path validation
+    // below rejects it as "already configured".
+    let resume_journal = match load_switch_journal(&state.runtime_paths.config_path)? {
+        Some(journal) => match classify_switch_journal(&journal, &body.agent, &fresh_config)? {
+            SwitchJournalAction::NoOp => {
+                return Ok(completed_switch_response(&fresh_config, &journal));
+            }
+            SwitchJournalAction::ResumeCommitted => {
+                return resume_committed_switch(
+                    &state,
+                    &registry,
+                    fresh_config,
+                    &journal,
+                    body.drop_configs,
+                )
+                .await;
+            }
+            SwitchJournalAction::ResumeFromCommitBoundary => Some(journal),
+            SwitchJournalAction::FreshStart => None,
+        },
+        None => None,
+    };
     if fresh_config.array.target(&body.agent).is_some() {
-        return switch_to_existing_array_target(&state, &home, &registry, fresh_config, body).await;
+        return switch_to_existing_array_target(
+            &state,
+            &home,
+            &registry,
+            fresh_config,
+            body,
+            resume_journal,
+        )
+        .await;
     }
     let plan = plan_agent_switch(
         &fresh_config,
@@ -157,25 +196,25 @@ pub(crate) async fn agent_switch_handler(
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;
     let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
-    // Rename sessions to the new primary target BEFORE writing the new config.
-    // The rename can fail (e.g. a UNIQUE(target_id, agent_session_id) collision
-    // is detected up front), and if it does the on-disk config must stay
-    // untouched so config and DB never diverge.
-    {
-        let store = state.state.lock().await;
-        store.rename_session_target_id(&old_target_id, &candidate_config.array.primary_target)?;
-    }
-    crate::fs_util::atomic_write_owner_only(
-        &state.runtime_paths.config_path,
-        canonical.as_bytes(),
-    )?;
-    state.refresh_array_runtime_from_disk().await?;
-    let restart_started = apply_switch_runtime(
-        &state,
-        &old_target_id,
-        &candidate_config.array.primary_target,
-        &candidate_config,
+    let mut journal = SwitchJournal {
+        old_target_id: old_target_id.clone(),
+        new_target_id: body.agent.clone(),
+        target_agent_id: plan.target_agent_id.clone(),
+        candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,
+        phase: SwitchJournalPhase::Planned,
+    };
+    let restart_started = commit_switch_and_apply_runtime(
+        SwitchCommit {
+            state: &state,
+            old_target_id: &old_target_id,
+            candidate_config: &candidate_config,
+            canonical: &canonical,
+            was_running,
+            resume_journal: resume_journal.as_ref(),
+            rename_sessions: true,
+        },
+        &mut journal,
     )
     .await?;
     let (cleaned_configs, cleanup_errors) = if body.drop_configs {
@@ -195,6 +234,8 @@ pub(crate) async fn agent_switch_handler(
     } else {
         (Vec::new(), Vec::new())
     };
+    journal.phase = SwitchJournalPhase::Completed;
+    persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
     let response = AgentSwitchResponse {
         old_agent_id: plan.old_agent_id,
@@ -204,7 +245,7 @@ pub(crate) async fn agent_switch_handler(
         api_key_ref: plan.provider_status.api_key_ref().map(str::to_owned),
         required_env_refs: plan.required_env_refs,
         secret_migrations,
-        install,
+        install: Some(install),
         restarted: was_running,
         restart_started,
         set_model: target_entry.set_model,
@@ -228,6 +269,7 @@ async fn switch_to_existing_array_target(
     registry: &RegistryCatalog,
     fresh_config: Config,
     body: AgentSwitchRequest,
+    resume_journal: Option<SwitchJournal>,
 ) -> std::result::Result<ApiSuccess<AgentSwitchResponse>, StackError> {
     if body.provider.is_some() || body.api_key_ref.is_some() {
         return Err(StackError::InvalidParam {
@@ -291,19 +333,29 @@ async fn switch_to_existing_array_target(
     let old_target_id = fresh_config.array.primary_target.clone();
     let old_target = state.agent_target(&old_target_id)?;
     let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
-    crate::fs_util::atomic_write_owner_only(
-        &state.runtime_paths.config_path,
-        canonical.as_bytes(),
-    )?;
-    state.refresh_array_runtime_from_disk().await?;
-    let restart_started = apply_switch_runtime(
-        state,
-        &old_target_id,
-        &candidate_config.array.primary_target,
-        &candidate_config,
+    let mut journal = SwitchJournal {
+        old_target_id: old_target_id.clone(),
+        new_target_id: body.agent.clone(),
+        target_agent_id: candidate_config.agent.id.clone(),
+        candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,
+        phase: SwitchJournalPhase::Planned,
+    };
+    let restart_started = commit_switch_and_apply_runtime(
+        SwitchCommit {
+            state,
+            old_target_id: &old_target_id,
+            candidate_config: &candidate_config,
+            canonical: &canonical,
+            was_running,
+            resume_journal: resume_journal.as_ref(),
+            rename_sessions: false,
+        },
+        &mut journal,
     )
     .await?;
+    journal.phase = SwitchJournalPhase::Completed;
+    persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
 
     Ok(ApiSuccess::new(AgentSwitchResponse {
         old_agent_id: fresh_config.agent.id,
@@ -321,7 +373,7 @@ async fn switch_to_existing_array_target(
             .and_then(|provider| provider.api_key_ref.clone()),
         required_env_refs,
         secret_migrations: Vec::new(),
-        install,
+        install: Some(install),
         restarted: was_running,
         restart_started,
         set_model: false,
@@ -334,6 +386,284 @@ async fn switch_to_existing_array_target(
         cleaned_configs: Vec::new(),
         cleanup_errors: Vec::new(),
     }))
+}
+
+/// How a pending-switch journal entry steers the current request.
+enum SwitchJournalAction {
+    /// Journal Completed, same target, disk agrees: the retry is a provably
+    /// side-effect-free no-op.
+    NoOp,
+    /// Journal incomplete and the committed candidate is already on disk:
+    /// resume at the runtime re-apply with the journaled `was_running`.
+    ResumeCommitted,
+    /// Journal incomplete and disk still shows the old primary: the
+    /// interrupted attempt never crossed the commit boundary, so re-run the
+    /// full (idempotent) pre-commit pipeline and commit again.
+    ResumeFromCommitBoundary,
+    /// Journal Completed but stale for this request: proceed as a fresh
+    /// switch, overwriting the journal at Planned.
+    FreshStart,
+}
+
+fn classify_switch_journal(
+    journal: &SwitchJournal,
+    requested: &str,
+    fresh_config: &Config,
+) -> Result<SwitchJournalAction> {
+    let same_target = journal.requested_target_matches(requested);
+    // Post-commit the on-disk primary target id is rewritten to the target
+    // agent id (config canonicalization invariant), so the committed marker
+    // is the agent id, not the requested target id.
+    let committed_on_disk = fresh_config.agent.id == journal.target_agent_id;
+    if journal.phase == SwitchJournalPhase::Completed {
+        if same_target && committed_on_disk {
+            return Ok(SwitchJournalAction::NoOp);
+        }
+        return Ok(SwitchJournalAction::FreshStart);
+    }
+    if !same_target {
+        return Err(StackError::AgentSwitchConflict {
+            reason: format!(
+                "an earlier switch to `{}` did not finish (phase `{}`); retry that target so the switch can resume, or repair the switch journal before switching elsewhere",
+                journal.new_target_id,
+                journal.phase.as_str()
+            ),
+        });
+    }
+    if committed_on_disk {
+        // The config write is the commit marker (the session rename strictly
+        // precedes it), so disk showing the new primary means the switch
+        // committed. Verify the bytes match the journaled candidate before
+        // trusting them: an operator edit between attempts must not be
+        // silently adopted as the in-flight switch's outcome.
+        let on_disk = fresh_config.to_canonical_toml()?;
+        if candidate_fingerprint(&on_disk) != journal.candidate_fingerprint {
+            return Err(StackError::AgentSwitchConflict {
+                reason: format!(
+                    "the on-disk config for `{}` does not match the interrupted switch's candidate; repair the config or the switch journal before retrying",
+                    journal.new_target_id
+                ),
+            });
+        }
+        return Ok(SwitchJournalAction::ResumeCommitted);
+    }
+    Ok(SwitchJournalAction::ResumeFromCommitBoundary)
+}
+
+/// Inputs to the shared switch commit boundary.
+struct SwitchCommit<'a> {
+    state: &'a AppState,
+    old_target_id: &'a str,
+    candidate_config: &'a Config,
+    canonical: &'a str,
+    was_running: bool,
+    resume_journal: Option<&'a SwitchJournal>,
+    /// Distinguishes the paths: the primary-switch path replaces the old
+    /// target id, so its session rows must move; the existing-array-target
+    /// path keeps both targets addressable and leaves session rows alone.
+    rename_sessions: bool,
+}
+
+/// Shared commit boundary for both switch paths: journal the plan, apply the
+/// commit (session rename + canonical config write), re-apply the runtime,
+/// and advance the journal to RuntimeApplied. The caller runs its own
+/// post-commit cleanup and then drives the journal to Completed.
+async fn commit_switch_and_apply_runtime(
+    commit: SwitchCommit<'_>,
+    journal: &mut SwitchJournal,
+) -> Result<bool> {
+    let state = commit.state;
+    // A same-target resume must reproduce the journaled candidate byte for
+    // byte; a divergence means the operator edited config between attempts
+    // and this retry would converge on a different switch than the one that
+    // was interrupted.
+    if let Some(prior) = commit.resume_journal
+        && prior.candidate_fingerprint != journal.candidate_fingerprint
+    {
+        return Err(StackError::AgentSwitchConflict {
+            reason: format!(
+                "the recomputed switch to `{}` no longer matches the interrupted attempt's candidate; restore the previous config or repair the switch journal before retrying",
+                prior.new_target_id
+            ),
+        });
+    }
+    persist_switch_journal(&state.runtime_paths.config_path, journal)?;
+    if commit.rename_sessions {
+        // Rename sessions to the new primary target BEFORE writing the new
+        // config. The rename can fail (e.g. a UNIQUE(target_id,
+        // agent_session_id) collision is detected up front), and if it does
+        // the on-disk config must stay untouched so config and DB never
+        // diverge. Re-running after a crash between rename and write is a
+        // no-op: zero rows still carry the old target id.
+        let rename_result = {
+            let store = state.state.lock().await;
+            store.rename_session_target_id(
+                commit.old_target_id,
+                &commit.candidate_config.array.primary_target,
+            )
+        };
+        if let Err(rename_error) = rename_result {
+            // The collision check rejects before any row moves and the config
+            // write below has not run, so nothing durable changed: drop the
+            // Planned journal persisted above rather than strand an
+            // in-progress record that would 409 every later switch while a
+            // same-target retry just reproduces the collision.
+            if matches!(rename_error, StackError::SessionTargetRenameConflict { .. }) {
+                remove_switch_journal(&state.runtime_paths.config_path)?;
+            }
+            return Err(rename_error);
+        }
+    }
+    crate::fs_util::atomic_write_owner_only(
+        &state.runtime_paths.config_path,
+        commit.canonical.as_bytes(),
+    )?;
+    state.refresh_array_runtime_from_disk().await?;
+    journal.phase = SwitchJournalPhase::Committed;
+    persist_switch_journal(&state.runtime_paths.config_path, journal)?;
+    let restart_started = apply_switch_runtime(
+        state,
+        commit.old_target_id,
+        &commit.candidate_config.array.primary_target,
+        commit.candidate_config,
+        commit.was_running,
+    )
+    .await?;
+    journal.phase = SwitchJournalPhase::RuntimeApplied;
+    persist_switch_journal(&state.runtime_paths.config_path, journal)?;
+    Ok(restart_started)
+}
+
+/// Post-commit resume. The candidate config is already on disk (the write is
+/// the commit marker), so planning, secret migration, install, provisioning,
+/// model discovery, and skills porting are NOT re-run: they are pre-commit,
+/// idempotent, and slow (install plus model discovery burn minutes), and the
+/// only step a retry must converge is the post-commit runtime re-apply. The
+/// response therefore reports those pre-commit fields as empty/skipped and
+/// uses the journaled `was_running`, which a process restart could not
+/// re-observe.
+async fn resume_committed_switch(
+    state: &AppState,
+    registry: &RegistryCatalog,
+    fresh_config: Config,
+    journal: &SwitchJournal,
+    drop_requested: bool,
+) -> Result<ApiSuccess<AgentSwitchResponse>> {
+    let target_entry = registry.lookup_required(&journal.target_agent_id)?;
+    let mut candidate_config = fresh_config.clone();
+    candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    state.refresh_array_runtime_from_disk().await?;
+    let restart_started = apply_switch_runtime(
+        state,
+        &journal.old_target_id,
+        &fresh_config.array.primary_target,
+        &candidate_config,
+        journal.was_running,
+    )
+    .await?;
+    let mut journal = journal.clone();
+    journal.phase = SwitchJournalPhase::RuntimeApplied;
+    persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
+
+    // `--drop` cleanup cannot be reconstructed on a post-commit resume: the
+    // source agent's identity was renamed away with its target, so there is
+    // no trustworthy config left to clean against. Surface the skip rather
+    // than silently dropping the flag.
+    let cleanup_errors = if drop_requested {
+        let message = format!(
+            "source agent config cleanup was skipped because the switch to `{}` was already committed before this retry; remove the old agent's config manually",
+            journal.target_agent_id
+        );
+        tracing::warn!(%message);
+        vec![message]
+    } else {
+        Vec::new()
+    };
+
+    journal.phase = SwitchJournalPhase::Completed;
+    persist_switch_journal(&state.runtime_paths.config_path, &journal)?;
+
+    Ok(ApiSuccess::new(AgentSwitchResponse {
+        old_agent_id: old_agent_label(&candidate_config, &journal.old_target_id),
+        agent_id: journal.target_agent_id.clone(),
+        provider_status: "resumed",
+        provider: candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.clone()),
+        api_key_ref: candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.api_key_ref.clone()),
+        required_env_refs: candidate_config.agent.env.clone(),
+        secret_migrations: Vec::new(),
+        install: None,
+        restarted: journal.was_running,
+        restart_started,
+        set_model: false,
+        models: Vec::new(),
+        follow_up: None,
+        provisioned: Vec::new(),
+        skills_port: None,
+        skills_link: None,
+        skills_link_error: None,
+        cleaned_configs: Vec::new(),
+        cleanup_errors,
+    }))
+}
+
+/// Retry of a switch that already Completed: the journal plus the on-disk
+/// primary prove convergence, so the response is a pure no-op — no rewrite,
+/// no stop/start, no install re-run. `old_agent_id` reports the current agent
+/// (which is the target) because nothing changed.
+fn completed_switch_response(
+    fresh_config: &Config,
+    journal: &SwitchJournal,
+) -> ApiSuccess<AgentSwitchResponse> {
+    ApiSuccess::new(AgentSwitchResponse {
+        old_agent_id: fresh_config.agent.id.clone(),
+        agent_id: journal.target_agent_id.clone(),
+        provider_status: "no_op",
+        provider: fresh_config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.clone()),
+        api_key_ref: fresh_config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.api_key_ref.clone()),
+        required_env_refs: fresh_config.agent.env.clone(),
+        secret_migrations: Vec::new(),
+        install: None,
+        restarted: false,
+        restart_started: false,
+        set_model: false,
+        models: Vec::new(),
+        follow_up: None,
+        provisioned: Vec::new(),
+        skills_port: None,
+        skills_link: None,
+        skills_link_error: None,
+        cleaned_configs: Vec::new(),
+        cleanup_errors: Vec::new(),
+    })
+}
+
+/// Post-commit the old primary target is still present in the config only on
+/// the existing-array-target path; the primary-switch path renames it to the
+/// new agent id. In the renamed-away case the old target id already IS the
+/// old agent id (config loading rewrites the primary target id to the agent
+/// id), so falling back to it reports the right thing.
+fn old_agent_label(config: &Config, old_target_id: &str) -> String {
+    config
+        .array
+        .target(old_target_id)
+        .map(|target| target.agent.id.clone())
+        .unwrap_or_else(|| old_target_id.to_owned())
 }
 
 fn rename_default_target_config(

@@ -28,7 +28,9 @@ pub const ADMIN_KEY: &str = "acps_admin_dddddddddddddddddddddddddddddddddddddddd
 pub struct AgentHarness {
     pub base_url: String,
     pub config_path: std::path::PathBuf,
-    pub _tempdir: TempDir,
+    // Option so `respawn` can hand the dir to the replacement harness; a
+    // plain `TempDir` could never move out of a `Drop` type.
+    tempdir: Option<TempDir>,
     pub state: Arc<TokioMutex<StateStore>>,
     pub join: JoinHandle<acp_stack::error::Result<()>>,
 }
@@ -45,13 +47,32 @@ impl AgentHarness {
             config.workspace.root = workspace.to_string_lossy().into_owned();
             config.workspace.uploads = workspace.join("uploads").to_string_lossy().into_owned();
         }
+        Self::spawn_in_tempdir(tempdir, config, true).await
+    }
+
+    /// Abort this server and boot a fresh one on the same tempdir, loading
+    /// the config from disk exactly as a restarted `acps` process would. Used
+    /// by the switch-journal tests to prove resume works across a process
+    /// restart, not just within one server lifetime.
+    pub async fn respawn(mut self) -> Self {
+        self.join.abort();
+        let tempdir = self.tempdir.take().expect("harness tempdir");
+        let config_path = tempdir.path().join("acps-config.toml");
+        let content = std::fs::read_to_string(&config_path).expect("on-disk config read");
+        let config = load_config_from_str(&content).expect("on-disk config parses");
+        Self::spawn_in_tempdir(tempdir, config, false).await
+    }
+
+    async fn spawn_in_tempdir(tempdir: TempDir, config: Config, write_config: bool) -> Self {
         let path = tempdir.path().join("state.sqlite");
         let config_path = tempdir.path().join("acps-config.toml");
-        std::fs::write(
-            &config_path,
-            config.to_canonical_toml().expect("canonical test config"),
-        )
-        .expect("test config write");
+        if write_config {
+            std::fs::write(
+                &config_path,
+                config.to_canonical_toml().expect("canonical test config"),
+            )
+            .expect("test config write");
+        }
         let store = StateStore::open(&path).expect("state open");
         store.migrate().expect("migrate");
         let effective_bind = config.api.bind.clone();
@@ -71,7 +92,7 @@ impl AgentHarness {
         Self {
             base_url,
             config_path,
-            _tempdir: tempdir,
+            tempdir: Some(tempdir),
             state,
             join,
         }
@@ -297,7 +318,15 @@ pub fn write_installed_skill(root: &std::path::Path, name: &str, descriptor: &st
 }
 
 pub fn write_kimi_registry_override(config_dir: &std::path::Path) {
-    let body = r#"
+    write_kimi_registry_override_with_command(config_dir, "true");
+}
+
+/// Same as `write_kimi_registry_override` but with a caller-chosen harness
+/// command, so a test can point the switch target's runtime at a binary that
+/// does not exist yet and create it between attempts.
+pub fn write_kimi_registry_override_with_command(config_dir: &std::path::Path, command: &str) {
+    let body = format!(
+        r#"
 [[agents]]
 id = "kimi"
 name = "Kimi Code"
@@ -310,12 +339,13 @@ agent_skills_install_dir = "~/.agents/skills"
 support_doc = "docs/agents/kimi.md"
 
 [agents.harness]
-id = "true"
+id = "{command}"
 
 [agents.harness.install.shell]
 script = "true"
 creates = "true"
-"#;
+"#
+    );
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
@@ -410,6 +440,44 @@ script = "true"
 creates = "true"
 "#;
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
+}
+
+/// Write an executable shim that execs the placebo ACP binary. Combined with
+/// a registry override (or array target) whose command is the shim's path, a
+/// test can make a switch target's start fail while the path does not exist
+/// and converge once the shim is created — without touching the committed
+/// config, which would change the switch journal's candidate fingerprint.
+pub fn write_placebo_shim(path: &std::path::Path) {
+    let body = format!(
+        "#!/bin/sh\nexec '{}' acp\n",
+        env!("CARGO_BIN_EXE_placebo-agent")
+    );
+    std::fs::write(path, body).expect("placebo shim write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("placebo shim chmod");
+    }
+}
+
+/// Variant of `write_placebo_shim` that exits 1 until `marker` exists. The
+/// shim file itself is present from the start so the installer's
+/// resolve-and-spawn gate passes; only the agent launch fails. Creating the
+/// marker "fixes" the launch without touching the committed config.
+pub fn write_gated_placebo_shim(path: &std::path::Path, marker: &std::path::Path) {
+    let body = format!(
+        "#!/bin/sh\nif [ ! -f '{}' ]; then\n  echo 'gated placebo shim: marker missing' >&2\n  exit 1\nfi\nexec '{}' acp\n",
+        marker.to_string_lossy(),
+        env!("CARGO_BIN_EXE_placebo-agent")
+    );
+    std::fs::write(path, body).expect("gated placebo shim write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("gated placebo shim chmod");
+    }
 }
 
 pub fn write_config_options_fixture(root: &std::path::Path, models: &[&str]) -> std::path::PathBuf {
