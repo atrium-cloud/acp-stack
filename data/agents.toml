@@ -400,16 +400,30 @@ script = '''
 set -eu
 managed_bin="${HOME}/.local/bin"
 managed_hermes="${managed_bin}/hermes"
-hermes_src="${HOME}/.hermes/hermes-agent"
+hermes_home="${HOME}/.hermes"
+hermes_src="${hermes_home}/hermes-agent"
 mkdir -p "$managed_bin"
 # Fetch to a file rather than piping into bash so the installer keeps the
 # runtime's empty stdin (no prompt can consume the script body) and a curl
-# failure is fatal without pipefail.
+# failure is fatal without pipefail. The script is ~150KB and fetches in
+# under a second from a healthy host, so a fetch still going at 15s means a
+# dead host -- fail over to the official GitHub-hosted installer rather than
+# burn the install-step budget (the Hermes release ships no binary assets,
+# so a release-asset fallback is not possible).
 installer="$(mktemp)"
 trap 'rm -f "$installer"' EXIT INT TERM
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$installer"
-test -s "$installer"
-bash "$installer" --skip-browser </dev/null
+fetch_installer() {
+    curl -fsSL --connect-timeout 10 --max-time 15 "$1" -o "$installer" && test -s "$installer"
+}
+if ! fetch_installer https://hermes-agent.nousresearch.com/install.sh; then
+    echo "vendor installer download failed; falling back to the GitHub-hosted installer" >&2
+    fetch_installer https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh
+fi
+# --skip-browser does not skip the upstream Computer Use install, which has
+# its own long timeout; --skip-computer-use does. --dir/--hermes-home keep
+# root installs off the upstream FHS layout (/usr/local/lib + /usr/local/bin)
+# so the managed paths asserted below stay accurate for every user.
+bash "$installer" --skip-setup --skip-browser --skip-computer-use --non-interactive --dir "$hermes_src" --hermes-home "$hermes_home" </dev/null
 test -x "$managed_hermes"
 # Current installers bundle ACP mode; older ones need the optional extra
 # installed into the checkout's venv, so only reach for uv when the ACP
