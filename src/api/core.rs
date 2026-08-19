@@ -137,6 +137,11 @@ pub struct AppState {
     pub(crate) native_config_imports:
         Arc<TokioMutex<crate::runtime::agent::native_config_import::NativeConfigImportState>>,
     pub(crate) native_config_mutation_lock: Arc<TokioMutex<()>>,
+    /// Serializes `/v1/deps/apply` against itself. The apply runs operator
+    /// install snippets that can take minutes, so it must not hold the shared
+    /// `state` mutex — this lock carries the "back-to-back applies queue, not
+    /// interleave" guarantee on its own, without parking unrelated handlers.
+    pub(crate) deps_apply_lock: Arc<TokioMutex<()>>,
     pub(crate) session_changes: SessionChangesHandle,
     pub event_hub: EventHub,
     pub commands: CommandGateway,
@@ -488,6 +493,7 @@ impl AppState {
                 crate::runtime::agent::native_config_import::NativeConfigImportState::default(),
             )),
             native_config_mutation_lock: Arc::new(TokioMutex::new(())),
+            deps_apply_lock: Arc::new(TokioMutex::new(())),
             session_changes: SessionChangesHandle::new(),
             event_hub,
             commands,
