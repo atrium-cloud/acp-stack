@@ -185,6 +185,8 @@ The target agent is positional. Non-interactive runs require `--admin-key`; inte
 
 Switch preserves runtime-scoped config, including workspace, MCP declarations, permissions, secrets config, and sessions. By default, it also preserves source agent-owned config, secrets, and installed harnesses/adapters so switching back is fast. `--drop` removes only source agent-owned config after the target switch succeeds. It does not delete runtime MCP declarations, secrets, binaries, adapters, or sessions.
 
+A switch is journaled (`agent-switch.json` beside the canonical config) so a failure after the config write — e.g. the new agent's first start — does not strand the daemon: retrying the same target resumes the interrupted switch and converges it (reported as `provider_status: "resumed"`), retrying a finished switch is a no-op success (`provider_status: "no_op"`), and requesting a different target while a switch is incomplete fails with `409 agent.switch_conflict`.
+
 `acps agent provider` manages mapped providers and their encrypted credential catalog:
 
 ```sh

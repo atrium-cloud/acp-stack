@@ -608,6 +608,12 @@ pub enum StackError {
     #[error("agent does not support `{name}`")]
     AgentUnsupportedCapability { name: &'static str },
 
+    #[error("agent switch conflict: {reason}")]
+    AgentSwitchConflict { reason: String },
+
+    #[error("agent switch journal at {path} is corrupt: {reason}")]
+    AgentSwitchJournalCorrupt { path: PathBuf, reason: String },
+
     #[error("agent API request to {path} failed: {source}")]
     AgentApiRequest {
         path: &'static str,

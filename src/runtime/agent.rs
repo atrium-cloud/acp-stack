@@ -15,3 +15,4 @@ pub mod session_sink;
 pub(crate) mod stale_prompt_sweeper;
 pub mod supervisor;
 pub mod switch;
+pub mod switch_journal;

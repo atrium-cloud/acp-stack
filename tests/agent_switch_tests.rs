@@ -19,3 +19,5 @@ mod secrets_drop;
 mod skills;
 #[path = "agent_switch_tests/switch_install.rs"]
 mod switch_install;
+#[path = "agent_switch_tests/switch_journal.rs"]
+mod switch_journal;

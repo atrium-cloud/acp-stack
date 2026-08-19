@@ -15,6 +15,7 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         PromptBodyEmpty => "prompt.body_empty",
         PromptBodyInvalid(_) => "prompt.body_invalid",
         PromptUnsupportedModality { .. } => "prompt.unsupported_modality",
+        SessionTargetRenameConflict { .. } => "session.target_rename_conflict",
         _ => return None,
     })
 }
@@ -37,6 +38,13 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         PromptUnsupportedModality { model, modality } => {
             format!("model `{model}` does not support `{modality}` prompt input")
         }
+        SessionTargetRenameConflict {
+            old_target_id,
+            new_target_id,
+            count,
+        } => format!(
+            "cannot move {count} session(s) from `{old_target_id}` to `{new_target_id}`: the new target already has session(s) with the same agent session id"
+        ),
         _ => return None,
     })
 }
@@ -48,6 +56,7 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         SessionClosed { .. } | SessionNotActive { .. } | PromptSessionMismatch { .. } => {
             StatusCode::CONFLICT
         }
+        SessionTargetRenameConflict { .. } => StatusCode::CONFLICT,
         PromptBodyEmpty | PromptBodyInvalid(_) | PromptUnsupportedModality { .. } => {
             StatusCode::BAD_REQUEST
         }
