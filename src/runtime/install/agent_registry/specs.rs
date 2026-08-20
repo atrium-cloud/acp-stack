@@ -12,14 +12,34 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub struct HarnessSpec {
     pub id: String,
+    /// Arguments appended to the harness command to enter ACP stdio mode.
+    /// Most harnesses expose an `acp` subcommand; the field exists for the
+    /// ones that use a flag instead (Cline launches as `cline --acp`).
+    #[serde(default = "default_acp_args")]
+    pub acp_args: Vec<String>,
     pub install: InstallSet,
     #[serde(default)]
     pub update: UpdateSet,
 }
 
+/// The conventional ACP entry point: an `acp` subcommand. Shared by the
+/// serde default and by test/fixture `HarnessSpec` literals so the
+/// convention lives in exactly one place.
+pub fn default_acp_args() -> Vec<String> {
+    vec!["acp".to_owned()]
+}
+
 impl HarnessSpec {
     pub(super) fn validate(&self, agent_id: &str, github: Option<&str>) -> Result<()> {
         validate_nonempty(agent_id, "harness.id", &self.id)?;
+        if self.acp_args.is_empty() {
+            return Err(StackError::RegistryLoad {
+                reason: format!("agent `{agent_id}` harness.acp_args must not be empty"),
+            });
+        }
+        for arg in &self.acp_args {
+            validate_nonempty(agent_id, "harness.acp_args", arg)?;
+        }
         self.install.validate(agent_id, "harness.install", github)?;
         if self.install.is_provided_by_adapter() && !self.update.is_empty() {
             return Err(StackError::RegistryLoad {

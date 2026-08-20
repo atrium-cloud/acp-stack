@@ -240,6 +240,16 @@ provider_ids = ["kilocode"]
 companion_env_vars = []
 optional_env_vars = []
 
+# KILO_API_KEY is the Kilo CLI's key: it authenticates the `kilo` Kilo Gateway
+# provider (OpenCode routing) and is also scoped to the `kilo` agent. Distinct
+# from KILOCODE_API_KEY above, which keys the `kilocode` provider (Hermes).
+[[api_keys]]
+env_var = "KILO_API_KEY"
+provider_ids = ["kilo"]
+agent_ids = ["kilo"]
+companion_env_vars = []
+optional_env_vars = []
+
 # MODEL_API_KEY (Hermes' `meta-ai` key) stays out of this list: it is
 # declared as the hermes override in providers.toml, following the zai pattern.
 [[api_keys]]
@@ -299,6 +309,7 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "CLINE_API_KEY"
 provider_ids = ["cline-pass"]
+agent_ids = ["cline"]
 companion_env_vars = []
 optional_env_vars = []
 

@@ -504,7 +504,7 @@ fn agent_config_from_registry_entry(config: &Config, entry: &RegistryEntry) -> R
                     reason: format!("agent `{}` is missing harness metadata", entry.id),
                 })?;
             agent.command = harness.id.clone();
-            agent.args = vec!["acp".to_owned()];
+            agent.args = harness.acp_args.clone();
         }
         RegistryKind::Adapter => {
             let adapter = entry

@@ -25,6 +25,8 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | Claude Code | adapter | `claude-agent-acp` | yes          |
 | Kimi Code   | native  |                    | yes          |
 | Hermes Agent | native |                    | yes          |
+| Cline       | native  |                    | yes          |
+| Kilo Code   | native  |                    | yes          |
 
 MCP support is determined per install from the agent's ACP `initialize` advertisement (see [registry.md](registry.md)); servers the advertisement does not cover are ignored at runtime.
 
@@ -40,9 +42,7 @@ An agent whose harness discovers skills somewhere other than its managed install
 
 ## Currently Unsupported
 
-- Cortex Code: Snowflake-specific, not a general-purpose ACP target;
-- Kilo: exposes a host/port ACP server rather than a stdio ACP peer;
-- Cline: ACP session setup requires an auth path that is not headless API-key based.
+- Cortex Code: Snowflake-specific, not a general-purpose ACP target.
 
 ## Deprecated
 

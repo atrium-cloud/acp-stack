@@ -16,6 +16,8 @@ How each harness reads resolved provider credentials:
 | Claude Code | provider env refs exposed through Claude settings, or native cloud provider credentials |
 | Kimi Code   | stored as `KIMI_API_KEY`, translated to Kimi's process-only `KIMI_MODEL_*` contract      |
 | Hermes Agent | provider-native env refs, with the model lane written to `~/.hermes/config.yaml`        |
+| Cline       | reads `CLINE_API_KEY` from the environment; provider selection stays with `CLINE_PROVIDER` when set |
+| Kilo Code   | reads `KILO_API_KEY` or provider-native env vars from the environment                    |
 
 Codex requires a Responses-API-compatible upstream for any non-OpenAI provider. OpenRouter's OpenResponses (beta) endpoint is the mapped option `acps` supports today.
 

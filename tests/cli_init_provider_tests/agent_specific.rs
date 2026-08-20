@@ -187,6 +187,82 @@ fn init_kimi_explicit_model_skips_acp_discovery_and_persists_canonical_secret_re
 }
 
 #[test]
+fn init_cline_writes_acp_flag_args_and_persists_canonical_secret_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("CLINE_API_KEY", "test-cline-key")]);
+    // Cline's provider/model live in its environment, so the explicit --model
+    // is validated against the advertised list; the fixture stands in for the
+    // live discovery session.
+    let options_path = write_acp_config_options(tempdir.path(), &["claude-sonnet-4.6"], &[]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "cline",
+            "--model",
+            "claude-sonnet-4.6",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Cline (cline)"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "cline""#));
+    assert!(config.contains(r#"command = "cline""#));
+    // Cline enters ACP mode through a flag, not an `acp` subcommand.
+    assert!(config.contains(r#"args = ["--acp"]"#));
+    assert!(config.contains(r#"env = ["CLINE_API_KEY"]"#));
+    assert!(config.contains(r#"model = "claude-sonnet-4.6""#));
+    assert!(!config.contains("test-cline-key"));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn init_kilo_writes_env_scoped_config_and_persists_canonical_secret_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("KILO_API_KEY", "test-kilo-key")]);
+    let options_path = write_acp_config_options(tempdir.path(), &["kilo/auto"], &[]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kilo",
+            "--model",
+            "kilo/auto",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Kilo Code (kilo)"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "kilo""#));
+    assert!(config.contains(r#"command = "kilo""#));
+    assert!(config.contains(r#"args = ["acp"]"#));
+    assert!(config.contains(r#"env = ["KILO_API_KEY"]"#));
+    assert!(config.contains(r#"model = "kilo/auto""#));
+    assert!(!config.contains("test-kilo-key"));
+    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
 fn init_hermes_writes_provider_backed_config_and_hermes_yaml() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());

@@ -96,6 +96,9 @@ ACP session lifecycle calls pass CWDs as paths because ACP has no directory-hand
 | Codex        | discovered     | discovered     | discovered       | discovered     |
 | Kimi Code    | discovered     | discovered     | discovered       | discovered     |
 | Hermes Agent | discovered     | discovered     | discovered       | discovered     |
+| Claude Code  | discovered     | discovered     | discovered       | discovered     |
+| Cline        | discovered     | discovered     | discovered       | discovered     |
+| Kilo Code    | discovered     | discovered     | discovered       | discovered     |
 
 "Discovered" means the runtime trusts the value advertised by the agent's `initialize` response. When an agent reports `false` (or omits the flag), the matching `POST /v1/sessions/{id}/{load,resume,fork}` route returns HTTP 501 `agent.unsupported_capability` and the operator-facing alternative is to create a fresh session. The per-agent live behavior of these capabilities is captured in `docs/agents/{agent}.md`.
 

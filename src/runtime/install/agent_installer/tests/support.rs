@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::runtime::install::agent_registry::{
-    AdapterSpec, HarnessSpec, InstallProvidedBy, ShellInstall,
+    AdapterSpec, HarnessSpec, InstallProvidedBy, ShellInstall, default_acp_args,
 };
 use crate::state::StateStore;
 use std::os::unix::fs::PermissionsExt;
@@ -86,6 +86,7 @@ pub(crate) fn adapter_provided_install_set() -> InstallSet {
 pub(crate) fn harness_spec(id: &str, install: InstallSet) -> HarnessSpec {
     HarnessSpec {
         id: id.to_owned(),
+        acp_args: default_acp_args(),
         install,
         update: Default::default(),
     }

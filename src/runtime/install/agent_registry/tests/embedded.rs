@@ -21,7 +21,7 @@ fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
             "`{id}` writes a per-provider endpoint and must declare set_provider_base_url"
         );
     }
-    for id in ["goose", "amp", "kimi"] {
+    for id in ["goose", "amp", "kimi", "cline", "kilo"] {
         assert!(
             !catalog.supports_provider_base_url(id),
             "`{id}` has no per-provider endpoint field and must not declare set_provider_base_url"
@@ -95,7 +95,9 @@ fn embedded_registry_advertises_tested_headless_support() {
             "codex",
             "claude-code",
             "kimi",
-            "hermes"
+            "hermes",
+            "cline",
+            "kilo"
         ]
     );
     for entry in catalog
@@ -164,7 +166,9 @@ fn embedded_registry_contains_only_curated_examples() {
             "codex",
             "claude-code",
             "kimi",
-            "hermes"
+            "hermes",
+            "cline",
+            "kilo"
         ]
     );
     let amp = catalog.lookup("amp").expect("amp entry exists");
@@ -370,6 +374,61 @@ fn embedded_registry_contains_only_curated_examples() {
     // `python3` was a wrapper script, which made the upstream installer's
     // node-gyp step unbounded — a defect no budget could have absorbed.
     assert_eq!(hermes_shell.timeout_secs, None);
+    let cline = catalog.lookup("cline").expect("Cline entry exists");
+    assert_eq!(cline.name, "Cline");
+    assert_eq!(cline.kind, RegistryKind::Native);
+    assert!(cline.headless_compatible);
+    assert!(!cline.set_provider);
+    assert!(cline.set_model);
+    assert!(!cline.allow_custom_provider);
+    assert!(!cline.allow_custom_model);
+    assert!(cline.set_mode);
+    assert!(cline.supports_agent_skills);
+    assert_eq!(
+        cline.agent_skills_install_dir.as_deref(),
+        Some("~/.agents/skills")
+    );
+    assert!(!cline.subagents);
+    assert_eq!(cline.github.as_deref(), Some("cline/cline"));
+    assert_eq!(cline.support_doc.as_deref(), Some("docs/agents/cline.md"));
+    let cline_harness = cline.harness.as_ref().expect("Cline harness");
+    assert_eq!(cline_harness.id, "cline");
+    // Cline enters ACP mode through a flag, not an `acp` subcommand.
+    assert_eq!(cline_harness.acp_args, ["--acp"]);
+    let cline_npm = cline_harness
+        .install
+        .npm
+        .as_ref()
+        .expect("Cline npm install");
+    assert_eq!(cline_npm.package, "cline");
+    assert_eq!(cline_npm.creates, "cline");
+    let kilo = catalog.lookup("kilo").expect("Kilo Code entry exists");
+    assert_eq!(kilo.name, "Kilo Code");
+    assert_eq!(kilo.kind, RegistryKind::Native);
+    assert!(kilo.headless_compatible);
+    assert!(!kilo.set_provider);
+    assert!(kilo.set_model);
+    assert!(!kilo.allow_custom_provider);
+    assert!(!kilo.allow_custom_model);
+    assert!(kilo.set_mode);
+    assert!(kilo.supports_agent_skills);
+    assert_eq!(
+        kilo.agent_skills_install_dir.as_deref(),
+        Some("~/.agents/skills")
+    );
+    assert!(!kilo.subagents);
+    assert_eq!(kilo.github.as_deref(), Some("Kilo-Org/kilocode"));
+    assert_eq!(kilo.support_doc.as_deref(), Some("docs/agents/kilo.md"));
+    let kilo_harness = kilo.harness.as_ref().expect("Kilo Code harness");
+    assert_eq!(kilo_harness.id, "kilo");
+    assert_eq!(kilo_harness.acp_args, ["acp"]);
+    let kilo_npm = kilo_harness
+        .install
+        .npm
+        .as_ref()
+        .expect("Kilo Code npm install");
+    assert_eq!(kilo_npm.package, "@kilocode/cli");
+    assert_eq!(kilo_npm.creates, "kilo");
     for entry in catalog.entries() {
         for shell in [
             entry

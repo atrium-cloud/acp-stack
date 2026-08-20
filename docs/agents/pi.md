@@ -39,6 +39,6 @@ Cloudflare providers require companion env refs alongside the main API key. Note
 
 ## Session Resume
 
-`session/load`, `session/resume`, and `session/list` are discovered from the `pi-acp` adapter's `initialize` reply at runtime; `data/agents.toml` does not pin a value. End-to-end resume behavior against `acp-stack` is not currently confirmed.
+`session/load`, `session/resume`, and `session/list` are discovered from the `pi-acp` adapter's `initialize` reply at runtime; `data/agents.toml` does not pin a value.
 
 If the live ACP connection to `pi-acp` drops, `restart = "on-crash"` relaunches the supervised agent automatically. Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect through `GET /v1/sessions/{id}/snapshot`, wait for the agent process to be running, then call `POST /v1/sessions/{id}/resume` when the new adapter advertises `sessionCapabilities.resume`. If `session/resume` is unsupported, prompt resumption is not possible and a fresh session is the recovery path.

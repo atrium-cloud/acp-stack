@@ -37,6 +37,6 @@ Models are not persisted as `GOOSE_MODEL`. `acps` applies the configured model t
 
 ## Session Resume
 
-`session/load`, `session/resume`, and `session/list` are discovered from the Goose `initialize` reply at runtime; `data/agents.toml` does not pin a value. End-to-end resume behavior against `acp-stack` is not currently confirmed.
+`session/load`, `session/resume`, and `session/list` are discovered from the Goose `initialize` reply at runtime; `data/agents.toml` does not pin a value.
 
 If the live ACP connection to `goose acp` drops, `restart = "on-crash"` relaunches the supervised agent automatically. Any prompt that was mid-stream is flipped to `stalled` once the stale-prompt sweeper observes no further updates beyond `[prompts].stale_threshold`. Clients reconnect by calling `GET /v1/sessions/{id}/snapshot`, wait for the agent process to be running, then call `POST /v1/sessions/{id}/resume` when the new Goose advertises `sessionCapabilities.resume`. Otherwise the practical recovery is a fresh session, with durable event history preserved.
