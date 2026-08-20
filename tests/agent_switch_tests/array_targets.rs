@@ -3,12 +3,36 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use acp_stack::runtime::agent::switch_journal::switch_journal_path;
+use acp_stack::secrets::{ManagedCredentialSelection, SecretStore};
 
 use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, add_codex_placebo_target, add_hermes_placebo_target, add_kimi_placebo_target,
     admin_bearer, http, session_bearer, test_config,
 };
+
+/// Stage an externally-owned credential carrying an endpoint override, the way
+/// a managed-state apply would leave it, so the switch guard has a live
+/// routing decision to protect.
+fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
+    let mut store = SecretStore::open_or_create(home).expect("secret store");
+    store
+        .apply_managed_state_credential(
+            "platform-state",
+            "provider-credential",
+            1,
+            Some(ManagedCredentialSelection {
+                provider_id: provider_id.to_owned(),
+                values: std::collections::BTreeMap::from([(
+                    "TEST_API_KEY".to_owned(),
+                    "sk-test".to_owned(),
+                )]),
+                source_refs: std::collections::BTreeMap::new(),
+                base_url: Some(format!("http://127.0.0.1:3129/{provider_id}")),
+            }),
+        )
+        .expect("stage override");
+}
 
 #[tokio::test]
 async fn agent_switch_selects_existing_array_target_config() {
@@ -287,5 +311,101 @@ async fn agent_switch_to_existing_running_target_keeps_it_running() {
         targets
             .iter()
             .any(|target| { target["id"] == "opencode" && target["process_state"] == "stopped" })
+    );
+}
+
+/// Selecting an existing Array target whose agent has no endpoint field would
+/// strand a stored override, so the selection is rejected before anything is
+/// journaled or written.
+#[tokio::test]
+async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_override() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    stage_endpoint_override(tempdir.path(), "openai");
+    let mut config = test_config();
+    config.array.enabled = true;
+    add_kimi_placebo_target(&mut config);
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
+
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "kimi" }))
+        .send()
+        .await
+        .expect("switch target");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert!(
+        body["error"]
+            .to_string()
+            .contains("agent `kimi` cannot route a provider through a custom endpoint"),
+        "{body}"
+    );
+
+    let config_after = std::fs::read_to_string(&harness.config_path).expect("config after");
+    assert_eq!(
+        config_after, config_before,
+        "a rejected selection must not rewrite the config"
+    );
+    let journal_path = switch_journal_path(&harness.config_path).expect("journal path");
+    assert!(
+        !journal_path.exists(),
+        "a rejected selection must not journal a switch"
+    );
+}
+
+/// The pair-level refusal also applies to target selection: codex reusing the
+/// overridden `openai` provider cannot carry the endpoint.
+#[tokio::test]
+async fn agent_switch_to_codex_target_reusing_overridden_openai_is_rejected() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    stage_endpoint_override(tempdir.path(), "openai");
+    let mut config = test_config();
+    config.array.enabled = true;
+    add_codex_placebo_target(&mut config);
+    let codex_target = config.array.targets.last_mut().expect("codex target");
+    codex_target.agent.provider = Some(acp_stack::config::AgentProviderConfig {
+        id: "openai".to_owned(),
+        model: Some("openai/gpt-5.5".to_owned()),
+        api_key_ref: None,
+        custom: None,
+    });
+    let harness = AgentHarness::spawn_with_config(config).await;
+    let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
+
+    let response = http()
+        .await
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "codex" }))
+        .send()
+        .await
+        .expect("switch target");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert!(
+        body["error"]
+            .to_string()
+            .contains("agent `codex` cannot route provider `openai` through a custom endpoint"),
+        "{body}"
+    );
+
+    let config_after = std::fs::read_to_string(&harness.config_path).expect("config after");
+    assert_eq!(
+        config_after, config_before,
+        "a rejected selection must not rewrite the config"
+    );
+    let journal_path = switch_journal_path(&harness.config_path).expect("journal path");
+    assert!(
+        !journal_path.exists(),
+        "a rejected selection must not journal a switch"
     );
 }

@@ -324,6 +324,17 @@ async fn switch_to_existing_array_target(
     let canonical = candidate_config.to_canonical_toml()?;
     let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
     candidate_config.agent.adapter = adapter_from_registry_entry(target_entry);
+    // Selecting an existing target repoints the native config the override
+    // lives in, so it faces the same survival check as a planned switch.
+    crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+        &target_entry.id,
+        target_entry.set_provider_base_url,
+        candidate_config
+            .agent
+            .provider
+            .as_ref()
+            .map(|provider| provider.id.as_str()),
+    )?;
     let _env = open_agent_env(&candidate_config)?;
     let required_env_refs = candidate_config.agent.env.clone();
 

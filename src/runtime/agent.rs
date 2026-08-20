@@ -7,6 +7,7 @@ pub(crate) mod inference_failure;
 pub mod mcp;
 pub mod model_catalog;
 pub mod model_discovery;
+pub mod model_wire;
 pub mod native_config_import;
 pub mod provider_keys;
 pub mod provider_model_catalog;

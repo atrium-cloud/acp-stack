@@ -61,10 +61,34 @@ pub(super) fn stage_init_config(
             entry
                 .ensure_supported()
                 .or_else(|error| finalize_failure(&store, &init_run, error))?;
+            // Re-confirming the same agent keeps its configured provider; an
+            // agent change clears it, so only the re-confirm path can land on
+            // the overridden provider.
+            let kept_provider_id = if entry.id == config.agent.id {
+                config
+                    .agent
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider.id.clone())
+            } else {
+                None
+            };
+            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                &entry.id,
+                entry.set_provider_base_url,
+                kept_provider_id.as_deref(),
+            )
+            .or_else(|error| finalize_failure(&store, &init_run, error))?;
             apply_registry_entry_to_config(&mut config, entry);
             true
         }
         Some(AgentSelection::Custom(spec)) => {
+            // A custom agent has no registry-managed native config surface, so
+            // there is nowhere an endpoint override could be written into.
+            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                &spec.id, false, None,
+            )
+            .or_else(|error| finalize_failure(&store, &init_run, error))?;
             apply_custom_agent_to_config(&mut config, spec);
             true
         }

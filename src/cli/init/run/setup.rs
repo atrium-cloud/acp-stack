@@ -144,11 +144,22 @@ pub(super) fn prepare_init_base(
     } else {
         let starter_config = starter_config(args)?;
         let mut new_config = config::load_config_from_str(&starter_config)?;
+        // The secret store can predate this init (an orchestrator applied an
+        // override before the first config existed), so even a fresh config
+        // must prove the override survives the agent being written.
         if let Some(spec) = &custom_agent_spec {
+            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                &spec.id, false, None,
+            )?;
             apply_custom_agent_to_config(&mut new_config, spec);
         } else if let Some(agent_id) = args.agent.as_deref() {
             let entry = registry.lookup_required(agent_id)?;
             entry.ensure_supported()?;
+            crate::runtime::agent::switch::ensure_endpoint_override_survives_target(
+                &entry.id,
+                entry.set_provider_base_url,
+                None,
+            )?;
             apply_registry_entry_to_config(&mut new_config, entry);
         }
         push_args_deps_to_config(&mut new_config, args)?;
