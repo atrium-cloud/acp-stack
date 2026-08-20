@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use crate::config::{AgentAdapterConfig, AgentProviderConfig, AgentProvidersConfig, Config};
 use crate::error::{Result, StackError};
 use crate::runtime::agent::provider_keys::{
-    api_key_ref_can_migrate_for_provider, env_refs_for_agent_id, env_var_for_agent_provider_id,
-    provider_id_is_known, provider_id_supports_agent, provider_uses_agent_native_auth,
+    agent_provider_accepts_endpoint_override, api_key_ref_can_migrate_for_provider,
+    env_refs_for_agent_id, env_var_for_agent_provider_id, provider_id_is_known,
+    provider_id_supports_agent, provider_uses_agent_native_auth,
     required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry, RegistryKind};
@@ -71,6 +72,49 @@ impl AgentSwitchProviderStatus {
     }
 }
 
+/// A stored endpoint override lives in the configured agent's native config,
+/// so every agent-change path (planned switch, existing-Array-target
+/// selection, init agent apply) must prove the override survives the target
+/// before committing: a target with no field to write it into, or a target
+/// whose provider is the overridden one on a pair that cannot carry an
+/// override, would silently drop a live routing decision and send protected
+/// traffic back to the vendor.
+pub fn ensure_endpoint_override_survives_target(
+    target_agent_id: &str,
+    target_supports_base_url: bool,
+    target_provider_id: Option<&str>,
+) -> Result<()> {
+    let home = crate::fs_util::home_dir()?;
+    let Some(endpoint) = crate::secrets::managed_provider_endpoint_override_for_home(&home)? else {
+        return Ok(());
+    };
+    if !target_supports_base_url {
+        return Err(StackError::InvalidParam {
+            field: "agent",
+            reason: format!(
+                "agent `{target_agent_id}` cannot route a provider through a custom endpoint, but \
+                 provider `{}` is currently routed through one; clear the managed-state \
+                 namespace's credential endpoint before switching",
+                endpoint.provider_id
+            ),
+        });
+    }
+    if target_provider_id == Some(endpoint.provider_id.as_str())
+        && !agent_provider_accepts_endpoint_override(target_agent_id, &endpoint.provider_id)
+    {
+        return Err(StackError::InvalidParam {
+            field: "agent",
+            reason: format!(
+                "agent `{target_agent_id}` cannot route provider `{}` through a custom endpoint; \
+                 clear the managed-state namespace's credential endpoint, or select `openrouter` \
+                 or a configured custom provider",
+                endpoint.provider_id
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub fn plan_agent_switch(
     current: &Config,
     registry: &RegistryCatalog,
@@ -84,30 +128,20 @@ pub fn plan_agent_switch(
             reason: format!("agent `{}` is already configured", entry.id),
         });
     }
-    // A stored endpoint override lives in the outgoing agent's native config.
-    // Switching to an agent with no field to write it into would silently drop
-    // a live routing decision, sending protected traffic back to the vendor.
-    if !entry.set_provider_base_url {
-        let home = crate::fs_util::home_dir()?;
-        if let Some(endpoint) = crate::secrets::managed_provider_endpoint_override_for_home(&home)?
-        {
-            return Err(StackError::InvalidParam {
-                field: "agent",
-                reason: format!(
-                    "agent `{}` cannot route a provider through a custom endpoint, but provider \
-                     `{}` is currently routed through one; clear the managed-state namespace's \
-                     credential endpoint before switching",
-                    entry.id, endpoint.provider_id
-                ),
-            });
-        }
-    }
 
     let old_agent_id = current.agent.id.clone();
     let mut config = current.clone();
     apply_switch_registry_entry(&mut config, entry);
     let (provider_status, required_env_refs, secret_migrations) =
         configure_switch_provider(current, &mut config, entry, request)?;
+    // Runs after provider resolution so the pair-level refusal (e.g. codex +
+    // openai) sees the provider the target would actually run — which also
+    // covers reusing the current provider unchanged.
+    ensure_endpoint_override_survives_target(
+        &entry.id,
+        entry.set_provider_base_url,
+        provider_status.provider_id(),
+    )?;
 
     Ok(AgentSwitchPlan {
         old_agent_id,
@@ -302,14 +336,7 @@ fn configure_switch_provider(
     let api_key_ref_was_explicit = request.api_key_ref.is_some();
     let explicit_api_key_ref = request.api_key_ref;
     let inherited_api_key_ref = current_provider.api_key_ref.clone();
-    let current_api_key_ref = match (
-        explicit_api_key_ref,
-        entry.id.as_str(),
-        current_provider.id.as_str(),
-    ) {
-        (None, "codex", "openai") => None,
-        (requested, _, _) => requested.or(inherited_api_key_ref.clone()),
-    };
+    let current_api_key_ref = explicit_api_key_ref.or_else(|| inherited_api_key_ref.clone());
     let (provider, refs, secret_migrations) = build_provider_for_target(
         &entry.id,
         &entry.name,
@@ -373,25 +400,6 @@ fn build_provider_for_target(
                 "provider `{provider_id}` is not supported for agent `{target_agent_id}`"
             ),
         });
-    }
-
-    if target_agent_id == "codex" && provider_id == "openai" {
-        if requested_api_key_ref.is_some() {
-            return Err(StackError::InvalidParam {
-                field: "api-key-ref",
-                reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
-            });
-        }
-        return Ok((
-            AgentProviderConfig {
-                id: provider_id,
-                model: None,
-                api_key_ref: None,
-                custom: None,
-            },
-            Vec::new(),
-            Vec::new(),
-        ));
     }
 
     let default_ref = env_var_for_agent_provider_id(target_agent_id, &provider_id);
@@ -518,7 +526,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -562,7 +570,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -607,7 +615,7 @@ mod tests {
         config.mcp = expected_mcp.clone();
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -628,7 +636,7 @@ mod tests {
         let config = valid_config();
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -659,7 +667,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -699,7 +707,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -737,7 +745,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -775,7 +783,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let error = plan_agent_switch(
+        let error = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -794,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_openai_reuse_drops_inherited_api_key_ref() {
+    fn codex_openai_reuse_keeps_inherited_api_key_ref() {
         let mut config = valid_config();
         config.agent.provider = Some(AgentProviderConfig {
             id: "openai".to_owned(),
@@ -804,7 +812,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -819,7 +827,7 @@ mod tests {
             plan.provider_status,
             AgentSwitchProviderStatus::Reused {
                 provider_id: "openai".to_owned(),
-                api_key_ref: None,
+                api_key_ref: Some("OPENAI_API_KEY".to_owned()),
             }
         );
         assert_eq!(
@@ -827,12 +835,11 @@ mod tests {
                 .agent
                 .provider
                 .as_ref()
-                .and_then(|provider| provider.api_key_ref.as_ref()),
-            None
+                .and_then(|provider| provider.api_key_ref.as_deref()),
+            Some("OPENAI_API_KEY")
         );
         assert!(
-            !plan
-                .config
+            plan.config
                 .agent
                 .env
                 .iter()
@@ -841,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_openai_reuse_rejects_explicit_api_key_ref() {
+    fn codex_openai_reuse_accepts_explicit_api_key_ref() {
         let mut config = valid_config();
         config.agent.provider = Some(AgentProviderConfig {
             id: "openai".to_owned(),
@@ -851,7 +858,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let error = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -860,12 +867,14 @@ mod tests {
                 api_key_ref: Some("OPENAI_API_KEY".to_owned()),
             },
         )
-        .expect_err("explicit key should be rejected for Codex OpenAI");
+        .expect("switch planned");
 
-        assert!(
-            error
-                .to_string()
-                .contains("Codex OpenAI uses Codex-native auth")
+        assert_eq!(
+            plan.provider_status,
+            AgentSwitchProviderStatus::Reused {
+                provider_id: "openai".to_owned(),
+                api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            }
         );
     }
 
@@ -880,7 +889,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let plan = plan_agent_switch(
+        let plan = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -925,7 +934,7 @@ mod tests {
         });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
-        let error = plan_agent_switch(
+        let error = plan_agent_switch_locked(
             &config,
             &registry,
             AgentSwitchRequest {
@@ -937,5 +946,211 @@ mod tests {
         .expect_err("custom provider migration is out of scope");
 
         assert!(error.to_string().contains("custom provider migration"));
+    }
+
+    // Serializes every test that can observe a staged endpoint override. The
+    // override guard resolves the secret store through `$HOME`, and the guard
+    // tests below repoint HOME at a temp home holding a staged override — so
+    // any other test calling `plan_agent_switch` while one of them runs would
+    // read that staged store and see its switch rejected. Every
+    // `plan_agent_switch` call in this module therefore goes through
+    // `plan_agent_switch_locked` (or runs while holding the lock via
+    // `HomeEnvGuard`), which makes the outcome independent of test scheduling.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn plan_agent_switch_locked(
+        current: &Config,
+        registry: &RegistryCatalog,
+        request: AgentSwitchRequest,
+    ) -> Result<AgentSwitchPlan> {
+        let _env_lock = env_lock();
+        super::plan_agent_switch(current, registry, request)
+    }
+
+    struct HomeEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let lock = env_lock();
+            let previous = std::env::var_os("HOME");
+            // SAFETY: HOME_LOCK serializes the HOME mutation against every
+            // other test in this module that touches the override store.
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the lock is still held, so restoring the prior HOME
+            // cannot race another test in this module.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    /// Stage an externally-owned credential carrying an endpoint override, the
+    /// way a managed-state apply would leave it.
+    fn stage_endpoint_override(home: &std::path::Path, provider_id: &str) {
+        let mut store = crate::secrets::SecretStore::open_or_create(home).expect("secret store");
+        store
+            .apply_managed_state_credential(
+                "platform-state",
+                "provider-credential",
+                1,
+                Some(crate::secrets::ManagedCredentialSelection {
+                    provider_id: provider_id.to_owned(),
+                    values: BTreeMap::from([("TEST_API_KEY".to_owned(), "sk-test".to_owned())]),
+                    source_refs: BTreeMap::new(),
+                    base_url: Some(format!("http://127.0.0.1:3129/{provider_id}")),
+                }),
+            )
+            .expect("stage override");
+    }
+
+    #[test]
+    fn override_guard_rejects_target_without_base_url_support() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _home = HomeEnvGuard::set(tempdir.path());
+        stage_endpoint_override(tempdir.path(), "openai");
+
+        let error = ensure_endpoint_override_survives_target("kimi", false, None)
+            .expect_err("a target with no endpoint field must be rejected");
+        assert!(
+            matches!(error, StackError::InvalidParam { field: "agent", .. }),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("agent `kimi` cannot route a provider through a custom endpoint"),
+            "{message}"
+        );
+        assert!(message.contains("openai"), "{message}");
+    }
+
+    #[test]
+    fn override_guard_passes_without_a_stored_override() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _home = HomeEnvGuard::set(tempdir.path());
+
+        ensure_endpoint_override_survives_target("kimi", false, None)
+            .expect("no override stored means any target passes");
+    }
+
+    /// An override for `openai` plus a codex target selecting `openai` fresh:
+    /// the pair cannot carry an override, so the plan is rejected.
+    #[test]
+    fn plan_switch_rejects_codex_openai_pair_with_fresh_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _home = HomeEnvGuard::set(tempdir.path());
+        stage_endpoint_override(tempdir.path(), "openai");
+        let mut config = valid_config();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("openai/gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        // `super::` because the lock is already held: these guard tests stage
+        // the override themselves and must not re-acquire HOME_LOCK.
+        let error = super::plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "codex".to_owned(),
+                provider_id: Some("openai".to_owned()),
+                api_key_ref: None,
+            },
+        )
+        .expect_err("codex + openai cannot carry the override");
+        let message = error.to_string();
+        assert!(
+            message
+                .contains("agent `codex` cannot route provider `openai` through a custom endpoint"),
+            "{message}"
+        );
+    }
+
+    /// Same refusal when the provider is reused rather than re-selected: the
+    /// target would still land on the overridden provider.
+    #[test]
+    fn plan_switch_rejects_codex_openai_pair_with_reused_provider() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _home = HomeEnvGuard::set(tempdir.path());
+        stage_endpoint_override(tempdir.path(), "openai");
+        let mut config = valid_config();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openai".to_owned(),
+            model: Some("openai/gpt-5.5".to_owned()),
+            api_key_ref: Some("OPENAI_API_KEY".to_owned()),
+            custom: None,
+        });
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let error = super::plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "codex".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect_err("codex + openai cannot carry the override");
+        assert!(
+            error
+                .to_string()
+                .contains("agent `codex` cannot route provider `openai` through a custom endpoint"),
+            "{error}"
+        );
+    }
+
+    /// Control: an override for `openrouter` does not block a codex switch
+    /// that selects `openrouter` — that pair accepts endpoint overrides.
+    #[test]
+    fn plan_switch_allows_codex_openrouter_with_openrouter_override() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _home = HomeEnvGuard::set(tempdir.path());
+        stage_endpoint_override(tempdir.path(), "openrouter");
+        let mut config = valid_config();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: Some("openrouter/deepseek/deepseek-v4-flash".to_owned()),
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = super::plan_agent_switch(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "codex".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect("codex + openrouter accepts an override");
+        assert_eq!(plan.target_agent_id, "codex");
     }
 }

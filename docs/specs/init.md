@@ -42,6 +42,7 @@ The operator-facing sequence, in order:
         - Non-interactive runs use `--custom-agent-*`.
         - The id must not be a registry agent id.
         - Provider/model setup is handled by the agent environment, not init flags.
+    - While a managed-state endpoint override is stored, an agent apply is rejected when the target cannot carry the override: a registry agent without `set_provider_base_url`, any custom agent, or a re-confirmed agent whose kept provider is the overridden one on a pair that refuses overrides (codex + `openai`). Clear the namespace's credential endpoint first; see [extensions.md](extensions.md#type-managed-state).
 4. Environment configuration (new config only).
     a. Standard setup
         - Install essential dependencies including `nodejs`, `python` 3.14, `git` (yes/no)
