@@ -1,0 +1,85 @@
+# Per-model wire shapes for providers whose model listings carry no wire
+# metadata: the OpenAI-style `GET /v1/models` listings return plain id-only
+# entries, so the wire each model speaks is mirrored from the provider docs
+# instead. Scoped to OpenCode Zen/Go today.
+#
+# Mirrored from:
+# [OpenCode Zen Docs - Endpoints](https://opencode.ai/docs/zen/#endpoints)
+# [OpenCode Go Docs - Endpoints](https://opencode.ai/docs/go/#endpoints)
+# Mirrored on 2026-08-20
+#
+# Refresh ritual: re-check those two pages when Zen/Go rotate models.
+#
+# The wire vocabulary is agent-neutral: chat_completions | anthropic_messages
+# | responses | google. `default` documents the listing's fallback wire, so
+# models on the default wire need no entry; the provisioning fallback itself
+# stays in providers.toml (`[providers.hermes].api_mode`) so there is exactly
+# one source of truth for it.
+
+[opencode]
+default = "chat_completions"
+
+[opencode.models]
+"claude-fable-5" = "anthropic_messages"
+"claude-opus-5" = "anthropic_messages"
+"claude-opus-4-8" = "anthropic_messages"
+"claude-opus-4-7" = "anthropic_messages"
+"claude-opus-4-6" = "anthropic_messages"
+"claude-opus-4-5" = "anthropic_messages"
+"claude-sonnet-5" = "anthropic_messages"
+"claude-sonnet-4-6" = "anthropic_messages"
+"claude-sonnet-4-5" = "anthropic_messages"
+"claude-haiku-4-5" = "anthropic_messages"
+"qwen3.7-max" = "anthropic_messages"
+"qwen3.7-plus" = "anthropic_messages"
+"qwen3.6-plus" = "anthropic_messages"
+"qwen3.5-plus" = "anthropic_messages"
+
+"gpt-5.6-sol" = "responses"
+"gpt-5.6-terra" = "responses"
+"gpt-5.6-luna" = "responses"
+"gpt-5.5" = "responses"
+"gpt-5.5-pro" = "responses"
+"gpt-5.4" = "responses"
+"gpt-5.4-pro" = "responses"
+"gpt-5.4-mini" = "responses"
+"gpt-5.4-nano" = "responses"
+"gpt-5.3-codex" = "responses"
+"gpt-5.3-codex-spark" = "responses"
+"gpt-5.2" = "responses"
+"gpt-5.2-codex" = "responses"
+"gpt-5.1" = "responses"
+"gpt-5.1-codex" = "responses"
+"gpt-5.1-codex-max" = "responses"
+"gpt-5.1-codex-mini" = "responses"
+"gpt-5" = "responses"
+"gpt-5-codex" = "responses"
+"gpt-5-nano" = "responses"
+"grok-4.6" = "responses"
+"grok-4.5" = "responses"
+"grok-build-0.1" = "responses"
+"muse-spark-1.2" = "responses"
+"muse-spark-1.2-contributor-free" = "responses"
+
+"gemini-3.7-flash" = "google"
+"gemini-3.6-flash" = "google"
+"gemini-3.5-flash" = "google"
+"gemini-3.5-flash-lite" = "google"
+"gemini-3.1-pro" = "google"
+"gemini-3-flash" = "google"
+
+[opencode-go]
+default = "chat_completions"
+
+[opencode-go.models]
+"minimax-m3" = "anthropic_messages"
+"minimax-m2.7" = "anthropic_messages"
+"minimax-m2.5" = "anthropic_messages"
+"qwen3.8-max" = "anthropic_messages"
+"qwen3.7-max" = "anthropic_messages"
+"qwen3.7-plus" = "anthropic_messages"
+"qwen3.6-plus" = "anthropic_messages"
+
+"grok-4.5" = "responses"
+"gpt-5.6-luna" = "responses"
+"muse-spark-1.2-contributor" = "responses"

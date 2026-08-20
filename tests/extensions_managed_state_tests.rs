@@ -703,11 +703,40 @@ async fn rejects_a_base_url_for_codex_built_in_openai() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("error envelope");
     assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert!(
+        body["error"]
+            .to_string()
+            .contains("invalid parameter `desired.selection.base_url`"),
+        "{body}"
+    );
     assert!(body["error"].to_string().contains("openrouter"), "{body}");
     // Rejected before any watermark or catalog persist.
     let store = harness.reopen_store();
     assert!(store.managed_state_record(NAMESPACE).is_none());
     assert!(store.provider_credential_set("openai").is_none());
+}
+
+/// The endpoint refusal is scoped to the routing decision, not to the key:
+/// Codex reads `OPENAI_API_KEY` natively, so a raw key for its built-in openai
+/// provider is an ordinary managed credential.
+#[tokio::test]
+async fn codex_accepts_a_keyed_openai_selection_without_a_base_url() {
+    let harness = ServerHarness::spawn().await;
+    use_codex_agent(&harness);
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(1, openai_selection("sk-a")),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let store = harness.reopen_store();
+    let credential = store
+        .provider_credential_set("openai")
+        .and_then(|set| set.sole.as_ref())
+        .expect("openai credential");
+    assert!(credential.base_url.is_none());
 }
 
 #[tokio::test]
@@ -1062,5 +1091,144 @@ async fn audit_event_records_outcome_without_values() {
     assert!(
         !payload.contains(secret_value),
         "audit payload must never carry credential values"
+    );
+}
+
+/// At most one provider may be rerouted at a time: a second namespace applying
+/// a `base_url` for a different provider is rejected before its watermark
+/// persists, and the same revision succeeds once the first endpoint clears.
+#[tokio::test]
+async fn a_second_provider_endpoint_override_is_rejected_until_the_first_is_cleared() {
+    let harness = ServerHarness::spawn().await;
+    use_endpoint_capable_agent(&harness);
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                1,
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+            ),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = harness
+        .post_apply(
+            PEER_NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                1,
+                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129/openrouter"),
+            ),
+        )
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("error envelope");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert!(
+        body["error"]
+            .to_string()
+            .contains("only one provider may be rerouted at a time"),
+        "{body}"
+    );
+    assert!(
+        harness
+            .reopen_store()
+            .managed_state_record(PEER_NAMESPACE)
+            .is_none(),
+        "rejected before the watermark persists, so the revision stays reusable"
+    );
+
+    // Clearing the first namespace's endpoint unblocks the same revision.
+    let response = harness
+        .post_apply(NAMESPACE, ADMIN_KEY, apply_body(2, Value::Null))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_apply(
+            PEER_NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                1,
+                openrouter_selection_with_base_url("sk-b", "http://127.0.0.1:3129/openrouter"),
+            ),
+        )
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["outcome"], "applied");
+    assert_eq!(body["data"]["applied_revision"], 1);
+}
+
+/// The singleton rule is scoped to distinct providers: advancing the same
+/// provider's endpoint under one namespace is an ordinary rotation.
+#[tokio::test]
+async fn re_applying_an_endpoint_for_the_same_provider_is_allowed() {
+    let harness = ServerHarness::spawn().await;
+    use_endpoint_capable_agent(&harness);
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                1,
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+            ),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                2,
+                openai_selection_with_base_url("sk-b", "http://127.0.0.1:3129/openai-2"),
+            ),
+        )
+        .await;
+    let status = response.status();
+    let body: Value = response.json().await.expect("envelope");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["outcome"], "applied");
+}
+
+/// An applied override changes where the provider's catalog is fetched from,
+/// so the cached listing for that provider must be dropped.
+#[tokio::test]
+async fn applying_an_override_invalidates_the_provider_model_cache() {
+    let harness = ServerHarness::spawn().await;
+    use_endpoint_capable_agent(&harness);
+    let cache_path = acp_stack::runtime::agent::provider_model_catalog::cache_path(&harness.home);
+    std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &cache_path,
+        br#"{"version": 1, "providers": {"openai": {"fetched_at": 100, "models": [{"value": "openai/gpt-5.5"}]}}}"#,
+    )
+    .expect("prime cache");
+    assert!(
+        acp_stack::runtime::agent::provider_model_catalog::cached_models(&harness.home, "openai")
+            .is_some()
+    );
+
+    let response = harness
+        .post_apply(
+            NAMESPACE,
+            ADMIN_KEY,
+            apply_body(
+                1,
+                openai_selection_with_base_url("sk-a", "http://127.0.0.1:3129/openai"),
+            ),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        acp_stack::runtime::agent::provider_model_catalog::cached_models(&harness.home, "openai")
+            .is_none(),
+        "an applied override must invalidate the provider's cached catalog"
     );
 }

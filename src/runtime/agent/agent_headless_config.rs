@@ -19,10 +19,12 @@ use crate::runtime::agent::config_io::{
     ensure_object_field, ensure_toml_table_field, insert_if_missing, read_json_object,
     read_toml_table, read_yaml_mapping, write_json_object, write_toml_table, write_yaml_mapping,
 };
+use crate::runtime::agent::model_wire::{ModelWire, model_wire};
 use crate::runtime::agent::provider_keys::{
     CLAUDE_CODE_AGENT_ID, CODEX_OPENAI_PROVIDER_ID, ClaudeCodeProviderProfile,
     agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
-    effective_active_provider_ids, env_var_for_agent_provider_id, provider_name_for_provider_id,
+    effective_active_provider_ids, env_var_for_agent_provider_id, hermes_api_mode_for_provider_id,
+    provider_name_for_provider_id,
 };
 
 mod claude_code;
@@ -40,8 +42,8 @@ use self::opencode::*;
 use self::pi::*;
 
 pub(crate) use self::codex::CODEX_OPENROUTER_PROVIDER_ID;
-pub(crate) use self::hermes::HERMES_AGENT_ID;
 pub(crate) use self::opencode::{OPENCODE_AGENT_ID, OPENCODE_DISABLED_SMALL_MODEL};
+pub(crate) use crate::runtime::agent::provider_keys::HERMES_AGENT_ID;
 
 pub(crate) const CLAUDE_CODE_MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
@@ -319,7 +321,7 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
-        HERMES_AGENT_ID => provision_hermes_config(config, home).map(|paths| {
+        HERMES_AGENT_ID => provision_hermes_config(config, home, endpoint).map(|paths| {
             paths
                 .into_iter()
                 .map(|path| ProvisionedAgentConfig {

@@ -10,6 +10,8 @@ mod basic_mcp;
 mod custom_agent;
 #[path = "cli_init_tests/deps_updates.rs"]
 mod deps_updates;
+#[path = "cli_init_tests/endpoint_override.rs"]
+mod endpoint_override;
 #[path = "cli_init_tests/mcp_validation.rs"]
 mod mcp_validation;
 #[path = "cli_init_tests/skills_flags.rs"]

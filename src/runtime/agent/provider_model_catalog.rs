@@ -6,6 +6,10 @@
 //! endpoint (declared as `models_url` in `data/providers.toml`) with the
 //! operator's stored API key and caches the result on disk, so provisioning
 //! and the `/v1/models` API can serve real model slugs without hardcoding any.
+//! A managed endpoint override reroutes the fetch along with inference, so the
+//! catalog is discovered through whatever endpoint the agent will actually
+//! call rather than against a vendor host the stored value cannot authenticate
+//! to.
 //!
 //! Fetches are event-driven (provider/model changes and catalog reads), not
 //! scheduled. Every failure degrades: callers keep the previous cache entry or
@@ -161,7 +165,10 @@ pub async fn refresh_provider_models(
     if let Some(reason) = recent_failure_reason(home, &provider.id) {
         return Err(catalog_error(&provider.id, reason));
     }
-    let models_url = resolve_models_url(&provider.id, declared_url);
+    // Read after the backoff short-circuit: this opens the secret store, and a
+    // down provider must not pay that cost on every poll.
+    let endpoint = crate::secrets::managed_provider_endpoint_override_for_home(home)?;
+    let models_url = resolve_models_url(&provider.id, declared_url, endpoint.as_ref());
 
     match fetch_provider_models(home, config, &provider.id, &models_url).await {
         Ok(models) => {
@@ -186,6 +193,22 @@ pub async fn refresh_provider_models(
             Err(error)
         }
     }
+}
+
+/// Drop one provider's cache entry (catalog and failure markers) so the next
+/// read refetches: an endpoint override apply/clear changes where the listing
+/// is fetched from, and a stale entry would keep serving the old endpoint's
+/// catalog. A missing or corrupt cache is not an error — there is nothing to
+/// invalidate.
+pub fn invalidate_provider_models(home: &Path, provider_id: &str) -> Result<()> {
+    let path = cache_path(home);
+    let Some(mut file) = read_cache_file(&path) else {
+        return Ok(());
+    };
+    if file.providers.remove(provider_id).is_none() {
+        return Ok(());
+    }
+    write_cache_file(&path, provider_id, &file)
 }
 
 /// Resolve the API key, fetch the provider's listing endpoint, and parse the
@@ -248,13 +271,33 @@ fn catalog_error(provider_id: &str, reason: String) -> StackError {
     }
 }
 
-/// Honors the `ACP_STACK_PROVIDER_MODELS_BASE` dev gate so tests can point
-/// fetches at a local server: `{base}/{provider_id}/models`.
-fn resolve_models_url(provider_id: &str, declared: &str) -> String {
+/// A managed endpoint override outranks the `ACP_STACK_PROVIDER_MODELS_BASE`
+/// dev gate: the override is a live routing decision for the same provider the
+/// agent will call, while the gate only ever stands in for a vendor URL.
+/// Without an override the gate still applies (`{base}/{provider_id}/models`),
+/// and otherwise the declared `models_url` is used verbatim.
+fn resolve_models_url(
+    provider_id: &str,
+    declared: &str,
+    endpoint: Option<&crate::secrets::ProviderEndpointOverride>,
+) -> String {
+    if let Some(endpoint) = endpoint.filter(|endpoint| endpoint.provider_id == provider_id) {
+        return models_url_for_base(&endpoint.base_url);
+    }
     match fixture_string(PROVIDER_MODELS_BASE_ENV) {
         Some(base) => format!("{}/{provider_id}/models", base.trim_end_matches('/')),
         None => declared.to_owned(),
     }
+}
+
+/// An override base names the provider's inference base, and the catalog is
+/// read from `{base}/models` — the same suffix every shipped `models_url`
+/// uses. The one exception is novita-ai, whose listing does not live under
+/// its inference base: its fetch under an override fails, and the catalog
+/// degrades to the last cached entry while inference still follows the
+/// override.
+fn models_url_for_base(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
 }
 
 fn resolve_provider_api_key(home: &Path, config: &Config, provider_id: &str) -> Result<String> {
@@ -621,6 +664,101 @@ mod tests {
         assert_eq!(
             recent_failure_reason(home.path(), "openrouter"),
             Some("boom".to_owned())
+        );
+    }
+
+    #[test]
+    fn invalidate_removes_entry_and_failure_markers_only_for_that_provider() {
+        let home = temp_home();
+        let openrouter = vec![ProviderModel {
+            value: "openai/gpt-5.5".to_owned(),
+            display_name: None,
+        }];
+        let moonshot = vec![ProviderModel {
+            value: "kimi-k3".to_owned(),
+            display_name: None,
+        }];
+        write_cache_entry(home.path(), "openrouter", &openrouter).expect("write openrouter");
+        record_fetch_failure(home.path(), "openrouter", "boom").expect("record failure");
+        write_cache_entry(home.path(), "moonshotai", &moonshot).expect("write moonshot");
+
+        invalidate_provider_models(home.path(), "openrouter").expect("invalidate");
+
+        assert_eq!(cached_models(home.path(), "openrouter"), None);
+        assert_eq!(recent_failure_reason(home.path(), "openrouter"), None);
+        assert_eq!(cached_models(home.path(), "moonshotai"), Some(moonshot));
+    }
+
+    #[test]
+    fn invalidate_tolerates_missing_unknown_and_corrupt_caches() {
+        // No cache file at all.
+        let home = temp_home();
+        invalidate_provider_models(home.path(), "openrouter").expect("missing cache is fine");
+
+        // A provider with no entry.
+        write_cache_entry(
+            home.path(),
+            "moonshotai",
+            &[ProviderModel {
+                value: "kimi-k3".to_owned(),
+                display_name: None,
+            }],
+        )
+        .expect("write moonshot");
+        invalidate_provider_models(home.path(), "openrouter").expect("unknown entry is fine");
+
+        // A corrupt cache file.
+        let path = cache_path(home.path());
+        std::fs::write(&path, b"not json").expect("write");
+        invalidate_provider_models(home.path(), "openrouter").expect("corrupt cache is fine");
+    }
+
+    fn override_for(provider_id: &str, base_url: &str) -> crate::secrets::ProviderEndpointOverride {
+        crate::secrets::ProviderEndpointOverride {
+            provider_id: provider_id.to_owned(),
+            base_url: base_url.to_owned(),
+        }
+    }
+
+    #[test]
+    fn endpoint_override_replaces_the_declared_models_url() {
+        let endpoint = override_for("openrouter", "http://127.0.0.1:3129/openrouter");
+        assert_eq!(
+            resolve_models_url(
+                "openrouter",
+                "https://openrouter.ai/api/v1/models",
+                Some(&endpoint)
+            ),
+            "http://127.0.0.1:3129/openrouter/models"
+        );
+    }
+
+    #[test]
+    fn endpoint_override_for_another_provider_leaves_the_declared_url() {
+        let endpoint = override_for("moonshotai", "http://127.0.0.1:3129/moonshotai");
+        assert_eq!(
+            resolve_models_url(
+                "openrouter",
+                "https://openrouter.ai/api/v1/models",
+                Some(&endpoint)
+            ),
+            "https://openrouter.ai/api/v1/models"
+        );
+        assert_eq!(
+            resolve_models_url("openrouter", "https://openrouter.ai/api/v1/models", None),
+            "https://openrouter.ai/api/v1/models"
+        );
+    }
+
+    #[test]
+    fn models_url_for_base_appends_one_segment_regardless_of_trailing_slash() {
+        assert_eq!(
+            models_url_for_base("http://127.0.0.1:3129/openrouter"),
+            "http://127.0.0.1:3129/openrouter/models"
+        );
+        assert_eq!(
+            models_url_for_base("http://127.0.0.1:3129/openrouter/"),
+            "http://127.0.0.1:3129/openrouter/models"
         );
     }
 
