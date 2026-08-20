@@ -393,7 +393,7 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         RegistryKind::Native => {
             let harness = entry.harness.as_ref().expect("validated registry harness");
             config.agent.command = harness.id.clone();
-            config.agent.args = vec!["acp".to_owned()];
+            config.agent.args = harness.acp_args.clone();
             #[cfg(feature = "test-fixtures")]
             if crate::runtime::install::agent_registry::development_placebo_registry_path()
                 .is_some_and(|path| path.display().to_string() == harness.id)

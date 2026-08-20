@@ -194,7 +194,7 @@ fn apply_switch_registry_entry(config: &mut Config, entry: &RegistryEntry) {
         RegistryKind::Native => {
             let harness = entry.harness.as_ref().expect("validated registry harness");
             config.agent.command = harness.id.clone();
-            config.agent.args = vec!["acp".to_owned()];
+            config.agent.args = harness.acp_args.clone();
         }
         RegistryKind::Adapter => {
             let adapter = entry.adapter.as_ref().expect("validated registry adapter");

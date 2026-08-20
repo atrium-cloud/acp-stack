@@ -88,6 +88,7 @@ impl RegistryCatalog {
             entry.adapter = None;
             entry.harness = Some(HarnessSpec {
                 id: placebo_path.clone(),
+                acp_args: default_acp_args(),
                 install: install.clone(),
                 update: Default::default(),
             });
@@ -479,6 +480,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         adapter: None,
         harness: Some(HarnessSpec {
             id: placebo_path.to_owned(),
+            acp_args: default_acp_args(),
             install,
             update: Default::default(),
         }),

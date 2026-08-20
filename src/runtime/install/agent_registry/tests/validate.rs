@@ -269,3 +269,65 @@ creates = "bad"
         other => panic!("expected RegistryLoad, got {other:?}"),
     }
 }
+
+#[test]
+fn validate_rejects_empty_acp_args() {
+    // An empty override would launch the harness with no ACP entry point.
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+acp_args = []
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject empty acp_args");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("harness.acp_args must not be empty"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_blank_acp_arg() {
+    // A whitespace-only argument is as unusable as an empty string.
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+acp_args = ["  "]
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject a blank acp_arg");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("harness.acp_args is empty"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}

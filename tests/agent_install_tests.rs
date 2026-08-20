@@ -30,7 +30,7 @@ use acp_stack::config::AgentConfig;
 use acp_stack::runtime::install::agent_installer::install_resolved_capture;
 use acp_stack::runtime::install::agent_registry::{
     AdapterSpec, ArchMap, ArchiveKind, GithubInstall, HarnessSpec, InstallSet, RegistryEntry,
-    RegistryKind, RegistryStdioFraming,
+    RegistryKind, RegistryStdioFraming, default_acp_args,
 };
 use axum::Router;
 use axum::extract::{Path as AxPath, State};
@@ -226,6 +226,7 @@ fn adapter_kind_entry() -> RegistryEntry {
         testflight_expect_fs: None,
         harness: Some(HarnessSpec {
             id: HARNESS_BIN.to_owned(),
+            acp_args: default_acp_args(),
             install: InstallSet {
                 github: Some(GithubInstall {
                     asset_pattern: HARNESS_ASSET.to_owned(),

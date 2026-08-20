@@ -9,6 +9,7 @@ Registry entries describe:
 - `id` and display name
 - whether the agent is headless-compatible
 - native command or adapter-backed command
+- optional `harness.acp_args` when the harness enters ACP mode through something other than an `acp` subcommand (e.g. Cline launches as `cline --acp`); it must be non-empty and defaults to `["acp"]`
 - install steps and post-install executable checks
 - provider/model/mode support flags
 - Agent Skills support flag
