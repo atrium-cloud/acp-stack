@@ -32,7 +32,11 @@ impl HostedInitManager {
             return Err(StartSessionError::Active);
         }
 
-        let session = HostedInitSession::new(next_bootstrap_session_id(), self.shutdown.clone());
+        let session = HostedInitSession::new(
+            next_bootstrap_session_id(),
+            self.shutdown.clone(),
+            init_args.defer_provider_credentials,
+        );
         let response = StartInitResponse {
             session_id: session.id.clone(),
             status: session.status(),
@@ -170,6 +174,11 @@ pub(super) struct HostedInitSession {
     shutdown: Arc<Notify>,
     activity: Mutex<tokio::time::Instant>,
     connected_ws: std::sync::atomic::AtomicUsize,
+    /// The start request's declaration that a custom provider's credential will
+    /// arrive out-of-band after init. Read by the prompt driver so the wizard's
+    /// secret-collection step defers a missing custom-provider ref rather than
+    /// failing. Fixed for the session's lifetime.
+    defer_provider_credentials: bool,
 }
 
 pub(super) struct SessionInner {
@@ -177,20 +186,21 @@ pub(super) struct SessionInner {
     next_seq: u64,
     history: Vec<Value>,
     pub(super) pending_input: Option<PublicInputRequest>,
-    /// Identity of the prompt occupying `pending_input`, kept beside it so the
-    /// category waiting on the client is derived rather than stored.
-    pending_kind: Option<HostedPromptKind>,
     pending_response: Option<(String, HostedAnswer)>,
+    /// The last step a `step_started`/`step_finished` signal named, kept only
+    /// so a failure that parks the session can badge the step's category. The
+    /// client folds `current_step` for itself from the signal stream; this copy
+    /// is not put on the wire.
     current_step: Option<&'static str>,
-    /// Whether `current_step` is still running. `current_step` itself stays put
-    /// after a step finishes because the wire wants the last step the run was
-    /// inside, but a failure surfacing between steps belongs to no lane and
-    /// must not badge the settled category the previous step left behind.
+    /// Whether `current_step` is still running. A failure surfacing between
+    /// steps belongs to no lane, so it must not emit a `category_failed` signal
+    /// for the settled category the previous step left behind.
     step_in_flight: bool,
-    categories: CategoryMap,
-    /// Last snapshot put on the wire. A signal that changes nothing observable
-    /// must not burn a seq, so every emission compares against this first.
-    last_state: Option<StateSnapshot>,
+    /// Every `signal` event emitted so far, in order, for the `hello`/status
+    /// replay. Bounded by init's structure (a fixed set of steps and
+    /// categories), not by client activity, so it is never evicted the way the
+    /// mixed `history` is.
+    signal_log: Vec<Value>,
     result_json: Option<String>,
     error: Option<PublicError>,
     error_acked: bool,
@@ -198,13 +208,12 @@ pub(super) struct SessionInner {
 }
 
 impl HostedInitSession {
-    pub(super) fn new(id: String, shutdown: Arc<Notify>) -> Arc<Self> {
+    pub(super) fn new(
+        id: String,
+        shutdown: Arc<Notify>,
+        defer_provider_credentials: bool,
+    ) -> Arc<Self> {
         let (events, _) = broadcast::channel(INIT_WS_CHANNEL_CAPACITY);
-        // The starting snapshot seeds the dedup guard rather than being sent:
-        // every client sees it in `hello`, so the first `state` event on the
-        // wire is a real transition away from it.
-        let categories = CategoryMap::default();
-        let last_state = Some(derive_snapshot(&categories, None, None));
         let session = Arc::new(Self {
             id,
             inner: Mutex::new(SessionInner {
@@ -212,12 +221,10 @@ impl HostedInitSession {
                 next_seq: 0,
                 history: Vec::new(),
                 pending_input: None,
-                pending_kind: None,
                 pending_response: None,
                 current_step: None,
                 step_in_flight: false,
-                categories,
-                last_state,
+                signal_log: Vec::new(),
                 result_json: None,
                 error: None,
                 error_acked: false,
@@ -228,6 +235,7 @@ impl HostedInitSession {
             shutdown,
             activity: Mutex::new(tokio::time::Instant::now()),
             connected_ws: std::sync::atomic::AtomicUsize::new(0),
+            defer_provider_credentials,
         });
         session.push_event(ServerEvent::Progress {
             message: "init session started".to_owned(),
@@ -241,6 +249,13 @@ impl HostedInitSession {
 
     pub(super) fn status(&self) -> String {
         lock_unpoisoned(&self.inner).status.clone()
+    }
+
+    /// Whether the start request declared that provider credentials arrive
+    /// out-of-band after init. The prompt driver surfaces this to the wizard's
+    /// secret-collection step.
+    pub(super) fn defer_provider_credentials(&self) -> bool {
+        self.defer_provider_credentials
     }
 
     pub(super) fn is_active(&self) -> bool {
@@ -295,10 +310,9 @@ impl HostedInitSession {
         InitStatusResponse {
             session_id: self.id.clone(),
             status: inner.status.clone(),
-            // Derived live rather than read from `last_state`: a REST poller
-            // must see the current frontier even when the last transition
-            // deduped to no frame.
-            state: derive_snapshot(&inner.categories, inner.current_step, inner.pending_kind),
+            // The raw signal stream a REST poller folds itself, identical to
+            // what `hello` carries.
+            signals: inner.signal_log.clone(),
             last_seq: inner.next_seq,
             pending_input: inner.pending_input.clone(),
             recent_events: inner.history.iter().rev().take(50).cloned().collect(),
@@ -315,7 +329,7 @@ impl HostedInitSession {
         frame_json(ServerFrame::Hello {
             session_id: &self.id,
             status: &snapshot.status,
-            state: &snapshot.state,
+            signals: &snapshot.signals,
             last_seq: snapshot.last_seq,
             pending_input: snapshot.pending_input.as_ref(),
             result_available: snapshot.result_available,
@@ -343,7 +357,7 @@ impl HostedInitSession {
     /// Record a typed event, absorbing the single failure mode a frame has.
     /// A payload that will not encode parks the session as errored through the
     /// normal error path: the transition it described is lost, so continuing
-    /// would leave the client's category map permanently behind the wizard.
+    /// would leave a client's fold permanently behind the wizard.
     pub(super) fn emit_event_locked(&self, inner: &mut SessionInner, event: ServerEvent) -> Value {
         let event_type = event.type_str();
         match event.payload() {
@@ -354,9 +368,10 @@ impl HostedInitSession {
                     error = %error,
                     "hosted init event payload could not be encoded; parking the session as errored"
                 );
-                // Deliberately not `set_error_locked`: that derives a fresh
-                // state snapshot, which is one of the two payloads that can
-                // fail this way, and the retry would recurse.
+                // Record the error directly rather than through
+                // `set_error_locked`: the encode-failure park wants nothing but
+                // the error frame, not the step-finish signal set_error would
+                // emit for a lane's blame.
                 self.record_error_locked(
                     inner,
                     FRAME_ENCODE_FAILED_CODE,
@@ -366,47 +381,33 @@ impl HostedInitSession {
         }
     }
 
-    /// Derive the category snapshot and record it if it moved. Returns the
-    /// frame to broadcast once the caller drops the lock, or `None` when the
-    /// mutation changed nothing observable — dedup happens before any seq is
-    /// allocated, so a no-op signal leaves the sequence untouched.
-    pub(super) fn emit_state_locked(&self, inner: &mut SessionInner) -> Option<Value> {
-        if is_terminal_status(&inner.status) {
-            return None;
-        }
-        let snapshot = derive_snapshot(&inner.categories, inner.current_step, inner.pending_kind);
-        if inner.last_state.as_ref() == Some(&snapshot) {
-            return None;
-        }
-        let frame = self.emit_event_locked(inner, ServerEvent::State(snapshot.clone()));
-        // A snapshot whose payload would not encode parks the session instead
-        // of reaching the client, so it must not seed the dedup guard: the next
-        // snapshot has to be treated as a real transition.
-        if inner.status != "errored" {
-            inner.last_state = Some(snapshot);
-        }
-        Some(frame)
+    /// Record a `signal` event and keep a copy for the hello/status replay.
+    /// Every signal is a distinct fact, so there is no dedup: the client folds
+    /// the stream, and a fact the fold ends up ignoring (an outranked verdict)
+    /// still belongs on the wire so a late joiner reconstructs the same view.
+    fn emit_signal_locked(&self, inner: &mut SessionInner, payload: Map<String, Value>) -> Value {
+        let frame = self.emit_event_locked(inner, ServerEvent::Signal(payload));
+        inner.signal_log.push(frame.clone());
+        frame
     }
 
-    /// Fold one init state signal into the category map and publish whatever
-    /// it moved. Called from the wizard thread via the hosted prompt driver.
+    /// Publish one raw init state signal. Called from the wizard thread via the
+    /// hosted prompt driver; the instance no longer folds a category view, it
+    /// just forwards the fact and lets the client fold it.
     pub(super) fn apply_state_signal(&self, signal: InitStateSignal) {
         let frame = {
             let mut inner = lock_unpoisoned(&self.inner);
             // The frontier freezes with the session. A cancel while a prompt is
-            // pending unwinds the wizard thread, which keeps emitting signals
-            // on the way out; folding them would move the categories reported
-            // by `hello` and the status route even though `emit_state_locked`
-            // will not put another frame on the wire.
+            // pending unwinds the wizard thread, which keeps emitting signals on
+            // the way out; forwarding them would extend the stream past the
+            // terminal frame the client already treated as the last word.
             if is_terminal_status(&inner.status) {
                 return;
             }
-            apply_state_signal_locked(&mut inner, signal);
-            self.emit_state_locked(&mut inner)
+            track_step(&mut inner, &signal);
+            self.emit_signal_locked(&mut inner, signal.wire_payload())
         };
-        if let Some(frame) = frame {
-            let _ = self.events.send(frame.to_string());
-        }
+        let _ = self.events.send(frame.to_string());
     }
 
     fn record_event_locked(
@@ -431,31 +432,26 @@ impl HostedInitSession {
         if !should_handle_hosted_prompt(&request) {
             return Ok(None);
         }
-        let kind = request.kind;
         let public = public_input_request(request);
-        let (input_frame, state_frame) = {
+        let input_frame = {
             let mut inner = lock_unpoisoned(&self.inner);
             terminal_status_error(&inner)?;
             inner.status = "waiting_for_input".to_owned();
             inner.pending_response = None;
             inner.pending_input = Some(public.clone());
-            inner.pending_kind = Some(kind);
-            // `input_required` is recorded first so the state frame announcing
-            // `awaiting_input` never arrives before the prompt it refers to.
-            let input_frame = self.emit_event_locked(
+            // The prompt is the whole signal that a category is awaiting input:
+            // the client derives `awaiting_input` from `pending_input.kind`, so
+            // no separate state frame announces it.
+            self.emit_event_locked(
                 &mut inner,
                 ServerEvent::InputRequired {
                     input: Box::new(public.clone()),
                 },
-            );
-            (input_frame, self.emit_state_locked(&mut inner))
+            )
         };
         let _ = self.events.send(input_frame.to_string());
-        if let Some(frame) = state_frame {
-            let _ = self.events.send(frame.to_string());
-        }
 
-        let (answer, state_frame) = {
+        let answer = {
             let mut inner = lock_unpoisoned(&self.inner);
             loop {
                 terminal_status_error(&inner)?;
@@ -464,11 +460,10 @@ impl HostedInitSession {
                 {
                     inner.status = "running".to_owned();
                     inner.pending_input = None;
-                    inner.pending_kind = None;
                     // The answer itself settles nothing: settlement comes from
                     // the config-write sites, which know what was actually
                     // written and never carry a secret value.
-                    break (answer, self.emit_state_locked(&mut inner));
+                    break answer;
                 }
                 inner = self
                     .input_ready
@@ -476,9 +471,6 @@ impl HostedInitSession {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         };
-        if let Some(frame) = state_frame {
-            let _ = self.events.send(frame.to_string());
-        }
         Ok(Some(answer))
     }
 
@@ -532,11 +524,9 @@ impl HostedInitSession {
             }
             inner.status = "completed_awaiting_ack".to_owned();
             inner.result_json = Some(result_json);
-            // `pending_kind` follows `pending_input` everywhere: they are two
-            // halves of one slot, and a stale kind would keep deriving a
-            // category as `awaiting_input` after the prompt is gone.
+            // Clear the prompt slot so a client stops deriving its category as
+            // `awaiting_input` once the result is ready.
             inner.pending_input = None;
-            inner.pending_kind = None;
             let frame = self.emit_event_locked(&mut inner, ServerEvent::ResultReady);
             drop(inner);
             let _ = self.events.send(frame.to_string());
@@ -578,7 +568,6 @@ impl HostedInitSession {
             result.zeroize();
             inner.status = "closed".to_owned();
             inner.pending_input = None;
-            inner.pending_kind = None;
             self.emit_event_locked(&mut inner, ServerEvent::ResultAcked)
         };
         let _ = self.events.send(frame.to_string());
@@ -600,7 +589,6 @@ impl HostedInitSession {
             }
             inner.status = "canceled".to_owned();
             inner.pending_input = None;
-            inner.pending_kind = None;
             inner.pending_response = None;
             Some(self.emit_event_locked(
                 &mut inner,
@@ -654,7 +642,6 @@ impl HostedInitSession {
             }
             inner.status = "canceled".to_owned();
             inner.pending_input = None;
-            inner.pending_kind = None;
             inner.pending_response = None;
             Some(self.emit_event_locked(
                 &mut inner,
@@ -686,9 +673,9 @@ impl HostedInitSession {
     }
 
     /// Lock-held `set_error`. Returns the frames to broadcast in order: the
-    /// state frame badging the failed category first, then the terminal
-    /// `error` frame, which is the last thing a client should see for this
-    /// transition.
+    /// step-finish signal badging the running step's lane first (when one is in
+    /// flight), then the terminal `error` frame, which is the last thing a
+    /// client should see for this transition.
     pub(super) fn set_error_locked(
         &self,
         inner: &mut SessionInner,
@@ -703,33 +690,35 @@ impl HostedInitSession {
             return Vec::new();
         }
         let mut frames = Vec::new();
-        if let Some(category) = inner
-            .current_step
-            .filter(|_| inner.step_in_flight)
-            .and_then(category_for_step_kind)
-        {
-            inner
-                .categories
-                .fail_step_category(category, code.to_owned());
+        if let Some(step) = inner.current_step.filter(|_| inner.step_in_flight) {
+            // Finish the running step with this error rather than emitting a bare
+            // `category_failed`: a client folds it through the same `step_finished`
+            // path a normally-failing step takes, so the fold applies the identical
+            // don't-double-blame and don't-badge-an-absent-lane guards. A
+            // between-steps failure (no live step) emits nothing. In production the
+            // step's own `step_finished` has already fired by the time a run errors
+            // out, so this only fires if a future caller parks a session mid-step.
+            let payload = InitStateSignal::StepFinished {
+                kind: step,
+                disposition: StepDisposition::Executed,
+                error_code: Some(code.to_owned()),
+            }
+            .wire_payload();
+            frames.push(self.emit_signal_locked(inner, payload));
         }
         inner.pending_input = None;
-        inner.pending_kind = None;
-        if let Some(frame) = self.emit_state_locked(inner) {
-            frames.push(frame);
-        }
         frames.push(self.record_error_locked(inner, code, message));
         frames
     }
 
-    /// Park the session on a failure and record the `error` event. Split out
-    /// so the frame-encode path can park without deriving a state snapshot,
-    /// and always records the event: a session that was already terminal still
-    /// owes the client a contiguous history.
+    /// Park the session on a failure and record the `error` event. Split out so
+    /// the frame-encode path can park without emitting the step-finish signal
+    /// set_error would, and always records the event: a session that was already
+    /// terminal still owes the client a contiguous history.
     fn record_error_locked(&self, inner: &mut SessionInner, code: &str, message: String) -> Value {
         if !is_terminal_status(&inner.status) {
             inner.status = "errored".to_owned();
             inner.pending_input = None;
-            inner.pending_kind = None;
             inner.errored_at = Some(tokio::time::Instant::now());
             inner.error = Some(PublicError {
                 code: code.to_owned(),
@@ -800,8 +789,8 @@ impl HostedInitSession {
 }
 
 /// The statuses after which nothing new may be said about the run's shape. The
-/// terminal frame is the last word a client gets, so both the category fold and
-/// the state emission stop here.
+/// terminal frame is the last word a client gets, so signal emission stops here
+/// and the step tracking stops moving.
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
@@ -829,49 +818,22 @@ fn terminal_status_error(inner: &SessionInner) -> Result<()> {
     }
 }
 
-/// Fold a signal into the session's durable state. Kept beside `SessionInner`
-/// rather than in `state.rs` because it is the only place that writes both the
-/// category map and `current_step`.
-fn apply_state_signal_locked(inner: &mut SessionInner, signal: InitStateSignal) {
+/// Track the running step so a failure that parks the session can badge the
+/// step's lane. This is the only session state a signal still moves: the
+/// category view itself is folded by the client from the forwarded stream.
+/// `current_step` is left in place after a step finishes so the attribution
+/// guard can tell a mid-step failure from a between-steps one via
+/// `step_in_flight`.
+fn track_step(inner: &mut SessionInner, signal: &InitStateSignal) {
     match signal {
         InitStateSignal::StepStarted { kind } => {
             inner.current_step = Some(kind);
             inner.step_in_flight = true;
         }
-        InitStateSignal::StepFinished {
-            kind, error_code, ..
-        } => {
+        InitStateSignal::StepFinished { .. } => {
             inner.step_in_flight = false;
-            if let Some(category) = category_for_step_kind(kind) {
-                match &error_code {
-                    Some(code) => inner.categories.fail_step_category(category, code.clone()),
-                    // Executed and skipped are the same verdict here: a
-                    // resumed run replays already-verified rows as skipped,
-                    // and both mean the lane is done being driven.
-                    None => inner.categories.settle_unresolved(category),
-                }
-            }
-            // The sweep says "init finished and nothing is left to drive", so a
-            // failed final step must not settle the lanes it never reached.
-            if kind == step_kind::INIT_COMPLETE && error_code.is_none() {
-                inner.categories.settle_remaining();
-            }
         }
-        InitStateSignal::CategoryApplicability {
-            category,
-            applicable,
-            source,
-            reason,
-        } => inner
-            .categories
-            .set_applicability(category, applicable, source, reason),
-        InitStateSignal::CategorySettled { category, value } => {
-            inner.categories.settle(category, value)
-        }
-        InitStateSignal::CategoryProvisionallySettled { category, value } => {
-            inner.categories.settle_provisional(category, value)
-        }
-        InitStateSignal::CategoryFailed { category, code } => inner.categories.fail(category, code),
+        _ => {}
     }
 }
 

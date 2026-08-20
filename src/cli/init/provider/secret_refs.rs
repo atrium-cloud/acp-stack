@@ -290,17 +290,20 @@ pub(crate) fn collect_missing_provider_refs(
     }
     for env_ref in required_refs {
         if !satisfiable(secret_store, env_ref) {
-            // A hosted backend answers the value prompt with null by design
-            // (plaintext never rides an input frame) and pushes the credential
-            // through the managed-state extension after init completes, so a
-            // provider ref missing here is deferred rather than fatal. Scoped
-            // to configured custom providers: their init lanes skip every
-            // later agent spawn, whereas a mapped provider's model-discovery
-            // spawn would still hard-fail on the missing ref and turn the
-            // deferral into a worse-attributed failure.
+            // A caller that declared `defer_provider_credentials` will push the
+            // credential through the managed-state extension after init (the
+            // value prompt is answered with null by design, since plaintext
+            // never rides an input frame), so a provider ref missing here is
+            // deferred rather than fatal. Gated on the declaration, not on the
+            // mere presence of a hosted driver: a driven init that made no such
+            // promise keeps the hard failure. Scoped to configured custom
+            // providers: their init lanes skip every later agent spawn, whereas
+            // a mapped provider's model-discovery spawn would still hard-fail on
+            // the missing ref and turn the deferral into a worse-attributed
+            // failure.
             let custom_provider = provider_id
                 .is_some_and(|provider_id| provider_is_configured_custom(config, provider_id));
-            if custom_provider && prompt::hosted_driver_active() {
+            if custom_provider && prompt::defer_provider_credentials() {
                 prompt::emit_progress(format!(
                     "provider secret `{env_ref}` not present yet; expecting a managed credential push after init"
                 ));

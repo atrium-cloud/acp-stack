@@ -3,20 +3,26 @@
 //! The wizard runs on one thread and knows things no observer can reconstruct
 //! from the progress text: which durable step it is inside, which categories
 //! the registry says this agent even has, and what the live capability probe
-//! contradicted. These signals carry exactly that, so a hosted driver can hold
-//! the category map without parsing prose. Off-hosted runs never build one —
-//! `prompt::emit_state_signal` takes a closure and drops it when no driver is
-//! installed.
+//! contradicted. These signals carry exactly that, so a hosted driver forwards
+//! them as `signal` events for the client to fold into a category view without
+//! parsing prose. Off-hosted runs emit nothing — `prompt::emit_state_signal`
+//! takes a closure and drops it when no driver is installed.
 //!
 //! Step kinds ride as the `init_runner::step_kind` constants verbatim rather
 //! than a parallel enum, so the vocabulary cannot drift from what is persisted
 //! in `init_steps.kind`.
 
-use crate::runtime::init_runner::{StepDisposition, step_kind};
+use serde_json::{Map, Value};
+
+use crate::runtime::init_runner::StepDisposition;
+// `step_kind` is named only by the test-only `category_for_step_kind` and this
+// module's own tests now.
+#[cfg(test)]
+use crate::runtime::init_runner::step_kind;
 
 /// The nine things init can settle. `id` is shared wire surface with hosted
-/// clients (it is the `id` of a category in the `state` frame), so a rename is
-/// a wire break.
+/// clients (it rides as the `category` field of the `category_*` signals), so a
+/// rename is a wire break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InitCategory {
     Agent,
@@ -104,7 +110,9 @@ pub(super) enum InitStateSignal {
 
 /// The category a step's failure badges. Steps with no category (auth, edge
 /// artifacts, headless config, testflight, init_complete) surface only as
-/// `current_step`.
+/// `current_step`. Test-only in the instance now: it forwards step kinds as
+/// opaque strings, and the client fold maps them to categories.
+#[cfg(test)]
 pub(super) fn category_for_step_kind(kind: &str) -> Option<InitCategory> {
     match kind {
         step_kind::AGENT_INSTALL => Some(InitCategory::Agent),
@@ -115,6 +123,122 @@ pub(super) fn category_for_step_kind(kind: &str) -> Option<InitCategory> {
         step_kind::MCP_CONFIGURE => Some(InitCategory::Mcp),
         step_kind::PROVIDER_CONFIGURE => Some(InitCategory::Provider),
         _ => None,
+    }
+}
+
+impl ApplicabilitySource {
+    /// Wire token for the `source` field of a `category_applicability` signal.
+    /// The client folds authority off this string, so a rename is a wire break.
+    fn wire(self) -> &'static str {
+        match self {
+            ApplicabilitySource::Args => "args",
+            ApplicabilitySource::Registry => "registry",
+            ApplicabilitySource::Probe => "probe",
+            ApplicabilitySource::Discovery => "discovery",
+            ApplicabilitySource::DiscoveryUnavailable => "discovery_unavailable",
+        }
+    }
+}
+
+impl InitStateSignal {
+    /// The `signal` event payload. Each signal rides the wire verbatim — no
+    /// status, no `blocked_on`, no precedence — because the fold that turns
+    /// these facts into a rendered category view is the client's, not the
+    /// instance's. Keys land under the event envelope beside `type`/`seq`.
+    pub(super) fn wire_payload(&self) -> Map<String, Value> {
+        let mut payload = Map::new();
+        match self {
+            InitStateSignal::StepStarted { kind } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("step_started".to_owned()),
+                );
+                payload.insert("step".to_owned(), Value::String((*kind).to_owned()));
+            }
+            InitStateSignal::StepFinished {
+                kind,
+                disposition,
+                error_code,
+            } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("step_finished".to_owned()),
+                );
+                payload.insert("step".to_owned(), Value::String((*kind).to_owned()));
+                payload.insert(
+                    "disposition".to_owned(),
+                    Value::String(
+                        match disposition {
+                            StepDisposition::Executed => "executed",
+                            StepDisposition::Skipped => "skipped",
+                        }
+                        .to_owned(),
+                    ),
+                );
+                if let Some(code) = error_code {
+                    payload.insert("error_code".to_owned(), Value::String(code.clone()));
+                }
+            }
+            InitStateSignal::CategoryApplicability {
+                category,
+                applicable,
+                source,
+                reason,
+            } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("category_applicability".to_owned()),
+                );
+                payload.insert(
+                    "category".to_owned(),
+                    Value::String(category.id().to_owned()),
+                );
+                payload.insert("applicable".to_owned(), Value::Bool(*applicable));
+                payload.insert("source".to_owned(), Value::String(source.wire().to_owned()));
+                if let Some(reason) = reason {
+                    payload.insert("reason".to_owned(), Value::String(reason.clone()));
+                }
+            }
+            InitStateSignal::CategorySettled { category, value } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("category_settled".to_owned()),
+                );
+                payload.insert(
+                    "category".to_owned(),
+                    Value::String(category.id().to_owned()),
+                );
+                // Settled-with-nothing is a distinct fact from an unsettled lane,
+                // so a null value rides rather than being omitted.
+                payload.insert(
+                    "value".to_owned(),
+                    value.clone().map_or(Value::Null, Value::String),
+                );
+            }
+            InitStateSignal::CategoryProvisionallySettled { category, value } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("category_provisionally_settled".to_owned()),
+                );
+                payload.insert(
+                    "category".to_owned(),
+                    Value::String(category.id().to_owned()),
+                );
+                payload.insert("value".to_owned(), Value::String(value.clone()));
+            }
+            InitStateSignal::CategoryFailed { category, code } => {
+                payload.insert(
+                    "signal".to_owned(),
+                    Value::String("category_failed".to_owned()),
+                );
+                payload.insert(
+                    "category".to_owned(),
+                    Value::String(category.id().to_owned()),
+                );
+                payload.insert("code".to_owned(), Value::String(code.clone()));
+            }
+        }
+        payload
     }
 }
 

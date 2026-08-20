@@ -106,7 +106,7 @@ fn cancel_prevents_late_result_publication() {
 #[tokio::test]
 async fn error_is_parked_until_acked() {
     let manager = HostedInitManager::new();
-    let session = HostedInitSession::new("init_error".to_owned(), manager.shutdown.clone());
+    let session = HostedInitSession::new("init_error".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
 
     {
@@ -214,7 +214,8 @@ async fn parked_error_blocks_new_session_and_surfaces_in_status() {
 #[tokio::test]
 async fn expiring_unacked_error_notifies_shutdown_and_keeps_status() {
     let manager = HostedInitManager::new();
-    let session = HostedInitSession::new("init_error_exp".to_owned(), manager.shutdown.clone());
+    let session =
+        HostedInitSession::new("init_error_exp".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
     session.set_error("init.failed", "provider setup failed".to_owned());
 
@@ -234,7 +235,8 @@ async fn expiring_unacked_error_notifies_shutdown_and_keeps_status() {
 #[tokio::test(start_paused = true)]
 async fn errored_session_expires_after_ack_grace_with_connected_ws() {
     let manager = HostedInitManager::new();
-    let session = HostedInitSession::new("init_error_ws".to_owned(), manager.shutdown.clone());
+    let session =
+        HostedInitSession::new("init_error_ws".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
     // A held socket must not defer the grace: the check ignores
     // connection state, unlike the idle clock.

@@ -11,7 +11,13 @@ use tower::ServiceExt;
 pub(crate) const TEST_TOKEN: &str = "test_bootstrap_token";
 
 pub(crate) fn test_session(id: &str) -> Arc<HostedInitSession> {
-    HostedInitSession::new(id.to_owned(), Arc::new(Notify::new()))
+    HostedInitSession::new(id.to_owned(), Arc::new(Notify::new()), false)
+}
+
+/// A session whose start request declared `defer_provider_credentials`, for the
+/// tests that exercise the custom-provider credential soft-pass.
+pub(crate) fn test_session_deferring_credentials(id: &str) -> Arc<HostedInitSession> {
+    HostedInitSession::new(id.to_owned(), Arc::new(Notify::new()), true)
 }
 
 pub(crate) fn wait_for_pending_input(session: &HostedInitSession) -> PublicInputRequest {
@@ -177,19 +183,39 @@ pub(crate) async fn request_raw_json(
     (status, value)
 }
 
-/// Every recorded `state` event, in seq order.
-pub(crate) fn state_events(session: &HostedInitSession) -> Vec<Value> {
+/// Every recorded `signal` event, in seq order.
+pub(crate) fn signal_events(session: &HostedInitSession) -> Vec<Value> {
     session
         .events_after(0)
         .into_iter()
-        .filter(|event| event["type"] == json!("state"))
+        .filter(|event| event["type"] == json!("signal"))
         .collect()
 }
 
+/// The category view a client folds from the live signal stream. The instance
+/// no longer derives one, so the view-shaped assertions run the reference fold
+/// over what the session actually emitted.
+pub(crate) fn folded_state(session: &HostedInitSession) -> Value {
+    let snapshot = session.status_snapshot();
+    let awaiting = super::state_fold::awaiting_category(
+        snapshot.pending_input.as_ref().map(|input| input.kind),
+    );
+    super::state_fold::fold_state(&signal_events(session), awaiting)
+}
+
+/// Back-compat name for the folded view; the surface tests read it exactly as
+/// they read a derived snapshot before the reshape.
 pub(crate) fn latest_state(session: &HostedInitSession) -> Value {
-    state_events(session)
-        .pop()
-        .expect("session recorded no state event")
+    folded_state(session)
+}
+
+/// The fold applied to what `hello` carries, so a test can assert a late joiner
+/// reconstructs the identical view a full-stream client computes.
+pub(crate) fn folded_from_hello(session: &HostedInitSession) -> Value {
+    let hello: Value = serde_json::from_str(&session.hello_frame()).expect("hello must be json");
+    let signals = hello["signals"].as_array().cloned().unwrap_or_default();
+    let awaiting = super::state_fold::awaiting_category(hello["pending_input"]["kind"].as_str());
+    super::state_fold::fold_state(&signals, awaiting)
 }
 
 pub(crate) fn category<'a>(state: &'a Value, id: &str) -> &'a Value {

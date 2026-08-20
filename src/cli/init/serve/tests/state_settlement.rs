@@ -52,8 +52,7 @@ fn a_cancel_mid_prompt_freezes_the_category_frontier() {
         json!("canceled"),
         "the cancellation must be the last thing the client is told: {events:?}"
     );
-    let hello: Value = serde_json::from_str(&session.hello_frame()).expect("hello must be json");
-    for frontier in [latest_state(&session), hello["state"].clone()] {
+    for frontier in [folded_state(&session), folded_from_hello(&session)] {
         for id in CANONICAL_CATEGORY_IDS {
             assert_ne!(
                 category(&frontier, id)["status"],
@@ -65,10 +64,10 @@ fn a_cancel_mid_prompt_freezes_the_category_frontier() {
 }
 
 #[test]
-fn a_cross_cutting_prompt_records_input_required_with_no_state_frame() {
-    // `secret_ref_value` belongs to no category, so nothing derives as
-    // `awaiting_input` for it and the snapshot does not move: the prompt is
-    // announced by `input_required` alone.
+fn a_cross_cutting_prompt_records_input_required_with_no_signal() {
+    // `secret_ref_value` belongs to no category, and a prompt never emits a
+    // signal anyway: the ask is announced by `input_required` alone, and the
+    // fold shows nothing awaiting because the pending kind maps to no category.
     let session = test_session("init_state_cross_cutting");
     let driver = SessionPromptDriver {
         session: session.clone(),
@@ -85,8 +84,8 @@ fn a_cross_cutting_prompt_records_input_required_with_no_state_frame() {
     let handle = std::thread::spawn(move || driver.password(request));
     let pending = wait_for_pending_input(&session);
     assert!(
-        state_events(&session).is_empty(),
-        "a category-less prompt must raise no state frame"
+        signal_events(&session).is_empty(),
+        "a category-less prompt must raise no signal"
     );
     assert_eq!(
         session
@@ -95,24 +94,25 @@ fn a_cross_cutting_prompt_records_input_required_with_no_state_frame() {
             .expect("session recorded no events")["type"],
         json!("input_required")
     );
+    assert!(
+        awaiting_ids(&folded_state(&session)).is_empty(),
+        "a category-less prompt leaves nothing awaiting in the fold"
+    );
     session
         .submit_input(&pending.request_id, json!(null))
         .expect("submit input");
     handle.join().expect("driver thread").expect("password");
     assert!(
-        state_events(&session).is_empty(),
-        "answering a category-less prompt must raise no state frame either"
+        signal_events(&session).is_empty(),
+        "answering a category-less prompt must raise no signal either"
     );
 }
 
 #[test]
 fn blocked_on_follows_the_dependency_table() {
     let session = test_session("init_state_blocked");
-    let fresh: Value = serde_json::from_str(&session.hello_frame()).expect("hello");
-    assert_eq!(
-        category(&fresh["state"], "model")["blocked_on"],
-        json!("provider")
-    );
+    let fresh = folded_from_hello(&session);
+    assert_eq!(category(&fresh, "model")["blocked_on"], json!("provider"));
     session.apply_state_signal(InitStateSignal::CategorySettled {
         category: InitCategory::Agent,
         value: Some("opencode".to_owned()),
@@ -153,28 +153,32 @@ fn blocked_on_follows_the_dependency_table() {
 }
 
 #[test]
-fn a_signal_that_changes_nothing_emits_no_frame() {
+fn a_repeated_signal_is_forwarded_but_folds_idempotently() {
+    // The instance no longer dedups — every fact is forwarded, so a repeated
+    // signal is a second event on the wire. The dedup that used to live here is
+    // the client's: folding the stream is idempotent, so the view is unchanged.
     let session = test_session("init_state_dedup");
     let settled = || InitStateSignal::CategorySettled {
         category: InitCategory::Agent,
         value: Some("opencode".to_owned()),
     };
     session.apply_state_signal(settled());
-    let first = latest_state(&session);
+    let once = folded_state(&session);
     session.apply_state_signal(settled());
-    assert_eq!(state_events(&session).len(), 1);
     assert_eq!(
-        session
-            .events_after(0)
-            .last()
-            .and_then(|event| event["seq"].as_u64()),
-        first["seq"].as_u64(),
-        "a no-op signal must not burn a seq"
+        signal_events(&session).len(),
+        2,
+        "both facts ride the wire; the instance does not dedup"
+    );
+    assert_eq!(
+        folded_state(&session),
+        once,
+        "folding the repeated signal must reach the same view"
     );
 }
 
 #[test]
-fn history_cap_evicts_state_frames_while_hello_stays_current() {
+fn history_cap_evicts_signals_while_the_hello_replay_stays_current() {
     let session = test_session("init_state_cap");
     let driver = SessionPromptDriver {
         session: session.clone(),
@@ -187,13 +191,14 @@ fn history_cap_evicts_state_frames_while_hello_stays_current() {
         driver.progress(format!("step {index}"));
     }
     assert!(
-        state_events(&session).is_empty(),
-        "the early state frame should have aged out of the capped history"
+        signal_events(&session).is_empty(),
+        "the early signal should have aged out of the capped history"
     );
-    // Which is exactly why hello carries the whole snapshot.
-    let hello: Value = serde_json::from_str(&session.hello_frame()).expect("hello");
+    // Which is exactly why the signal log — bounded by init's structure, not by
+    // progress chatter — rides hello in full, so a late joiner still folds the
+    // settled agent.
     assert_eq!(
-        category(&hello["state"], "agent")["value"],
+        category(&folded_from_hello(&session), "agent")["value"],
         json!("opencode")
     );
 }
@@ -211,14 +216,15 @@ fn init_complete_settles_every_applicable_category_left_open() {
         source: ApplicabilitySource::Registry,
         reason: Some("agent does not take a mode".to_owned()),
     });
-    let before = state_events(&session).len();
+    let before = signal_events(&session).len();
     session.apply_state_signal(InitStateSignal::StepFinished {
         kind: step_kind::INIT_COMPLETE,
         disposition: StepDisposition::Executed,
         error_code: None,
     });
-    // The sweep and the step that triggered it are one transition.
-    assert_eq!(state_events(&session).len(), before + 1);
+    // The sweep is the client's: the instance forwards one `step_finished`
+    // signal for init_complete, and the fold settles every open lane from it.
+    assert_eq!(signal_events(&session).len(), before + 1);
 
     let swept = latest_state(&session);
     assert_eq!(category(&swept, "agent")["value"], json!("opencode"));

@@ -71,24 +71,22 @@ fn golden_input_required_and_input_accepted_event_bytes() {
             pending.request_id
         )
     );
-    // seq 3 is the state frame the prompt raised (pinned in
-    // `golden_state_event_bytes`); the acceptance follows it.
+    // A prompt raises no state frame now, so the acceptance is seq 3 directly
+    // behind the prompt.
     assert_eq!(
-        recorded_frame(&session, 4),
+        recorded_frame(&session, 3),
         format!(
-            r#"{{"request_id":"{}","seq":4,"session_id":"init_golden_input","type":"input_accepted"}}"#,
+            r#"{{"request_id":"{}","seq":3,"session_id":"init_golden_input","type":"input_accepted"}}"#,
             pending.request_id
         )
     );
 }
 
 #[test]
-fn golden_state_event_bytes() {
-    // Two key orders in one frame, both deliberate: the envelope sorts
-    // `categories`/`current_step`/`seq`/`session_id`/`type`
-    // alphabetically like every other seq-bearing event, while each
-    // category object keeps its declared `id`/`status`/`blocked_on`/
-    // `value`/`code`/`reason` order.
+fn golden_signal_event_bytes() {
+    // One `signal` event per fact, each carrying only its own raw fields — no
+    // status, no `blocked_on`, no derived view. The envelope sorts every key
+    // alphabetically like every other seq-bearing event.
     let session = test_session("init_golden_state");
     session.apply_state_signal(InitStateSignal::StepStarted {
         kind: step_kind::PROVIDER_CONFIGURE,
@@ -108,8 +106,20 @@ fn golden_state_event_bytes() {
         code: "init.skills_install_failed".to_owned(),
     });
     assert_eq!(
+        recorded_frame(&session, 2),
+        r#"{"seq":2,"session_id":"init_golden_state","signal":"step_started","step":"provider_configure","type":"signal"}"#
+    );
+    assert_eq!(
+        recorded_frame(&session, 3),
+        r#"{"category":"agent","seq":3,"session_id":"init_golden_state","signal":"category_settled","type":"signal","value":"opencode"}"#
+    );
+    assert_eq!(
+        recorded_frame(&session, 4),
+        r#"{"applicable":false,"category":"mode","reason":"agent does not take a mode","seq":4,"session_id":"init_golden_state","signal":"category_applicability","source":"registry","type":"signal"}"#
+    );
+    assert_eq!(
         recorded_frame(&session, 5),
-        r#"{"categories":[{"id":"agent","status":"settled","value":"opencode"},{"id":"provider","status":"ready"},{"id":"model","status":"blocked","blocked_on":"provider"},{"id":"mode","status":"not_applicable","reason":"agent does not take a mode"},{"id":"workspace","status":"ready"},{"id":"native_config","status":"ready"},{"id":"mcp","status":"ready"},{"id":"skills","status":"failed","code":"init.skills_install_failed"},{"id":"deps","status":"ready"}],"current_step":"provider_configure","seq":5,"session_id":"init_golden_state","type":"state"}"#
+        r#"{"category":"skills","code":"init.skills_install_failed","seq":5,"session_id":"init_golden_state","signal":"category_failed","type":"signal"}"#
     );
 }
 
@@ -179,37 +189,30 @@ fn golden_error_expired_event_bytes() {
 
 #[test]
 fn golden_hello_frame_bytes() {
-    // `state` sits beside `status`: the two answer the same question at
-    // different resolutions, and the snapshot is declaration-ordered
-    // (`current_step` then `categories`) unlike the sorted state event.
+    // `signals` sits beside `status`: a fresh session has emitted none, so the
+    // replay is empty and the client folds it to the starting view itself. The
+    // hello body is declaration-ordered, unlike the sorted signal events.
     let session = test_session("init_golden_hello");
     assert_eq!(
         session.hello_frame(),
-        format!(
-            r#"{{"type":"hello","session_id":"init_golden_hello","status":"running","state":{FRESH_STATE_JSON},"last_seq":1,"pending_input":null,"result_available":false,"error":null}}"#
-        )
+        r#"{"type":"hello","session_id":"init_golden_hello","status":"running","signals":[],"last_seq":1,"pending_input":null,"result_available":false,"error":null}"#
     );
-    // The errored hello pins the nested `PublicError` object, the one
-    // part of the frame that goes through a `Serialize` impl.
+    // The errored hello pins the nested `PublicError` object, the one part of
+    // the frame that goes through a `Serialize` impl. A between-steps failure
+    // emits no signal, so the replay stays empty.
     session.set_error("init.boom", "it broke".to_owned());
     assert_eq!(
         session.hello_frame(),
-        format!(
-            r#"{{"type":"hello","session_id":"init_golden_hello","status":"errored","state":{FRESH_STATE_JSON},"last_seq":2,"pending_input":null,"result_available":false,"error":{{"code":"init.boom","message":"it broke"}}}}"#
-        )
+        r#"{"type":"hello","session_id":"init_golden_hello","status":"errored","signals":[],"last_seq":2,"pending_input":null,"result_available":false,"error":{"code":"init.boom","message":"it broke"}}"#
     );
 }
 
-/// The snapshot of a session no signal has reached yet: nothing is settled,
-/// the four root categories are ready, and everything else is blocked on
-/// the dependency table.
-const FRESH_STATE_JSON: &str = r#"{"current_step":null,"categories":[{"id":"agent","status":"ready"},{"id":"provider","status":"blocked","blocked_on":"agent"},{"id":"model","status":"blocked","blocked_on":"provider"},{"id":"mode","status":"blocked","blocked_on":"model"},{"id":"workspace","status":"ready"},{"id":"native_config","status":"ready"},{"id":"mcp","status":"blocked","blocked_on":"agent"},{"id":"skills","status":"blocked","blocked_on":"agent"},{"id":"deps","status":"ready"}]}"#;
-
 #[test]
 fn golden_hello_frame_with_pending_input_and_result_bytes() {
-    // The reconnect cases: a hello sent while the wizard is blocked on a
-    // prompt, and one sent after the result is waiting to be acked. Both
-    // populate fields the fresh-session hello leaves null.
+    // The reconnect cases: a hello sent while the wizard is blocked on a prompt,
+    // and one sent after the result is waiting to be acked. Both populate fields
+    // the fresh-session hello leaves null; neither adds a signal, since a prompt
+    // and its answer settle nothing on their own.
     let session = test_session("init_golden_hello_pending");
     let driver = SessionPromptDriver {
         session: session.clone(),
@@ -222,12 +225,12 @@ fn golden_hello_frame_with_pending_input_and_result_bytes() {
     );
     let handle = std::thread::spawn(move || driver.text(request));
     let pending = wait_for_pending_input(&session);
-    // The pending prompt is what makes `model` derive as awaiting_input,
-    // and it is the only category that may: there is one prompt slot.
+    // The pending prompt is the whole signal that `model` awaits input; the
+    // client derives that from `pending_input.kind`, so the replay stays empty.
     assert_eq!(
         session.hello_frame(),
         format!(
-            r#"{{"type":"hello","session_id":"init_golden_hello_pending","status":"waiting_for_input","state":{{"current_step":null,"categories":[{{"id":"agent","status":"ready"}},{{"id":"provider","status":"blocked","blocked_on":"agent"}},{{"id":"model","status":"awaiting_input"}},{{"id":"mode","status":"blocked","blocked_on":"model"}},{{"id":"workspace","status":"ready"}},{{"id":"native_config","status":"ready"}},{{"id":"mcp","status":"blocked","blocked_on":"agent"}},{{"id":"skills","status":"blocked","blocked_on":"agent"}},{{"id":"deps","status":"ready"}}]}},"last_seq":3,"pending_input":{{"request_id":"{}","kind":"model","style":"text","prompt":"model","required":false,"default":null,"options":[]}},"result_available":false,"error":null}}"#,
+            r#"{{"type":"hello","session_id":"init_golden_hello_pending","status":"waiting_for_input","signals":[],"last_seq":2,"pending_input":{{"request_id":"{}","kind":"model","style":"text","prompt":"model","required":false,"default":null,"options":[]}},"result_available":false,"error":null}}"#,
             pending.request_id
         )
     );
@@ -240,13 +243,11 @@ fn golden_hello_frame_with_pending_input_and_result_bytes() {
         .expect("driver result");
 
     session.set_result(json!({"status": "initialized"}));
-    // The answered prompt released the frontier, so the completed hello is
-    // back to the fresh snapshot: an answer settles nothing on its own.
+    // The answered prompt released the frontier and settled nothing, so the
+    // completed hello still carries an empty replay.
     assert_eq!(
         session.hello_frame(),
-        format!(
-            r#"{{"type":"hello","session_id":"init_golden_hello_pending","status":"completed_awaiting_ack","state":{FRESH_STATE_JSON},"last_seq":6,"pending_input":null,"result_available":true,"error":null}}"#
-        )
+        r#"{"type":"hello","session_id":"init_golden_hello_pending","status":"completed_awaiting_ack","signals":[],"last_seq":4,"pending_input":null,"result_available":true,"error":null}"#
     );
 }
 

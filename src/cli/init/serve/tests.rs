@@ -1,5 +1,6 @@
 //! Hosted init serve tests, grouped by the surface each one pins.
 
+mod state_fold;
 mod support;
 
 mod golden_frames;
