@@ -2,9 +2,11 @@
 
 Hermes Agent is a native ACP target. `acp-stack` launches `hermes acp`.
 
-## Known limitation
+## Known limitations
 
 Hermes advertises session models and modes through the pre-1.0 `models`/`modes` session state instead of ACP v1 `configOptions`, and its `initialize` response carries no `mcpCapabilities`. Until upstream adopts the v1 shapes: model ids are accepted as supplied without ACP discovery, mode selection is unavailable (`set_mode = false`), and configured MCP servers are recorded as ignored features for Hermes sessions rather than delivered.
+
+The same gap means a Hermes session's model cannot be switched after creation: with no v1 `configOptions` there is no `session/set_config_option` target, so live model switching (as Goose supports) is unavailable. Changing the model goes through `acps agent set --model`, which rewrites the `model` block of `~/.hermes/config.yaml`; the running agent keeps its startup model until it is restarted (`POST /v1/agent/restart`), and the new model applies to sessions created after that.
 
 ## Setup
 
