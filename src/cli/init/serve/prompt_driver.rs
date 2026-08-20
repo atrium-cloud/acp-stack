@@ -103,6 +103,10 @@ impl HostedPromptDriver for SessionPromptDriver {
     fn state_signal(&self, signal: InitStateSignal) {
         self.session.apply_state_signal(signal);
     }
+
+    fn defer_provider_credentials(&self) -> bool {
+        self.session.defer_provider_credentials()
+    }
 }
 
 /// The streamed set, decided per prompt kind. The match is exhaustive on

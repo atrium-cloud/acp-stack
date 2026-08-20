@@ -22,10 +22,10 @@ pub(super) struct InitEventsResponse {
 pub(super) struct InitStatusResponse {
     pub(super) session_id: String,
     pub(super) status: String,
-    /// Category snapshot, identical in shape to the `state` frame and to the
-    /// `state` field of `hello`, so a REST poller and a socket client read the
-    /// same thing.
-    pub(super) state: StateSnapshot,
+    /// The full ordered signal stream, identical to the `signals` field of
+    /// `hello`, so a REST poller and a socket client fold the same input into
+    /// the same category view.
+    pub(super) signals: Vec<Value>,
     pub(super) last_seq: u64,
     pub(super) pending_input: Option<PublicInputRequest>,
     pub(super) recent_events: Vec<Value>,

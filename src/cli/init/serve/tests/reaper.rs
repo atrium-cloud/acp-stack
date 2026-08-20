@@ -22,7 +22,7 @@ fn parse_optional_duration_accepts_suffixes_and_zero_disables() {
 
 fn reaper_test_manager(session_id: &str) -> (Arc<HostedInitManager>, Arc<HostedInitSession>) {
     let manager = HostedInitManager::new();
-    let session = HostedInitSession::new(session_id.to_owned(), manager.shutdown.clone());
+    let session = HostedInitSession::new(session_id.to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session.clone());
     (manager, session)
 }
@@ -174,7 +174,7 @@ async fn idle_reaper_respects_pre_session_api_activity() {
 #[tokio::test]
 async fn shutdown_if_no_session_is_atomic_with_session_creation() {
     let manager = HostedInitManager::new();
-    let session = HostedInitSession::new("init_atomic".to_owned(), manager.shutdown.clone());
+    let session = HostedInitSession::new("init_atomic".to_owned(), manager.shutdown.clone(), false);
     *lock_unpoisoned(&manager.active) = Some(session);
     assert!(!manager.shutdown_if_no_session("idle_timeout"));
     assert!(manager.terminal_result().is_ok());
@@ -214,22 +214,26 @@ async fn websocket_closes_when_session_turns_terminal() {
     assert!(hello.is_text());
     let hello: Value =
         serde_json::from_str(hello.to_text().expect("hello text")).expect("hello json");
-    assert_eq!(hello["state"]["categories"][0]["id"], json!("agent"));
+    // A fresh session has emitted no signals; the client folds the empty replay
+    // to the starting view.
+    assert_eq!(hello["signals"], json!([]));
 
-    // State transitions reach a real socket, not just the history.
+    // Signals reach a real socket, not just the history.
     session.apply_state_signal(InitStateSignal::CategorySettled {
         category: InitCategory::Agent,
         value: Some("opencode".to_owned()),
     });
-    let state = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
         .await
-        .expect("timed out waiting for the state frame")
-        .expect("stream ended before the state frame")
+        .expect("timed out waiting for the signal frame")
+        .expect("stream ended before the signal frame")
         .expect("frame");
-    let state: Value =
-        serde_json::from_str(state.to_text().expect("state text")).expect("state json");
-    assert_eq!(state["type"], json!("state"));
-    assert_eq!(state["categories"][0]["value"], json!("opencode"));
+    let signal: Value =
+        serde_json::from_str(signal.to_text().expect("signal text")).expect("signal json");
+    assert_eq!(signal["type"], json!("signal"));
+    assert_eq!(signal["signal"], json!("category_settled"));
+    assert_eq!(signal["category"], json!("agent"));
+    assert_eq!(signal["value"], json!("opencode"));
 
     // A reaper expiry while a client holds the socket must end the
     // connection server-side; waiting on the client would let a hung

@@ -23,7 +23,11 @@ use std::sync::Arc;
 use crate::error::{Result, StackError};
 use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
 
-use super::state_signal::{InitCategory, InitStateSignal};
+use super::state_signal::InitStateSignal;
+// `HostedPromptKind::category` maps a prompt to the category it settles, which
+// only the client-side fold and its tests still need after the state reshape.
+#[cfg(test)]
+use super::state_signal::InitCategory;
 
 /// One variant per prompt site in the init wizard. There is deliberately no
 /// catch-all: `should_handle_hosted_prompt` matches exhaustively, so a new
@@ -167,6 +171,10 @@ impl HostedPromptKind {
     /// non-hostable set) or it is a cross-cutting ask — a secret value can be
     /// requested for an MCP server, a data source, or a provider, and the
     /// testflight confirm settles nothing.
+    ///
+    /// Only the client-side fold reference and its tests derive `awaiting_input`
+    /// from a pending prompt now, so this mapping is test-only in the instance.
+    #[cfg(test)]
     pub(super) fn category(self) -> Option<InitCategory> {
         match self {
             HostedPromptKind::Agent => Some(InitCategory::Agent),
@@ -412,6 +420,13 @@ pub(super) trait HostedPromptDriver: Send + Sync {
     /// Machine-readable counterpart to `progress`. Defaulted to a no-op so a
     /// driver that only renders prompts and text needs no state map.
     fn state_signal(&self, _signal: InitStateSignal) {}
+    /// Whether the caller that installed this driver declared it will supply a
+    /// custom provider's credential out-of-band after init. Defaulted false so
+    /// only a driver built from a start request that says so opts in; every
+    /// other driver, and every terminal run, keeps the hard failure.
+    fn defer_provider_credentials(&self) -> bool {
+        false
+    }
 }
 
 /// Shared test double: captures state signals the way the hosted session will,
@@ -422,10 +437,20 @@ pub(super) trait HostedPromptDriver: Send + Sync {
 #[derive(Default)]
 pub(super) struct RecordingPromptDriver {
     signals: std::sync::Mutex<Vec<InitStateSignal>>,
+    defer_provider_credentials: bool,
 }
 
 #[cfg(test)]
 impl RecordingPromptDriver {
+    /// A driver that declared it will push provider credentials out-of-band,
+    /// for tests exercising the deferral path.
+    pub(super) fn deferring_provider_credentials() -> Self {
+        Self {
+            defer_provider_credentials: true,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn recorded(&self) -> Vec<InitStateSignal> {
         self.signals
             .lock()
@@ -465,6 +490,10 @@ impl HostedPromptDriver for RecordingPromptDriver {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(signal);
     }
+
+    fn defer_provider_credentials(&self) -> bool {
+        self.defer_provider_credentials
+    }
 }
 
 thread_local! {
@@ -492,6 +521,18 @@ pub(super) fn with_hosted_driver<T>(
 
 pub(super) fn hosted_driver_active() -> bool {
     HOSTED_DRIVER.with(|slot| slot.borrow().is_some())
+}
+
+/// Whether the active hosted driver declared that provider credentials arrive
+/// out-of-band after init. False with no driver installed (terminal runs) and
+/// false for a hosted driver whose start request did not declare it, so a
+/// missing custom-provider ref stays a hard failure unless the caller opted in.
+pub(super) fn defer_provider_credentials() -> bool {
+    HOSTED_DRIVER.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|driver| driver.defer_provider_credentials())
+    })
 }
 
 pub(super) fn emit_progress(message: impl Into<String>) {

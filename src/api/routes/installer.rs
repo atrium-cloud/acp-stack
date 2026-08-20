@@ -2,8 +2,8 @@
 //!
 //! `GET /v1/installer/runs` reads the `installer_runs` audit table. With
 //! `?active=true` it returns only in-flight steps (`status = "running"`),
-//! each carrying a server-computed `elapsed_seconds` — the polling shape a
-//! platform driving instance init uses to render live install progress
+//! each carrying a server-computed `elapsed_seconds` — the polling shape an
+//! orchestrator driving instance init uses to render live install progress
 //! (agent harness/adapter installs can run for minutes). Log contents stay
 //! in the table preview columns and on disk; this endpoint returns step
 //! metadata only.

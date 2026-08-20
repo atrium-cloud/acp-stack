@@ -88,6 +88,13 @@ pub(super) struct StartInitRequest {
     stack_update_frequency: Option<String>,
     agent_update: Option<String>,
     agent_update_frequency: Option<String>,
+    // The caller declares here that it will push a custom provider's credential
+    // through the managed-state extension after init. Only then does a missing
+    // custom-provider api-key ref soft-pass; otherwise init hard-fails on it
+    // exactly like a terminal run. Replaces the old inference from "a hosted
+    // driver is attached", which conflated transport with an orchestration
+    // guarantee. Absent → false.
+    defer_provider_credentials: Option<bool>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,
     // Run selection, matching `--resume`/`--fresh`. The interactive
@@ -571,6 +578,7 @@ impl StartInitRequest {
         args.stack_update_frequency = self.stack_update_frequency;
         args.agent_update = self.agent_update;
         args.agent_update_frequency = self.agent_update_frequency;
+        args.defer_provider_credentials = self.defer_provider_credentials.unwrap_or(false);
         args.prompt_data_sources = self
             .data_sources
             .into_iter()

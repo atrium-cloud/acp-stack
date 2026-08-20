@@ -7,8 +7,8 @@ use super::*;
 /// root. Day-2 read surface for `acps skills list` and the HTTP list route.
 ///
 /// Returns an empty list — never an error — when the agent declares no skills
-/// support, has no install dir, or the root does not yet exist: hosted callers
-/// must be able to render the "nothing installed" state. Only a genuine read
+/// support, has no install dir, or the root does not yet exist: callers must be
+/// able to render the "nothing installed" state. Only a genuine read
 /// failure of an existing root propagates. Enumeration reuses the tolerant
 /// link collector, so a stray non-skill entry is skipped with a warning rather
 /// than failing the whole listing.

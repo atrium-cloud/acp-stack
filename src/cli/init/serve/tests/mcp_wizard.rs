@@ -326,7 +326,7 @@ fn hosted_mcp_secret_values_are_collected_as_password_prompts() {
 #[test]
 fn hosted_null_provider_key_answer_defers_to_managed_credential_push() {
     let home = tempfile::tempdir().expect("tempdir");
-    let session = test_session("init_provider_key_soft_pass");
+    let session = test_session_deferring_credentials("init_provider_key_soft_pass");
     let driver: Arc<dyn HostedPromptDriver> = Arc::new(SessionPromptDriver {
         session: session.clone(),
     });

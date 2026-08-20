@@ -45,7 +45,10 @@ pub(super) enum ServerEvent {
     ErrorExpired {
         reason: String,
     },
-    State(StateSnapshot),
+    /// One raw init state signal, prebuilt into its wire payload. The client
+    /// folds the signal stream into a rendered category view; the instance no
+    /// longer derives one.
+    Signal(Map<String, Value>),
 }
 
 impl ServerEvent {
@@ -60,14 +63,14 @@ impl ServerEvent {
             ServerEvent::Error { .. } => "error",
             ServerEvent::ErrorAcked => "error_acked",
             ServerEvent::ErrorExpired { .. } => "error_expired",
-            ServerEvent::State(_) => "state",
+            ServerEvent::Signal(_) => "signal",
         }
     }
 
     /// Scalar variants build their map by hand so no `Serialize` impl sits
-    /// between the caller and the wire; `InputRequired` and `State` are the
-    /// only variants carrying a struct, and therefore the only ones that can
-    /// fail.
+    /// between the caller and the wire; `InputRequired` is the only variant
+    /// carrying a struct, and therefore the only one that can fail. `Signal`
+    /// arrives with its payload already built, so it is infallible too.
     pub(super) fn payload(self) -> std::result::Result<Map<String, Value>, FrameError> {
         let mut payload = Map::new();
         match self {
@@ -101,10 +104,10 @@ impl ServerEvent {
             ServerEvent::ErrorExpired { reason } => {
                 payload.insert("reason".to_owned(), Value::String(reason));
             }
-            // The snapshot's own fields become envelope keys, so the event
-            // reads `{"categories":…,"current_step":…,"seq":…}` rather than
-            // nesting the snapshot one level down.
-            ServerEvent::State(snapshot) => payload = snapshot.payload()?,
+            // The signal's own fields become envelope keys, so the event reads
+            // `{"signal":"category_settled","category":…,"seq":…}` rather than
+            // nesting the payload one level down.
+            ServerEvent::Signal(map) => payload = map,
         }
         Ok(payload)
     }
@@ -151,10 +154,12 @@ pub(super) enum ServerFrame<'a> {
     Hello {
         session_id: &'a str,
         status: &'a str,
-        /// Full category snapshot, so a client that connects late — or after
-        /// the history cap evicted early `state` events — starts current
-        /// without replaying anything.
-        state: &'a StateSnapshot,
+        /// The whole signal stream so far, in order, so a client that connects
+        /// late — or after the history cap evicted early `signal` events —
+        /// folds it to the current category view without replaying history.
+        /// Bounded by init's structure, not by client chatter, so it is safe
+        /// to carry in full.
+        signals: &'a [Value],
         last_seq: u64,
         pending_input: Option<&'a PublicInputRequest>,
         result_available: bool,
@@ -188,7 +193,7 @@ impl ServerFrame<'_> {
             ServerFrame::Hello {
                 session_id,
                 status,
-                state,
+                signals,
                 last_seq,
                 pending_input,
                 result_available,
@@ -197,7 +202,7 @@ impl ServerFrame<'_> {
                 frame_type: "hello",
                 session_id,
                 status,
-                state,
+                signals,
                 last_seq: *last_seq,
                 pending_input: *pending_input,
                 result_available: *result_available,
@@ -291,7 +296,7 @@ struct HelloBody<'a> {
     frame_type: &'static str,
     session_id: &'a str,
     status: &'a str,
-    state: &'a StateSnapshot,
+    signals: &'a [Value],
     last_seq: u64,
     pending_input: Option<&'a PublicInputRequest>,
     result_available: bool,

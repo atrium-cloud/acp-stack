@@ -127,11 +127,11 @@ pub(crate) async fn agent_switch_handler(
         },
         None => None,
     };
-    // The platform re-delivers the stored harness whenever an agent-config PATCH
-    // names it, so a bare switch to the target that is already the default must
-    // converge as a side-effect-free success — the never-switched twin of the
-    // completed-journal retry above. Flagged bodies keep their explicit-intent
-    // rejections in the existing-target path below.
+    // A client that re-delivers the stored harness on every agent-config PATCH
+    // names the current target, so a bare switch to the target that is already
+    // the default must converge as a side-effect-free success — the
+    // never-switched twin of the completed-journal retry above. Flagged bodies
+    // keep their explicit-intent rejections in the existing-target path below.
     if resume_journal.is_none()
         && fresh_config.array.primary_target == body.agent
         && !body.drop_configs

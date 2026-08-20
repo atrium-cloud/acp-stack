@@ -350,6 +350,12 @@ pub struct InitArgs {
     pub(super) native_config_upload: Option<InitNativeConfigUpload>,
     #[arg(skip)]
     pub(super) native_config_revision: Option<String>,
+    /// The hosted caller declared it will push a custom provider's credential
+    /// out-of-band (managed-state) after init. Only then is a missing custom
+    /// provider ref soft-passed; a terminal run leaves this false and keeps the
+    /// hard failure. Not a CLI flag: the declaration rides the start request.
+    #[arg(skip)]
+    pub(super) defer_provider_credentials: bool,
     /// Resume the most recent non-terminal init run. With `--run-id`, resume
     /// the specified run. Conflicts with `--fresh`.
     #[arg(long, conflicts_with = "fresh")]
@@ -438,6 +444,7 @@ impl Default for InitArgs {
             testflight: false,
             native_config_upload: None,
             native_config_revision: None,
+            defer_provider_credentials: false,
             skip_testflight: false,
             standard_agent_work_deps: false,
             browser_use_profile: false,

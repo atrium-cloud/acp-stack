@@ -24,6 +24,10 @@ use crate::envelope::{ApiError, ApiSuccess};
 use crate::error::{Result, StackError};
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, home_dir};
 use crate::runtime::agent::native_config_import::{NativeConfigInspection, NativeConfigSelection};
+use crate::runtime::init_runner::StepDisposition;
+// Step-kind constants are only named by the state-fold reference and the
+// surface tests now; production no longer folds a category view.
+#[cfg(test)]
 use crate::runtime::init_runner::step_kind;
 use crate::state::default_state_path;
 
@@ -31,9 +35,12 @@ use super::prompt::{
     self, ConfirmAnswer, HostedPromptDriver, HostedPromptKind, HostedPromptOutcome,
     HostedPromptRequest, HostedPromptStyle,
 };
-use super::state_signal::{
-    ApplicabilitySource, InitCategory, InitStateSignal, category_for_step_kind,
-};
+use super::state_signal::InitStateSignal;
+// The category/applicability enums and the step→category map are named only by
+// the reference fold and the surface tests now; the instance forwards raw facts
+// and lets the client fold them.
+#[cfg(test)]
+use super::state_signal::{ApplicabilitySource, InitCategory, category_for_step_kind};
 use super::{
     InitArgs, InitMcpHttpHeader, InitMcpHttpServer, InitMcpStdioServer, InitMode,
     InitNativeConfigUpload, run_hosted_init,
@@ -46,7 +53,6 @@ mod request_dto;
 mod response_dto;
 mod routes;
 mod session;
-mod state;
 
 // Plain (non-re-exporting) globs make each sibling's `pub(super)` items private
 // members of this parent module, so the other siblings and the `tests` module
@@ -59,7 +65,6 @@ use self::request_dto::*;
 use self::response_dto::*;
 use self::routes::*;
 use self::session::*;
-use self::state::*;
 
 const DEFAULT_INIT_TOKEN_ENV: &str = "ACP_STACK_INIT_TOKEN";
 const INIT_BOOTSTRAP_TOKEN_FIELD: &str = "bootstrap token";

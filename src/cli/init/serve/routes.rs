@@ -316,11 +316,15 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
         session: session.clone(),
     };
     let (mut sender, mut receiver) = socket.split();
+    // Subscribe before snapshotting hello so no signal can slip between the two.
+    // A frame emitted in that window rides the live stream and the client dedups
+    // it against the hello replay by seq; the alternative order drops it from
+    // both, and a raw-signal stream has no later full snapshot to self-correct.
+    let mut events = session.subscribe();
     let hello = session.hello_frame();
     if sender.send(Message::Text(hello.into())).await.is_err() {
         return;
     }
-    let mut events = session.subscribe();
     loop {
         tokio::select! {
             inbound = receiver.next() => {
@@ -362,9 +366,24 @@ async fn init_ws_connection(socket: WebSocket, session: Arc<HostedInitSession>) 
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = sender.send(Message::Text(ws_lagged_frame().into())).await;
-                        // A lagged receiver can miss the terminal event
-                        // itself; check the session state directly.
+                        // A lagged receiver skipped frames it can never get back
+                        // from this stream. Re-send hello so the client re-folds
+                        // the full signal-log replay: with raw signals a skipped
+                        // frame is otherwise a permanent hole. The lag notice
+                        // goes first so the client knows why a fresh hello landed.
+                        if sender
+                            .send(Message::Text(ws_lagged_frame().into()))
+                            .await
+                            .is_err()
+                            || sender
+                                .send(Message::Text(session.hello_frame().into()))
+                                .await
+                                .is_err()
+                        {
+                            break;
+                        }
+                        // A lagged receiver can miss the terminal event itself;
+                        // check the session state directly.
                         if !session.is_active() {
                             let _ = sender.send(Message::Close(None)).await;
                             break;

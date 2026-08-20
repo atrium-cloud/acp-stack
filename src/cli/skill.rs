@@ -3,7 +3,7 @@
 //! Reads (`list`, `catalog`) go over the session tier — a session key when one
 //! is available, otherwise the local UDS socket when keyless access is enabled.
 //! Mutations (`add`, `remove`) hit the admin-tier daemon routes. All four are
-//! daemon-routed so the hosted platform and the CLI share one code path.
+//! daemon-routed so remote orchestrators and the CLI share one code path.
 
 use std::io::{self, IsTerminal};
 

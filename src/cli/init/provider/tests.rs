@@ -255,7 +255,7 @@ fn custom_provider_readiness_config() -> Config {
 }
 
 #[test]
-fn hosted_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
+fn declared_defer_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
     use std::sync::Arc;
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
@@ -273,10 +273,11 @@ fn hosted_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
     .expect_err("hard failure without hosted driver");
     assert!(error.to_string().contains("CUSTOM_KEY"));
 
-    // Hosted run with a null answer defers the provider ref to the
-    // managed credential push instead of failing.
-    let driver = Arc::new(prompt::RecordingPromptDriver::default());
-    prompt::with_hosted_driver(driver, || {
+    // A hosted driver that did NOT declare the deferral keeps the hard failure:
+    // the transport being hosted is no longer a promise that a credential will
+    // arrive later.
+    let plain = Arc::new(prompt::RecordingPromptDriver::default());
+    prompt::with_hosted_driver(plain, || {
         collect_missing_provider_refs(
             true,
             &mut secret_store,
@@ -284,13 +285,27 @@ fn hosted_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
             Some("my-custom"),
             &required,
         )
-        .expect("hosted soft-pass");
+        .expect_err("undeclared hosted run keeps the hard failure");
+    });
+
+    // Only a driver whose start request declared `defer_provider_credentials`
+    // soft-passes the missing custom-provider ref.
+    let deferring = Arc::new(prompt::RecordingPromptDriver::deferring_provider_credentials());
+    prompt::with_hosted_driver(deferring, || {
+        collect_missing_provider_refs(
+            true,
+            &mut secret_store,
+            &config,
+            Some("my-custom"),
+            &required,
+        )
+        .expect("declared deferral soft-passes the custom-provider ref");
         // Refs without a provider context (MCP refs on the prepared-config
         // path) never soft-pass.
         collect_missing_provider_refs(true, &mut secret_store, &config, None, &required)
             .expect_err("flat-only refs keep the hard failure");
-        // Mapped providers keep the hard failure even in hosted runs: their
-        // model-discovery spawn would fail on the missing ref anyway.
+        // Mapped providers keep the hard failure even with the declaration:
+        // their model-discovery spawn would fail on the missing ref anyway.
         let mapped_config = readiness_config("opencode");
         collect_missing_provider_refs(
             true,
@@ -299,7 +314,7 @@ fn hosted_gate_defers_missing_provider_ref_but_not_flat_only_refs() {
             Some("openai"),
             &["OPENAI_API_KEY".to_owned()],
         )
-        .expect_err("mapped providers keep the hard failure under hosted");
+        .expect_err("mapped providers keep the hard failure under a declared deferral");
     });
 }
 
