@@ -168,6 +168,16 @@ impl CustomProviderApi {
         }
     }
 
+    /// Hermes names its wire transports after the upstream named-provider
+    /// `transport` field, not after the agents that popularized them.
+    pub fn as_hermes_api_mode(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "codex_responses",
+            Self::AnthropicMessages => "anthropic_messages",
+        }
+    }
+
     pub fn as_codex_wire_api(self) -> &'static str {
         match self {
             Self::Responses => "responses",

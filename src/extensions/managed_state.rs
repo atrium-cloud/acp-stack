@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::error::{Result, StackError};
-use crate::secrets::{ManagedCredentialSelection, SecretStore};
+use crate::secrets::{CredentialSource, ManagedCredentialSelection, SecretStore};
 
 // CONSTANTS
 
@@ -252,6 +252,7 @@ fn resolve_selection(
         validate_base_url(base_url)?;
         require_agent_supports_base_url(config)?;
         require_provider_accepts_base_url(config, &selection.provider_id)?;
+        require_single_endpoint_override(store, &selection.provider_id)?;
     }
     Ok(ManagedCredentialSelection {
         provider_id: selection.provider_id,
@@ -326,6 +327,34 @@ fn require_provider_accepts_base_url(config: &Config, provider_id: &str) -> Resu
             config.agent.id
         ),
     })
+}
+
+/// At most one provider may be rerouted at a time: the agent's native config
+/// carries exactly one endpoint override, and two namespaces each rerouting a
+/// different provider would have provisioning arbitrarily pick a winner.
+/// Rejecting here — before any watermark or catalog persist — keeps the
+/// revision reusable once the first namespace's endpoint is cleared.
+fn require_single_endpoint_override(store: &SecretStore, provider_id: &str) -> Result<()> {
+    for (existing_id, set) in store.provider_credentials() {
+        if existing_id == provider_id {
+            continue;
+        }
+        let carries_override = set.sole.as_ref().is_some_and(|credential| {
+            credential.base_url.is_some()
+                && matches!(&credential.source, CredentialSource::External(_))
+        });
+        if carries_override {
+            return Err(StackError::InvalidParam {
+                field: "desired.selection.base_url",
+                reason: format!(
+                    "provider `{existing_id}` is already routed through a custom endpoint; only \
+                     one provider may be rerouted at a time — clear that namespace's credential \
+                     endpoint first"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_bounded(field: &'static str, value: &str, max_bytes: usize) -> Result<()> {

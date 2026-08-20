@@ -13,6 +13,13 @@
 # omits companion_env_vars/optional_env_vars, lookups fall back to the
 # provider-level and env_vars.toml lists.
 #
+# A `[providers.hermes]` sub-table carries Hermes-specific provisioning
+# metadata: `api_mode` is the wire transport (`chat_completions`,
+# `anthropic_messages`, or `codex_responses`) declared on the managed
+# named-provider entry acp-stack writes when an endpoint override reroutes
+# the provider. Every hermes-enabled provider must declare the sub-table;
+# omitting `api_mode` marks the pair as unable to carry an override.
+#
 # `models_url` is the provider's OpenAI-compatible model listing endpoint:
 # `GET <models_url>` with `Authorization: Bearer <api key>` returning
 # `{"data": [{"id": ..., "name"?: ...}]}`. It backs live model-catalog
@@ -27,6 +34,9 @@ agents = ["pi", "opencode", "goose", "claude-code", "hermes"]
 # First-party Anthropic API needs no provisioning extras; the empty sub-table
 # marks the provider as Claude Code-profiled.
 [providers.claude_code]
+
+[providers.hermes]
+api_mode = "anthropic_messages"
 
 [[providers]]
 id = ["ant-ling"]
@@ -43,6 +53,9 @@ id = ["openai"]
 name = "OpenAI"
 agents = ["pi", "opencode", "goose", "codex", "hermes"]
 
+[providers.hermes]
+api_mode = "codex_responses"
+
 [[providers]]
 id = ["deepseek"]
 name = "DeepSeek"
@@ -57,10 +70,16 @@ default_sonnet_model = "deepseek-v4-pro[1m]"
 default_haiku_model = "deepseek-v4-flash"
 env = { CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash", CLAUDE_CODE_EFFORT_LEVEL = "max", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "786432" }
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["google"]
 name = "Google AI Studio"
 agents = ["pi", "opencode", "hermes"]
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["mistral"]
@@ -98,11 +117,17 @@ id = ["xai"]
 name = "xAI"
 agents = ["pi", "opencode", "goose", "hermes"]
 
+[providers.hermes]
+api_mode = "codex_responses"
+
 [[providers]]
 id = ["openrouter"]
 name = "OpenRouter"
 agents = ["pi", "opencode", "goose", "codex", "hermes"]
 models_url = "https://openrouter.ai/api/v1/models"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["vercel-ai-gateway", "vercel", "ai-gateway"]
@@ -113,6 +138,9 @@ agents = ["pi", "opencode", "hermes"]
 vercel-ai-gateway = "pi"
 vercel = "opencode"
 ai-gateway = "hermes"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["zai"]
@@ -134,6 +162,9 @@ env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "
 [providers.api_key_env_vars]
 hermes = "GLM_API_KEY"
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 # Pi's China variant of the Z.AI Coding Plan; kept as a separate entry from
 # the models.dev `zai-coding-plan` (opencode) entry, matching the
 # minimax/minimax-cn regional-variant pattern.
@@ -154,6 +185,12 @@ models_url = "https://opencode.ai/zen/v1/models"
 [providers.api_key_env_vars]
 hermes = "OPENCODE_ZEN_API_KEY"
 
+# OpenCode Zen/Go route some models over Anthropic's wire; per-model wire
+# negotiation on those is between Hermes and the provider, so the managed
+# lane declares the baseline transport.
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["opencode-go"]
 name = "OpenCode Go"
@@ -165,6 +202,9 @@ models_url = "https://opencode.ai/zen/go/v1/models"
 
 [providers.api_key_env_vars]
 hermes = "OPENCODE_GO_API_KEY"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["radius"]
@@ -178,6 +218,9 @@ agents = ["pi", "opencode", "hermes"]
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://router.huggingface.co/v1/models"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["fireworks", "fireworks-ai", "fw"]
@@ -193,6 +236,9 @@ models_url = "https://api.fireworks.ai/inference/v1/models"
 fireworks = "pi"
 fireworks-ai = "opencode"
 fw = "hermes"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["together", "togetherai"]
@@ -228,6 +274,9 @@ kimi-for-coding = "opencode"
 kimi-coding-plan = "claude-code"
 kimi = "hermes"
 
+[providers.hermes]
+api_mode = "anthropic_messages"
+
 [[providers]]
 id = ["minimax"]
 name = "MiniMax"
@@ -238,6 +287,9 @@ base_url = "https://api.minimax.io/anthropic"
 default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
 
+[providers.hermes]
+api_mode = "anthropic_messages"
+
 [[providers]]
 id = ["minimax-cn"]
 name = "MiniMax (China)"
@@ -247,6 +299,9 @@ agents = ["pi", "opencode", "claude-code", "hermes"]
 base_url = "https://api.minimaxi.com/anthropic"
 default_model = "MiniMax-M3[1m]"
 env = { API_TIMEOUT_MS = "3000000", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1000000" }
+
+[providers.hermes]
+api_mode = "anthropic_messages"
 
 [[providers]]
 id = ["qwen-token-plan"]
@@ -275,6 +330,9 @@ models_url = "https://api.xiaomimimo.com/v1/models"
 [providers.claude_code]
 base_url = "https://api.xiaomimimo.com/anthropic"
 default_model = "mimo-v2.5-pro[1m]"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["xiaomi-token-plan-cn"]
@@ -405,15 +463,24 @@ id = ["actual"]
 name = "Actual Computer"
 agents = ["hermes"]
 
+[providers.hermes]
+api_mode = "codex_responses"
+
 [[providers]]
 id = ["commandcode"]
 name = "CommandCode"
 agents = ["hermes"]
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["kilocode"]
 name = "Kilo Code"
 agents = ["hermes"]
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 # OpenCode-only providers from models.dev
 # Excluded:
@@ -444,6 +511,9 @@ agents = ["opencode", "hermes"]
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["alibaba-cn"]
 name = "Alibaba (China)"
@@ -456,6 +526,9 @@ agents = ["opencode", "hermes"]
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://coding-intl.dashscope.aliyuncs.com/v1/models"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["alibaba-coding-plan-cn"]
@@ -494,6 +567,9 @@ models_url = "https://api.arcee.ai/api/v1/models"
 # provider reads ARCEEAI_API_KEY instead.
 [providers.api_key_env_vars]
 hermes = "ARCEEAI_API_KEY"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["auriko"]
@@ -633,6 +709,9 @@ agents = ["opencode", "hermes"]
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://api.gmi-serving.com/v1/models"
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["helicone"]
 name = "Helicone"
@@ -740,6 +819,9 @@ meta-ai = "hermes"
 [providers.api_key_env_vars]
 hermes = "MODEL_API_KEY"
 
+[providers.hermes]
+api_mode = "codex_responses"
+
 [[providers]]
 id = ["minimax-cn-coding-plan"]
 name = "MiniMax Token Plan (minimaxi.com)"
@@ -842,8 +924,14 @@ id = ["novita-ai"]
 name = "NovitaAI"
 agents = ["opencode", "hermes"]
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
-# served even unauthenticated. Note the /openai base, not /v1.
+# served even unauthenticated. Note the /openai base, not /v1. This is the one
+# shipped provider whose listing does not live at {inference base}/models, so
+# under an endpoint override the catalog fetch fails and degrades to the last
+# cached entry while inference still follows the override.
 models_url = "https://api.novita.ai/openai/models"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["nvidia"]
@@ -853,6 +941,9 @@ agents = ["pi", "opencode", "hermes"]
 # served even unauthenticated.
 models_url = "https://integrate.api.nvidia.com/v1/models"
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["ollama-cloud"]
 name = "Ollama Cloud"
@@ -860,6 +951,9 @@ agents = ["opencode", "hermes"]
 # Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
 # served even unauthenticated.
 models_url = "https://ollama.com/v1/models"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["orcarouter"]
@@ -956,6 +1050,9 @@ id = ["stepfun"]
 name = "StepFun"
 agents = ["opencode", "hermes"]
 
+[providers.hermes]
+api_mode = "chat_completions"
+
 [[providers]]
 id = ["stepfun-ai"]
 name = "StepFun AI"
@@ -998,6 +1095,9 @@ agents = ["opencode", "hermes"]
 # Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
 # the best-effort fetch degrades to a logged skip if it turns out wrong.
 models_url = "https://tokenhub.tencentmaas.com/v1/models"
+
+[providers.hermes]
+api_mode = "chat_completions"
 
 [[providers]]
 id = ["the-grid-ai"]

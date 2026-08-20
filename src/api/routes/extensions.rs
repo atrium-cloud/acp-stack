@@ -39,8 +39,38 @@ pub(crate) async fn extension_managed_state_apply_handler(
     let home = home_dir()?;
     let mut store = crate::secrets::SecretStore::open(&home)?;
     let revision = body.revision;
+    // Captured before the apply so an applied/cleared outcome can invalidate
+    // the model-catalog cache for both the outgoing and the incoming provider:
+    // the override changes where the listing is fetched from, and a stale
+    // entry would keep serving the previous endpoint's catalog.
+    let previous_provider_id = store
+        .managed_state_record(&name)
+        .and_then(|record| record.provider_id.clone());
     let response =
         crate::extensions::managed_state::apply(&mut store, &runtime_config, &name, body)?;
+    let new_provider_id = store
+        .managed_state_record(&name)
+        .and_then(|record| record.provider_id.clone());
+    if response.outcome == "applied" || response.outcome == "cleared" {
+        for provider_id in [previous_provider_id, new_provider_id]
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if let Err(err) =
+                crate::runtime::agent::provider_model_catalog::invalidate_provider_models(
+                    &home,
+                    &provider_id,
+                )
+            {
+                tracing::warn!(
+                    error = %err,
+                    provider = %provider_id,
+                    "provider model catalog invalidation failed after managed-state apply"
+                );
+            }
+        }
+    }
 
     // The agent reads its native config at process start, so the endpoint must
     // be on disk before the restart the orchestrator triggers after a

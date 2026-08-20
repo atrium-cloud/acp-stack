@@ -15,13 +15,13 @@ fn embedded_registry_parses() {
 #[test]
 fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
     let catalog = RegistryCatalog::load_embedded().expect("registry");
-    for id in ["opencode", "pi", "codex", "claude-code"] {
+    for id in ["opencode", "pi", "codex", "claude-code", "hermes"] {
         assert!(
             catalog.supports_provider_base_url(id),
             "`{id}` writes a per-provider endpoint and must declare set_provider_base_url"
         );
     }
-    for id in ["goose", "amp", "kimi", "hermes"] {
+    for id in ["goose", "amp", "kimi"] {
         assert!(
             !catalog.supports_provider_base_url(id),
             "`{id}` has no per-provider endpoint field and must not declare set_provider_base_url"
