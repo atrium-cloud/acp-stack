@@ -78,28 +78,6 @@ fn init_custom_provider_fails_noninteractive_when_required_fields_are_missing() 
 }
 
 #[test]
-fn init_codex_openai_rejects_api_key_ref() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be created");
-
-    acps_command()
-        .env("HOME", tempdir.path())
-        .args([
-            "init",
-            "--agent",
-            "codex",
-            "--provider",
-            "openai",
-            "--api-key-ref",
-            "OPENAI_API_KEY",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref",
-        ));
-}
-
-#[test]
 fn init_provider_failure_persists_selected_agent_for_resume() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");

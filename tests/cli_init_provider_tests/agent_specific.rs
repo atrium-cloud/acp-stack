@@ -373,6 +373,40 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
 }
 
 #[test]
+fn init_codex_openai_takes_an_api_key_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(tempdir.path(), &[("OPENAI_API_KEY", "test-openai-key")]);
+    // Codex reads `OPENAI_API_KEY` from its own environment, so its built-in
+    // openai lane provisions like any other keyed provider.
+    let options_path = write_acp_config_options(tempdir.path(), &["gpt-5.5"], &[]);
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "codex",
+            "--provider",
+            "openai",
+            "--api-key-ref",
+            "OPENAI_API_KEY",
+            "--model",
+            "gpt-5.5",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success();
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "openai""#));
+    assert!(config.contains(r#"api_key_ref = "OPENAI_API_KEY""#));
+}
+
+#[test]
 fn init_hermes_openrouter_lists_provider_catalog_models() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(

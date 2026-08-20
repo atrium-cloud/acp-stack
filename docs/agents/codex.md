@@ -15,16 +15,17 @@ Codex supports two mapped provider ids.
 For Codex's built-in OpenAI provider:
 
 ```sh
-acps agent set --provider openai --model <model-id>
+acps agent provider credential add openai
+acps agent provider use openai --model <model-id>
 ```
 
-You must use an `OPENAI_API_KEY` for this provider. Switching from a generated non-OpenAI provider to `openai` backs up the prior `~/.codex/config.toml` with a numeric suffix.
+`credential add` prompts for the key; to reuse one already in the store, run `acps secrets set OPENAI_API_KEY` first and pass `--from-secret OPENAI_API_KEY=OPENAI_API_KEY`. Switching from a generated non-OpenAI provider to `openai` backs up the prior `~/.codex/config.toml` with a numeric suffix.
 
 For [OpenRouter](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli):
 
 ```sh
 acps secrets set OPENROUTER_API_KEY
-acps agent set --provider openrouter --model <model-id>
+acps agent provider use openrouter --model <model-id>
 ```
 
 OpenRouter config is written to `~/.codex/config.toml` with `https://openrouter.ai/api/v1` as the Responses base URL. Following the OpenRouter cookbook, authentication uses a command-based `auth` block that echoes `OPENROUTER_API_KEY` instead of a plain `env_key`, so Codex refreshes its model catalog and non-OpenAI models get correct metadata.

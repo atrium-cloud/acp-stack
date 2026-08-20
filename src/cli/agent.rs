@@ -407,6 +407,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_openai_defaults_to_openai_api_key_ref() {
+        // Codex + openai is an ordinary keyed provider; only the endpoint-
+        // override lane treats the pair specially.
+        assert_eq!(
+            default_api_key_ref_for_agent_provider("codex", "openai"),
+            Some("OPENAI_API_KEY".to_owned())
+        );
+    }
+
     struct MockResolver {
         npm: std::collections::HashMap<String, String>,
         github: std::collections::HashMap<String, String>,

@@ -101,12 +101,6 @@ pub(super) fn preflight_provider_for_init(
         )?;
         return Ok(());
     }
-    if config.agent.id == "codex" && provider_id == "openai" && args.api_key_ref.is_some() {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
-        });
-    }
     if provider_id_is_known(provider_id)
         && !provider_id_supports_agent(provider_id, &config.agent.id)
     {
@@ -282,13 +276,6 @@ fn validate_configured_provider_for_init(
             ),
         });
     }
-    if config.agent.id == "codex" && provider.id == "openai" && provider.api_key_ref.is_some() {
-        return Err(StackError::AgentConfigProvision {
-            path: config_path.to_path_buf(),
-            reason: "Codex OpenAI uses Codex-native auth; remove agent.provider.api_key_ref"
-                .to_owned(),
-        });
-    }
     Ok(())
 }
 
@@ -306,9 +293,7 @@ fn configured_provider_shape_is_supported(
             && (agent_id == CLAUDE_CODE_AGENT_ID
                 || custom.api != CustomProviderApi::AnthropicMessages);
     }
-    provider_id_is_known(&provider.id)
-        && provider_id_supports_agent(&provider.id, agent_id)
-        && !(agent_id == "codex" && provider.id == "openai" && provider.api_key_ref.is_some())
+    provider_id_is_known(&provider.id) && provider_id_supports_agent(&provider.id, agent_id)
 }
 
 fn select_provider_for_init(

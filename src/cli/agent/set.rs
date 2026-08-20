@@ -427,9 +427,6 @@ pub(in crate::cli) fn default_api_key_ref_for_agent_provider(
     agent_id: &str,
     provider_id: &str,
 ) -> Option<String> {
-    if agent_id == "codex" && provider_id == "openai" {
-        return None;
-    }
     env_var_for_agent_provider_id(agent_id, provider_id).map(str::to_owned)
 }
 

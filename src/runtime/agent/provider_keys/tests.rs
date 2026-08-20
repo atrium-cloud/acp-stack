@@ -424,6 +424,19 @@ fn claude_code_provider_refs_use_agent_specific_profiles() {
         "claude-code",
         "microsoft-foundry"
     ));
+    // Codex reads `OPENAI_API_KEY` from its environment, so its built-in
+    // openai lane is key-driven like any other mapped provider. The pair is
+    // still refused an endpoint override, which is a separate capability.
+    assert!(!provider_uses_agent_native_auth("codex", "openai"));
+    assert_eq!(
+        env_var_for_agent_provider_id("codex", "openai"),
+        Some("OPENAI_API_KEY")
+    );
+    assert!(!agent_provider_accepts_endpoint_override("codex", "openai"));
+    assert!(agent_provider_accepts_endpoint_override(
+        "codex",
+        "openrouter"
+    ));
 
     let summaries = providers_for_agent("claude-code");
     let bedrock = summaries
@@ -813,4 +826,121 @@ agent_native_auth = true
     .expect_err("native auth with api key mapping fails");
 
     assert!(err.to_string().contains("native auth"));
+}
+
+#[test]
+fn hermes_api_modes_are_data_driven() {
+    for provider_id in ["anthropic", "kimi", "kimi-coding", "minimax", "minimax-cn"] {
+        assert_eq!(
+            hermes_api_mode_for_provider_id(provider_id),
+            Some("anthropic_messages"),
+            "{provider_id}"
+        );
+    }
+    for provider_id in ["openai", "xai", "meta", "meta-ai", "actual"] {
+        assert_eq!(
+            hermes_api_mode_for_provider_id(provider_id),
+            Some("codex_responses"),
+            "{provider_id}"
+        );
+    }
+    for provider_id in ["openrouter", "google", "zai", "opencode", "opencode-go"] {
+        assert_eq!(
+            hermes_api_mode_for_provider_id(provider_id),
+            Some("chat_completions"),
+            "{provider_id}"
+        );
+    }
+    assert_eq!(hermes_api_mode_for_provider_id("not-a-provider"), None);
+}
+
+#[test]
+fn endpoint_override_pairs_are_data_driven() {
+    assert!(agent_provider_accepts_endpoint_override(
+        "hermes",
+        "openrouter"
+    ));
+    // Unknown ids are configured custom providers; the wire shape comes from
+    // the custom provider's declared api.
+    assert!(agent_provider_accepts_endpoint_override(
+        "hermes",
+        "myprovider"
+    ));
+    assert!(!agent_provider_accepts_endpoint_override("codex", "openai"));
+    assert!(agent_provider_accepts_endpoint_override(
+        "codex",
+        "openrouter"
+    ));
+}
+
+#[test]
+fn invalid_mapping_rejects_hermes_provider_without_profile() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["hermes"]
+"#,
+    )
+    .expect_err("hermes-enabled provider without profile fails");
+
+    assert!(
+        err.to_string()
+            .contains("declares no [providers.hermes] profile")
+    );
+}
+
+#[test]
+fn invalid_mapping_rejects_unknown_hermes_api_mode() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["hermes"]
+
+[providers.hermes]
+api_mode = "bogus"
+"#,
+    )
+    .expect_err("unknown hermes api_mode fails");
+
+    assert!(err.to_string().contains("hermes.api_mode must be one of"));
+}
+
+#[test]
+fn invalid_mapping_rejects_hermes_profile_without_agent_support() {
+    let err = ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["pi"]
+
+[providers.hermes]
+api_mode = "chat_completions"
+"#,
+    )
+    .expect_err("hermes profile without hermes support fails");
+
+    assert!(err.to_string().contains("does not support `hermes`"));
+}
+
+#[test]
+fn hermes_profile_may_omit_api_mode_to_refuse_overrides() {
+    // A profile without api_mode is valid: it marks a hermes-enabled provider
+    // whose wire transport is unknown, so the pair refuses endpoint overrides
+    // instead of guessing one.
+    ProviderKeyMapping::from_toml(
+        r#"
+[[providers]]
+id = ["solo"]
+name = "Solo"
+agents = ["hermes"]
+
+[providers.hermes]
+"#,
+    )
+    .expect("hermes profile without api_mode validates");
 }
