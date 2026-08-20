@@ -37,7 +37,7 @@ pub(super) fn shell_quote(s: &str) -> String {
     out
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SecurityFinding {
     pub code: String,
     pub severity: String,

@@ -49,6 +49,7 @@ flowchart LR
 | Dependencies     | declaration checks and explicit install actions                   |
 | Logging          | local event history, metrics, and optional external sink          |
 | Edge             | reverse-proxy/tunnel artifacts and optional Cloudflare provisioning |
+| Schema export    | `dev-tools`-only (`src/schema_export.rs`): derives the published `/v1` JSON Schema from the wire DTOs across three serialize/deserialize-contract passes, plus a coverage check against the handler surface; no runtime role, regenerated via the `generate-api-schema` bin |
 
 ## Boundaries
 
@@ -70,3 +71,5 @@ flowchart LR
 ## Maintainer Notes
 
 Development and verification guidance lives in [development.md](development.md). Product behavior contracts live under [../specs](../specs).
+
+After changing any `/v1` request/response DTO or the config schema, regenerate the published schema with `cargo run --features dev-tools --bin generate-api-schema` and commit the updated `docs/specs/api/acps-schema.json` + `.meta.json`. The `--all-features` test run byte-compares the checked-in files (drift test) and verifies coverage of the handler surface, so an un-regenerated change fails CI and blocks tagging. A new endpoint whose payload types are not registered in the `src/schema_export/{requests,responses}.rs` umbrellas fails the coverage test.

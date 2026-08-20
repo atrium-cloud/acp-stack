@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsEventsParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,
@@ -10,7 +10,7 @@ pub(crate) struct SessionsEventsParams {
     target_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsEventsResponse {
     events: Vec<LogEventJson>,
 }
@@ -69,7 +69,7 @@ const SNAPSHOT_RECENT_EVENTS_LIMIT: u32 = 50;
 /// settles) so the snapshot stays bounded.
 const SNAPSHOT_IN_FLIGHT_PROMPTS_CAP: usize = 25;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionSnapshotResponse {
     session: SessionResponse,
     in_flight_prompts: Vec<PromptStatusResponse>,

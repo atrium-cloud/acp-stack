@@ -1,11 +1,11 @@
 use super::*;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct SessionsPromptBody {
     prompt: serde_json::Value,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct PromptSubmitResponse {
     prompt_id: String,
     session_id: String,

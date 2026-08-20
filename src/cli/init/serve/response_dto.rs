@@ -1,24 +1,24 @@
 use super::*;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct StartInitResponse {
     pub(super) session_id: String,
     pub(super) status: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct SimpleSessionResponse {
     pub(super) session_id: String,
     pub(super) status: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct InitEventsResponse {
     pub(super) session_id: String,
     pub(super) events: Vec<Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct InitStatusResponse {
     pub(super) session_id: String,
     pub(super) status: String,
@@ -34,13 +34,13 @@ pub(super) struct InitStatusResponse {
     pub(super) last_activity_age_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(super) struct PublicError {
     pub(super) code: String,
     pub(super) message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(super) struct PublicInputRequest {
     pub(super) request_id: String,
     /// Machine-readable prompt identity, from `HostedPromptKind::as_str`. Field
@@ -56,7 +56,7 @@ pub(super) struct PublicInputRequest {
     pub(super) inspection: Option<NativeConfigInspection>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub(super) struct PublicInputOption {
     pub(super) index: usize,
     /// Stable option id an answer may address by `{"value": "<id>"}`; unlike

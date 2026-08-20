@@ -28,7 +28,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config::SecurityHttpConfig;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct RequestOrigin {
     pub origin_kind: String,
     pub proxy_provider: Option<String>,

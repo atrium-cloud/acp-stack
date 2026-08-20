@@ -32,7 +32,7 @@ pub struct ResolvedSkillDirectory {
     pub installable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SkillInstallReport {
     pub source_id: String,
     pub destination_root: PathBuf,
@@ -40,7 +40,7 @@ pub struct SkillInstallReport {
     pub skipped: Vec<SkillInstallEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SkillInstallEntry {
     pub name: String,
     pub path: PathBuf,
@@ -50,7 +50,7 @@ pub struct SkillInstallEntry {
 /// carries provenance: the source id recorded in the managed marker at
 /// install time, absent for skills the user placed in the install root by
 /// hand (which `remove` will refuse to delete).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct InstalledSkill {
     pub name: String,
     pub path: PathBuf,
@@ -58,7 +58,7 @@ pub struct InstalledSkill {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SkillPortReport {
     pub source_root: PathBuf,
     pub target_root: PathBuf,
@@ -71,7 +71,7 @@ pub struct SkillPortReport {
     pub kept_unmanaged: Vec<SkillInstallEntry>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillPortStatus {
     Shared,
@@ -79,7 +79,7 @@ pub enum SkillPortStatus {
     NoneFound,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SkillLinkReport {
     pub install_root: PathBuf,
     pub link_root: PathBuf,
@@ -102,7 +102,7 @@ pub struct SkillLinkOutcome {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SkillRemoveReport {
     pub install_root: PathBuf,
     pub removed: SkillInstallEntry,
@@ -110,7 +110,7 @@ pub struct SkillRemoveReport {
 
 /// One installable skill surfaced by `source get` inspection: the selector to
 /// pass to `add`, plus the frontmatter identity read from its `SKILL.md`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SkillMetadata {
     pub selector: String,
     pub name: String,

@@ -14,7 +14,7 @@ use crate::workspace::{
     self, FileMetadata, FileRead, PathIntent, WorkspaceListing, resolve_workspace_path,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct WorkspaceMetadataResponse {
     root: String,
     uploads_path: String,
@@ -35,18 +35,18 @@ pub(crate) async fn workspace_metadata_handler(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct FilesPathParams {
     path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FilesListResponse {
     path: String,
     entries: Vec<FilesListEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FilesListEntry {
     name: String,
     kind: String,
@@ -86,7 +86,7 @@ pub(crate) async fn files_list_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FilesContentResponse {
     path: String,
     encoding: String,
@@ -160,7 +160,7 @@ pub(crate) async fn files_download_handler(
     Ok(response)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct FilesContentPutBody {
     path: String,
     encoding: String,
@@ -428,14 +428,14 @@ async fn publish_workspace_mutation(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FileMutationResponse {
     path: String,
     size: u64,
     modified: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FileUploadResponse {
     path: String,
     filename: String,
@@ -443,7 +443,7 @@ pub(crate) struct FileUploadResponse {
     modified: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FileDeleteResponse {
     path: String,
     deleted: bool,

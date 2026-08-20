@@ -15,7 +15,7 @@ use crate::runtime::install::agent_version_check::{
 /// auto-update timer's; the `agent_lifecycle` table has no source column.
 const UPDATE_TRIGGER_API: &str = "api";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentUpdateRequest {
     #[serde(default)]
     force: bool,
@@ -153,7 +153,7 @@ async fn run_update_and_release(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentUpdateStatusResponse {
     agent_id: String,
     managed: bool,
@@ -165,14 +165,14 @@ pub(crate) struct AgentUpdateStatusResponse {
     components: Vec<AgentUpdateStatusComponent>,
 }
 
-#[derive(Serialize)]
-struct AgentAutoUpdatePolicyJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentAutoUpdatePolicyJson {
     enabled: bool,
     frequency: String,
 }
 
-#[derive(Serialize)]
-struct AgentUpdateStatusComponent {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentUpdateStatusComponent {
     step: String,
     #[serde(flatten)]
     result: AgentVersionStatus,

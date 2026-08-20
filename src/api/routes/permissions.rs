@@ -7,19 +7,19 @@ use super::logs::{LogsLimitParams, MAX_LOGS_LIMIT};
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct PermissionsListResponse {
     permissions: Vec<crate::runtime::mediation::permissions::PermissionRequestView>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct PermissionApproveBody {
     option_id: Option<String>,
     reason: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct PermissionDenyBody {
     reason: Option<String>,

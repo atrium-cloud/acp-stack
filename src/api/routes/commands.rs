@@ -8,7 +8,7 @@ use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::runtime::mediation::commands::SubmitRequest;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct CommandSubmitRequest {
     command: String,
     #[serde(default)]
@@ -19,7 +19,7 @@ pub(crate) struct CommandSubmitRequest {
     timeout_override: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct CommandResponse {
     id: String,
     created_at: String,
@@ -66,7 +66,7 @@ impl From<crate::state::CommandRecord> for CommandResponse {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct CommandsListResponse {
     items: Vec<CommandResponse>,
 }
@@ -93,7 +93,7 @@ pub(crate) async fn commands_get_handler(
     Ok(ApiSuccess::new(record.into()))
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct CommandOutputParams {
     #[serde(default = "default_logs_limit")]
@@ -102,13 +102,13 @@ pub(crate) struct CommandOutputParams {
     order: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct CommandOutputResponse {
     chunks: Vec<CommandOutputFrame>,
     next_cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct CommandOutputFrame {
     event_id: String,
     created_at: String,

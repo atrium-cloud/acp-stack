@@ -8,7 +8,7 @@ use serde_json::Value;
 /// but is independent of the SDK's `AgentCapabilities` type so our
 /// `GET /v1/agent/capabilities` JSON contract stays stable across SDK
 /// minor-version churn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentCapabilitiesDto {
     pub protocol_version: u16,
     /// Raw JSON object of the agent's advertised capabilities. We surface it
@@ -42,7 +42,7 @@ pub struct PartitionedMcpServers {
 /// A configured feature the runtime routes around because the agent does not
 /// advertise the capability backing it. The feature stays in config; this
 /// record surfaces the omission through init reports and session events.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct IgnoredFeature {
     /// What kind of configured feature was ignored: `mcp.server`,
     /// `agent.mode`, or `agent.model`.

@@ -5,31 +5,31 @@ use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct WsConnectionsResponse {
     connections: Vec<super::super::ws_registry::WsConnectionView>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct WsSessionsResponse {
     sessions: Vec<super::super::ws_registry::WsSessionView>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct DisconnectConnectionsRequest {
     connection_ids: Vec<String>,
     #[serde(default)]
     reason: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct DisconnectSessionsRequest {
     session_ids: Vec<String>,
     #[serde(default)]
     reason: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct DisconnectResponse {
     requested: usize,
 }

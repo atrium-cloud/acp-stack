@@ -23,7 +23,7 @@ impl WireGuard {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StartInitRequest {
     agent: Option<String>,
@@ -105,14 +105,14 @@ pub(super) struct StartInitRequest {
     fresh: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct NativeConfigUploadRequest {
     filename: String,
     content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct McpStdioServerRequest {
     name: String,
@@ -124,7 +124,7 @@ struct McpStdioServerRequest {
     env: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct McpHttpServerRequest {
     name: String,
@@ -136,7 +136,7 @@ struct McpHttpServerRequest {
 /// Exactly one of `value_ref` (whole-value secret ref) or `value`
 /// (`${NAME}`-interpolated template) must be set; enforced in
 /// `into_init_args` so a malformed declaration is a 400 at the boundary.
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct McpHttpHeaderRequest {
     name: String,
@@ -146,7 +146,7 @@ struct McpHttpHeaderRequest {
     value: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DepRequest {
     name: String,
@@ -157,7 +157,7 @@ struct DepRequest {
 // struct accepts any field combination (validation happens later in the config
 // validator), while the hosted contract should reject a malformed declaration
 // at the HTTP boundary and stay decoupled from the config schema.
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum DataSourceRequest {
     Local {

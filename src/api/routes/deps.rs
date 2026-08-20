@@ -26,7 +26,7 @@ pub(crate) async fn deps_check_handler(
     ))
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct DepsApplyBody {
     /// Operator must set `confirmation = true` for the apply to run.
     /// Mirrors the CLI's `--yes` flag; without it the endpoint returns
@@ -39,7 +39,7 @@ pub(crate) struct DepsApplyBody {
     feature: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, schemars::JsonSchema)]
 pub(crate) struct DepsApplyResponse {
     /// True when subprocesses ran. False on a preview call
     /// (`confirmation = false`); the operator sees the candidate list

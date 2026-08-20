@@ -5,7 +5,7 @@ use super::*;
 /// User-declared Agent Skills sources (managed via `acps skills source add`),
 /// layered alongside the embedded curated catalog. Unlike the catalog these
 /// are operator-supplied and untrusted by default.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -18,7 +18,7 @@ impl SkillsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UserSkillSource {
     /// Unique alias used by `acps skills add <alias> ...` and `source get`.

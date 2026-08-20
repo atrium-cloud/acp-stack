@@ -16,7 +16,7 @@ use crate::state::{
 const MAX_HISTORY_LIMIT: u32 = 500;
 const DEFAULT_HISTORY_LIMIT: u32 = 20;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecurityCheckResponse {
     pub(crate) run_id: String,
     pub(crate) status: String,
@@ -25,7 +25,7 @@ pub(crate) struct SecurityCheckResponse {
     pub(crate) auth_failure_count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecurityRunSummary {
     pub(crate) id: String,
     pub(crate) started_at: String,
@@ -52,20 +52,20 @@ impl From<SecurityRunRecord> for SecurityRunSummary {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecurityHistoryResponse {
     pub(crate) runs: Vec<SecurityRunSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) next_cursor: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecurityHistoryShowResponse {
     pub(crate) run: SecurityRunSummary,
     pub(crate) findings: Vec<crate::security::SecurityFinding>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SecurityHistoryQuery {
     pub(crate) limit: Option<u32>,
     pub(crate) after: Option<String>,

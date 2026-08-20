@@ -11,8 +11,8 @@ use serde::Deserialize;
 use super::auth::{persist_security_event, reject};
 use super::core::AppState;
 
-#[derive(Deserialize)]
-struct WsClientMessage {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub(crate) struct WsClientMessage {
     #[serde(rename = "type")]
     message_type: String,
     #[serde(default)]

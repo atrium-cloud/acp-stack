@@ -32,7 +32,7 @@ pub(super) fn default_runs_limit() -> u32 {
     100
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct InstallerRunsParams {
     /// When true, only in-flight (`running`) rows are returned, oldest first.
@@ -44,13 +44,13 @@ pub(crate) struct InstallerRunsParams {
     limit: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct InstallerRunsResponse {
     runs: Vec<InstallerRunJson>,
 }
 
-#[derive(Serialize)]
-struct InstallerRunJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct InstallerRunJson {
     id: String,
     agent_id: Option<String>,
     operation: String,

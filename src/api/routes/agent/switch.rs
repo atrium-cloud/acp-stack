@@ -6,7 +6,7 @@ use crate::runtime::agent::switch_journal::{
     persist_switch_journal, remove_switch_journal,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentSwitchRequest {
     agent: String,
     #[serde(default, rename = "drop")]
@@ -17,7 +17,7 @@ pub(crate) struct AgentSwitchRequest {
     api_key_ref: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentSwitchResponse {
     old_agent_id: String,
     agent_id: String,
@@ -55,20 +55,20 @@ pub(crate) struct AgentSwitchResponse {
     cleanup_errors: Vec<String>,
 }
 
-#[derive(Serialize)]
-struct ProvisionedAgentConfigJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct ProvisionedAgentConfigJson {
     label: &'static str,
     path: String,
 }
 
-#[derive(Serialize)]
-struct CleanedAgentConfigJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct CleanedAgentConfigJson {
     label: &'static str,
     path: String,
 }
 
-#[derive(Serialize)]
-struct AgentSwitchSecretMigrationJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentSwitchSecretMigrationJson {
     from_ref: String,
     to_ref: String,
 }

@@ -1,0 +1,7745 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json",
+  "title": "acp-stack /v1 API and configuration contract",
+  "$defs": {
+    "request": {
+      "AgentRestartQuery": {
+        "type": "object",
+        "properties": {
+          "require_idle": {
+            "type": "boolean",
+            "default": false
+          },
+          "auto": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "AgentSwitchRequest": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "drop": {
+            "type": "boolean",
+            "default": false
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "api_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "agent"
+        ]
+      },
+      "AgentUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "ApplyRequest": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "revision",
+          "desired"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "desired": {
+            "$ref": "#/$defs/request/DesiredState"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DesiredState": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "selection"
+            ],
+            "properties": {
+              "selection": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/request/CredentialSelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "const": "provider-credential"
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "The desired payload, discriminated by `kind`. A second kind later is an\nadditive change; unknown kinds fail deserialization."
+      },
+      "CredentialSelection": {
+        "type": "object",
+        "required": [
+          "provider_id"
+        ],
+        "properties": {
+          "provider_id": {
+            "type": "string"
+          },
+          "values": {
+            "type": "object",
+            "default": {},
+            "description": "Inline values keyed by env-var name.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "source_refs": {
+            "type": "object",
+            "default": {},
+            "description": "Secret-store refs keyed by env-var name; each resolves into `values`\nat apply time and the ref name is retained alongside the value.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Endpoint base the agent must send this provider's traffic to instead of\nthe vendor default. Written into the agent's own native config, so the\nconfigured agent must declare `set_provider_base_url` in the registry."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CommandOutputParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "CommandSubmitRequest": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "env": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "default": null,
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "timeout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "ConfigImportQuery": {
+        "type": "object",
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "DepsApplyBody": {
+        "type": "object",
+        "properties": {
+          "confirmation": {
+            "type": "boolean",
+            "description": "Operator must set `confirmation = true` for the apply to run.\nMirrors the CLI's `--yes` flag; without it the endpoint returns\na structured preview without spawning any subprocess.",
+            "default": false
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional `feature` filter — only deps whose `feature` matches\nare eligible. `None` means apply every actionable dep.",
+            "default": null
+          }
+        }
+      },
+      "DisconnectConnectionsRequest": {
+        "type": "object",
+        "properties": {
+          "connection_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "connection_ids"
+        ]
+      },
+      "DisconnectSessionsRequest": {
+        "type": "object",
+        "properties": {
+          "session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "session_ids"
+        ]
+      },
+      "FilesContentPutBody": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "encoding",
+          "content"
+        ]
+      },
+      "FilesPathParams": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "InstallerRunsParams": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "When true, only in-flight (`running`) rows are returned, oldest first.",
+            "default": false
+          },
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Scope to one agent id (`deps_apply` covers dependency installs);\nabsent returns rows for every agent.",
+            "default": null
+          },
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          }
+        }
+      },
+      "LocalSessionAccessRequest": {
+        "type": "object",
+        "properties": {
+          "session_auth": {
+            "$ref": "#/$defs/request/LocalSessionAuth"
+          }
+        },
+        "required": [
+          "session_auth"
+        ]
+      },
+      "LocalSessionAuth": {
+        "type": "string",
+        "enum": [
+          "session-key",
+          "keyless"
+        ]
+      },
+      "LogsCommandsParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "LogsEventsParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "command_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "permission_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "LogsLimitParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          }
+        }
+      },
+      "LogsPermissionsParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "permission_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "LogsSecurityParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "auth_failures_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "events_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "LogsSessionsParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "order": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "MetricsSummaryParams": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Window start. Accepts RFC3339 (e.g. `2026-05-16T00:00:00Z`) or a\nduration suffix (`1h`, `30m`, `2d`). Defaults to 24h ago.",
+            "default": null
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Window end. Same format as `since`. Defaults to \"now\".",
+            "default": null
+          }
+        }
+      },
+      "NativeConfigImportRequest": {
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "selected_managed_field_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "executable_settings_acknowledged": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigInspectBody": {
+        "type": "object",
+        "required": [
+          "filename",
+          "content"
+        ],
+        "properties": {
+          "filename": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PermissionApproveBody": {
+        "type": "object",
+        "properties": {
+          "option_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "PermissionDenyBody": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SecretsSetBody": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ]
+      },
+      "SecurityHistoryQuery": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SessionsCreateBody": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SessionsEventsParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SessionsForkBody": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SessionsListParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 100
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "range": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolve_bounds": {
+            "type": "boolean",
+            "default": false
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SessionsLoadBody": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SessionsPromptBody": {
+        "type": "object",
+        "properties": {
+          "prompt": {}
+        },
+        "required": [
+          "prompt"
+        ]
+      },
+      "SessionsStatusParams": {
+        "type": "object",
+        "properties": {
+          "threshold": {
+            "type": "string",
+            "default": "15m"
+          },
+          "window": {
+            "type": "string",
+            "default": "8h"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 1000
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SessionsTargetParams": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        }
+      },
+      "SkillSourceAddRequest": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "github": {
+            "type": "string",
+            "description": "GitHub source as `owner/repo`."
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "trusted": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "alias",
+          "github"
+        ]
+      },
+      "SkillSourceGetQuery": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "Catalog alias, configured user alias, or `github:<owner>[/<repo>]`."
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "SkillSourceRemoveRequest": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "alias"
+        ]
+      },
+      "SkillsAddRequest": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "Catalog alias, a configured user alias, or `github:<owner>[/<repo>]`."
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Skill selectors; comma-separated values in an entry are also accepted.",
+            "default": []
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "SkillsRemoveRequest": {
+        "type": "object",
+        "properties": {
+          "skill": {
+            "type": "string",
+            "description": "Install name of the skill to remove (a `/`-joined path for nested\nskills, e.g. `zoom/android`)."
+          }
+        },
+        "required": [
+          "skill"
+        ]
+      },
+      "WsClientMessage": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "StartInitRequest": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_agent_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_agent_command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_agent_args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "custom_agent_install": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_agent_creates": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "api_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Declared up front like `model`, so a hosted client that already knows\nthe session mode it wants skips the streamed picker entirely. Validated\nagainst the agent's advertised modes by the shared mode lane."
+          },
+          "custom_provider": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "provider_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_api": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_max_tokens": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_uploads": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sandbox": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code_from": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "data_from": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "skip_testflight": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "testflight": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "native_config": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/request/NativeConfigUploadRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mcp_preset": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "mcp_stdio": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/McpStdioServerRequest"
+            }
+          },
+          "mcp_http": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/McpHttpServerRequest"
+            }
+          },
+          "skills_source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "essential_skills": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "deps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/DepRequest"
+            }
+          },
+          "deps_system": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/DepRequest"
+            }
+          },
+          "deps_apply": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "deps_apply_yes": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "standard_agent_work_deps": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "browser_use": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "stack_update": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stack_update_frequency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_update": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_update_frequency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "defer_provider_credentials": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "data_sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/DataSourceRequest"
+            }
+          },
+          "resume": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "fresh": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigUploadRequest": {
+        "type": "object",
+        "required": [
+          "filename",
+          "content"
+        ],
+        "properties": {
+          "filename": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpStdioServerRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "command"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Secret ref names exported into the server's environment.",
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpHttpServerRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request/McpHttpHeaderRequest"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpHttpHeaderRequest": {
+        "type": "object",
+        "description": "Exactly one of `value_ref` (whole-value secret ref) or `value`\n(`${NAME}`-interpolated template) must be set; enforced in\n`into_init_args` so a malformed declaration is a 400 at the boundary.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "DepRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "shell"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "shell": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DataSourceRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "path"
+            ],
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "const": "local"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "url"
+            ],
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "url": {
+                "type": "string"
+              },
+              "expected_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "max_download_bytes": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "max_extracted_bytes": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "const": "https"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "bucket",
+              "region",
+              "access_key_ref",
+              "secret_key_ref"
+            ],
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "bucket": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              },
+              "prefix": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "access_key_ref": {
+                "type": "string"
+              },
+              "secret_key_ref": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "const": "s3"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "EventsQuery": {
+        "type": "object",
+        "properties": {
+          "after_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          }
+        }
+      },
+      "NativeConfigCancelRequest": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "revision"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ClientFrame": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {},
+          "deferred": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Sibling of `value` on an `input` frame: the answer is `false` because\nthe hosting backend will run the confirmed work itself later, not\nbecause the operator declined. Only the testflight confirm reads it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "type"
+        ]
+      }
+    },
+    "response": {
+      "ApiSuccess": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "data": {}
+        },
+        "required": [
+          "ok",
+          "data"
+        ]
+      },
+      "ApiErrorEnvelope": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "$ref": "#/$defs/response/ApiError"
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ]
+      },
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ]
+      },
+      "AgentCapabilitiesResponseBody": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "adapter": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/AgentAdapterConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "captured_at": {
+            "type": "string"
+          },
+          "capabilities": {},
+          "process_state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "adapter",
+          "captured_at",
+          "capabilities",
+          "process_state"
+        ]
+      },
+      "AgentAdapterConfig": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "upstream_agent"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "upstream_agent": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentInstallResponse": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "path",
+          "sha256"
+        ]
+      },
+      "AgentRestartBlockersResponse": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AgentRestartBlockerResponse"
+            }
+          }
+        },
+        "required": [
+          "target_id",
+          "blockers"
+        ]
+      },
+      "AgentRestartBlockerResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "prompt_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt_stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permission_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "target_id",
+          "state"
+        ]
+      },
+      "AgentRestartResultResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/response/AgentRestartResponse",
+            "title": "Restarted"
+          },
+          {
+            "$ref": "#/$defs/response/AgentRestartBlockedResponse",
+            "title": "Blocked"
+          },
+          {
+            "$ref": "#/$defs/response/AgentRestartQueuedResponse",
+            "title": "Queued"
+          }
+        ]
+      },
+      "AgentRestartResponse": {
+        "type": "object",
+        "properties": {
+          "stopped_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "prior_exit_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Exit status of the prior process. `None` when the supervisor\nwas not running (the restart degenerated into a plain start)."
+          },
+          "capabilities": {
+            "$ref": "#/$defs/response/AgentCapabilitiesDto"
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "stopped_at",
+          "started_at",
+          "prior_exit_status",
+          "capabilities",
+          "pid"
+        ]
+      },
+      "AgentCapabilitiesDto": {
+        "type": "object",
+        "properties": {
+          "protocol_version": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "capabilities": {
+            "description": "Raw JSON object of the agent's advertised capabilities. We surface it\nverbatim so clients can read every field today without the daemon\ngrowing a struct for each one. Named accessors land alongside the\nsession API."
+          },
+          "agent_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`agentInfo.name` if the agent provided it. The spec says `SHOULD`,\nnot `MUST`, so this is best-effort."
+          },
+          "agent_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "protocol_version",
+          "capabilities",
+          "agent_name",
+          "agent_title",
+          "agent_version"
+        ],
+        "description": "Our owned view of the `initialize` response. Mirrors the protocol shape\nbut is independent of the SDK's `AgentCapabilities` type so our\n`GET /v1/agent/capabilities` JSON contract stays stable across SDK\nminor-version churn."
+      },
+      "AgentRestartBlockedResponse": {
+        "type": "object",
+        "properties": {
+          "restarted": {
+            "type": "boolean"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AgentRestartBlockerResponse"
+            }
+          }
+        },
+        "required": [
+          "restarted",
+          "target_id",
+          "blockers"
+        ]
+      },
+      "AgentRestartQueuedResponse": {
+        "type": "object",
+        "properties": {
+          "queued": {
+            "type": "boolean"
+          },
+          "already_queued": {
+            "type": "boolean"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "queued",
+          "already_queued",
+          "target_id"
+        ]
+      },
+      "AgentStartResponse": {
+        "type": "object",
+        "properties": {
+          "started_at": {
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/$defs/response/AgentCapabilitiesDto"
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "started_at",
+          "capabilities",
+          "pid"
+        ]
+      },
+      "AgentStopResponse": {
+        "type": "object",
+        "properties": {
+          "stopped_at": {
+            "type": "string"
+          },
+          "exit_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "required": [
+          "stopped_at",
+          "exit_status"
+        ]
+      },
+      "AgentSwitchResponse": {
+        "type": "object",
+        "properties": {
+          "old_agent_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "provider_status": {
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "api_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "required_env_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "secret_migrations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AgentSwitchSecretMigrationJson"
+            }
+          },
+          "install": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/AgentInstallResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent on resumed/no-op retries: install is a pre-commit step that the\ninterrupted attempt already ran, and re-running it on every retry\nwould re-burn minutes for no state change."
+          },
+          "restarted": {
+            "type": "boolean"
+          },
+          "restart_started": {
+            "type": "boolean"
+          },
+          "set_model": {
+            "type": "boolean"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "follow_up": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provisioned": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ProvisionedAgentConfigJson"
+            }
+          },
+          "skills_port": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SkillPortReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skills_link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SkillLinkReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skills_link_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cleaned_configs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/CleanedAgentConfigJson"
+            }
+          },
+          "cleanup_errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "old_agent_id",
+          "agent_id",
+          "provider_status",
+          "restarted",
+          "restart_started",
+          "set_model",
+          "models"
+        ]
+      },
+      "AgentSwitchSecretMigrationJson": {
+        "type": "object",
+        "properties": {
+          "from_ref": {
+            "type": "string"
+          },
+          "to_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_ref",
+          "to_ref"
+        ]
+      },
+      "ProvisionedAgentConfigJson": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "path"
+        ]
+      },
+      "SkillPortReport": {
+        "type": "object",
+        "properties": {
+          "source_root": {
+            "type": "string"
+          },
+          "target_root": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/response/SkillPortStatus"
+          },
+          "copied": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "overwritten": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "kept_unmanaged": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            },
+            "description": "Same-named target skills left untouched because they carry no managed\nmarker — user-owned content is never replaced."
+          }
+        },
+        "required": [
+          "source_root",
+          "target_root",
+          "status",
+          "copied",
+          "overwritten"
+        ]
+      },
+      "SkillPortStatus": {
+        "type": "string",
+        "enum": [
+          "shared",
+          "copied",
+          "none_found"
+        ]
+      },
+      "SkillInstallEntry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ]
+      },
+      "SkillLinkReport": {
+        "type": "object",
+        "properties": {
+          "install_root": {
+            "type": "string"
+          },
+          "link_root": {
+            "type": "string"
+          },
+          "linked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "unchanged": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "pruned": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Per-skill failures (`\"<skill>: <error>\"`) that were skipped so the\nrest of the refresh could continue; empty when every skill linked."
+          }
+        },
+        "required": [
+          "install_root",
+          "link_root",
+          "linked",
+          "unchanged",
+          "conflicts",
+          "pruned"
+        ]
+      },
+      "CleanedAgentConfigJson": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "path"
+        ]
+      },
+      "AgentUpdateReport": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "updated": {
+            "type": "boolean"
+          },
+          "skipped": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AgentUpdateStepReport"
+            }
+          }
+        },
+        "required": [
+          "agent",
+          "updated",
+          "skipped",
+          "steps"
+        ]
+      },
+      "AgentUpdateStepReport": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/response/AgentUpdateStepStatus"
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "installed": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "step",
+          "status"
+        ]
+      },
+      "AgentUpdateStepStatus": {
+        "type": "string",
+        "enum": [
+          "updated",
+          "up_to_date",
+          "skipped",
+          "failed"
+        ]
+      },
+      "AgentUpdateStatusResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pinned": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auto_update": {
+            "$ref": "#/$defs/response/AgentAutoUpdatePolicyJson"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AgentUpdateStatusComponent"
+            }
+          }
+        },
+        "required": [
+          "agent_id",
+          "managed",
+          "auto_update",
+          "components"
+        ]
+      },
+      "AgentAutoUpdatePolicyJson": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "frequency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "frequency"
+        ]
+      },
+      "AgentUpdateStatusComponent": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step"
+        ],
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "const": "up_to_date"
+              }
+            },
+            "required": [
+              "status",
+              "version"
+            ],
+            "description": "Installed and upstream agree on a non-empty version."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "installed": {
+                "type": "string"
+              },
+              "latest": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "const": "stale"
+              }
+            },
+            "required": [
+              "status",
+              "installed",
+              "latest"
+            ],
+            "description": "Both versions are known and they differ — operator should re-run install."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "description": "We could not derive an upstream version (shell-recipe install, missing\nregistry kind, or upstream API error captured as a fall-through)."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "const": "not_installed"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "description": "No successful installer row for this step yet."
+          }
+        ],
+        "description": "Result of comparing the installed managed-agent version against upstream.\nCarried as a typed enum so the CLI printer, the API route, and test cases\ncan pattern-match the four states deterministically."
+      },
+      "ApplyResponse": {
+        "type": "object",
+        "properties": {
+          "applied_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied_revision",
+          "outcome"
+        ]
+      },
+      "ArrayStatusResponse": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "primary_target": {
+            "type": "string"
+          },
+          "delegation": {
+            "$ref": "#/$defs/response/ArrayDelegationStatusResponse"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ArrayTargetStatusResponse"
+            }
+          }
+        },
+        "required": [
+          "enabled",
+          "primary_target",
+          "delegation",
+          "targets"
+        ]
+      },
+      "ArrayDelegationStatusResponse": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "local_session_auth": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ready",
+          "local_session_auth"
+        ]
+      },
+      "ArrayTargetStatusResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "primary": {
+            "type": "boolean"
+          },
+          "process_state": {
+            "type": "string"
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "configured_providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ProviderStatusJson"
+            }
+          },
+          "loaded_providers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/response/ProviderStatusJson"
+            }
+          },
+          "provider_restart_required": {
+            "type": "boolean"
+          },
+          "provider_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when this target's provider resolution fails; other targets keep\nreporting so one broken credential never aborts the whole fleet status."
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "name",
+          "primary",
+          "process_state",
+          "pid",
+          "configured_providers",
+          "loaded_providers",
+          "provider_restart_required",
+          "provider_error"
+        ]
+      },
+      "ProviderStatusJson": {
+        "type": "object",
+        "properties": {
+          "provider_id": {
+            "type": "string"
+          },
+          "alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "provider_id",
+          "alias",
+          "env_names"
+        ]
+      },
+      "CommandOutputResponse": {
+        "type": "object",
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/CommandOutputFrame"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "chunks",
+          "next_cursor"
+        ]
+      },
+      "CommandOutputFrame": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "command_id": {
+            "type": "string"
+          },
+          "stream": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "created_at",
+          "command_id",
+          "stream",
+          "seq",
+          "data"
+        ]
+      },
+      "CommandResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "exit_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "last_output_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_output_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_output_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "output_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_progress_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "updated_at",
+          "status",
+          "command",
+          "exit_status",
+          "started_at",
+          "finished_at",
+          "cwd",
+          "duration_ms",
+          "truncated",
+          "last_output_event_id",
+          "last_output_at",
+          "last_output_seq",
+          "output_bytes",
+          "last_progress_at",
+          "origin",
+          "session_id"
+        ]
+      },
+      "CommandsListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/CommandResponse"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "ConfigExportResponse": {
+        "type": "object",
+        "properties": {
+          "toml": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "toml"
+        ]
+      },
+      "ConfigValidateResponse": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid"
+        ]
+      },
+      "DepsApplyResponse": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "True when subprocesses ran. False on a preview call\n(`confirmation = false`); the operator sees the candidate list\nwithout any side effects."
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "One-line summaries of every candidate action, including\nscope=system warnings."
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/DepsApplyReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Full apply report when `applied = true`. `None` on preview."
+          }
+        },
+        "required": [
+          "applied",
+          "candidates"
+        ]
+      },
+      "DepsApplyReport": {
+        "type": "object",
+        "properties": {
+          "apply_run_id": {
+            "type": "string"
+          },
+          "before": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/DepStatus"
+            }
+          },
+          "after": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/DepStatus"
+            }
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/DepApplyResult"
+            }
+          }
+        },
+        "required": [
+          "apply_run_id",
+          "before",
+          "after",
+          "results"
+        ]
+      },
+      "DepStatus": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/response/DepKind"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "required",
+          "available",
+          "path",
+          "feature",
+          "reason"
+        ]
+      },
+      "DepKind": {
+        "type": "string",
+        "enum": [
+          "command",
+          "package",
+          "runtime",
+          "mcp"
+        ]
+      },
+      "DepApplyResult": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/$defs/response/DepApplyOutcome"
+          },
+          "post_status": {
+            "$ref": "#/$defs/response/DepStatus",
+            "description": "Status of the dep's `creates` binary AFTER the action ran.\n`available = true` confirms the action actually installed the\nthing it claimed to install."
+          }
+        },
+        "required": [
+          "name",
+          "outcome",
+          "post_status"
+        ]
+      },
+      "DepApplyOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "installed"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "description": "Action ran and the `creates` postcheck resolved."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "alreadypresent"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "description": "`creates` already resolved before the action ran; the action\nwas skipped entirely. Mirrors the agent installer's\n\"already_present\" semantics."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "uid": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "const": "privilegerequired"
+              }
+            },
+            "required": [
+              "kind",
+              "uid"
+            ],
+            "description": "Action declared `scope = \"system\"` but the process isn't root\nand passwordless sudo is unavailable. No subprocess was spawned."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32"
+              },
+              "stderr_tail": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "const": "failed"
+              }
+            },
+            "required": [
+              "kind",
+              "exit_code",
+              "stderr_tail"
+            ],
+            "description": "Action ran but `creates` did not resolve afterwards, OR the\naction exited non-zero. Tail of stderr included for context."
+          }
+        ]
+      },
+      "DepsReport": {
+        "type": "object",
+        "properties": {
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/DepStatus"
+            }
+          }
+        },
+        "required": [
+          "dependencies"
+        ]
+      },
+      "DisconnectResponse": {
+        "type": "object",
+        "properties": {
+          "requested": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "requested"
+        ]
+      },
+      "FileDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "deleted"
+        ]
+      },
+      "FileMutationResponse": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "modified": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "size",
+          "modified"
+        ]
+      },
+      "FileUploadResponse": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "modified": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "filename",
+          "size",
+          "modified"
+        ]
+      },
+      "FilesContentResponse": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "modified": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "encoding",
+          "content",
+          "size",
+          "modified"
+        ]
+      },
+      "FilesListResponse": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/FilesListEntry"
+            }
+          }
+        },
+        "required": [
+          "path",
+          "entries"
+        ]
+      },
+      "FilesListEntry": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "modified": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "modified"
+        ]
+      },
+      "HealthLiveResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "server": {
+            "$ref": "#/$defs/response/ServerInfo"
+          }
+        },
+        "required": [
+          "ok",
+          "server"
+        ]
+      },
+      "ServerInfo": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "features"
+        ]
+      },
+      "InstallerRunsResponse": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/InstallerRunJson"
+            }
+          }
+        },
+        "required": [
+          "runs"
+        ]
+      },
+      "InstallerRunJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exit_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "elapsed_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds since `started_at`, computed server-side so pollers need no\nclock sync with the daemon; present only while the row is `running`."
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "operation",
+          "step",
+          "method",
+          "status",
+          "started_at",
+          "finished_at",
+          "exit_status",
+          "version"
+        ]
+      },
+      "LocalSessionAccessResponse": {
+        "type": "object",
+        "properties": {
+          "session_auth": {
+            "$ref": "#/$defs/response/LocalSessionAuth"
+          }
+        },
+        "required": [
+          "session_auth"
+        ]
+      },
+      "LocalSessionAuth": {
+        "type": "string",
+        "enum": [
+          "session-key",
+          "keyless"
+        ]
+      },
+      "LogsCommandsResponse": {
+        "type": "object",
+        "properties": {
+          "commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/CommandLogJson"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "commands",
+          "next_cursor"
+        ]
+      },
+      "CommandLogJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "exit_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "updated_at",
+          "status",
+          "command",
+          "exit_status"
+        ]
+      },
+      "LogsEventsResponse": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/LogEventJson"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "events",
+          "next_cursor"
+        ]
+      },
+      "LogEventJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload_json": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "level",
+          "kind",
+          "message",
+          "payload_json",
+          "source"
+        ]
+      },
+      "LogsSecurityResponse": {
+        "type": "object",
+        "properties": {
+          "auth_failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AuthFailureJson"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/LogEventJson"
+            }
+          },
+          "auth_failures_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events_next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "auth_failures",
+          "events",
+          "auth_failures_next_cursor",
+          "events_next_cursor"
+        ]
+      },
+      "AuthFailureJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "key_kind": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "client_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload_json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "key_kind",
+          "reason",
+          "client_ip",
+          "route",
+          "payload_json"
+        ]
+      },
+      "LogsSessionsResponse": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SessionLogJson"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sessions",
+          "next_cursor"
+        ]
+      },
+      "SessionLogJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "updated_at",
+          "status"
+        ]
+      },
+      "MetricsSummaryResponse": {
+        "type": "object",
+        "properties": {
+          "window": {
+            "$ref": "#/$defs/response/MetricsWindowJson"
+          },
+          "counts": {
+            "$ref": "#/$defs/response/MetricsCountsJson"
+          },
+          "sessions": {
+            "$ref": "#/$defs/response/MetricsSessionsJson"
+          },
+          "turns": {
+            "$ref": "#/$defs/response/MetricsTurnsJson"
+          },
+          "prompt_failures": {
+            "$ref": "#/$defs/response/MetricsPromptFailuresJson"
+          },
+          "commands": {
+            "$ref": "#/$defs/response/MetricsCommandsJson"
+          },
+          "permissions": {
+            "$ref": "#/$defs/response/MetricsPermissionsJson"
+          },
+          "security": {
+            "$ref": "#/$defs/response/MetricsSecurityJson"
+          },
+          "api_connections": {
+            "$ref": "#/$defs/response/MetricsApiConnectionsJson"
+          },
+          "ws_connections": {
+            "$ref": "#/$defs/response/MetricsWsConnectionsJson"
+          },
+          "usage": {
+            "$ref": "#/$defs/response/MetricsUsageJson"
+          }
+        },
+        "required": [
+          "window",
+          "counts",
+          "sessions",
+          "turns",
+          "prompt_failures",
+          "commands",
+          "permissions",
+          "security",
+          "api_connections",
+          "ws_connections",
+          "usage"
+        ]
+      },
+      "MetricsWindowJson": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until"
+        ]
+      },
+      "MetricsCountsJson": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "commands": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "auth_failures": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "agent_lifecycle": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "installer_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "agent_capabilities": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "prompts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "permission_requests": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "permission_decisions": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "events",
+          "sessions",
+          "commands",
+          "auth_failures",
+          "agent_lifecycle",
+          "installer_runs",
+          "agent_capabilities",
+          "prompts",
+          "permission_requests",
+          "permission_decisions"
+        ]
+      },
+      "MetricsSessionsJson": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "closed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "average_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p50_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p95_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "required": [
+          "active",
+          "closed",
+          "average_duration_ms",
+          "p50_duration_ms",
+          "p95_duration_ms"
+        ]
+      },
+      "MetricsTurnsJson": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "average_per_session": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        },
+        "required": [
+          "total",
+          "by_status",
+          "average_per_session"
+        ]
+      },
+      "MetricsPromptFailuresJson": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inference_5xx": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "inference_4xx": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "agent_request": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "vm": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sqlite": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "daemon": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "agent_process": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "stalled": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "by_class": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_status_code": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_reason_category": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        },
+        "required": [
+          "total",
+          "inference_5xx",
+          "inference_4xx",
+          "agent_request",
+          "vm",
+          "sqlite",
+          "daemon",
+          "agent_process",
+          "stalled",
+          "by_class",
+          "by_status_code",
+          "by_reason_category"
+        ]
+      },
+      "MetricsCommandsJson": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "average_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p50_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p95_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "truncated_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "total",
+          "by_status",
+          "average_duration_ms",
+          "p50_duration_ms",
+          "p95_duration_ms",
+          "truncated_count"
+        ]
+      },
+      "MetricsPermissionsJson": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "by_outcome": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "average_response_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p50_response_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "p95_response_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "required": [
+          "total",
+          "by_outcome",
+          "average_response_ms",
+          "p50_response_ms",
+          "p95_response_ms"
+        ]
+      },
+      "MetricsSecurityJson": {
+        "type": "object",
+        "properties": {
+          "auth_failures": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "by_reason": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "events_by_kind": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        },
+        "required": [
+          "auth_failures",
+          "by_reason",
+          "events_by_kind"
+        ]
+      },
+      "MetricsApiConnectionsJson": {
+        "type": "object",
+        "properties": {
+          "request_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_method": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_route": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_key_kind": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_source": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_origin_kind": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_country": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "by_region": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "average_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "required": [
+          "request_count",
+          "by_status",
+          "by_method",
+          "by_route",
+          "by_key_kind",
+          "by_source",
+          "by_origin_kind",
+          "by_country",
+          "by_region",
+          "average_duration_ms"
+        ]
+      },
+      "MetricsWsConnectionsJson": {
+        "type": "object",
+        "properties": {
+          "connections_opened": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "connections_closed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "average_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "required": [
+          "connections_opened",
+          "connections_closed",
+          "average_duration_ms"
+        ]
+      },
+      "MetricsUsageJson": {
+        "type": "object",
+        "properties": {
+          "tokens_input": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "tokens_output": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "context_window_used_max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "context_window_max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "required": [
+          "tokens_input",
+          "tokens_output",
+          "context_window_used_max",
+          "context_window_max"
+        ]
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "`\"provider_catalog\"` when `models` comes from the provider's live\nmodel listing; `\"acp_advertised\"` when it comes from the agent's\nACP `session/new` config options."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ModelJson"
+            }
+          },
+          "modes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "ACP-advertised `mode` values. Empty when the agent does not\nexpose a mode option (or, on the catalog fallback path, when ACP\ndiscovery failed)."
+          },
+          "catalog_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the provider declares a model listing endpoint but the\ncatalog is unavailable (fetch failed and no cache)."
+          }
+        },
+        "required": [
+          "agent_id",
+          "source",
+          "models",
+          "modes"
+        ]
+      },
+      "ModelJson": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "Model id accepted verbatim by `acps agent set --model`."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value"
+        ]
+      },
+      "NativeConfigInspection": {
+        "type": "object",
+        "required": [
+          "revision",
+          "harness",
+          "format",
+          "size_bytes",
+          "managed_fields",
+          "blocked_fields",
+          "unmanaged_field_paths",
+          "executable_categories",
+          "warnings"
+        ],
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "harness": {
+            "type": "string"
+          },
+          "format": {
+            "$ref": "#/$defs/response/NativeConfigFormat"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "managed_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ManagedField"
+            }
+          },
+          "blocked_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/BlockedField"
+            }
+          },
+          "unmanaged_field_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "executable_categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ExecutableCategory"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigFormat": {
+        "type": "string",
+        "enum": [
+          "json",
+          "jsonc",
+          "toml",
+          "yaml"
+        ]
+      },
+      "ManagedField": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "kind",
+          "compatible"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/response/ManagedFieldKind"
+          },
+          "compatible": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ManagedFieldKind": {
+        "type": "string",
+        "enum": [
+          "mcp",
+          "model",
+          "provider"
+        ]
+      },
+      "BlockedField": {
+        "type": "object",
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/response/BlockedReason"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BlockedReason": {
+        "type": "string",
+        "enum": [
+          "credentials",
+          "authentication-state",
+          "permissions",
+          "sandbox",
+          "acps-policy",
+          "managed-unsupported",
+          "mcp-unmappable"
+        ]
+      },
+      "ExecutableCategory": {
+        "type": "string",
+        "enum": [
+          "hooks",
+          "notifications",
+          "command-helpers",
+          "plugins",
+          "formatters"
+        ]
+      },
+      "NativeConfigOperation": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "status",
+          "harness",
+          "revision",
+          "agent_config",
+          "restart"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/response/NativeConfigOperationStatus"
+          },
+          "harness": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "agent_config": {
+            "$ref": "#/$defs/response/NativeConfigProjection"
+          },
+          "restart": {
+            "$ref": "#/$defs/response/NativeConfigRestartMetadata"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/NativeConfigOperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigOperationStatus": {
+        "type": "string",
+        "enum": [
+          "applied",
+          "queued",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "NativeConfigProjection": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigRestartMetadata": {
+        "type": "object",
+        "required": [
+          "required",
+          "queued",
+          "restarted",
+          "target_id"
+        ],
+        "properties": {
+          "required": {
+            "type": "boolean"
+          },
+          "queued": {
+            "type": "boolean"
+          },
+          "restarted": {
+            "type": "boolean"
+          },
+          "target_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "NativeConfigOperationError": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PermissionDecisionView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string"
+          },
+          "deciding_principal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "request_id",
+          "created_at",
+          "decision",
+          "deciding_principal",
+          "reason"
+        ]
+      },
+      "PermissionRequestView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "requester": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {},
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "updated_at",
+          "status",
+          "source",
+          "requester",
+          "subject_id",
+          "detail",
+          "expires_at"
+        ],
+        "description": "Public view of a permission request, suitable for the HTTP API. The\n`detail` field is the parsed JSON of the durable `detail_json` column."
+      },
+      "PermissionsListResponse": {
+        "type": "object",
+        "properties": {
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/PermissionRequestView"
+            }
+          }
+        },
+        "required": [
+          "permissions"
+        ]
+      },
+      "PromptStatusResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_id_acknowledged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "created_at",
+          "updated_at",
+          "status",
+          "stop_reason",
+          "error_code",
+          "error_message",
+          "message_id",
+          "message_id_acknowledged"
+        ]
+      },
+      "PromptSubmitResponse": {
+        "type": "object",
+        "properties": {
+          "prompt_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "prompt_id",
+          "session_id",
+          "status",
+          "created_at",
+          "message_id"
+        ]
+      },
+      "ProvidersResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ProviderJson"
+            }
+          }
+        },
+        "required": [
+          "agent_id",
+          "providers"
+        ]
+      },
+      "ProviderJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "agent_provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_api_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "companion_env_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "optional_env_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "RegenerateSessionKeyResponse": {
+        "type": "object",
+        "properties": {
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_key"
+        ]
+      },
+      "SecretsDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "deleted"
+        ]
+      },
+      "SecretsListResponse": {
+        "type": "object",
+        "properties": {
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "names"
+        ]
+      },
+      "SecretsSetResponse": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "action"
+        ]
+      },
+      "SecurityCheckResponse": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SecurityFinding"
+            }
+          },
+          "auth_failure_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "ok",
+          "findings",
+          "auth_failure_count"
+        ]
+      },
+      "SecurityFinding": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "description": "Optional structured payload attached to the finding. `message` is the\nhuman-readable summary; `details` carries the same facts in machine-\nreadable form so the history view, future dashboards, or downstream\nobservability can aggregate without parsing the message string."
+          },
+          "remediation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-actionable remediation hint. `message` describes *what* is\nwrong; `remediation` describes *how to fix it*. Kept as a separate\nfield so CLI/UI surfaces can render it distinct from the diagnostic\ntext and so callers can lint findings for \"must have a hint\"."
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ]
+      },
+      "SecurityHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SecurityRunSummary"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "runs"
+        ]
+      },
+      "SecurityRunSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "critical_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warning_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "auth_failure_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "started_at",
+          "finished_at",
+          "status",
+          "ok",
+          "critical_count",
+          "warning_count",
+          "auth_failure_count"
+        ]
+      },
+      "SecurityHistoryShowResponse": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "$ref": "#/$defs/response/SecurityRunSummary"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SecurityFinding"
+            }
+          }
+        },
+        "required": [
+          "run",
+          "findings"
+        ]
+      },
+      "SessionChangesSnapshot": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/CapturedToolCall"
+            }
+          }
+        },
+        "required": [
+          "session_id",
+          "generation",
+          "revision",
+          "truncated",
+          "tool_calls"
+        ]
+      },
+      "CapturedToolCall": {
+        "type": "object",
+        "properties": {
+          "tool_call_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/ToolKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/ToolCallStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/CapturedToolCallContent"
+            }
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "title",
+          "kind",
+          "status",
+          "content"
+        ]
+      },
+      "ToolKind": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "read",
+            "description": "Reading files or data."
+          },
+          {
+            "type": "string",
+            "const": "edit",
+            "description": "Modifying files or content."
+          },
+          {
+            "type": "string",
+            "const": "delete",
+            "description": "Removing files or data."
+          },
+          {
+            "type": "string",
+            "const": "move",
+            "description": "Moving or renaming files."
+          },
+          {
+            "type": "string",
+            "const": "search",
+            "description": "Searching for information."
+          },
+          {
+            "type": "string",
+            "const": "execute",
+            "description": "Running commands or code."
+          },
+          {
+            "type": "string",
+            "const": "think",
+            "description": "Internal reasoning or planning."
+          },
+          {
+            "type": "string",
+            "const": "fetch",
+            "description": "Retrieving external data."
+          },
+          {
+            "type": "string",
+            "const": "switch_mode",
+            "description": "Switching the current session mode."
+          },
+          {
+            "type": "string",
+            "const": "other",
+            "description": "Other tool types (default)."
+          }
+        ],
+        "description": "Categories of tools that can be invoked.\n\nTool kinds help clients choose appropriate icons and optimize how they\ndisplay tool execution progress.\n\nSee protocol docs: [Creating](https://agentclientprotocol.com/protocol/tool-calls#creating)"
+      },
+      "ToolCallStatus": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "pending",
+            "description": "The tool call hasn't started running yet because the input is either\nstreaming or we're awaiting approval."
+          },
+          {
+            "type": "string",
+            "const": "in_progress",
+            "description": "The tool call is currently running."
+          },
+          {
+            "type": "string",
+            "const": "completed",
+            "description": "The tool call completed successfully."
+          },
+          {
+            "type": "string",
+            "const": "failed",
+            "description": "The tool call failed with an error."
+          }
+        ],
+        "description": "Execution status of a tool call.\n\nTool calls progress through different statuses during their lifecycle.\n\nSee protocol docs: [Status](https://agentclientprotocol.com/protocol/tool-calls#status)"
+      },
+      "CapturedToolCallContent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "oldText": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Deliberately serialized as `null` for creates instead of omitted."
+              },
+              "newText": {
+                "type": "string"
+              },
+              "_meta": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/response/CapturedMeta"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "type": "string",
+                "const": "diff"
+              }
+            },
+            "required": [
+              "type",
+              "path",
+              "oldText",
+              "newText"
+            ]
+          }
+        ]
+      },
+      "CapturedMeta": {},
+      "SessionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "agent_session_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata_json": {
+            "type": "string"
+          },
+          "ignored": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/IgnoredFeature"
+            },
+            "description": "Configured features (mode, model) the agent's advertised capabilities\ncould not honor; the session proceeded on agent defaults. Omitted when\nnothing was ignored, so list/read responses are unchanged."
+          }
+        },
+        "required": [
+          "id",
+          "target_id",
+          "agent_session_id",
+          "created_at",
+          "updated_at",
+          "status",
+          "agent_id",
+          "cwd",
+          "title",
+          "metadata_json"
+        ]
+      },
+      "IgnoredFeature": {
+        "type": "object",
+        "properties": {
+          "feature": {
+            "type": "string",
+            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, or `agent.model`."
+          },
+          "target": {
+            "type": "string",
+            "description": "The configured value: the MCP server name, or the mode/model value."
+          },
+          "capability": {
+            "type": "string",
+            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or — for `agent.mode`/`agent.model` — the\n`session/new` config option that would have had to carry the value."
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature",
+          "target",
+          "capability",
+          "reason"
+        ],
+        "description": "A configured feature the runtime routes around because the agent does not\nadvertise the capability backing it. The feature stays in config; this\nrecord surfaces the omission through init reports and session events."
+      },
+      "SessionSnapshotResponse": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "$ref": "#/$defs/response/SessionResponse"
+          },
+          "in_flight_prompts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/PromptStatusResponse"
+            }
+          },
+          "last_event_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recent_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/LogEventJson"
+            }
+          }
+        },
+        "required": [
+          "session",
+          "in_flight_prompts",
+          "last_event_id",
+          "recent_events"
+        ]
+      },
+      "SessionsCancelResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ]
+      },
+      "SessionsDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "deleted"
+        ]
+      },
+      "SessionsEventsResponse": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/LogEventJson"
+            }
+          }
+        },
+        "required": [
+          "events"
+        ]
+      },
+      "SessionsListResponse": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SessionResponse"
+            }
+          },
+          "agent_sync": {
+            "$ref": "#/$defs/response/SessionsAgentSyncResponse"
+          }
+        },
+        "required": [
+          "sessions",
+          "agent_sync"
+        ]
+      },
+      "SessionsAgentSyncResponse": {
+        "type": "object",
+        "properties": {
+          "attempted": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "upserted": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "attempted",
+          "status",
+          "upserted",
+          "updated"
+        ]
+      },
+      "SessionsStatusResponse": {
+        "type": "object",
+        "properties": {
+          "generated_at": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          },
+          "window_start": {
+            "type": "string"
+          },
+          "window_end": {
+            "type": "string"
+          },
+          "session_count": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "active_count": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SessionStatusSessionResponse"
+            }
+          }
+        },
+        "required": [
+          "generated_at",
+          "threshold",
+          "window",
+          "window_start",
+          "window_end",
+          "session_count",
+          "active_count",
+          "truncated",
+          "sessions"
+        ]
+      },
+      "SessionStatusSessionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_activity_at": {
+            "type": "string"
+          },
+          "last_activity_from": {
+            "type": "string"
+          },
+          "recent": {
+            "type": "boolean"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SessionStatusPromptResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SessionStatusPermissionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prompt_stream_started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "status",
+          "agent_id",
+          "cwd",
+          "title",
+          "last_activity_at",
+          "last_activity_from",
+          "recent",
+          "prompt",
+          "permission",
+          "prompt_stream_started_at"
+        ]
+      },
+      "SessionStatusPromptResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message_id_acknowledged": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "updated_at",
+          "status",
+          "stop_reason",
+          "error_code",
+          "error_message",
+          "message_id",
+          "message_id_acknowledged"
+        ]
+      },
+      "SessionStatusPermissionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "SkillSourceAddResponse": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "github": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "trusted": {
+            "type": "boolean"
+          },
+          "sources": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "description": "Total configured user sources after the add."
+          }
+        },
+        "required": [
+          "alias",
+          "github",
+          "branch",
+          "trusted",
+          "sources"
+        ]
+      },
+      "SkillSourceGetResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string",
+            "description": "`owner/repo`."
+          },
+          "branch": {
+            "type": "string"
+          },
+          "catalog": {
+            "type": "boolean",
+            "description": "True for the curated catalog; false for user/ad-hoc sources."
+          },
+          "trusted": {
+            "type": "boolean"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillMetadata"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "repo",
+          "branch",
+          "catalog",
+          "trusted",
+          "skills"
+        ]
+      },
+      "SkillMetadata": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "selector",
+          "name",
+          "path"
+        ],
+        "description": "One installable skill surfaced by `source get` inspection: the selector to\npass to `add`, plus the frontmatter identity read from its `SKILL.md`."
+      },
+      "SkillSourceRemoveResponse": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0,
+            "description": "Total configured user sources after the removal."
+          }
+        },
+        "required": [
+          "alias",
+          "sources"
+        ]
+      },
+      "SkillsAddResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "install": {
+            "$ref": "#/$defs/response/SkillInstallReport"
+          },
+          "skills_link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SkillLinkReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skills_link_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent_id",
+          "install"
+        ]
+      },
+      "SkillInstallReport": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string"
+          },
+          "destination_root": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillInstallEntry"
+            }
+          }
+        },
+        "required": [
+          "source_id",
+          "destination_root",
+          "installed",
+          "skipped"
+        ]
+      },
+      "SkillsCatalogResponse": {
+        "type": "object",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SkillCatalogSourceJson"
+            }
+          }
+        },
+        "required": [
+          "sources"
+        ]
+      },
+      "SkillCatalogSourceJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "alias": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string",
+            "description": "`owner/repo`, the GitHub source of the skills."
+          },
+          "catalog": {
+            "type": "boolean",
+            "description": "True for the embedded curated catalog; false for user-declared sources."
+          },
+          "trusted": {
+            "type": "boolean"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Selectors accepted by `add` (indexed catalog sources only; empty for\nuser sources — use `source get` to enumerate those live)."
+          },
+          "essential": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Subset of `skills` installed by the Standard Setup essentials step."
+          }
+        },
+        "required": [
+          "id",
+          "alias",
+          "name",
+          "repo",
+          "catalog",
+          "trusted",
+          "skills",
+          "essential"
+        ]
+      },
+      "SkillsListResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "Whether the active agent is a managed Agent Skills install target.\nWhen false, `skills` is always empty and `install_dir` is absent."
+          },
+          "install_dir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/InstalledSkill"
+            }
+          }
+        },
+        "required": [
+          "agent_id",
+          "supported",
+          "skills"
+        ]
+      },
+      "InstalledSkill": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "description": "One entry in the day-2 list surface. Unlike [`SkillInstallEntry`] it\ncarries provenance: the source id recorded in the managed marker at\ninstall time, absent for skills the user placed in the install root by\nhand (which `remove` will refuse to delete)."
+      },
+      "SkillsRemoveResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "remove": {
+            "$ref": "#/$defs/response/SkillRemoveReport"
+          },
+          "skills_link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/SkillLinkReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skills_link_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agent_id",
+          "remove"
+        ]
+      },
+      "SkillRemoveReport": {
+        "type": "object",
+        "properties": {
+          "install_root": {
+            "type": "string"
+          },
+          "removed": {
+            "$ref": "#/$defs/response/SkillInstallEntry"
+          }
+        },
+        "required": [
+          "install_root",
+          "removed"
+        ]
+      },
+      "StatusAgentResponse": {
+        "type": "object",
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "agent": {
+            "$ref": "#/$defs/response/AgentStatusJson"
+          },
+          "process_state": {
+            "type": "string"
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "latest_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/AgentFailureJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifecycle_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AgentLifecycleJson"
+            }
+          },
+          "configured_providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/ProviderStatusJson"
+            }
+          },
+          "loaded_providers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/response/ProviderStatusJson"
+            }
+          },
+          "provider_restart_required": {
+            "type": "boolean"
+          },
+          "provider_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Populated when configured-provider resolution fails (missing/unselected\ncredential, corrupt secret). Carries a remote-safe message so the\nmonitoring endpoint stays reachable in exactly the broken state an\noperator queries it to diagnose. `None` on the happy path."
+          }
+        },
+        "required": [
+          "configured",
+          "agent",
+          "process_state",
+          "pid",
+          "latest_failure",
+          "lifecycle_events",
+          "configured_providers",
+          "loaded_providers",
+          "provider_restart_required",
+          "provider_error"
+        ]
+      },
+      "AgentStatusJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "restart": {
+            "type": "string"
+          },
+          "adapter": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/AgentAdapterConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "command",
+          "args",
+          "cwd",
+          "restart",
+          "adapter"
+        ]
+      },
+      "AgentFailureJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "event_kind": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "event_kind",
+          "message",
+          "reason"
+        ]
+      },
+      "AgentLifecycleJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "event_kind": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload_json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "event_kind",
+          "message",
+          "payload_json"
+        ]
+      },
+      "StatusConnectionsResponse": {
+        "type": "object",
+        "properties": {
+          "active_requests": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "active_requests"
+        ]
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "latest_event": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deps_apply_in_flight": {
+            "type": "boolean",
+            "description": "True while a `POST /v1/deps/apply` is running install snippets. The\napply outlives the HTTP client that started it, so this is the only way\nto see one in flight. Advisory: a caller about to restart or reconfigure\nthe runtime should wait for it to clear, because a restart signals the\nprocess group and tears the install down mid-flight, leaving a\nhalf-applied package set and an unfinalized `installer_runs` row."
+          },
+          "server": {
+            "$ref": "#/$defs/response/ServerInfo"
+          }
+        },
+        "required": [
+          "schema_version",
+          "latest_event",
+          "deps_apply_in_flight",
+          "server"
+        ]
+      },
+      "WorkspaceMetadataResponse": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "uploads_path": {
+            "type": "string"
+          },
+          "default_shell": {
+            "type": "string"
+          },
+          "max_file_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "root",
+          "uploads_path",
+          "default_shell",
+          "max_file_bytes"
+        ]
+      },
+      "WsConnectionsResponse": {
+        "type": "object",
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/WsConnectionView"
+            }
+          }
+        },
+        "required": [
+          "connections"
+        ]
+      },
+      "WsConnectionView": {
+        "type": "object",
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "connected_at": {
+            "type": "string"
+          },
+          "last_activity_at": {
+            "type": "string"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "origin": {
+            "$ref": "#/$defs/response/RequestOrigin"
+          },
+          "disconnect_requested": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connection_id",
+          "connected_at",
+          "last_activity_at",
+          "topics",
+          "session_ids",
+          "origin",
+          "disconnect_requested"
+        ]
+      },
+      "RequestOrigin": {
+        "type": "object",
+        "properties": {
+          "origin_kind": {
+            "type": "string"
+          },
+          "proxy_provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cloudflare_ray_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "origin_kind",
+          "proxy_provider",
+          "client_ip",
+          "country_code",
+          "region_code",
+          "region_name",
+          "cloudflare_ray_id"
+        ]
+      },
+      "WsSessionsResponse": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/WsSessionView"
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ]
+      },
+      "WsSessionView": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "connection_count": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "session_id",
+          "connection_count"
+        ]
+      },
+      "StartInitResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ]
+      },
+      "SimpleSessionResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ]
+      },
+      "InitEventsResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "events": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": [
+          "session_id",
+          "events"
+        ]
+      },
+      "InitStatusResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "signals": {
+            "type": "array",
+            "items": {},
+            "description": "The full ordered signal stream, identical to the `signals` field of\n`hello`, so a REST poller and a socket client fold the same input into\nthe same category view."
+          },
+          "last_seq": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "pending_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/PublicInputRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recent_events": {
+            "type": "array",
+            "items": {}
+          },
+          "result_available": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/PublicError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_activity_age_secs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "signals",
+          "last_seq",
+          "pending_input",
+          "recent_events",
+          "result_available",
+          "error",
+          "last_activity_age_secs"
+        ]
+      },
+      "PublicInputRequest": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Machine-readable prompt identity, from `HostedPromptKind::as_str`. Field\norder here is the wire order; `kind` sits beside `request_id` so a\nclient can route on it before parsing the rest."
+          },
+          "style": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "default": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/PublicInputOption"
+            }
+          },
+          "inspection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/NativeConfigInspection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "request_id",
+          "kind",
+          "style",
+          "prompt",
+          "required",
+          "default",
+          "options"
+        ]
+      },
+      "PublicInputOption": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "value": {
+            "type": "string",
+            "description": "Stable option id an answer may address by `{\"value\": \"<id>\"}`; unlike\n`label` it survives display rewording."
+          },
+          "label": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "value",
+          "label",
+          "hint"
+        ]
+      },
+      "PublicError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      }
+    },
+    "config": {
+      "Config": {
+        "type": "object",
+        "anyOf": [
+          {
+            "required": [
+              "agent"
+            ]
+          },
+          {
+            "required": [
+              "array"
+            ]
+          }
+        ],
+        "properties": {
+          "config_version": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 1
+          },
+          "api": {
+            "$ref": "#/$defs/config/ApiConfig"
+          },
+          "security": {
+            "$ref": "#/$defs/config/SecurityConfig"
+          },
+          "edge": {
+            "$ref": "#/$defs/config/EdgeConfig"
+          },
+          "updates": {
+            "$ref": "#/$defs/config/UpdatesConfig",
+            "default": {
+              "acp_stack": {
+                "policy": "security-critical",
+                "frequency": "1d"
+              }
+            }
+          },
+          "workspace": {
+            "$ref": "#/$defs/config/WorkspaceConfig"
+          },
+          "logging": {
+            "$ref": "#/$defs/config/LoggingConfig"
+          },
+          "agent": {
+            "$ref": "#/$defs/config/AgentConfig",
+            "writeOnly": true
+          },
+          "array": {
+            "$ref": "#/$defs/config/ArrayConfig"
+          },
+          "permissions": {
+            "$ref": "#/$defs/config/PermissionsConfig",
+            "default": {
+              "mode": "auto",
+              "review": [],
+              "deny": []
+            }
+          },
+          "commands": {
+            "$ref": "#/$defs/config/CommandsConfig",
+            "default": {
+              "default_timeout": "10m",
+              "cancel_grace": "5s",
+              "progress_interval": "30s",
+              "env_allowlist": [],
+              "max_output_bytes": 1048576
+            }
+          },
+          "prompts": {
+            "$ref": "#/$defs/config/PromptsConfig",
+            "default": {
+              "stale_threshold": "5m",
+              "sweep_interval": "30s"
+            }
+          },
+          "dependencies": {
+            "$ref": "#/$defs/config/DependenciesConfig",
+            "default": {}
+          },
+          "mcp": {
+            "$ref": "#/$defs/config/McpConfig",
+            "default": {}
+          },
+          "skills": {
+            "$ref": "#/$defs/config/SkillsConfig"
+          },
+          "local": {
+            "$ref": "#/$defs/config/LocalConfig",
+            "default": {}
+          },
+          "extensions": {
+            "type": "object",
+            "description": "Operator-declared extension instances, keyed by operator-chosen name.\nSee [`ExtensionConfig`].",
+            "additionalProperties": {
+              "$ref": "#/$defs/config/ExtensionConfig"
+            }
+          }
+        },
+        "required": [
+          "api",
+          "security",
+          "workspace",
+          "logging"
+        ],
+        "additionalProperties": false
+      },
+      "ApiConfig": {
+        "type": "object",
+        "required": [
+          "bind",
+          "max_request_bytes"
+        ],
+        "properties": {
+          "bind": {
+            "type": "string"
+          },
+          "public_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_request_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "SecurityConfig": {
+        "type": "object",
+        "required": [
+          "http"
+        ],
+        "properties": {
+          "http": {
+            "$ref": "#/$defs/config/SecurityHttpConfig"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SecurityHttpConfig": {
+        "type": "object",
+        "required": [
+          "max_request_bytes",
+          "rate_limit_per_minute",
+          "burst",
+          "auth_failures_per_minute",
+          "auth_block_duration",
+          "trust_proxy_headers"
+        ],
+        "properties": {
+          "max_request_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "rate_limit_per_minute": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "burst": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "auth_failures_per_minute": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "auth_block_duration": {
+            "type": "string"
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "trust_proxy_headers": {
+            "type": "boolean"
+          },
+          "trusted_proxies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "EdgeConfig": {
+        "type": "object",
+        "properties": {
+          "cloudflare": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/CloudflareEdgeConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CloudflareEdgeConfig": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "mode",
+          "exposure",
+          "hostname"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "exposure": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "api_token_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "account_id_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tunnel_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tunnel_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cloudflared_deployment": {
+            "type": "string",
+            "default": "host"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdatesConfig": {
+        "type": "object",
+        "properties": {
+          "acp_stack": {
+            "$ref": "#/$defs/config/StackUpdateConfig",
+            "default": {
+              "policy": "security-critical",
+              "frequency": "1d"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "StackUpdateConfig": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "$ref": "#/$defs/config/StackUpdatePolicy",
+            "default": "security-critical"
+          },
+          "frequency": {
+            "type": "string",
+            "default": "1d"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StackUpdatePolicy": {
+        "type": "string",
+        "enum": [
+          "compatible",
+          "security-critical",
+          "manual"
+        ]
+      },
+      "WorkspaceConfig": {
+        "type": "object",
+        "required": [
+          "root",
+          "uploads",
+          "default_shell",
+          "runtime_user",
+          "max_file_bytes"
+        ],
+        "properties": {
+          "root": {
+            "type": "string"
+          },
+          "uploads": {
+            "type": "string"
+          },
+          "default_shell": {
+            "type": "string"
+          },
+          "runtime_user": {
+            "type": "string"
+          },
+          "max_file_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "sandbox": {
+            "$ref": "#/$defs/config/SandboxConfig",
+            "description": "Isolation backend that the agent harness and mediated shells run inside.\nDefault `off` preserves single-process behavior; other modes wrap each\nspawn so the workload cannot read the daemon's secrets/state or reach its\ncontrol socket. See [`SandboxConfig`]."
+          },
+          "code_sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/CodeSourceConfig"
+            }
+          },
+          "data_sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/DataSourceConfig"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SandboxConfig": {
+        "type": "object",
+        "description": "Selects how the agent harness and mediated shells are isolated from the\ndaemon. The daemon always derives the set of its own sensitive paths to mask\n(config dir, state dir) from its path helpers, so an operator cannot forget\nto protect them; the fields below only add to or parameterize that.",
+        "properties": {
+          "mode": {
+            "$ref": "#/$defs/config/SandboxMode",
+            "default": "off"
+          },
+          "wrapper": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Wrapper argv for `mode = \"custom\"`: prepended to the harness command\n(e.g. `[\"systemd-run\", \"--scope\", \"-p\", \"...\"]`). Required for `custom`,\nignored otherwise."
+          },
+          "mask_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Extra absolute paths to mask (read-deny) on top of the daemon's own."
+          },
+          "allow_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Extra absolute paths the workload may read+write (e.g. bwrap binds)\nbeyond the workspace root."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SandboxMode": {
+        "type": "string",
+        "enum": [
+          "off",
+          "unshare",
+          "bwrap",
+          "custom"
+        ],
+        "description": "Isolation mechanism. `unshare` requires the daemon to hold `CAP_SYS_ADMIN`\n(privileged container); `bwrap` requires unprivileged user namespaces;\n`custom` delegates to an operator-supplied [`SandboxConfig::wrapper`]."
+      },
+      "CodeSourceConfig": {
+        "type": "object",
+        "description": "Source for code that init should seed under `<workspace.root>/usr/code/`.\n\nThe only `type` value today is `git`. The schema is shaped as an enum so\nthat additional code-source kinds can be added without invalidating\nexisting configs, but loaders reject unknown values fail-fast.",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "repo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "credential_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override the derived `<repo-name>` directory under\n`<workspace.root>/usr/code/`. Defaults to the trailing path segment of\nthe repository URL with any `.git` suffix stripped."
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "DataSourceConfig": {
+        "type": "object",
+        "description": "Source for arbitrary data that init should seed under\n`<workspace.root>/usr/data/`. `type` is one of `local`, `https`, or `s3`;\nthe other fields are required-or-rejected based on the selected type.",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_download_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "max_extracted_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "bucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "access_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "LoggingConfig": {
+        "type": "object",
+        "required": [
+          "level",
+          "local_retention_days"
+        ],
+        "properties": {
+          "level": {
+            "type": "string"
+          },
+          "local_retention_days": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "supabase": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/SupabaseLoggingConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SupabaseLoggingConfig": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "url",
+          "api_key_ref",
+          "schema"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "backend": {
+            "$ref": "#/$defs/config/SupabaseLoggingBackend",
+            "default": "postgrest"
+          },
+          "url": {
+            "type": "string"
+          },
+          "table_prefix": {
+            "type": "string",
+            "default": ""
+          },
+          "db_url_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "api_key_ref": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SupabaseLoggingBackend": {
+        "type": "string",
+        "enum": [
+          "postgrest",
+          "postgres"
+        ]
+      },
+      "AgentConfig": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "command",
+          "restart"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "expected_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "restart": {
+            "type": "string"
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pin the harness to a specific GitHub Release tag (e.g. `\"v0.42.0\"`).\nConsulted by both install and managed update when the harness install\npath is `github_release`; updates target the pin instead of the latest\nrelease. Default (None) resolves the latest release."
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentProviderConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentProvidersConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subagent": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentSubagentConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "auto_update": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentAutoUpdateConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "install": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentInstallConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentProviderConfig": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "api_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentCustomProviderConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentCustomProviderConfig": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "api": {
+            "$ref": "#/$defs/config/CustomProviderApi",
+            "default": "chat-completions"
+          },
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 200000
+          },
+          "output_max_tokens": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 65536
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomProviderApi": {
+        "type": "string",
+        "enum": [
+          "chat-completions",
+          "responses",
+          "anthropic-messages"
+        ]
+      },
+      "AgentProvidersConfig": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "selected_aliases": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentSubagentConfig": {
+        "type": "object",
+        "properties": {
+          "disabled": {
+            "type": "boolean"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentProviderConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAutoUpdateConfig": {
+        "type": "object",
+        "required": [
+          "frequency"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "frequency": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentInstallConfig": {
+        "type": "object",
+        "description": "Operator-facing escape hatch for installing an agent whose entry is not\nin the embedded registry (private fork, unreleased build, custom adapter).\nThe runtime resolves registry-listed agents from `data/agents.toml`\nkeyed off `[agent].id`; this struct is consulted only when the operator\nexplicitly writes `[agent.install]` to override that resolution.",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "creates": {
+            "type": "string"
+          },
+          "shell": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "creates"
+        ],
+        "additionalProperties": false
+      },
+      "ArrayConfig": {
+        "type": "object",
+        "required": [
+          "primary_target"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "primary_target": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/ArrayTargetConfig"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "ArrayTargetConfig": {
+        "type": "object",
+        "required": [
+          "id",
+          "agent"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent": {
+            "$ref": "#/$defs/config/AgentConfig"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PermissionsConfig": {
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "review": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "deny": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "request_timeout": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CommandsConfig": {
+        "type": "object",
+        "required": [
+          "default_timeout",
+          "cancel_grace",
+          "max_output_bytes"
+        ],
+        "properties": {
+          "default_timeout": {
+            "type": "string"
+          },
+          "cancel_grace": {
+            "type": "string"
+          },
+          "progress_interval": {
+            "type": "string",
+            "default": "30s"
+          },
+          "env_allowlist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "max_output_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptsConfig": {
+        "type": "object",
+        "description": "Configuration for the stale-prompt sweeper background task. When no\nACP `session/update` notification has touched a `pending`/`running`\nprompt row for `stale_threshold`, the sweeper flips it to terminal\n`Stalled` so polling clients always see the row settle. The sweep\nruns every `sweep_interval` from `acps serve`.",
+        "properties": {
+          "stale_threshold": {
+            "type": "string"
+          },
+          "sweep_interval": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stale_threshold",
+          "sweep_interval"
+        ],
+        "additionalProperties": false
+      },
+      "DependenciesConfig": {
+        "type": "object",
+        "properties": {
+          "commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/DependencyEntry"
+            }
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/DependencyEntry"
+            }
+          },
+          "runtimes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/DependencyEntry"
+            }
+          },
+          "mcp": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/DependencyEntry"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DependencyEntry": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean",
+            "default": true
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "install": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/DependencyInstallAction"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped per the Phase 4 spec:\nno cross-distro reconciliation, no auto-derived package names —\nthe operator declares each install action explicitly."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DependencyInstallAction": {
+        "type": "object",
+        "description": "Operator-declared install action for one dependency. Intentionally\nminimal: a single shell snippet, an optional `creates` postcheck,\nand a scope marker that distinguishes \"runs as the runtime user\"\nfrom \"needs OS-wide privilege\" so the apply runner knows when to\nescalate — and never silently downgrades privileged work to user\nscope behind the operator's back.",
+        "properties": {
+          "shell": {
+            "type": "string",
+            "description": "Shell snippet executed via `[workspace].default_shell -c`.\nOperator declares it verbatim — no apt/brew/yum derivation in\nthe runtime."
+          },
+          "creates": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PATH name that must resolve to an executable after `shell`\ncompletes. Defaults to the dependency entry's `name`. The apply\nrunner records `available = true` only when this resolves\npost-install."
+          },
+          "scope": {
+            "$ref": "#/$defs/config/DependencyInstallScope",
+            "description": "`user` (default) runs as the runtime user; `system` declares\nthe action needs OS-wide privilege (typically sudo). The\nrunner emits a clear distinction in the audit log and a\nconfirmation prompt for `system` scope so operators don't\ninvoke `apt-get install` from a stale CLI invocation.",
+            "default": "user"
+          },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Optional timeout override in seconds. Defaults to 600s\n(10 minutes) — same cap as the agent installer. Bounded above at\nvalidation by `MAX_INSTALL_TIMEOUT_SECS`."
+          }
+        },
+        "required": [
+          "shell"
+        ],
+        "additionalProperties": false
+      },
+      "DependencyInstallScope": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "user",
+            "description": "Runs as the runtime user. No privilege escalation. Suitable\nfor npm globals under `~/.local/`, language toolchains in\n$HOME, etc."
+          },
+          {
+            "type": "string",
+            "const": "system",
+            "description": "Action needs OS-wide privilege (system package manager, writes\nunder /usr or /opt). Runs directly when the process is root,\nescalates through passwordless `sudo -n` when it isn't (never a\npassword prompt), and otherwise refuses early with a clear\n\"privilege required\" outcome — the runner never falls back to\nuser scope."
+          }
+        ]
+      },
+      "McpConfig": {
+        "type": "object",
+        "properties": {
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/McpServerConfig"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "McpServerConfig": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "name",
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "const": "stdio"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "name",
+              "url"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/config/HttpHeaderRef"
+                }
+              },
+              "type": {
+                "type": "string",
+                "const": "http"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HttpHeaderRef": {
+        "type": "object",
+        "description": "One MCP HTTP header, valued either by a whole-value secret ref\n(`value_ref`) or by a `${NAME}`-interpolated template (`value`).\nExactly-one is enforced in validation rather than serde so TOML errors\nstay readable; `source()` is the runtime accessor that upholds it.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "SkillsConfig": {
+        "type": "object",
+        "description": "User-declared Agent Skills sources (managed via `acps skills source add`),\nlayered alongside the embedded curated catalog. Unlike the catalog these\nare operator-supplied and untrusted by default.",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/config/UserSkillSource"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserSkillSource": {
+        "type": "object",
+        "required": [
+          "alias",
+          "github"
+        ],
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "Unique alias used by `acps skills add <alias> ...` and `source get`."
+          },
+          "github": {
+            "type": "string",
+            "description": "GitHub source as `owner/repo`."
+          },
+          "branch": {
+            "type": "string",
+            "default": "main"
+          },
+          "trusted": {
+            "type": "boolean",
+            "description": "Operator assertion that the source has been vetted. Defaults false;\ninstalls from untrusted sources are allowed but surfaced as such.",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "LocalConfig": {
+        "type": "object",
+        "properties": {
+          "socket_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override path for the internal local Unix-domain socket. When unset the\ndaemon binds `~/.local/share/acp-stack/acps-local.sock`. Override is\nintended for integration tests; deployed instances should leave it\nunset."
+          },
+          "session_auth": {
+            "$ref": "#/$defs/config/LocalSessionAuth",
+            "description": "Controls whether local Unix-socket session-tier HTTP routes require an\nexplicit session key. Public HTTP tiering is unaffected."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LocalSessionAuth": {
+        "type": "string",
+        "enum": [
+          "session-key",
+          "keyless"
+        ]
+      },
+      "ExtensionConfig": {
+        "type": "object",
+        "description": "A typed, data-declared extension seam. An `[extensions.<name>]` table\ndeclares one instance of an acp-stack-defined extension type; acp-stack\nsupervises or serves the type's generic contract and never learns the\nextension's semantics. The struct is flat across all types; the extensions\nvalidator rejects fields that do not belong to the declared `type`.",
+        "properties": {
+          "type": {
+            "$ref": "#/$defs/config/ExtensionType"
+          },
+          "provider": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`network-provider` only. Lifecycle provider argv, invoked as\n`<exe> setup|teardown <args...>` around each network-isolated spawn.\nEmpty means no provider: the namespace stays deny-all."
+          },
+          "provider_timeout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`network-provider` only. Duration string applied independently to\nprovider setup and teardown."
+          },
+          "provider_stderr": {
+            "$ref": "#/$defs/config/SandboxProviderStderr",
+            "description": "`network-provider` only. Where provider stderr goes: the daemon's\nstderr diagnostic channel, or discarded. Stdout is always discarded."
+          },
+          "workload_env": {
+            "type": "object",
+            "description": "`network-provider` only. Environment variables injected into every\nworkload spawned inside the provider's namespace (agent harness,\nmediated commands, ACP terminals) so the workload can reach whatever\negress path the provider set up — proxy endpoints, CA bundle paths.\nNever passed to the provider executable itself, and never in argv.\n`BTreeMap` for deterministic ordering across serialization round-trips.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "capability": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`managed-state` only. The state contract the namespace applies;\n`provider-credential` is the only capability today."
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "ExtensionType": {
+        "type": "string",
+        "enum": [
+          "network-provider",
+          "managed-state"
+        ],
+        "description": "The extension types acp-stack defines. Declaring a `network-provider`\ninstance switches every sandboxed spawn to an isolated network namespace\nwhose policy belongs to the external provider executable; declaring a\n`managed-state` instance grants an external orchestrator ownership of a\nnamed state namespace via the admin apply endpoint."
+      },
+      "SandboxProviderStderr": {
+        "type": "string",
+        "enum": [
+          "daemon",
+          "null"
+        ]
+      }
+    }
+  }
+}

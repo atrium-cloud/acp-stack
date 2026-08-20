@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::config::{Config, DependencyEntry};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DepKind {
     Command,
@@ -27,7 +27,7 @@ pub enum DepKind {
     Mcp,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DepStatus {
     pub name: String,
     pub kind: DepKind,
@@ -38,7 +38,7 @@ pub struct DepStatus {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DepsReport {
     pub dependencies: Vec<DepStatus>,
 }

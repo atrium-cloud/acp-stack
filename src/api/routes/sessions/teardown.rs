@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsCancelResponse {
     session_id: String,
 }
@@ -27,7 +27,7 @@ pub(crate) async fn sessions_close_handler(
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsDeleteResponse {
     session_id: String,
     deleted: bool,

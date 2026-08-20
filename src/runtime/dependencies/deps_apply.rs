@@ -66,7 +66,7 @@ pub struct DepApplyCandidate {
     pub creates: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DepApplyResult {
     pub name: String,
     pub outcome: DepApplyOutcome,
@@ -76,7 +76,7 @@ pub struct DepApplyResult {
     pub post_status: DepStatus,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase", tag = "kind")]
 pub enum DepApplyOutcome {
     /// Action ran and the `creates` postcheck resolved.
@@ -96,7 +96,7 @@ pub enum DepApplyOutcome {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DepsApplyReport {
     pub apply_run_id: String,
     pub before: Vec<DepStatus>,

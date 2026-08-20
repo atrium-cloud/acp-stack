@@ -94,7 +94,7 @@ impl PermissionOutcome {
 
 /// Public view of a permission request, suitable for the HTTP API. The
 /// `detail` field is the parsed JSON of the durable `detail_json` column.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PermissionRequestView {
     pub id: String,
     pub created_at: String,
@@ -136,7 +136,7 @@ impl PermissionRequestView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct PermissionDecisionView {
     pub id: String,
     pub request_id: String,

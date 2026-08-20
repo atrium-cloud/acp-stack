@@ -41,6 +41,14 @@ JSON errors:
 
 Binary downloads and WebSocket frames are not wrapped in this envelope.
 
+## Machine-Readable Schema
+
+A JSON Schema (draft 2020-12) of the typed contract is generated from the Rust wire types and committed at `docs/specs/api/acps-schema.json`, with a `docs/specs/api/acps-schema.meta.json` sidecar carrying the schema version and per-namespace definition counts. Consumers reference it two ways: the raw committed file at a git ref — `https://raw.githubusercontent.com/atrium-cloud/acp-stack/<ref>/docs/specs/api/acps-schema.json` (pin `main` for the current contract, or a tag for a reproducible one) — or the release asset `https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json`, which resolves to the newest stable release (nightlies are prereleases, so `latest` skips them).
+
+The document splits `$defs` into three namespaces because serde's `#[serde(default)]`/`skip_serializing_if` fields belong to `required` under one direction but not the other: `request` (what a client sends, deserialize contract), `response` (what the server emits, serialize contract), and `config` (the `acps-config.toml` shape). A type used on both sides appears once per namespace.
+
+Cross-field rules (mutually-required/exclusive fields, exactly-one-of headers, blank-as-absent) are mostly not expressible in JSON Schema and stay enforced in code, described in prose in the relevant field descriptions rather than duplicated as schema logic; the few that map cleanly to a structural keyword are emitted (e.g. the config file's at-least-one-of `agent`/`array` sections as an `anyOf`), with the finer per-field checks still in the loader. Not covered by the schema, by design: WebSocket frames (`/v1/ws` `LiveEvent` and the init streaming frames — hand-built and byte-pinned), the envelope-bypassing binary/`health/ready` handlers, and the untyped `config` import response. Coverage of the typed handler surface is verified in CI (`cargo run --features dev-tools --bin generate-api-schema -- --coverage`); regenerate after any DTO change with `cargo run --features dev-tools --bin generate-api-schema`.
+
 ## Bootstrap Init API
 
 `acps init serve` exposes only the bootstrap init routes below. Normal session/admin `/v1` routes are not mounted in this mode. Calls use exactly one `Authorization: Bearer <bootstrap-token>` header; the token comes from process input, not config or state.

@@ -114,11 +114,19 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           prerelease: ${{ steps.notes.outputs.prerelease }}
+          # The published `/v1` JSON Schema is attached to every release from its
+          # drift-tested committed copy (no runner-side regeneration). The fixed
+          # asset name keeps `releases/latest/download/acps-schema.json` stable;
+          # `latest` is the newest non-prerelease, so it always serves the newest
+          # stable schema. Consumers that need a specific version read the raw
+          # committed file at that release's tag instead.
           files: |
             dist/acp-stack-*.tar.gz
             dist/SHA256SUMS
             dist/install.sh
             dist/acps-release.json
+            docs/specs/api/acps-schema.json
+            docs/specs/api/acps-schema.meta.json
           # Regular/major release notes come from the curated per-version
           # changelog committed at the tag (docs/changelogs/<tag>.md, e.g.
           # docs/changelogs/v0.1.1.md); the release fails if that file is

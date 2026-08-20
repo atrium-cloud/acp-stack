@@ -18,7 +18,7 @@ pub(super) const MAX_LOGS_LIMIT: u32 = 1000;
 const ORDER_ASC: &str = "asc";
 const ORDER_DESC: &str = "desc";
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsEventsParams {
     #[serde(default = "default_logs_limit")]
@@ -79,14 +79,14 @@ pub(super) fn parse_security_category(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct LogsEventsResponse {
     events: Vec<LogEventJson>,
     next_cursor: Option<String>,
 }
 
-#[derive(Serialize)]
-pub(super) struct LogEventJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct LogEventJson {
     id: String,
     created_at: String,
     level: String,
@@ -183,21 +183,21 @@ impl HasRowId for crate::state::AuthFailure {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct LogsSessionsResponse {
     sessions: Vec<SessionLogJson>,
     next_cursor: Option<String>,
 }
 
-#[derive(Serialize)]
-struct SessionLogJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct SessionLogJson {
     id: String,
     created_at: String,
     updated_at: String,
     status: String,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsSessionsParams {
     #[serde(default = "default_logs_limit")]
@@ -241,14 +241,14 @@ pub(crate) async fn logs_sessions_handler(
     }))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsLimitParams {
     #[serde(default = "default_logs_limit")]
     pub(super) limit: u32,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsCommandsParams {
     #[serde(default = "default_logs_limit")]
@@ -260,14 +260,14 @@ pub(crate) struct LogsCommandsParams {
     order: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct LogsCommandsResponse {
     commands: Vec<CommandLogJson>,
     next_cursor: Option<String>,
 }
 
-#[derive(Serialize)]
-struct CommandLogJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct CommandLogJson {
     id: String,
     created_at: String,
     updated_at: String,
@@ -309,7 +309,7 @@ pub(crate) async fn logs_commands_handler(
     }))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsPermissionsParams {
     #[serde(default = "default_logs_limit")]
@@ -355,7 +355,7 @@ pub(crate) async fn logs_permissions_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct LogsSecurityResponse {
     auth_failures: Vec<AuthFailureJson>,
     events: Vec<LogEventJson>,
@@ -363,7 +363,7 @@ pub(crate) struct LogsSecurityResponse {
     events_next_cursor: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsSecurityParams {
     #[serde(default = "default_logs_limit")]
@@ -377,8 +377,8 @@ pub(crate) struct LogsSecurityParams {
     order: Option<String>,
 }
 
-#[derive(Serialize)]
-struct AuthFailureJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AuthFailureJson {
     id: String,
     created_at: String,
     key_kind: String,

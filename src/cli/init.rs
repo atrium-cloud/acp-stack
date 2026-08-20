@@ -14,6 +14,11 @@ mod serve;
 mod skills;
 mod starter_config;
 mod state_signal;
+
+// Lift the init schema def-producers one level further, toward `crate::cli`, so
+// `schema_export` reaches them without the private `serve` module on the path.
+#[cfg(feature = "dev-tools")]
+pub(crate) use self::serve::{init_request_defs, init_response_defs};
 mod testflight;
 
 use std::io::{self, IsTerminal};

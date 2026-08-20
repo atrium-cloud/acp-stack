@@ -85,7 +85,7 @@ impl Default for SessionChangeLimits {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, schemars::JsonSchema)]
 pub(crate) struct CapturedMeta(Box<RawValue>);
 
 impl CapturedMeta {
@@ -134,7 +134,7 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum CapturedToolCallContent {
     Diff {
@@ -176,7 +176,7 @@ impl CapturedToolCallContent {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub(crate) struct CapturedToolCall {
     tool_call_id: Box<str>,
     title: Option<Box<str>>,
@@ -265,7 +265,7 @@ fn captured_diffs(content: &[ToolCallContent]) -> Box<[CapturedToolCallContent]>
         .into_boxed_slice()
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionChangesSnapshot {
     session_id: String,
     generation: String,

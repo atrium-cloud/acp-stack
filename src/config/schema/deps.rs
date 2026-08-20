@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependenciesConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -15,7 +15,7 @@ pub struct DependenciesConfig {
     pub mcp: Vec<DependencyEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyEntry {
     pub name: String,
@@ -43,7 +43,7 @@ fn default_dependency_required() -> bool {
 /// from "needs OS-wide privilege" so the apply runner knows when to
 /// escalate — and never silently downgrades privileged work to user
 /// scope behind the operator's back.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyInstallAction {
     /// Shell snippet executed via `[workspace].default_shell -c`.
@@ -70,7 +70,9 @@ pub struct DependencyInstallAction {
     pub timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum DependencyInstallScope {
     /// Runs as the runtime user. No privilege escalation. Suitable

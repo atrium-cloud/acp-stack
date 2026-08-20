@@ -1,12 +1,12 @@
 use super::*;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsListResponse {
     sessions: Vec<SessionResponse>,
     agent_sync: SessionsAgentSyncResponse,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsAgentSyncResponse {
     attempted: bool,
     status: String,
@@ -25,7 +25,7 @@ impl From<SessionListSyncResult> for SessionsAgentSyncResponse {
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsListParams {
     #[serde(default = "default_logs_limit")]
     limit: u32,

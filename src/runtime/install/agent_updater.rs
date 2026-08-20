@@ -47,7 +47,7 @@ pub struct AgentUpdateOptions {
     pub agent_running: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AgentUpdateReport {
     pub agent: String,
     pub updated: bool,
@@ -77,7 +77,7 @@ impl AgentUpdateReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AgentUpdateStepReport {
     pub step: String,
     pub status: AgentUpdateStepStatus,
@@ -91,7 +91,7 @@ pub struct AgentUpdateStepReport {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentUpdateStepStatus {
     Updated,

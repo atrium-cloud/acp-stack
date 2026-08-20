@@ -8,7 +8,7 @@ use crate::config::LocalSessionAuth;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct RegenerateSessionKeyResponse {
     pub(crate) session_key: String,
 }
@@ -31,12 +31,12 @@ pub(crate) async fn auth_regenerate_session_key_handler(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct LocalSessionAccessRequest {
     session_auth: LocalSessionAuth,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct LocalSessionAccessResponse {
     session_auth: LocalSessionAuth,
 }

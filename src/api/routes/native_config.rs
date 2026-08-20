@@ -45,7 +45,7 @@ use self::rollback::*;
 
 const QUEUED_IMPORT_POLL_SECONDS: u64 = 2;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeConfigInspectBody {
     filename: String,

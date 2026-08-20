@@ -9,6 +9,11 @@ mod init;
 mod installer;
 mod logging;
 mod logs;
+
+// Final hop of the init schema re-export chain: exposes the def-producers at
+// `crate::cli` for `schema_export`. Dev-tools only.
+#[cfg(feature = "dev-tools")]
+pub(crate) use self::init::{init_request_defs, init_response_defs};
 mod metrics;
 mod reset;
 mod secrets;

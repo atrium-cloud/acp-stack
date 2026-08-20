@@ -20,12 +20,12 @@ use crate::state::{
     SessionStatusRecord, SessionUpdateBounds,
 };
 
-mod events;
-mod lifecycle;
-mod list;
-mod prompts;
-mod status;
-mod teardown;
+pub(crate) mod events;
+pub(crate) mod lifecycle;
+pub(crate) mod list;
+pub(crate) mod prompts;
+pub(crate) mod status;
+pub(crate) mod teardown;
 
 // Router wiring (`api::core`, `local_listener::router`) imports handlers as
 // `sessions::<handler>`; re-export them so the split is invisible to callers.
@@ -43,7 +43,7 @@ pub(crate) use teardown::{
     sessions_cancel_handler, sessions_close_handler, sessions_delete_handler,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionResponse {
     id: String,
     target_id: String,
@@ -88,13 +88,13 @@ impl From<crate::runtime::agent::supervisor::SessionAttachOutcome> for SessionRe
     }
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsTargetParams {
     #[serde(default, alias = "target")]
     target_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct PromptStatusResponse {
     id: String,
     session_id: String,
