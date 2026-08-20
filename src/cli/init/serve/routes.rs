@@ -178,8 +178,8 @@ async fn session_status_handler(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct EventsQuery {
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(super) struct EventsQuery {
     after_seq: Option<u64>,
 }
 
@@ -226,9 +226,9 @@ async fn session_cancel_handler(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct NativeConfigCancelRequest {
+pub(super) struct NativeConfigCancelRequest {
     operation_id: String,
     revision: String,
 }
@@ -476,8 +476,8 @@ fn protocol_error(code: &str, message: &str) -> ClientFrameOutcome {
     ClientFrameOutcome::Send(frame_json(ServerFrame::ProtocolError { code, message }))
 }
 
-#[derive(Debug, Deserialize)]
-struct ClientFrame {
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(super) struct ClientFrame {
     #[serde(rename = "type")]
     frame_type: String,
     request_id: Option<String>,

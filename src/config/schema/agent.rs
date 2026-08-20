@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArrayConfig {
     #[serde(default)]
@@ -48,14 +48,14 @@ impl ArrayConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArrayTargetConfig {
     pub id: String,
     pub agent: AgentConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub id: String,
@@ -97,7 +97,7 @@ pub struct AgentConfig {
     pub install: Option<AgentInstallConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProvidersConfig {
     #[serde(default)]
@@ -106,7 +106,7 @@ pub struct AgentProvidersConfig {
     pub selected_aliases: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAutoUpdateConfig {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -114,7 +114,7 @@ pub struct AgentAutoUpdateConfig {
     pub frequency: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSubagentConfig {
     #[serde(default, skip_serializing_if = "is_false")]
@@ -123,7 +123,7 @@ pub struct AgentSubagentConfig {
     pub provider: Option<AgentProviderConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProviderConfig {
     pub id: String,
@@ -135,7 +135,7 @@ pub struct AgentProviderConfig {
     pub custom: Option<AgentCustomProviderConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCustomProviderConfig {
     pub name: String,
@@ -150,7 +150,9 @@ pub struct AgentCustomProviderConfig {
     pub output_max_tokens: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum CustomProviderApi {
     #[default]
@@ -199,7 +201,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAdapterConfig {
     pub id: String,
@@ -214,7 +216,7 @@ pub struct AgentAdapterConfig {
 /// The runtime resolves registry-listed agents from `data/agents.toml`
 /// keyed off `[agent].id`; this struct is consulted only when the operator
 /// explicitly writes `[agent.install]` to override that resolution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstallConfig {
     #[serde(rename = "type")]

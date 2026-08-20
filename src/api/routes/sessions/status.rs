@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct SessionsStatusParams {
     #[serde(default = "default_session_status_threshold")]
     threshold: String,
@@ -24,7 +24,7 @@ fn default_session_status_limit() -> u32 {
     MAX_LOGS_LIMIT
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsStatusResponse {
     generated_at: String,
     threshold: String,
@@ -37,7 +37,7 @@ pub(crate) struct SessionsStatusResponse {
     sessions: Vec<SessionStatusSessionResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionStatusSessionResponse {
     id: String,
     state: &'static str,
@@ -53,7 +53,7 @@ pub(crate) struct SessionStatusSessionResponse {
     prompt_stream_started_at: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionStatusPromptResponse {
     id: String,
     created_at: String,
@@ -66,7 +66,7 @@ pub(crate) struct SessionStatusPromptResponse {
     message_id_acknowledged: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionStatusPermissionResponse {
     id: String,
     created_at: String,

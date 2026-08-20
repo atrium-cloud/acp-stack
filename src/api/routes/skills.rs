@@ -44,7 +44,7 @@ use crate::runtime::install::skill_installer::{
 };
 use crate::runtime::install::skill_registry::SkillCatalog;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillsListResponse {
     agent_id: String,
     /// Whether the active agent is a managed Agent Skills install target.
@@ -74,13 +74,13 @@ pub(crate) async fn skills_list_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillsCatalogResponse {
     sources: Vec<SkillCatalogSourceJson>,
 }
 
-#[derive(Serialize)]
-struct SkillCatalogSourceJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct SkillCatalogSourceJson {
     id: String,
     alias: String,
     name: String,
@@ -134,7 +134,7 @@ pub(crate) async fn skills_catalog_handler(
     Ok(ApiSuccess::new(SkillsCatalogResponse { sources }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct SkillsAddRequest {
     /// Catalog alias, a configured user alias, or `github:<owner>[/<repo>]`.
     source: String,
@@ -143,7 +143,7 @@ pub(crate) struct SkillsAddRequest {
     skills: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillsAddResponse {
     agent_id: String,
     install: SkillInstallReport,
@@ -251,14 +251,14 @@ pub(crate) async fn skills_add_handler(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct SkillsRemoveRequest {
     /// Install name of the skill to remove (a `/`-joined path for nested
     /// skills, e.g. `zoom/android`).
     skill: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillsRemoveResponse {
     agent_id: String,
     remove: SkillRemoveReport,
@@ -340,13 +340,13 @@ async fn record_skill_event(state: &AppState, kind: &str, payload: serde_json::V
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct SkillSourceGetQuery {
     /// Catalog alias, configured user alias, or `github:<owner>[/<repo>]`.
     source: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillSourceGetResponse {
     id: String,
     /// `owner/repo`.
@@ -402,7 +402,7 @@ pub(crate) async fn skills_source_get_handler(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct SkillSourceAddRequest {
     alias: String,
     /// GitHub source as `owner/repo`.
@@ -413,7 +413,7 @@ pub(crate) struct SkillSourceAddRequest {
     trusted: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillSourceAddResponse {
     alias: String,
     github: String,
@@ -477,12 +477,12 @@ pub(crate) async fn skills_source_add_handler(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct SkillSourceRemoveRequest {
     alias: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SkillSourceRemoveResponse {
     alias: String,
     /// Total configured user sources after the removal.

@@ -6,7 +6,7 @@ use super::*;
 /// daemon. The daemon always derives the set of its own sensitive paths to mask
 /// (config dir, state dir) from its path helpers, so an operator cannot forget
 /// to protect them; the fields below only add to or parameterize that.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
     #[serde(default)]
@@ -34,7 +34,9 @@ impl SandboxConfig {
 /// Isolation mechanism. `unshare` requires the daemon to hold `CAP_SYS_ADMIN`
 /// (privileged container); `bwrap` requires unprivileged user namespaces;
 /// `custom` delegates to an operator-supplied [`SandboxConfig::wrapper`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxMode {
     #[default]
@@ -58,7 +60,7 @@ pub const MAX_WORKLOAD_ENV_VALUE_BYTES: usize = 16 * 1024;
 /// supervises or serves the type's generic contract and never learns the
 /// extension's semantics. The struct is flat across all types; the extensions
 /// validator rejects fields that do not belong to the declared `type`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionConfig {
     #[serde(rename = "type")]
@@ -95,7 +97,7 @@ pub struct ExtensionConfig {
 /// whose policy belongs to the external provider executable; declaring a
 /// `managed-state` instance grants an external orchestrator ownership of a
 /// named state namespace via the admin apply endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExtensionType {
     NetworkProvider,
@@ -111,7 +113,9 @@ impl ExtensionType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxProviderStderr {
     #[default]

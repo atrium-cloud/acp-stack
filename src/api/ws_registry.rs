@@ -29,7 +29,7 @@ pub struct WsRegistration {
     pub notify: Arc<Notify>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsConnectionView {
     pub connection_id: String,
     pub connected_at: String,
@@ -40,7 +40,7 @@ pub struct WsConnectionView {
     pub disconnect_requested: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct WsSessionView {
     pub session_id: String,
     pub connection_count: usize,

@@ -33,7 +33,7 @@ const MAX_VALUE_COUNT: usize = 8;
 const MAX_ENV_NAME_BYTES: usize = 128;
 const MAX_VALUE_BYTES: usize = 16 * 1024;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyRequest {
     pub schema_version: u16,
@@ -43,17 +43,59 @@ pub struct ApplyRequest {
 
 /// The desired payload, discriminated by `kind`. A second kind later is an
 /// additive change; unknown kinds fail deserialization.
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[schemars(transform = require_selection_key)]
 pub enum DesiredState {
     ProviderCredential {
         // `selection` is a required key that may be null: silently defaulting
         // an absent key to `None` would read a malformed body as a
         // destructive clear. The `deserialize_with` marker removes serde's
         // implicit Option default so a missing key is a parse error instead.
+        // schemars sees only the `Option` and would drop the key from
+        // `required`; the `require_selection_key` transform adds it back
+        // without touching the field schema, so it stays nullable while
+        // generated clients must send the key.
         #[serde(deserialize_with = "deserialize_required_selection")]
         selection: Option<CredentialSelection>,
     },
+}
+
+/// Force `selection` into each variant's `required` list. `selection` is an
+/// `Option`, so schemars omits it from `required`; but the deserializer treats
+/// an absent key as a parse error (a missing key must not read as a destructive
+/// clear). The field schema is left untouched — it stays `CredentialSelection |
+/// null` — so `selection: null` remains valid while omitting the key does not.
+/// Applied per `oneOf` variant that actually has a `selection` property, so a
+/// future `kind` without one is unaffected.
+fn require_selection_key(schema: &mut schemars::Schema) {
+    const SELECTION: &str = "selection";
+    let Some(variants) = schema
+        .ensure_object()
+        .get_mut("oneOf")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for variant in variants {
+        let Some(variant) = variant.as_object_mut() else {
+            continue;
+        };
+        let has_selection = variant
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| properties.contains_key(SELECTION));
+        if !has_selection {
+            continue;
+        }
+        if let serde_json::Value::Array(required) = variant
+            .entry("required")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            && !required.iter().any(|field| field == SELECTION)
+        {
+            required.push(serde_json::Value::String(SELECTION.to_owned()));
+        }
+    }
 }
 
 impl std::fmt::Debug for DesiredState {
@@ -76,7 +118,7 @@ where
     Option::<CredentialSelection>::deserialize(deserializer)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialSelection {
     pub provider_id: String,
@@ -107,7 +149,7 @@ impl std::fmt::Debug for CredentialSelection {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ApplyResponse {
     pub applied_revision: i64,
     pub outcome: &'static str,

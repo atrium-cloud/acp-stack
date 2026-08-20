@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 
 use crate::error::StackError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiSuccess<T> {
     pub ok: bool,
     pub data: T,
@@ -26,13 +26,13 @@ impl<T> ApiSuccess<T> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiErrorEnvelope {
     pub ok: bool,
     pub error: ApiError,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiError {
     pub code: String,
     pub message: String,

@@ -5,7 +5,7 @@ use super::super::core::AppState;
 use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct MetricsSummaryParams {
     /// Window start. Accepts RFC3339 (e.g. `2026-05-16T00:00:00Z`) or a
@@ -15,7 +15,7 @@ pub(crate) struct MetricsSummaryParams {
     until: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsSummaryResponse {
     window: MetricsWindowJson,
     counts: MetricsCountsJson,
@@ -30,13 +30,13 @@ pub(crate) struct MetricsSummaryResponse {
     usage: MetricsUsageJson,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsWindowJson {
     since: String,
     until: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsCountsJson {
     events: i64,
     sessions: i64,
@@ -50,7 +50,7 @@ pub(crate) struct MetricsCountsJson {
     permission_decisions: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsSessionsJson {
     active: i64,
     closed: i64,
@@ -59,14 +59,14 @@ pub(crate) struct MetricsSessionsJson {
     p95_duration_ms: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsTurnsJson {
     total: i64,
     by_status: std::collections::BTreeMap<String, i64>,
     average_per_session: Option<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsPromptFailuresJson {
     total: i64,
     inference_5xx: i64,
@@ -82,7 +82,7 @@ pub(crate) struct MetricsPromptFailuresJson {
     by_reason_category: std::collections::BTreeMap<String, i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsCommandsJson {
     total: i64,
     by_status: std::collections::BTreeMap<String, i64>,
@@ -92,7 +92,7 @@ pub(crate) struct MetricsCommandsJson {
     truncated_count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsPermissionsJson {
     total: i64,
     by_outcome: std::collections::BTreeMap<String, i64>,
@@ -101,14 +101,14 @@ pub(crate) struct MetricsPermissionsJson {
     p95_response_ms: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsSecurityJson {
     auth_failures: i64,
     by_reason: std::collections::BTreeMap<String, i64>,
     events_by_kind: std::collections::BTreeMap<String, i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsApiConnectionsJson {
     request_count: Option<i64>,
     by_status: std::collections::BTreeMap<String, i64>,
@@ -122,14 +122,14 @@ pub(crate) struct MetricsApiConnectionsJson {
     average_duration_ms: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsWsConnectionsJson {
     connections_opened: Option<i64>,
     connections_closed: Option<i64>,
     average_duration_ms: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsUsageJson {
     tokens_input: Option<i64>,
     tokens_output: Option<i64>,

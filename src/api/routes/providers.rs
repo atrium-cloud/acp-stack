@@ -31,14 +31,14 @@ use crate::runtime::agent::provider_model_catalog::{cached_models, refresh_provi
 
 use super::super::core::AppState;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ProvidersResponse {
     agent_id: String,
     providers: Vec<ProviderJson>,
 }
 
-#[derive(Serialize)]
-struct ProviderJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct ProviderJson {
     id: &'static str,
     name: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +79,7 @@ pub(crate) async fn providers_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ModelsResponse {
     agent_id: String,
     /// `"provider_catalog"` when `models` comes from the provider's live
@@ -97,7 +97,7 @@ pub(crate) struct ModelsResponse {
     catalog_error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ModelJson {
     /// Model id accepted verbatim by `acps agent set --model`.
     value: String,

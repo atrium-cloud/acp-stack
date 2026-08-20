@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentStartResponse {
     started_at: String,
     capabilities: AgentCapabilitiesDto,
@@ -125,7 +125,7 @@ async fn start_agent_target_locked(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentStopResponse {
     stopped_at: String,
     exit_status: Option<i32>,
@@ -165,7 +165,7 @@ async fn stop_agent_target(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentRestartResponse {
     stopped_at: String,
     started_at: String,
@@ -176,7 +176,7 @@ pub(crate) struct AgentRestartResponse {
     pid: Option<u32>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentRestartQuery {
     #[serde(default)]
     require_idle: bool,
@@ -184,7 +184,7 @@ pub(crate) struct AgentRestartQuery {
     auto: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub(crate) enum AgentRestartResultResponse {
     Restarted(AgentRestartResponse),
@@ -192,14 +192,14 @@ pub(crate) enum AgentRestartResultResponse {
     Queued(AgentRestartQueuedResponse),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentRestartBlockedResponse {
     restarted: bool,
     target_id: String,
     blockers: Vec<AgentRestartBlockerResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentRestartQueuedResponse {
     queued: bool,
     already_queued: bool,
@@ -229,14 +229,14 @@ pub(crate) async fn agent_restart_handler(
     restart_agent_target(&state, &target_id, query.require_idle).await
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentRestartBlockersResponse {
     target_id: String,
     blockers: Vec<AgentRestartBlockerResponse>,
 }
 
-#[derive(Serialize)]
-struct AgentRestartBlockerResponse {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentRestartBlockerResponse {
     session_id: String,
     target_id: String,
     state: String,

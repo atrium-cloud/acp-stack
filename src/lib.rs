@@ -18,6 +18,11 @@ pub mod http_hardening;
 pub mod local_listener;
 pub mod ownership;
 pub mod runtime;
+// Derives the published `/v1` JSON Schema contract from the wire DTOs. Exists
+// only under `dev-tools`; the `generate-api-schema` bin is its only caller and
+// nothing in the shipped binary references it.
+#[cfg(feature = "dev-tools")]
+pub mod schema_export;
 pub mod secrets;
 pub mod security;
 pub mod state;

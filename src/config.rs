@@ -49,8 +49,9 @@ pub(crate) use self::validate::skills::{is_valid_github_owner, is_valid_github_r
 pub(crate) use self::validate::sources::{derive_code_source_name, derive_data_source_name};
 pub(crate) use self::validate::{STACK_UPDATE_FREQUENCY_LIMITS, validate_supabase_identifiers};
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = relax_agent_array_requirement)]
 pub struct Config {
     #[serde(default = "default_config_version")]
     pub config_version: u64,
@@ -83,6 +84,33 @@ pub struct Config {
     /// See [`ExtensionConfig`].
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub extensions: std::collections::BTreeMap<String, ExtensionConfig>,
+}
+
+/// Relax the derived `Config` JSON Schema to the shape the loader actually
+/// accepts. schemars derives `required` from the in-memory `Config`, which
+/// always carries both `agent` and `array`; but the on-disk file goes through
+/// [`RawConfig`], where either section alone is enough. Canonical export writes
+/// `[array]` only (`agent` is `#[serde(skip_serializing)]`), legacy files may
+/// write `[agent]` only, and both together are accepted. So neither is
+/// individually required, but at least one must be present — an `anyOf` the
+/// derive cannot express. The finer per-field cross-checks stay in the loader.
+fn relax_agent_array_requirement(schema: &mut schemars::Schema) {
+    const OPTIONAL_SECTIONS: [&str; 2] = ["agent", "array"];
+    let object = schema.ensure_object();
+    if let Some(serde_json::Value::Array(required)) = object.get_mut("required") {
+        required.retain(|field| {
+            field
+                .as_str()
+                .is_none_or(|name| !OPTIONAL_SECTIONS.contains(&name))
+        });
+    }
+    object.insert(
+        "anyOf".to_owned(),
+        serde_json::json!([
+            { "required": ["agent"] },
+            { "required": ["array"] },
+        ]),
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

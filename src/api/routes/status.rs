@@ -17,7 +17,7 @@ use crate::runtime::health::HealthReport;
 
 use super::agent::open_agent_environment;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct StatusResponse {
     schema_version: i64,
     latest_event: Option<String>,
@@ -48,8 +48,8 @@ const SERVER_FEATURES: &[&str] = &[
     FEATURE_MANAGED_CREDENTIAL_BASE_URL,
 ];
 
-#[derive(Serialize)]
-struct ServerInfo {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct ServerInfo {
     version: &'static str,
     features: &'static [&'static str],
 }
@@ -86,7 +86,7 @@ pub(crate) async fn status_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct StatusAgentResponse {
     configured: bool,
     agent: AgentStatusJson,
@@ -104,7 +104,7 @@ pub(crate) struct StatusAgentResponse {
     provider_error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ProviderStatusJson {
     provider_id: String,
     alias: Option<String>,
@@ -160,8 +160,8 @@ pub(crate) fn provider_restart_required_for_status(
     !resolution_failed && provider_snapshot_requires_restart(state, loaded, configured)
 }
 
-#[derive(Serialize)]
-struct AgentStatusJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentStatusJson {
     id: String,
     name: String,
     command: String,
@@ -171,8 +171,8 @@ struct AgentStatusJson {
     adapter: Option<AgentAdapterConfig>,
 }
 
-#[derive(Serialize)]
-struct AgentLifecycleJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentLifecycleJson {
     id: String,
     created_at: String,
     event_kind: String,
@@ -180,8 +180,8 @@ struct AgentLifecycleJson {
     payload_json: String,
 }
 
-#[derive(Serialize)]
-struct AgentFailureJson {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AgentFailureJson {
     id: String,
     created_at: String,
     event_kind: String,
@@ -262,7 +262,7 @@ pub(crate) async fn status_agent_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct StatusConnectionsResponse {
     active_requests: u64,
 }
@@ -275,7 +275,7 @@ pub(crate) async fn status_connections_handler(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct HealthLiveResponse {
     ok: bool,
     server: ServerInfo,

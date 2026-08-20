@@ -54,6 +54,15 @@ mod response_dto;
 mod routes;
 mod session;
 
+// Feeds the init wire DTOs into the published schema. Dev-tools only; the
+// `pub(crate) use` re-export lifts just the two def-producing functions up to
+// `crate::cli` (see `init.rs`, `cli.rs`) so `schema_export` reaches them without
+// exposing the module-private DTOs themselves.
+#[cfg(feature = "dev-tools")]
+mod schema_umbrella;
+#[cfg(feature = "dev-tools")]
+pub(crate) use self::schema_umbrella::{init_request_defs, init_response_defs};
+
 // Plain (non-re-exporting) globs make each sibling's `pub(super)` items private
 // members of this parent module, so the other siblings and the `tests` module
 // reach them via `super::NAME` / `super::*`. Nothing here escapes `serve`

@@ -2,7 +2,7 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     pub root: String,
@@ -27,7 +27,7 @@ pub struct WorkspaceConfig {
 /// The only `type` value today is `git`. The schema is shaped as an enum so
 /// that additional code-source kinds can be added without invalidating
 /// existing configs, but loaders reject unknown values fail-fast.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSourceConfig {
     #[serde(rename = "type")]
@@ -48,7 +48,7 @@ pub struct CodeSourceConfig {
 /// Source for arbitrary data that init should seed under
 /// `<workspace.root>/usr/data/`. `type` is one of `local`, `https`, or `s3`;
 /// the other fields are required-or-rejected based on the selected type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DataSourceConfig {
     #[serde(rename = "type")]

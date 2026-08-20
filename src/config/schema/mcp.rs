@@ -2,14 +2,14 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<McpServerConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum McpServerConfig {
     Stdio(McpStdioServer),
@@ -25,7 +25,7 @@ impl McpServerConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpStdioServer {
     pub name: String,
@@ -36,7 +36,7 @@ pub struct McpStdioServer {
     pub env: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpHttpServer {
     pub name: String,
@@ -49,7 +49,7 @@ pub struct McpHttpServer {
 /// (`value_ref`) or by a `${NAME}`-interpolated template (`value`).
 /// Exactly-one is enforced in validation rather than serde so TOML errors
 /// stay readable; `source()` is the runtime accessor that upholds it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HttpHeaderRef {
     pub name: String,

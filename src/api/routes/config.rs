@@ -8,7 +8,7 @@ use crate::envelope::ApiSuccess;
 use crate::error::StackError;
 use crate::fs_util::home_dir;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ConfigExportResponse {
     toml: String,
 }
@@ -21,7 +21,7 @@ pub(crate) async fn config_export_handler(
     Ok(ApiSuccess::new(ConfigExportResponse { toml }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ConfigValidateResponse {
     valid: bool,
 }
@@ -37,7 +37,7 @@ pub(crate) async fn config_validate_handler(
     Ok(ApiSuccess::new(ConfigValidateResponse { valid: true }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ConfigImportQuery {
     #[serde(default)]
     dry_run: bool,
@@ -122,24 +122,24 @@ pub(crate) async fn config_import_handler(
     })))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecretsListResponse {
     names: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct SecretsSetBody {
     name: String,
     value: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecretsSetResponse {
     name: String,
     action: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecretsDeleteResponse {
     name: String,
     deleted: bool,

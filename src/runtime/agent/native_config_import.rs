@@ -68,7 +68,7 @@ const CREDENTIAL_PATH_SEGMENT_PREFIXES: [&str; 14] = [
 
 static OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NativeConfigFormat {
     Json,
@@ -77,7 +77,7 @@ pub enum NativeConfigFormat {
     Yaml,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ManagedFieldKind {
     Mcp,
@@ -85,7 +85,7 @@ pub enum ManagedFieldKind {
     Provider,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum BlockedReason {
     Credentials,
@@ -97,7 +97,9 @@ pub enum BlockedReason {
     McpUnmappable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutableCategory {
     Hooks,
@@ -107,7 +109,7 @@ pub enum ExecutableCategory {
     Formatters,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedField {
     pub id: String,
@@ -116,14 +118,14 @@ pub struct ManagedField {
     pub compatible: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BlockedField {
     pub path: String,
     pub reason: BlockedReason,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigInspection {
     pub revision: String,
@@ -176,7 +178,7 @@ impl InspectedNativeConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigSelection {
     pub revision: String,
@@ -186,7 +188,7 @@ pub struct NativeConfigSelection {
     pub executable_settings_acknowledged: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigImportRequest {
     pub revision: String,
@@ -220,7 +222,7 @@ pub struct PreparedNativeConfigImport {
     pub selected_managed_field_ids: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NativeConfigOperationStatus {
     Applied,
@@ -229,7 +231,7 @@ pub enum NativeConfigOperationStatus {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigProjection {
     pub id: String,
@@ -239,7 +241,7 @@ pub struct NativeConfigProjection {
     pub model: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigRestartMetadata {
     pub required: bool,
@@ -248,13 +250,13 @@ pub struct NativeConfigRestartMetadata {
     pub target_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigOperationError {
     pub code: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NativeConfigOperation {
     pub operation_id: String,

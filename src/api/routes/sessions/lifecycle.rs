@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsCreateBody {
     #[serde(default)]
     cwd: Option<String>,
@@ -69,7 +69,7 @@ pub(crate) async fn sessions_get_handler(
     Ok(ApiSuccess::new(SessionResponse::from(record)))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsLoadBody {
     #[serde(default)]
     cwd: Option<String>,
@@ -133,7 +133,7 @@ pub(crate) async fn sessions_resume_handler(
     Ok(ApiSuccess::new(SessionResponse::from(outcome)))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsForkBody {
     #[serde(default)]
     cwd: Option<String>,

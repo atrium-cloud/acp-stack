@@ -3,7 +3,7 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionsConfig {
     pub mode: String,
@@ -65,7 +65,7 @@ pub enum PermissionTimeoutAction {
 
 pub const DEFAULT_COMMAND_PROGRESS_INTERVAL: &str = "30s";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommandsConfig {
     pub default_timeout: String,
@@ -110,7 +110,7 @@ pub const DEFAULT_PROMPTS_SWEEP_INTERVAL: &str = "30s";
 /// prompt row for `stale_threshold`, the sweeper flips it to terminal
 /// `Stalled` so polling clients always see the row settle. The sweep
 /// runs every `sweep_interval` from `acps serve`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromptsConfig {
     pub stale_threshold: String,
@@ -156,7 +156,9 @@ impl PromptsConfig {
 
 // LOCAL DAEMON SOCKET
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub enum LocalSessionAuth {
     #[serde(rename = "session-key")]
     #[default]
@@ -178,7 +180,7 @@ impl LocalSessionAuth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LocalConfig {
     /// Override path for the internal local Unix-domain socket. When unset the

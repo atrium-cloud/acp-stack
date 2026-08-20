@@ -11,7 +11,7 @@ use crate::state::InstallerRun;
 /// Result of comparing the installed managed-agent version against upstream.
 /// Carried as a typed enum so the CLI printer, the API route, and test cases
 /// can pattern-match the four states deterministically.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum AgentVersionStatus {
     /// Installed and upstream agree on a non-empty version.

@@ -39,9 +39,9 @@ use crate::runtime::install::skill_installer::{
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 
-mod lifecycle;
-mod switch;
-mod update;
+pub(crate) mod lifecycle;
+pub(crate) mod switch;
+pub(crate) mod update;
 
 // Cross-seam helpers keep their visibility; re-import them here so each
 // sibling's `use super::*;` resolves items defined in the other siblings, and
@@ -54,7 +54,7 @@ pub(crate) use self::lifecycle::{
 pub(crate) use self::switch::agent_switch_handler;
 pub(crate) use self::update::{agent_update_handler, agent_update_status_handler};
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentInstallResponse {
     outcome: &'static str,
     path: String,
@@ -68,7 +68,7 @@ pub(crate) async fn agent_install_handler(
     install_agent_target(&state, &target_id).await
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ArrayStatusResponse {
     enabled: bool,
     primary_target: String,
@@ -76,14 +76,14 @@ pub(crate) struct ArrayStatusResponse {
     targets: Vec<ArrayTargetStatusResponse>,
 }
 
-#[derive(Serialize)]
-struct ArrayDelegationStatusResponse {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct ArrayDelegationStatusResponse {
     ready: bool,
     local_session_auth: &'static str,
 }
 
-#[derive(Serialize)]
-struct ArrayTargetStatusResponse {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct ArrayTargetStatusResponse {
     id: String,
     agent_id: String,
     name: String,
@@ -332,7 +332,7 @@ pub(crate) fn ensure_array_process_start_allowed(config: &Config, target_id: &st
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentCapabilitiesResponseBody {
     agent_id: String,
     adapter: Option<AgentAdapterConfig>,

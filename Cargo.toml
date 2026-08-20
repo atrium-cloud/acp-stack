@@ -46,6 +46,13 @@ name = "sync-skills-catalog"
 path = "src/bin/sync_skills_catalog/main.rs"
 required-features = ["dev-tools"]
 
+# Dev-only: regenerates the published /v1 JSON Schema contract
+# (docs/specs/api/acps-schema.json + .meta.json) from the derived DTOs.
+[[bin]]
+name = "generate-api-schema"
+path = "src/bin/generate_api_schema.rs"
+required-features = ["dev-tools"]
+
 [dependencies]
 base64 = "0.22.1"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -54,6 +61,11 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 serde_norway = "0.9.42"
+# Derives the published /v1 JSON Schema from the wire DTOs (mirrors the ACP SDK,
+# which already pulls schemars 1.x into the tree). The `generate-api-schema` bin
+# and the schema_export module are dev-tools-gated; only the derive ships.
+# `chrono04` covers the `DateTime<Utc>` fields on native-config responses.
+schemars = { version = "1.2", features = ["derive", "chrono04", "raw_value"] }
 thiserror = "2.0.18"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde"] }
 toml = "1.1.2"
