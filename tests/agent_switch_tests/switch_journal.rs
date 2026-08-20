@@ -359,6 +359,55 @@ async fn agent_switch_conflicting_target_is_rejected_while_journal_incomplete() 
 }
 
 #[tokio::test]
+async fn agent_switch_same_primary_still_conflicts_while_foreign_journal_incomplete() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn().await;
+    // An interrupted switch to another target is still in flight; a bare
+    // request naming the current primary must not no-op past it.
+    let journal = SwitchJournal {
+        old_target_id: "opencode".to_owned(),
+        new_target_id: "kimi".to_owned(),
+        target_agent_id: "kimi".to_owned(),
+        candidate_fingerprint: "pending".to_owned(),
+        was_running: false,
+        phase: SwitchJournalPhase::Planned,
+    };
+    persist_switch_journal(&harness.config_path, &journal).expect("persist incomplete journal");
+
+    let (status, body) = switch_request(&harness, "opencode").await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(body["error"]["code"], "agent.switch_conflict");
+}
+
+#[tokio::test]
+async fn agent_switch_stale_completed_journal_still_noops_same_target() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn().await;
+    // A Completed journal for a target this request does not name is stale
+    // context, not an in-flight switch: the bare same-target request still
+    // converges as a no-op.
+    let journal = SwitchJournal {
+        old_target_id: "opencode".to_owned(),
+        new_target_id: "kimi".to_owned(),
+        target_agent_id: "kimi".to_owned(),
+        candidate_fingerprint: "stale".to_owned(),
+        was_running: false,
+        phase: SwitchJournalPhase::Completed,
+    };
+    persist_switch_journal(&harness.config_path, &journal).expect("persist stale journal");
+    let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
+
+    let (status, body) = switch_request(&harness, "opencode").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider_status"], "no_op");
+    assert_eq!(body["data"]["agent_id"], "opencode");
+    let config_after = std::fs::read_to_string(&harness.config_path).expect("config after");
+    assert_eq!(config_after, config_before, "no-op must not rewrite config");
+}
+
+#[tokio::test]
 async fn agent_switch_conflicts_when_resumed_candidate_differs() {
     let tempdir = TempDir::new().expect("tempdir");
     let _home = HomeEnvGuard::set(tempdir.path());
@@ -475,7 +524,7 @@ async fn agent_switch_corrupt_journal_is_a_hard_error() {
 }
 
 #[tokio::test]
-async fn agent_switch_without_journal_keeps_already_configured_error() {
+async fn agent_switch_without_journal_converges_same_target_as_noop() {
     let tempdir = TempDir::new().expect("tempdir");
     let _home = HomeEnvGuard::set(tempdir.path());
     let shim_path = tempdir.path().join("kimi-shim");
@@ -489,10 +538,17 @@ async fn agent_switch_without_journal_keeps_already_configured_error() {
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
     // A daemon whose journal is absent (e.g. written before the journal
-    // existed) must keep the pre-journal rejection for a same-target retry.
+    // existed, or reaped) must still converge a bare same-target retry as a
+    // side-effect-free no-op: callers like the platform's agent-config PATCH
+    // re-deliver the stored harness and rely on idempotent success.
     let journal_path = switch_journal_path(&harness.config_path).expect("journal path");
     std::fs::remove_file(&journal_path).expect("remove journal");
+    let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
     let (status, body) = switch_request(&harness, "kimi").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert_eq!(body["error"]["code"], "request.invalid_param");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["provider_status"], "no_op");
+    assert_eq!(body["data"]["restarted"], false);
+    let config_after = std::fs::read_to_string(&harness.config_path).expect("config after");
+    assert_eq!(config_after, config_before, "no-op must not rewrite config");
+    assert!(!journal_path.exists(), "no-op must not journal a switch");
 }

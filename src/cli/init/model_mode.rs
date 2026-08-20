@@ -8,6 +8,7 @@ use crate::dev_gates::{
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
 use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
+use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
 use crate::runtime::agent::model_discovery::{
     advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
     validate_advertised_value,
@@ -657,14 +658,16 @@ fn configure_model_for_init(
     // codex-acp advertises codex-core's bundled OpenAI preset catalog
     // regardless of the configured provider (see
     // `model_value_is_explicit_without_discovery`), so for codex lanes the
-    // advertised list is not a truthful pickable set. Substitute the
-    // provider's live catalog — refreshed best-effort by the caller right
-    // before discovery — and when no catalog exists (custom provider or an
-    // offline fetch) skip the lane with a hint rather than surface the
-    // misleading presets.
-    let codex_catalog_lane =
-        agent_model_is_explicit_without_discovery(config) && config.agent.id == CODEX_AGENT_ID;
-    let values: Vec<String> = if codex_catalog_lane {
+    // advertised list is not a truthful pickable set; Hermes speaks pre-1.0
+    // ACP and advertises nothing at all, which would otherwise fail the
+    // `advertised_values_for_category` call below. Substitute the provider's
+    // live catalog — refreshed best-effort by the caller right before
+    // discovery — and when no catalog exists (custom provider or an offline
+    // fetch) skip the lane with a hint rather than surface a misleading or
+    // absent list.
+    let provider_catalog_lane = agent_model_is_explicit_without_discovery(config)
+        && (config.agent.id == CODEX_AGENT_ID || config.agent.id == HERMES_AGENT_ID);
+    let values: Vec<String> = if provider_catalog_lane {
         let catalog = config
             .agent
             .provider
@@ -697,7 +700,7 @@ fn configure_model_for_init(
         // whatever it was (most commonly unset, so the agent picks
         // its own default on session/new).
         if !args.handoff_json {
-            if codex_catalog_lane {
+            if provider_catalog_lane {
                 println!("provider catalog models for {agent_name}:");
             } else {
                 println!("advertised models for {agent_name}:");

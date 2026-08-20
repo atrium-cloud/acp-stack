@@ -107,7 +107,10 @@ pub(crate) async fn agent_switch_handler(
     let resume_journal = match load_switch_journal(&state.runtime_paths.config_path)? {
         Some(journal) => match classify_switch_journal(&journal, &body.agent, &fresh_config)? {
             SwitchJournalAction::NoOp => {
-                return Ok(completed_switch_response(&fresh_config, &journal));
+                return Ok(completed_switch_response(
+                    &fresh_config,
+                    &journal.target_agent_id,
+                ));
             }
             SwitchJournalAction::ResumeCommitted => {
                 return resume_committed_switch(
@@ -124,6 +127,22 @@ pub(crate) async fn agent_switch_handler(
         },
         None => None,
     };
+    // The platform re-delivers the stored harness whenever an agent-config PATCH
+    // names it, so a bare switch to the target that is already the default must
+    // converge as a side-effect-free success — the never-switched twin of the
+    // completed-journal retry above. Flagged bodies keep their explicit-intent
+    // rejections in the existing-target path below.
+    if resume_journal.is_none()
+        && fresh_config.array.primary_target == body.agent
+        && !body.drop_configs
+        && body.provider.is_none()
+        && body.api_key_ref.is_none()
+    {
+        return Ok(completed_switch_response(
+            &fresh_config,
+            &fresh_config.agent.id,
+        ));
+    }
     if fresh_config.array.target(&body.agent).is_some() {
         return switch_to_existing_array_target(
             &state,
@@ -614,17 +633,19 @@ async fn resume_committed_switch(
     }))
 }
 
-/// Retry of a switch that already Completed: the journal plus the on-disk
-/// primary prove convergence, so the response is a pure no-op — no rewrite,
-/// no stop/start, no install re-run. `old_agent_id` reports the current agent
-/// (which is the target) because nothing changed.
+/// Switch whose target is already in place: either a retry of a switch that
+/// Completed (the journal plus the on-disk primary prove convergence) or a
+/// bare request naming the target that is already the default. Either way the
+/// response is a pure no-op — no rewrite, no stop/start, no install re-run.
+/// `old_agent_id` reports the current agent (which is the target) because
+/// nothing changed.
 fn completed_switch_response(
     fresh_config: &Config,
-    journal: &SwitchJournal,
+    target_agent_id: &str,
 ) -> ApiSuccess<AgentSwitchResponse> {
     ApiSuccess::new(AgentSwitchResponse {
         old_agent_id: fresh_config.agent.id.clone(),
-        agent_id: journal.target_agent_id.clone(),
+        agent_id: target_agent_id.to_owned(),
         provider_status: "no_op",
         provider: fresh_config
             .agent

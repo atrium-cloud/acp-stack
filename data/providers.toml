@@ -147,6 +147,9 @@ id = ["opencode"]
 name = "OpenCode Zen"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated.
+models_url = "https://opencode.ai/zen/v1/models"
 
 [providers.api_key_env_vars]
 hermes = "OPENCODE_ZEN_API_KEY"
@@ -156,6 +159,9 @@ id = ["opencode-go"]
 name = "OpenCode Go"
 # does not appear to have a status page
 agents = ["pi", "opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated.
+models_url = "https://opencode.ai/zen/go/v1/models"
 
 [providers.api_key_env_vars]
 hermes = "OPENCODE_GO_API_KEY"
@@ -169,11 +175,17 @@ agents = ["pi"]
 id = ["huggingface"]
 name = "Hugging Face"
 agents = ["pi", "opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated.
+models_url = "https://router.huggingface.co/v1/models"
 
 [[providers]]
 id = ["fireworks", "fireworks-ai", "fw"]
 name = "Fireworks"
 agents = ["pi", "opencode", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://api.fireworks.ai/inference/v1/models"
 
 # Hermes' own `fireworks`/`fireworks-ai` ids are already claimed by pi and
 # opencode above; `fw` is its remaining documented alias.
@@ -195,6 +207,9 @@ togetherai = "opencode"
 id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi"]
 name = "Kimi For Coding"
 agents = ["pi", "opencode", "claude-code", "hermes"]
+# No models_url: probed 2026-08-20 with a real subscription key — the coding
+# surface has no model-list route (/coding/* variants all 404) and the platform
+# /v1/models rejects coding-plan keys with 401.
 
 # Kimi For Coding's Claude Code endpoint speaks Anthropic Messages at the
 # /coding/ root (no /anthropic suffix). Tier-universal defaults: the
@@ -253,6 +268,9 @@ id = ["xiaomi"]
 name = "Xiaomi"
 # does not appear to have a status page
 agents = ["pi", "opencode", "claude-code", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://api.xiaomimimo.com/v1/models"
 
 [providers.claude_code]
 base_url = "https://api.xiaomimimo.com/anthropic"
@@ -422,6 +440,9 @@ agents = ["opencode"]
 id = ["alibaba"]
 name = "Alibaba"
 agents = ["opencode", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"
 
 [[providers]]
 id = ["alibaba-cn"]
@@ -432,6 +453,9 @@ agents = ["opencode"]
 id = ["alibaba-coding-plan"]
 name = "Alibaba Coding Plan"
 agents = ["opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated.
+models_url = "https://coding-intl.dashscope.aliyuncs.com/v1/models"
 
 [[providers]]
 id = ["alibaba-coding-plan-cn"]
@@ -462,6 +486,9 @@ agents = ["opencode"]
 id = ["arcee"]
 name = "Arcee"
 agents = ["opencode", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://api.arcee.ai/api/v1/models"
 
 # models.dev (OpenCode) authenticates with ARCEE_API_KEY; Hermes' `arcee`
 # provider reads ARCEEAI_API_KEY instead.
@@ -602,6 +629,9 @@ agents = ["opencode"]
 id = ["gmicloud"]
 name = "GMI Cloud"
 agents = ["opencode", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://api.gmi-serving.com/v1/models"
 
 [[providers]]
 id = ["helicone"]
@@ -697,6 +727,9 @@ agents = ["opencode"]
 id = ["meta", "meta-ai"]
 name = "Meta"
 agents = ["opencode", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://api.llama.com/compat/v1/models"
 
 # Hermes reaches the Meta Model API as `meta-ai`; models.dev (OpenCode) uses
 # `meta`. Hermes reads MODEL_API_KEY, models.dev lists META_MODEL_API_KEY.
@@ -808,16 +841,25 @@ agents = ["opencode"]
 id = ["novita-ai"]
 name = "NovitaAI"
 agents = ["opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated. Note the /openai base, not /v1.
+models_url = "https://api.novita.ai/openai/models"
 
 [[providers]]
 id = ["nvidia"]
 name = "Nvidia" # NIM
 agents = ["pi", "opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated.
+models_url = "https://integrate.api.nvidia.com/v1/models"
 
 [[providers]]
 id = ["ollama-cloud"]
 name = "Ollama Cloud"
 agents = ["opencode", "hermes"]
+# Verified 2026-08-20: 200 with the standard {"data":[{"id":...}]} shape,
+# served even unauthenticated.
+models_url = "https://ollama.com/v1/models"
 
 [[providers]]
 id = ["orcarouter"]
@@ -953,6 +995,9 @@ agents = ["opencode"]
 id = ["tencent-tokenhub"]
 name = "Tencent TokenHub"
 agents = ["opencode", "hermes"]
+# Probed 2026-08-20: 401 unauthenticated, so the response shape is unverified;
+# the best-effort fetch degrades to a logged skip if it turns out wrong.
+models_url = "https://tokenhub.tencentmaas.com/v1/models"
 
 [[providers]]
 id = ["the-grid-ai"]
