@@ -25,11 +25,17 @@ const EMBEDDED_ENV_VARS: &str = include_str!("../../../data/env_vars.toml");
 const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
 pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
 pub const CODEX_AGENT_ID: &str = "codex";
-/// Codex reserves this provider id for its own built-in definition: it
-/// authenticates through Codex's own login rather than an acp-stack-written
-/// provider table, and the built-in table's required shape is version-dependent,
+pub const HERMES_AGENT_ID: &str = "hermes";
+/// Codex plus `openai` is an ordinary keyed provider (`OPENAI_API_KEY`); this
+/// constant exists for the endpoint-override lane only. Codex reserves the
+/// `openai` id for its own built-in provider definition, and the shape a
+/// replacement `[model_providers.openai]` table must take is version-dependent,
 /// so acp-stack cannot synthesize one to carry an endpoint override.
 pub const CODEX_OPENAI_PROVIDER_ID: &str = "openai";
+
+/// Wire transports Hermes accepts on a named `providers:` entry (upstream
+/// `transport`/`api_mode` field).
+const HERMES_API_MODES: [&str; 3] = ["chat_completions", "anthropic_messages", "codex_responses"];
 
 static PROVIDER_KEY_MAPPING: LazyLock<ProviderKeyMapping> = LazyLock::new(|| {
     ProviderKeyMapping::from_toml_parts(EMBEDDED_ENV_VARS, EMBEDDED_PROVIDERS)
@@ -68,6 +74,8 @@ pub struct ProviderEnvMapping {
     pub models_url: Option<String>,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeProviderProfile>,
+    #[serde(default)]
+    pub hermes: Option<HermesProviderProfile>,
 }
 
 /// Claude Code-specific headless provisioning metadata for one provider.
@@ -97,6 +105,19 @@ pub struct ClaudeCodeProviderProfile {
     pub companion_env_vars: Option<Vec<String>>,
     #[serde(default)]
     pub optional_env_vars: Option<Vec<String>>,
+}
+
+/// Hermes-specific headless provisioning metadata for one provider.
+///
+/// `api_mode` is the wire transport declared on the managed named-provider
+/// entry when an endpoint override reroutes this provider. `None` marks the
+/// pair as unable to carry an override — the named entry must state its
+/// transport, and a provider without a known one cannot be rerouted (see
+/// `agent_provider_accepts_endpoint_override`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HermesProviderProfile {
+    #[serde(default)]
+    pub api_mode: Option<String>,
 }
 
 impl ProviderEnvMapping {
@@ -368,6 +389,15 @@ impl ProviderKeyMapping {
             if let Some(profile) = &mapping.claude_code {
                 self.validate_claude_code_profile(mapping, profile)?;
             }
+            if let Some(profile) = &mapping.hermes {
+                self.validate_hermes_profile(mapping, profile)?;
+            } else if mapping.agents.iter().any(|agent| agent == HERMES_AGENT_ID) {
+                // The override lane needs the profile to state its wire
+                // transport, so a hermes-enabled provider cannot forget it.
+                return provider_mapping_error(format!(
+                    "provider `{primary_id}` supports `{HERMES_AGENT_ID}` but declares no [providers.hermes] profile"
+                ));
+            }
         }
 
         for mapping in &self.api_keys {
@@ -473,6 +503,29 @@ impl ProviderKeyMapping {
                         "provider `{primary_id}` uses Claude Code native auth but has an API-key mapping"
                     ));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_hermes_profile(
+        &self,
+        mapping: &ProviderEnvMapping,
+        profile: &HermesProviderProfile,
+    ) -> Result<()> {
+        let primary_id = mapping.primary_id();
+        if !mapping.agents.iter().any(|agent| agent == HERMES_AGENT_ID) {
+            return provider_mapping_error(format!(
+                "provider `{primary_id}` declares a Hermes profile but does not support `{HERMES_AGENT_ID}`"
+            ));
+        }
+        if let Some(api_mode) = profile.api_mode.as_deref() {
+            validate_token(&format!("providers.{primary_id}.hermes.api_mode"), api_mode)?;
+            if !HERMES_API_MODES.contains(&api_mode) {
+                return provider_mapping_error(format!(
+                    "provider `{primary_id}` hermes.api_mode must be one of {}, got `{api_mode}`",
+                    HERMES_API_MODES.join(", ")
+                ));
             }
         }
         Ok(())
@@ -585,21 +638,47 @@ pub fn is_claude_code_profiled_provider(provider_id: &str) -> bool {
     claude_code_profile_for_provider_id(provider_id).is_some()
 }
 
-pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
-    (agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID)
-        || (agent_id == CLAUDE_CODE_AGENT_ID
-            && claude_code_profile_for_provider_id(provider_id)
-                .is_some_and(|profile| profile.agent_native_auth))
+/// The wire transport the managed Hermes named-provider entry declares for
+/// this provider when an endpoint override reroutes it.
+pub fn hermes_api_mode_for_provider_id(provider_id: &str) -> Option<&'static str> {
+    ProviderKeyMapping::load_embedded()
+        .provider_mapping(provider_id)
+        .and_then(|provider| provider.hermes.as_ref())
+        .and_then(|profile| profile.api_mode.as_deref())
 }
 
-/// Codex plus the built-in `openai` id is the only pair that cannot carry an
-/// operator-supplied endpoint: every other pair either writes the endpoint into
-/// the agent's native config or is rejected earlier by the registry capability
-/// check. Deliberately not `provider_uses_agent_native_auth`, which also covers
-/// Claude Code's agent-native providers — those do honour an override, via
+pub fn provider_uses_agent_native_auth(agent_id: &str, provider_id: &str) -> bool {
+    agent_id == CLAUDE_CODE_AGENT_ID
+        && claude_code_profile_for_provider_id(provider_id)
+            .is_some_and(|profile| profile.agent_native_auth)
+}
+
+/// Pairs that cannot carry an operator-supplied endpoint:
+/// - Codex plus the built-in `openai` id (see `CODEX_OPENAI_PROVIDER_ID`).
+/// - Hermes plus a mapped provider whose Hermes profile declares no api_mode:
+///   the override rides a named `providers:` entry that must state its wire
+///   transport, and a provider without a known one cannot be rerouted.
+///
+/// Unknown provider ids (configured custom providers) accept: the transport
+/// comes from the custom provider's declared api. Deliberately not
+/// `provider_uses_agent_native_auth`, which also covers Claude Code's
+/// agent-native providers — those do honour an override, via
 /// `ANTHROPIC_BASE_URL`.
 pub fn agent_provider_accepts_endpoint_override(agent_id: &str, provider_id: &str) -> bool {
-    !(agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID)
+    if agent_id == CODEX_AGENT_ID && provider_id == CODEX_OPENAI_PROVIDER_ID {
+        return false;
+    }
+    if agent_id != HERMES_AGENT_ID {
+        return true;
+    }
+    let mapping = ProviderKeyMapping::load_embedded();
+    match mapping.provider_mapping(provider_id) {
+        Some(provider) if provider.agents.iter().any(|agent| agent == HERMES_AGENT_ID) => provider
+            .hermes
+            .as_ref()
+            .is_some_and(|profile| profile.api_mode.is_some()),
+        _ => true,
+    }
 }
 
 pub fn models_url_for_provider_id(provider_id: &str) -> Option<&'static str> {
@@ -632,7 +711,7 @@ pub struct AgentProviderSummary {
     /// Default API-key env var ref for this (agent, provider) pair, if
     /// the embedded mapping declares one. `None` indicates the
     /// operator must configure a custom provider OR the provider uses
-    /// agent-native auth (e.g. Codex+OpenAI).
+    /// agent-native auth (e.g. Claude Code + Amazon Bedrock).
     pub default_api_key_ref: Option<&'static str>,
     /// Required companion env vars beyond the API key.
     pub companion_env_refs: Vec<&'static str>,
@@ -660,12 +739,10 @@ pub fn providers_for_agent(agent_id: &str) -> Vec<AgentProviderSummary> {
             }
             let id_static = static_str(id);
             let mut default = env_var_for_agent_provider_id(agent_id, id_static);
-            // Codex + OpenAI is special-cased throughout the CLI: it
-            // uses Codex-native auth, NOT `OPENAI_API_KEY`. Advertising
-            // a default here would let a UI client write a config the
-            // CLI then rejects with "Codex OpenAI uses Codex-native
-            // auth". Drop the default so clients see "no api_key_ref
-            // required" and route through Codex's own login flow.
+            // A native-auth pair takes no API key at all. Advertising a
+            // default here would let a UI client write a config the CLI
+            // then rejects, so clients see "no api_key_ref required" and
+            // route through the harness's own auth instead.
             if provider_uses_agent_native_auth(agent_id, id_static) {
                 default = None;
             }

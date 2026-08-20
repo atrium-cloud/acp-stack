@@ -122,11 +122,24 @@ fn provider_readiness_reports_a_distinct_custom_id_for_provider_without_default_
 fn provider_readiness_reports_native_auth_only_for_known_native_auth_provider() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let secret_store = SecretStore::open_or_create(tempdir.path()).expect("secret store");
-    let summary = summary_for("codex", "openai");
 
     assert_eq!(
-        provider_readiness_label(&readiness_config("codex"), &summary, &secret_store),
+        provider_readiness_label(
+            &readiness_config("claude-code"),
+            &summary_for("claude-code", "amazon-bedrock"),
+            &secret_store
+        ),
         "agent-native auth"
+    );
+    // Codex reads `OPENAI_API_KEY` itself, so its OpenAI lane is an ordinary
+    // keyed provider, not a native-auth one.
+    assert_eq!(
+        provider_readiness_label(
+            &readiness_config("codex"),
+            &summary_for("codex", "openai"),
+            &secret_store
+        ),
+        "missing OPENAI_API_KEY"
     );
 }
 

@@ -83,7 +83,7 @@ fn agent_provider_use_codex_openai_model_removes_custom_provider_with_backup() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
-    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
     let codex_dir = tempdir.path().join(".codex");
     fs::create_dir_all(&codex_dir).expect("codex config dir should be created");
     fs::write(
@@ -120,6 +120,8 @@ wire_api = "responses"
     assert!(config.contains(r#"id = "openai""#));
     assert!(config.contains(r#"model = "gpt-5.5""#));
     assert!(config.contains("env = []"));
+    // `provider use` resolves the key from the structured credential catalog,
+    // so no flat `api_key_ref` is pinned into the config.
     let parsed_config: toml::Value = toml::from_str(&config).expect("config should parse");
     assert!(
         primary_array_agent_value(&parsed_config)["provider"]
@@ -149,7 +151,7 @@ fn agent_provider_use_codex_openai_allows_omitting_model() {
     fs::create_dir_all(&config_dir).expect("config dir should be created");
     fs::write(config_dir.join("acps-config.toml"), codex_config())
         .expect("config should be written");
-    SecretStore::open_or_create(tempdir.path()).expect("secret store should open");
+    seed_provider_credential(tempdir.path(), "openai", &["OPENAI_API_KEY"]);
 
     acps_command()
         .env("HOME", tempdir.path())

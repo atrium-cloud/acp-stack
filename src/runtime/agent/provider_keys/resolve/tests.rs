@@ -202,10 +202,16 @@ fn secretless_resolution_skips_store_only_for_empty_or_native_auth_envs() {
     assert!(resolved.env.is_empty());
     assert!(resolved.providers.is_empty());
 
+    let mut config = resolver_config("claude-code");
+    config.agent.provider = Some(mapped_provider("amazon-bedrock", None));
+    let resolved = resolve_agent_environment_without_secrets(&config).expect("native auth");
+    assert_eq!(resolved.providers[0].provider_id, "amazon-bedrock");
+
+    // Codex reads `OPENAI_API_KEY` itself, so its OpenAI lane needs the store
+    // like any other keyed provider.
     let mut config = resolver_config("codex");
     config.agent.provider = Some(mapped_provider("openai", None));
-    let resolved = resolve_agent_environment_without_secrets(&config).expect("native auth");
-    assert_eq!(resolved.providers[0].provider_id, "openai");
+    assert!(resolve_agent_environment_without_secrets(&config).is_none());
 
     let mut config = resolver_config("opencode");
     config.agent.provider = Some(mapped_provider("opencode-go", None));

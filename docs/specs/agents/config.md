@@ -93,9 +93,9 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 | Pi Agent    | every active provider env bundle is injected; only the default provider/model lane is written to Pi settings |
 | Amp Code    | mode selection only                                                                      |
 | Goose       | provider-native env vars; model applied through ACP session config                       |
-| Codex       | `openai` uses Codex-native auth; `openrouter` uses `OPENROUTER_API_KEY`                  |
+| Codex       | `openai` uses `OPENAI_API_KEY`; `openrouter` uses `OPENROUTER_API_KEY`                   |
 | Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
 | Kimi Code   | model-only setup; runtime derives Kimi's process environment from `KIMI_API_KEY`        |
-| Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id |
+| Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id; endpoint-carrying configurations ride a managed `providers.acps-managed` entry (`custom:acps-managed`) |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

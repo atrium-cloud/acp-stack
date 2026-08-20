@@ -103,29 +103,6 @@ pub(crate) fn apply_provider_to_config(
             ),
         });
     }
-    if config.agent.id == "codex" && provider_id == "openai" {
-        if args.api_key_ref.is_some() {
-            return Err(StackError::AgentConfigProvision {
-                path: config_path.to_path_buf(),
-                reason: "Codex OpenAI uses Codex-native auth; do not pass --api-key-ref".to_owned(),
-            });
-        }
-        // Mirror the preserve-on-same-provider semantics from the
-        // generic branch — re-confirming codex+openai must not silently
-        // drop a previously pinned model just because --model was
-        // omitted on this rerun.
-        let preserved_model = match config.agent.provider.as_ref() {
-            Some(existing) if existing.id == provider_id => existing.model.clone(),
-            _ => None,
-        };
-        config.agent.provider = Some(AgentProviderConfig {
-            id: provider_id,
-            model: preserved_model,
-            api_key_ref: None,
-            custom: None,
-        });
-        return Ok(Vec::new());
-    }
     let default_api_key_ref = env_var_for_agent_provider_id(&config.agent.id, &provider_id);
     let native_auth = provider_uses_agent_native_auth(&config.agent.id, &provider_id);
     if default_api_key_ref.is_none() && !native_auth {
