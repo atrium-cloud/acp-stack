@@ -373,6 +373,88 @@ fn init_codex_openrouter_lists_provider_catalog_models() {
 }
 
 #[test]
+fn init_hermes_openrouter_lists_provider_catalog_models() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    // Hermes speaks pre-1.0 ACP and advertises no model config options at all;
+    // the init model list must come from the live provider catalog instead of
+    // failing on the absent advertisement.
+    let options_path = write_acp_config_options(tempdir.path(), &[], &[]);
+    let base = spawn_provider_models_server(serde_json::json!({
+        "data": [
+            { "id": "deepseek/deepseek-v4-flash-0731", "name": "DeepSeek V4 Flash 0731" },
+            { "id": "moonshotai/kimi-k3" },
+        ]
+    }));
+
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", &base)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "hermes",
+            "--provider",
+            "openrouter",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "provider catalog models for Hermes Agent:",
+        ))
+        .stdout(predicates::str::contains(
+            "  deepseek/deepseek-v4-flash-0731",
+        ))
+        .stdout(predicates::str::contains("  moonshotai/kimi-k3"))
+        .stdout(predicates::str::contains("advertised models for Hermes Agent:").not());
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"id = "openrouter""#));
+    assert!(!config.contains(r#"model = "deepseek/deepseek-v4-flash-0731""#));
+}
+
+#[test]
+fn init_hermes_openrouter_without_catalog_skips_model_list() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    let options_path = write_acp_config_options(tempdir.path(), &[], &[]);
+
+    // Dead endpoint: the catalog refresh degrades to a warning. Before the
+    // provider-catalog lane covered hermes this path failed the whole init
+    // with agent.config_provision_failed on the absent model advertisement.
+    acps_with_empty_path(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .env("ACP_STACK_PROVIDER_MODELS_BASE", "http://127.0.0.1:1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "hermes",
+            "--provider",
+            "openrouter",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "no live model catalog available for Hermes Agent",
+        ));
+}
+
+#[test]
 fn init_codex_openrouter_without_catalog_skips_model_list() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     seed_init_secrets(

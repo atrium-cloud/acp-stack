@@ -2,6 +2,8 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use acp_stack::runtime::agent::switch_journal::switch_journal_path;
+
 use crate::common::HomeEnvGuard;
 use crate::common::agent::{
     AgentHarness, add_codex_placebo_target, add_hermes_placebo_target, add_kimi_placebo_target,
@@ -63,6 +65,96 @@ async fn agent_switch_selects_existing_array_target_config() {
             .iter()
             .any(|target| { target["id"] == "opencode" && target["process_state"] == "stopped" })
     );
+}
+
+#[tokio::test]
+async fn agent_switch_same_target_bare_body_is_noop() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn().await;
+    let client = http().await;
+    let config_before = std::fs::read_to_string(&harness.config_path).expect("config before");
+
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "opencode" }))
+        .send()
+        .await
+        .expect("switch to current target");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["data"]["agent_id"], "opencode");
+    assert_eq!(body["data"]["old_agent_id"], "opencode");
+    assert_eq!(body["data"]["provider_status"], "no_op");
+    assert_eq!(body["data"]["restarted"], false);
+    assert_eq!(body["data"]["restart_started"], false);
+
+    let config_after = std::fs::read_to_string(&harness.config_path).expect("config after");
+    assert_eq!(config_after, config_before, "no-op must not rewrite config");
+    let journal_path = switch_journal_path(&harness.config_path).expect("journal path");
+    assert!(!journal_path.exists(), "no-op must not journal a switch");
+}
+
+#[tokio::test]
+async fn agent_switch_same_target_with_provider_flag_is_rejected() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn().await;
+    let client = http().await;
+
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "opencode", "provider": "openrouter" }))
+        .send()
+        .await
+        .expect("switch with provider flag");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
+async fn agent_switch_same_target_with_api_key_ref_flag_is_rejected() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn().await;
+    let client = http().await;
+
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "opencode", "api_key_ref": "OPENCODE_API_KEY" }))
+        .send()
+        .await
+        .expect("switch with api_key_ref flag");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
+}
+
+#[tokio::test]
+async fn agent_switch_same_target_with_drop_is_rejected() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let _home = HomeEnvGuard::set(tempdir.path());
+    let harness = AgentHarness::spawn().await;
+    let client = http().await;
+
+    let response = client
+        .post(format!("{}/v1/agent/switch", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "agent": "opencode", "drop": true }))
+        .send()
+        .await
+        .expect("switch with drop flag");
+    let status = response.status();
+    let body: Value = response.json().await.expect("switch json");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"]["code"], "request.invalid_param");
 }
 
 #[tokio::test]
