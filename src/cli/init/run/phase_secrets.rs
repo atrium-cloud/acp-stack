@@ -100,6 +100,43 @@ pub(super) fn run_secrets_phase(flow: &mut InitFlow) -> Result<()> {
     if let Err(error) = env_apply {
         return finalize_with_error(&flow.store, &flow.init_run, error);
     }
+    // An imported or hand-edited kilo config may not declare KILO_API_KEY;
+    // without the declaration the variable never reaches the agent's process
+    // env, which the harness rejects even when a provider-native credential
+    // carries the auth. Seed the declaration like `agent set --model` does,
+    // then let the placeholder below fill its value.
+    let kilo_env_seed = (|| -> Result<()> {
+        if crate::cli::agent::seed_kilo_mapped_key_env_declaration(&mut flow.config.agent) {
+            let canonical = flow.config.to_canonical_toml()?;
+            flow.config = config::load_config_from_str(&canonical)?;
+            atomic_write_owner_only(&flow.config_path, canonical.as_bytes())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = kilo_env_seed {
+        return finalize_with_error(&flow.store, &flow.init_run, error);
+    }
+    // A kilo config authenticating through a provider-native credential —
+    // imported, or declared via `--agent-env-ref` and just applied above —
+    // still needs KILO_API_KEY present in the agent's process env, so record
+    // the empty placeholder during init rather than making the operator run
+    // a separate `secrets set` afterwards. Uses the phase's own store handle:
+    // the store is a whole-file read-modify-write, so a second handle's later
+    // writes would clobber the placeholder.
+    match crate::cli::agent::record_empty_key_placeholders_for_provider_native_env(
+        &mut flow.secret_store,
+        &flow.config.agent,
+    ) {
+        Ok(recorded) => {
+            for placeholder in &recorded {
+                init_println!(
+                    output_mode,
+                    "recorded empty {placeholder} placeholder: the harness requires the variable present; authentication uses the declared provider-native credential"
+                );
+            }
+        }
+        Err(error) => return finalize_with_error(&flow.store, &flow.init_run, error),
+    }
     // Offer masked entry for secret refs declared by MCP servers and S3 data
     // sources (flags, wizard, or hosted request). Skipped refs are not an
     // error: they surface later in MCP health or workspace materialization,

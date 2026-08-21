@@ -9,8 +9,8 @@ Kimi Code currently rejects API-key-backed ACP sessions at session creation, inc
 ## Setup
 
 ```sh
-acps secrets set KIMI_API_KEY
 acps init --agent kimi
+acps secrets set KIMI_API_KEY
 acps agent set --model <kimi-model-id>
 ```
 

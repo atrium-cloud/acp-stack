@@ -26,6 +26,7 @@ const EMBEDDED_PROVIDERS: &str = include_str!("../../../data/providers.toml");
 pub const CLAUDE_CODE_AGENT_ID: &str = "claude-code";
 pub const CODEX_AGENT_ID: &str = "codex";
 pub const HERMES_AGENT_ID: &str = "hermes";
+pub const KILO_AGENT_ID: &str = "kilo";
 /// Codex plus `openai` is an ordinary keyed provider (`OPENAI_API_KEY`); this
 /// constant exists for the endpoint-override lane only. Codex reserves the
 /// `openai` id for its own built-in provider definition, and the shape a

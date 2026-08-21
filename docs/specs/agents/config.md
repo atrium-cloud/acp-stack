@@ -97,6 +97,6 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 | Claude Code | Anthropic-compatible providers are written to Claude settings with provider-specific refs |
 | Kimi Code   | model-only setup; runtime derives Kimi's process environment from `KIMI_API_KEY`        |
 | Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id; endpoint-carrying configurations ride a managed `providers.acps-managed` entry (`custom:acps-managed`) |
-| Kilo Code   | env-var auth (`KILO_API_KEY` or provider-native keys); model and `build`/`plan` modes applied through ACP session config |
+| Kilo Code   | env-var auth (`KILO_API_KEY` — required present by the harness; an empty placeholder is auto-recorded at init, `config import`, or `agent set --model` when a provider-native key is declared — or provider-native keys); model and `build`/`plan` modes applied through ACP session config |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.

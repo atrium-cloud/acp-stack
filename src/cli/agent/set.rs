@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    self, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
+    self, AgentConfig, AgentCustomProviderConfig, AgentProviderConfig, Config, CustomProviderApi,
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
 use crate::error::{Result, StackError};
@@ -14,11 +14,13 @@ use crate::runtime::agent::model_discovery::{
     fetch_session_config, model_value_is_explicit_without_discovery, resolve_advertised_model_value,
 };
 use crate::runtime::agent::provider_keys::{
-    CLAUDE_CODE_AGENT_ID, agent_provider_id_for_provider_id, claude_code_profile_for_provider_id,
-    env_refs_for_agent_id, env_var_for_agent_provider_id, required_env_refs_for_agent_provider_id,
+    CLAUDE_CODE_AGENT_ID, KILO_AGENT_ID, agent_provider_id_for_provider_id,
+    claude_code_profile_for_provider_id, env_refs_for_agent_id, env_var_for_agent_provider_id,
+    provider_ids_for_env_refs, required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::agent::provider_model_catalog::refresh_provider_models_best_effort_blocking;
 use crate::runtime::install::agent_registry::{RegistryCatalog, RegistryEntry};
+use crate::secrets::SecretStore;
 
 use super::AgentSetArgs;
 use super::install::operator_registry_override;
@@ -241,6 +243,116 @@ fn reject_custom_provider_args(args: &AgentSetArgs) -> Result<()> {
     Ok(())
 }
 
+/// Env refs the model-set preflight seeds into `[agent].env` before spawning
+/// the provisional discovery session, so the session can resolve its
+/// credentials. A mapped/custom provider derives them from the provider
+/// mapping. A `set_provider = false` agent (e.g. kilo) always seeds the
+/// mapped default key, even when `[agent].env` declares a provider-native
+/// credential like `OPENROUTER_API_KEY`: Kilo requires `KILO_API_KEY` present
+/// in the process env regardless of the active provider, so an unseeded key
+/// would break the session. When such a credential is declared, the preflight
+/// records an empty placeholder for the seeded key (see
+/// `record_empty_key_placeholders_for_provider_native_env`); otherwise a
+/// missing secret surfaces as a clear "secret not found" error from the
+/// discovery session instead of a session that stalls until the stale-prompt
+/// sweeper.
+fn model_set_required_env_refs(agent: &AgentConfig) -> Vec<String> {
+    if let Some(provider) = agent.provider.as_ref() {
+        provider
+            .api_key_ref
+            .as_deref()
+            .map(|api_key_ref| {
+                required_env_refs_for_agent_provider_id(&agent.id, &provider.id, Some(api_key_ref))
+            })
+            .unwrap_or_default()
+    } else {
+        env_refs_for_agent_id(&agent.id)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// Records an empty placeholder for each mapped key the operator never
+/// stored, when `[agent].env` declares a recognized provider-native
+/// credential. That declaration shows the operator authenticates through the
+/// provider's own key, but Kilo requires its `KILO_API_KEY` variable present
+/// in the process env regardless of the active provider, so the mapped ref
+/// must still resolve. Recording the placeholder at init (and at `agent set
+/// --model`, for credentials declared after init) spares the operator a
+/// separate `acps secrets set <REF> --value ""`. When no provider-native
+/// credential is declared, missing refs are left alone so a genuinely absent
+/// key surfaces as a clear "secret not found" error. Mapped providers are
+/// excluded: they demand their real key as before. Kilo-only: it is the one
+/// agent verified to require the var present while accepting an empty value
+/// (kimi rejects an empty key at launch; others are unverified). At the
+/// `agent set --model` call site recording happens before model validation,
+/// so a failed model set can leave the placeholder behind — harmless (it only
+/// materializes an empty var) and visible in `acps secrets list`. Returns the
+/// ref names recorded, for the operator notice.
+pub(in crate::cli) fn record_empty_key_placeholders_for_provider_native_env(
+    store: &mut SecretStore,
+    agent: &AgentConfig,
+) -> Result<Vec<String>> {
+    if agent.provider.is_some() || agent.id != KILO_AGENT_ID {
+        return Ok(Vec::new());
+    }
+    let mapped_refs: Vec<String> = env_refs_for_agent_id(&agent.id)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    // Judge intent from what the operator declared, excluding the mapped refs
+    // themselves: the mapped key is a recognized credential too, so counting
+    // it would pass the gate even with no provider-native credential present.
+    // Compare by var name so a templated declaration (`OPENROUTER_API_KEY=${X}`)
+    // is recognized as well as a bare one.
+    if mapped_refs.is_empty()
+        || provider_ids_for_env_refs(
+            agent
+                .env
+                .iter()
+                .filter(|entry| {
+                    !mapped_refs
+                        .iter()
+                        .any(|mapped| crate::config::env_entry_var_name(entry) == *mapped)
+                })
+                .map(|entry| crate::config::env_entry_var_name(entry)),
+        )
+        .is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let missing: Vec<String> = mapped_refs
+        .into_iter()
+        .filter(|env_ref| !store.contains(env_ref))
+        .collect();
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    store.set_many(missing.iter().map(|name| (name.as_str(), "")))?;
+    Ok(missing)
+}
+
+/// Seeds the agent's mapped key declarations into `[agent].env` when missing.
+/// `agent set --model` does this for every `set_provider = false` agent; the
+/// init and config-import paths call it for kilo only, the one agent verified
+/// to require the variable present, so an imported or hand-edited kilo config
+/// that omits the declaration is repaired instead of silently spawning the
+/// harness without a variable it requires. Returns whether env changed.
+pub(in crate::cli) fn seed_kilo_mapped_key_env_declaration(agent: &mut AgentConfig) -> bool {
+    if agent.provider.is_some() || agent.id != KILO_AGENT_ID {
+        return false;
+    }
+    let mut seeded = false;
+    for env_ref in env_refs_for_agent_id(&agent.id) {
+        if !crate::config::agent_env_declares(&agent.env, env_ref) {
+            agent.env.push(env_ref.to_owned());
+            seeded = true;
+        }
+    }
+    seeded
+}
+
 fn run_agent_model_set(
     mut config: Config,
     config_path: PathBuf,
@@ -281,29 +393,20 @@ fn run_agent_model_set(
         });
     };
 
-    let required_env_refs = if let Some(provider) = config.agent.provider.as_ref() {
-        provider
-            .api_key_ref
-            .as_deref()
-            .map(|api_key_ref| {
-                required_env_refs_for_agent_provider_id(
-                    &config.agent.id,
-                    &provider.id,
-                    Some(api_key_ref),
-                )
-            })
-            .unwrap_or_default()
-    } else {
-        env_refs_for_agent_id(&config.agent.id)
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
+    let required_env_refs = model_set_required_env_refs(&config.agent);
     for env_ref in &required_env_refs {
         if !crate::config::agent_env_declares(&config.agent.env, env_ref) {
             config.agent.env.push(env_ref.clone());
         }
     }
+    // Placeholder recording only applies to `set_provider = false` agents;
+    // skip opening the store for mapped providers.
+    let recorded_placeholders = if config.agent.provider.is_some() {
+        Vec::new()
+    } else {
+        let mut store = SecretStore::open(home)?;
+        record_empty_key_placeholders_for_provider_native_env(&mut store, &config.agent)?
+    };
     let agent_provider_id = config
         .agent
         .provider
@@ -336,8 +439,23 @@ fn run_agent_model_set(
         println!("provider: {}", provider.id);
     }
     println!("model: {model_value}");
-    if !required_env_refs.is_empty() {
-        println!("required_env_refs: {}", required_env_refs.join(", "));
+    // Print the refs the operator must have resolvable. For a mapped provider
+    // that is the provider's required set; for a `set_provider = false` agent it
+    // is the effective `[agent].env` (whatever the seed added or the operator
+    // declared, e.g. a provider-native ref), matching `agent switch`.
+    let displayed_env_refs = if config.agent.provider.is_some() {
+        required_env_refs
+    } else {
+        config.agent.env.clone()
+    };
+    if !displayed_env_refs.is_empty() {
+        println!("required_env_refs: {}", displayed_env_refs.join(", "));
+    }
+    for placeholder in &recorded_placeholders {
+        println!(
+            "recorded empty {placeholder} placeholder: the harness requires the variable \
+             present; authentication uses the declared provider-native credential"
+        );
     }
     for item in provisioned {
         println!("{}: {}", item.label, item.path.display());
@@ -536,4 +654,210 @@ fn read_agent_new_session_response(
     config: &Config,
 ) -> Result<agent_client_protocol::schema::v1::NewSessionResponse> {
     fetch_session_config(home, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(id: &str, env: &[&str]) -> AgentConfig {
+        AgentConfig {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            command: id.to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: env.iter().map(|value| (*value).to_owned()).collect(),
+            expected_sha256: None,
+            restart: "on-crash".to_owned(),
+            mode: None,
+            model: None,
+            harness_version: None,
+            adapter: None,
+            install: None,
+            provider: None,
+            providers: None,
+            subagent: None,
+            auto_update: None,
+        }
+    }
+
+    #[test]
+    fn set_provider_false_agent_seeds_mapped_key_when_env_empty() {
+        assert_eq!(
+            model_set_required_env_refs(&agent("kilo", &[])),
+            vec!["KILO_API_KEY".to_owned()]
+        );
+    }
+
+    #[test]
+    fn set_provider_false_agent_seeds_mapped_key_despite_provider_native_env() {
+        // A declared OPENROUTER_API_KEY must not suppress the mapped key:
+        // Kilo requires KILO_API_KEY present in the process env even when the
+        // active provider is not Kilo's gateway (an empty value is accepted).
+        assert_eq!(
+            model_set_required_env_refs(&agent("kilo", &["OPENROUTER_API_KEY"])),
+            vec!["KILO_API_KEY".to_owned()]
+        );
+    }
+
+    #[test]
+    fn set_provider_false_agent_seeds_default_when_env_has_no_credential() {
+        // A non-credential env (e.g. only a KILO_PROVIDER selector) still seeds
+        // the default key so a missing credential surfaces as a clear error
+        // rather than a stalled discovery session.
+        assert_eq!(
+            model_set_required_env_refs(&agent("kilo", &["KILO_PROVIDER"])),
+            vec!["KILO_API_KEY".to_owned()]
+        );
+    }
+
+    #[test]
+    fn set_provider_false_agent_seeding_dedupes_declared_default_key() {
+        // The mapped key is listed even when already declared; the seeding
+        // loop in `run_agent_model_set` skips refs that `agent_env_declares`
+        // matches, so the declared KILO_API_KEY is never duplicated.
+        assert_eq!(
+            model_set_required_env_refs(&agent("kilo", &["KILO_API_KEY"])),
+            vec!["KILO_API_KEY".to_owned()]
+        );
+    }
+
+    #[test]
+    fn mapped_provider_uses_provider_required_refs_regardless_of_env() {
+        // The mapped-provider branch is unchanged by the fix: it derives refs
+        // from the provider mapping, not from whether [agent].env is populated.
+        let mut mapped = agent("codex", &["OPENROUTER_API_KEY"]);
+        mapped.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: None,
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        assert!(model_set_required_env_refs(&mapped).contains(&"OPENROUTER_API_KEY".to_owned()));
+    }
+
+    fn mapped_provider(agent_id: &str, env: &[&str]) -> AgentConfig {
+        let mut mapped = agent(agent_id, env);
+        mapped.provider = Some(AgentProviderConfig {
+            id: "openrouter".to_owned(),
+            model: None,
+            api_key_ref: Some("OPENROUTER_API_KEY".to_owned()),
+            custom: None,
+        });
+        mapped
+    }
+
+    #[test]
+    fn provider_native_env_records_empty_placeholder_for_missing_mapped_key() {
+        // The env mirrors the post-seeding state: the mapped key itself is
+        // already declared and must not count as the provider-native
+        // credential that justifies the placeholder.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("create store");
+        let recorded = record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &agent("kilo", &["OPENROUTER_API_KEY", "KILO_API_KEY"]),
+        )
+        .expect("placeholder recording");
+        assert_eq!(recorded, vec!["KILO_API_KEY".to_owned()]);
+        assert_eq!(store.get("KILO_API_KEY").expect("placeholder stored"), "");
+    }
+
+    #[test]
+    fn provider_native_env_preserves_recorded_mapped_key() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("create store");
+        store.set("KILO_API_KEY", "real-key").expect("set secret");
+        let recorded = record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &agent("kilo", &["OPENROUTER_API_KEY", "KILO_API_KEY"]),
+        )
+        .expect("placeholder recording");
+        assert!(recorded.is_empty());
+        assert_eq!(store.get("KILO_API_KEY").expect("key stored"), "real-key");
+    }
+
+    #[test]
+    fn no_provider_native_env_leaves_missing_mapped_key_unrecorded() {
+        // A KILO_PROVIDER selector alone is not a credential: the missing key
+        // must surface as a clear "secret not found" error, not a placeholder.
+        // The env mirrors the post-seeding state, so this also guards against
+        // the seeded KILO_API_KEY itself tripping the credential gate.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("create store");
+        let recorded = record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &agent("kilo", &["KILO_PROVIDER", "KILO_API_KEY"]),
+        )
+        .expect("placeholder recording");
+        assert!(recorded.is_empty());
+        assert!(!store.contains("KILO_API_KEY"));
+    }
+
+    #[test]
+    fn placeholder_recording_is_kilo_only() {
+        // Kimi rejects an empty key at launch, so a declared provider-native
+        // credential must not auto-record an empty KIMI_API_KEY.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("create store");
+        let recorded = record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &agent("kimi", &["OPENROUTER_API_KEY", "KIMI_API_KEY"]),
+        )
+        .expect("placeholder recording");
+        assert!(recorded.is_empty());
+        assert!(!store.contains("KIMI_API_KEY"));
+    }
+
+    #[test]
+    fn mapped_provider_never_records_placeholders() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("create store");
+        let recorded = record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &mapped_provider("codex", &["OPENROUTER_API_KEY"]),
+        )
+        .expect("placeholder recording");
+        assert!(recorded.is_empty());
+        assert!(!store.contains("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn templated_provider_native_declaration_records_placeholder() {
+        // A templated credential declaration (`VAR=${REF}` form, possible in
+        // imported configs) is still a recognized provider-native credential.
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let mut store = SecretStore::open_or_create(home.path()).expect("create store");
+        let recorded = record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &agent("kilo", &["OPENROUTER_API_KEY=${MY_OR_KEY}", "KILO_API_KEY"]),
+        )
+        .expect("placeholder recording");
+        assert_eq!(recorded, vec!["KILO_API_KEY".to_owned()]);
+        assert_eq!(store.get("KILO_API_KEY").expect("placeholder stored"), "");
+    }
+
+    #[test]
+    fn seed_declaration_adds_missing_kilo_mapped_key_once() {
+        let mut kilo = agent("kilo", &["OPENROUTER_API_KEY"]);
+        assert!(seed_kilo_mapped_key_env_declaration(&mut kilo));
+        assert_eq!(
+            kilo.env,
+            vec!["OPENROUTER_API_KEY".to_owned(), "KILO_API_KEY".to_owned()]
+        );
+        // Already-declared is a no-op.
+        assert!(!seed_kilo_mapped_key_env_declaration(&mut kilo));
+        assert_eq!(kilo.env.len(), 2);
+    }
+
+    #[test]
+    fn seed_declaration_is_kilo_only() {
+        let mut kimi = agent("kimi", &[]);
+        assert!(!seed_kilo_mapped_key_env_declaration(&mut kimi));
+        assert!(kimi.env.is_empty());
+        let mut mapped = mapped_provider("kilo", &[]);
+        assert!(!seed_kilo_mapped_key_env_declaration(&mut mapped));
+        assert!(mapped.env.is_empty());
+    }
 }

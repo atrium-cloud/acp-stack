@@ -2,6 +2,7 @@ use std::fs;
 
 use acp_stack::config::load_config_from_str;
 use acp_stack::dev_gates::TEST_SKIP_AGENT_INSTALL_ENV;
+use acp_stack::secrets::SecretStore;
 use predicates::prelude::PredicateBooleanExt as _;
 use serde_json::Value;
 
@@ -260,6 +261,54 @@ fn init_kilo_writes_env_scoped_config_and_persists_canonical_secret_ref() {
     assert!(config.contains(r#"model = "kilo/auto""#));
     assert!(!config.contains("test-kilo-key"));
     assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn init_kilo_records_empty_placeholder_when_provider_native_credential_declared() {
+    // Kilo with a non-Kilo provider: the operator declares OPENROUTER_API_KEY
+    // and never touches KILO_API_KEY. The harness still requires the variable
+    // present (empty accepted), so init records the placeholder itself.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(
+        tempdir.path(),
+        &[("OPENROUTER_API_KEY", "test-openrouter-key")],
+    );
+    let options_path = write_acp_config_options(tempdir.path(), &["openrouter/auto"], &[]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kilo",
+            "--agent-env-ref",
+            "OPENROUTER_API_KEY",
+            "--model",
+            "openrouter/auto",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "recorded empty KILO_API_KEY placeholder",
+        ));
+
+    let store = SecretStore::open(tempdir.path()).expect("secret store should open");
+    assert_eq!(store.get("KILO_API_KEY").expect("placeholder recorded"), "");
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    let config = load_config_from_str(&written).expect("config should validate");
+    for expected in ["KILO_API_KEY", "OPENROUTER_API_KEY"] {
+        assert!(
+            config.agent.env.iter().any(|entry| entry == expected),
+            "agent.env should contain {expected}, got {:?}",
+            config.agent.env
+        );
+    }
 }
 
 #[test]
