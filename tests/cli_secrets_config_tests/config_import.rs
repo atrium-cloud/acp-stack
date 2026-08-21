@@ -1,5 +1,6 @@
 use crate::common::cli::*;
 use crate::support::*;
+use acp_stack::secrets::SecretStore;
 use axum::{Json, Router, routing::put};
 use base64::Engine;
 use http::StatusCode;
@@ -483,6 +484,55 @@ fn config_import_dry_run_with_path() {
     assert!(stdout.contains("would write to:"));
     let current_config = fs::read_to_string(&config_path).expect("config readable");
     assert_eq!(current_config, original_config);
+}
+
+#[test]
+fn config_import_kilo_seeds_key_declaration_and_records_empty_placeholder() {
+    // An imported kilo config that authenticates through OpenRouter and does
+    // not declare KILO_API_KEY: the import seeds the declaration (the harness
+    // requires the variable present even with a non-Kilo provider) and
+    // records the empty placeholder, so no separate `secrets set` is needed.
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (_, admin_key) = run_init_with_home(tempdir.path());
+    let mut store = SecretStore::open(tempdir.path()).expect("secret store should open");
+    store
+        .set("OPENROUTER_API_KEY", "test-openrouter-key")
+        .expect("provider key should be stored");
+
+    let kilo_config = VALID_PLACEBO_CONFIG
+        .replace(r#"id = "placebo""#, r#"id = "kilo""#)
+        .replace(r#"name = "Placebo Agent""#, r#"name = "Kilo Code""#)
+        .replace(r#"command = "placebo-agent""#, r#"command = "kilo""#)
+        .replace("env = []", r#"env = ["OPENROUTER_API_KEY"]"#);
+    let import_path = tempdir.path().join("kilo.toml");
+    fs::write(&import_path, &kilo_config).expect("write kilo config");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "config",
+            "import",
+            import_path.to_str().unwrap(),
+            "--force",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "recorded empty KILO_API_KEY placeholder",
+        ));
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config readable");
+    let config = acp_stack::config::load_config_from_str(&written).expect("config should validate");
+    assert_eq!(
+        config.agent.env,
+        vec!["OPENROUTER_API_KEY".to_owned(), "KILO_API_KEY".to_owned()],
+        "import should seed the KILO_API_KEY declaration"
+    );
+    let store = SecretStore::open(tempdir.path()).expect("secret store should open");
+    assert_eq!(store.get("KILO_API_KEY").expect("placeholder recorded"), "");
 }
 
 #[test]

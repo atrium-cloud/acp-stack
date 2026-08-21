@@ -29,9 +29,10 @@ pub(in crate::cli) use self::provider_target::{
 pub(in crate::cli) use self::set::{
     agent_model_is_explicit_without_discovery, default_api_key_ref_for_agent_provider,
     default_custom_provider_api, model_values_for_cli_display, parse_custom_provider_api,
-    parse_custom_token_limit, print_agent_set_effective_notice_for, required_custom_arg,
-    resolve_agent_model_value, validate_agent_session_config_value,
-    validate_custom_provider_api_for_agent,
+    parse_custom_token_limit, print_agent_set_effective_notice_for,
+    record_empty_key_placeholders_for_provider_native_env, required_custom_arg,
+    resolve_agent_model_value, seed_kilo_mapped_key_env_declaration,
+    validate_agent_session_config_value, validate_custom_provider_api_for_agent,
 };
 pub(in crate::cli) use self::test::run_init_testflight;
 

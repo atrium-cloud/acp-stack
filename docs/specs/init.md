@@ -71,6 +71,7 @@ The operator-facing sequence, in order:
     - Preserve existing verifier rows on re-run.
     - Show fresh plaintext keys once at final handover.
     - Store interactive agent env values and verify `--agent-env-ref` names before install.
+    - For a Kilo config that authenticates through a provider-native credential (declared via `--agent-env-ref` or present in an imported config), seed the `KILO_API_KEY` declaration when missing and record an empty placeholder for it automatically: the harness requires the variable present even with a non-Kilo provider, so no separate `secrets set` is needed. `acps config import` and `acps agent set --model` apply the same rule outside init.
 8. Agent install.
     - Registry agents install from the embedded catalog.
     - Custom agents install through `[agent.install]`.

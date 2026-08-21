@@ -1,8 +1,9 @@
 use crate::config::{self, Config, LocalSessionAuth};
 use crate::error::{Result, StackError};
 use crate::fs_util::{
-    atomic_write_owner_only, create_dir_owner_only, parent_dir, write_new_file_owner_only,
+    atomic_write_owner_only, create_dir_owner_only, home_dir, parent_dir, write_new_file_owner_only,
 };
+use crate::secrets::SecretStore;
 use base64::Engine;
 use clap::{Args, Subcommand};
 use std::io::IsTerminal;
@@ -146,7 +147,16 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
         (None, Some(encoded)) => ConfigImportSource::Base64(encoded),
     };
 
-    let payload = load_config_import_payload(source)?;
+    let mut payload = load_config_import_payload(source)?;
+    // An imported kilo config that omits the KILO_API_KEY declaration would
+    // spawn the harness without a variable it requires even with a non-Kilo
+    // provider; seed the declaration like init does so the written config is
+    // self-sufficient. In-memory only — a dry run still writes nothing.
+    if crate::cli::agent::seed_kilo_mapped_key_env_declaration(&mut payload.config.agent) {
+        let canonical = payload.config.to_canonical_toml()?;
+        payload.config = config::load_config_from_str(&canonical)?;
+        payload.canonical = canonical;
+    }
     let target = config::default_config_path()?;
 
     if args.dry_run {
@@ -228,6 +238,28 @@ fn run_config_import(args: ConfigImportArgs, output: OutputFormat) -> Result<()>
             }))?;
         } else {
             println!("imported config: {}", target.display());
+        }
+    }
+
+    // Fill the seeded key's value so the imported config works without a
+    // separate `secrets set`: Kilo requires the variable present even with a
+    // non-Kilo provider and accepts it empty. Opening the store is
+    // best-effort — a machine whose secret store is not openable here (e.g.
+    // init has not run yet) records the placeholder during init's secrets
+    // phase instead — but once the store is open, a recording failure
+    // surfaces: the placeholder is the whole point of the import for kilo,
+    // and a silently missing one would stall the harness later.
+    if let Ok(mut store) = SecretStore::open(&home_dir()?) {
+        for placeholder in crate::cli::agent::record_empty_key_placeholders_for_provider_native_env(
+            &mut store,
+            &payload.config.agent,
+        )? {
+            if !output.is_json() {
+                println!(
+                    "recorded empty {placeholder} placeholder: the harness requires the variable \
+                     present; authentication uses the declared provider-native credential"
+                );
+            }
         }
     }
 
