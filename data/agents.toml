@@ -485,14 +485,15 @@ headless_compatible = true
 # id doubles as the launch command, so it stays `antigravity`.
 sync_id = "antigravity-acp"
 # Auth is env-var based (GEMINI_API_KEY) against the single supported headless
-# provider (Google AI Studio), selected by the `modelProvider` key acps writes
-# into ~/.gemini/antigravity-cli/settings.json — there is nothing to select.
+# provider (Google AI Studio), selected by the `auth.type` key acps writes
+# into ~/.gemini/antigravity-acp/settings.json — there is nothing to select.
 set_provider = false
-# The ACP server has not been observed to advertise ACP v1 configOptions, so
-# model and mode selection stay off until the initialize response says
-# otherwise.
-set_model = false
-set_mode = false
+# session/new advertises model and mode configOptions (Gemini 3.x tiers;
+# default/auto_edit/yolo). Model selection matters in practice: the default
+# gemini-3.7-flash-high stalls on free-tier AI Studio keys while lower tiers
+# answer.
+set_model = true
+set_mode = true
 allow_custom_provider = false
 allow_custom_model = false
 supports_agent_skills = true
