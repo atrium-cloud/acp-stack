@@ -309,7 +309,6 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "CLINE_API_KEY"
 provider_ids = ["cline-pass"]
-agent_ids = ["cline"]
 companion_env_vars = []
 optional_env_vars = []
 

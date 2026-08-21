@@ -14,7 +14,7 @@ pub struct HarnessSpec {
     pub id: String,
     /// Arguments appended to the harness command to enter ACP stdio mode.
     /// Most harnesses expose an `acp` subcommand; the field exists for the
-    /// ones that use a flag instead (Cline launches as `cline --acp`).
+    /// ones that enter ACP mode via a flag instead of a subcommand.
     #[serde(default = "default_acp_args")]
     pub acp_args: Vec<String>,
     pub install: InstallSet,

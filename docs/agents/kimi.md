@@ -2,9 +2,13 @@
 
 Kimi Code is a native ACP target. `acp-stack` launches `kimi acp`.
 
-## Known limitation
+## Headless authentication status
 
-Kimi Code currently rejects API-key-backed ACP sessions at session creation, including sessions configured through the documented `KIMI_MODEL_*` environment contract. These sessions fail with `Authentication required`; follow [upstream issue #1330](https://github.com/MoonshotAI/kimi-code/issues/1330) and its [open fix](https://github.com/MoonshotAI/kimi-code/pull/1570). Until that fix is included in a Kimi Code release, the secure headless setup below cannot run native Kimi Code sessions. `acp-stack` does not automate Kimi's interactive OAuth flow.
+The `Authentication required` (`-32000`) rejection that previously blocked API-key-backed ACP sessions no longer applies on current Kimi Code releases. The default `kimi acp` path (the agent-core-v2 `@moonshot-ai/acp-server` engine) accepts a config-resolved provider API key at the `session/new` auth gate without an interactive OAuth login, and the documented `KIMI_MODEL_*` environment contract synthesizes exactly such a provider from `KIMI_MODEL_API_KEY` / `KIMI_MODEL_NAME` / `KIMI_MODEL_BASE_URL` — which is the launch environment `acp-stack` constructs (see below). `acp-stack` does not automate Kimi's interactive OAuth flow, and this path does not need it.
+
+Provenance (verified against upstream `main` and `@moonshot-ai/kimi-code@0.38.0`, 2026-08-21): the agent-core-v2 engine became the default `kimi acp` surface in [PR #2627](https://github.com/MoonshotAI/kimi-code/pull/2627) (merged 2026-08-05, first shipped in the `0.34.0` release on 2026-08-06); its `session/new` gate is `ensureAuthed` in `packages/acp-server`. The legacy `acp-adapter` had received the equivalent config-provider auth fix earlier in [PR #934](https://github.com/MoonshotAI/kimi-code/pull/934) (merged 2026-07-20). The tracking issue [#1330](https://github.com/MoonshotAI/kimi-code/issues/1330) is still open and the separately proposed [PR #1570](https://github.com/MoonshotAI/kimi-code/pull/1570) was closed unmerged, so the fix arrived through a different path than the two refs we had been watching.
+
+Kimi Code is not yet listed in the README supported-harnesses table: that flip is gated on an end-to-end prompt smoke against a released build with a real key.
 
 ## Setup
 

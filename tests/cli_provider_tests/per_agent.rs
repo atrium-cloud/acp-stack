@@ -77,41 +77,6 @@ creates = "opencode"
 }
 
 #[test]
-fn agent_set_cline_accepts_advertised_model_and_keeps_env_scoped_auth() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be created");
-    let config_dir = tempdir.path().join(".config/acp-stack");
-    fs::create_dir_all(&config_dir).expect("config dir should be created");
-    fs::write(config_dir.join("acps-config.toml"), cline_config())
-        .expect("config should be written");
-    seed_init_secrets(tempdir.path(), &[("CLINE_API_KEY", "test-cline-key")]);
-    // Cline resolves provider/model from its environment in ACP mode, so the
-    // model lane goes through ACP discovery; the fixture stands in for the
-    // live advertisement.
-    let options_path = write_acp_config_options(tempdir.path(), &["claude-sonnet-4.6"], &[]);
-
-    acps_command()
-        .env("HOME", tempdir.path())
-        .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["agent", "set", "--model", "claude-sonnet-4.6"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("agent: cline"))
-        .stdout(predicates::str::contains("model: claude-sonnet-4.6"))
-        .stdout(predicates::str::contains(
-            "required_env_refs: CLINE_API_KEY",
-        ))
-        .stdout(predicates::str::contains(
-            "model and mode take effect on new sessions via ACP session/set_config_option",
-        ));
-
-    let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
-    assert!(config.contains(r#"env = ["CLINE_API_KEY"]"#));
-    assert!(config.contains(r#"model = "claude-sonnet-4.6""#));
-    assert!(!config.contains("test-cline-key"));
-    assert!(!config.contains("[agent.provider]"));
-}
-
-#[test]
 fn agent_set_kilo_accepts_advertised_model_and_keeps_env_scoped_auth() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
@@ -236,27 +201,6 @@ fn kimi_config() -> String {
         .replace(r#"name = "OpenCode""#, r#"name = "Kimi Code""#)
         .replace(r#"command = "opencode""#, r#"command = "kimi""#)
         .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["KIMI_API_KEY"]"#)
-        .replace(
-            r#"
-[agent.install]
-type = "shell"
-shell = "curl -fsSL https://opencode.ai/install | bash"
-creates = "opencode"
-"#,
-            "",
-        )
-}
-
-fn cline_config() -> String {
-    VALID_CONFIG
-        .replace(r#"id = "opencode""#, r#"id = "cline""#)
-        .replace(r#"name = "OpenCode""#, r#"name = "Cline""#)
-        .replace(r#"command = "opencode""#, r#"command = "cline""#)
-        .replace(r#"args = ["acp"]"#, r#"args = ["--acp"]"#)
-        .replace(
-            r#"env = ["OPENCODE_API_KEY"]"#,
-            r#"env = ["CLINE_API_KEY"]"#,
-        )
         .replace(
             r#"
 [agent.install]

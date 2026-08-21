@@ -352,7 +352,6 @@ fn pi_native_config_provider_ids_resolve_to_canonical() {
 #[test]
 fn direct_agent_env_refs_are_data_driven() {
     assert_eq!(env_refs_for_agent_id("amp"), ["AMP_API_KEY"]);
-    assert_eq!(env_refs_for_agent_id("cline"), ["CLINE_API_KEY"]);
     assert_eq!(env_refs_for_agent_id("kilo"), ["KILO_API_KEY"]);
     assert_eq!(env_refs_for_agent_id("kimi"), ["KIMI_API_KEY"]);
     assert!(env_refs_for_agent_id("opencode").is_empty());

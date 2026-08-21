@@ -441,40 +441,6 @@ fi
 creates = "hermes"
 required_tools = ["curl", "bash", "git"]
 
-# Cline
-
-[[agents]]
-id = "cline"
-name = "Cline"
-kind = "native"
-headless_compatible = true
-# ACP mode resolves provider/model from CLINE_PROVIDER/CLINE_MODEL env vars and
-# locks the provider when set, so acps leaves provider selection to the env.
-set_provider = false
-set_model = true
-allow_custom_provider = false
-allow_custom_model = false
-set_mode = true # plan, act
-supports_agent_skills = true
-# Cline discovers ~/.agents/skills natively (SDK skill search paths), so no
-# registry link directory is needed.
-agent_skills_install_dir = "~/.agents/skills"
-stdio_framing = "json-lines"
-website = "https://cline.bot"
-github = "cline/cline"
-support_doc = "docs/agents/cline.md"
-testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
-testflight_expect_fs = ".acp-stack-testflight.txt"
-
-[agents.harness]
-id = "cline"
-# Cline enters ACP mode through a flag, not the usual `acp` subcommand.
-acp_args = ["--acp"]
-
-[agents.harness.install.npm]
-package = "cline"
-creates = "cline"
-
 # Kilo Code
 
 [[agents]]

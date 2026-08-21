@@ -516,8 +516,8 @@ fn print_agent_set_agent(config: &Config) {
 /// Whether a provider/credential/model change needs a supervised-agent process
 /// restart to take effect. Goose reloads model changes live and applies other
 /// changes on the next ACP session via `session/set_config_option`, so no
-/// process restart is required. Cline and Kilo also apply model/mode over ACP
-/// rather than from disk, but their credentials are env vars materialized at
+/// process restart is required. Kilo also applies model/mode over ACP
+/// rather than from disk, but its credentials are env vars materialized at
 /// process spawn, so a credential change still needs a restart. Every other
 /// harness reads provider/model from disk at process start. Keeps the
 /// machine-readable `restart_required` JSON field consistent with the
@@ -534,9 +534,9 @@ pub(in crate::cli) fn print_agent_set_effective_notice_for(agent_id: Option<&str
                  other changes apply to new sessions"
             );
         }
-        // Cline and Kilo apply model/mode over ACP, so there is no on-disk lane
-        // to reload; a restart only re-materializes their env-var credentials.
-        Some("cline") | Some("kilo") => {
+        // Kilo applies model/mode over ACP, so there is no on-disk lane
+        // to reload; a restart only re-materializes its env-var credentials.
+        Some("kilo") => {
             println!(
                 "model and mode take effect on new sessions via ACP \
                  session/set_config_option; restart the supervised agent \
