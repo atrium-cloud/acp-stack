@@ -29,6 +29,9 @@ pub enum SessionsCommand {
     Fork(SessionsForkArgs),
     /// Send a prompt to a session. Polls until completion unless `--no-wait`.
     Prompt(SessionsPromptArgs),
+    /// List or run agent-advertised slash commands for a session.
+    #[command(subcommand)]
+    Commands(SessionsCommandsCommand),
     /// Cancel any in-flight prompts and notify the agent.
     Cancel(SessionsTargetArgs),
     /// Close the session on the agent side and mark it closed locally.
@@ -119,6 +122,38 @@ pub struct SessionsPromptArgs {
     session_id: String,
     /// Prompt text. If omitted, the CLI reads stdin until EOF.
     text: Option<String>,
+    /// Return immediately with the prompt id without polling completion.
+    #[arg(long)]
+    no_wait: bool,
+    /// Maximum seconds to wait before giving up on the prompt (ignored when
+    /// `--no-wait` is set). The daemon keeps the task running regardless.
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+    /// Assert that the session belongs to this Array target.
+    #[arg(long)]
+    target: Option<String>,
+    /// Session API key. Falls back to ACP_STACK_SESSION_KEY.
+    #[arg(long = "session-key")]
+    session_key: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionsCommandsCommand {
+    /// List slash commands the agent last advertised for the session.
+    List(SessionsTargetArgs),
+    /// Run a slash command as a session prompt. Polls until completion unless
+    /// `--no-wait`.
+    Run(SessionsCommandsRunArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsCommandsRunArgs {
+    session_id: String,
+    /// Command name as advertised; a leading slash is accepted.
+    command: String,
+    /// Free-form arguments appended after the command name. Use `--` before
+    /// arguments that start with a hyphen.
+    args: Vec<String>,
     /// Return immediately with the prompt id without polling completion.
     #[arg(long)]
     no_wait: bool,
@@ -308,6 +343,53 @@ pub(super) fn run_sessions_command(command: SessionsCommand, output: OutputForma
             SessionsCommand::Prompt(args) => {
                 let session_access = resolve_session_access(&config, args.session_key.clone())?;
                 run_sessions_prompt(&config, &base_url, &session_access, args, output).await
+            }
+            SessionsCommand::Commands(SessionsCommandsCommand::List(args)) => {
+                let session_access = resolve_session_access(&config, args.session_key)?;
+                let encoded = encode_path_segment(&args.session_id);
+                let path = session_target_path(
+                    &format!("/v1/sessions/{encoded}/commands"),
+                    args.target.as_deref(),
+                );
+                let response = session_daemon_request(
+                    &config,
+                    &base_url,
+                    &session_access,
+                    CliMethod::Get,
+                    &path,
+                    None,
+                )
+                .await?;
+                let data = response.get("data").unwrap_or(&response);
+                if output.is_json() {
+                    print_json(data)?;
+                    return Ok(());
+                }
+                let commands = data["available_commands"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if commands.is_empty() {
+                    println!("(no commands advertised)");
+                    return Ok(());
+                }
+                for command in commands {
+                    let name = command["name"].as_str().unwrap_or("?");
+                    let description = command["description"].as_str().unwrap_or("");
+                    let hint = command["input_hint"]
+                        .as_str()
+                        .map(|hint| format!(" [{hint}]"))
+                        .unwrap_or_default();
+                    println!("/{name}{hint}  {description}");
+                }
+                if let Some(updated_at) = data["updated_at"].as_str() {
+                    println!("updated_at: {updated_at}");
+                }
+                Ok(())
+            }
+            SessionsCommand::Commands(SessionsCommandsCommand::Run(args)) => {
+                let session_access = resolve_session_access(&config, args.session_key.clone())?;
+                run_sessions_command_run(&config, &base_url, &session_access, args, output).await
             }
             SessionsCommand::Cancel(args) => {
                 let session_access = resolve_session_access(&config, args.session_key)?;
@@ -554,20 +636,114 @@ async fn run_sessions_prompt(
         }
         return Ok(());
     }
+    await_prompt_settle(
+        config,
+        base_url,
+        session_access,
+        &encoded_session,
+        &prompt_id,
+        args.target.as_deref(),
+        args.timeout_secs,
+        output,
+    )
+    .await
+}
 
-    let encoded_prompt = encode_path_segment(&prompt_id);
-    let status_path = session_target_path(
-        &format!("/v1/sessions/{encoded_session}/prompts/{encoded_prompt}"),
+/// Run an agent-advertised slash command by submitting it through the
+/// session commands route, then poll like a normal prompt.
+async fn run_sessions_command_run(
+    config: &Config,
+    base_url: &str,
+    session_access: &SessionAccess,
+    args: SessionsCommandsRunArgs,
+    output: OutputFormat,
+) -> Result<()> {
+    let command_args = args.args.join(" ");
+    let body = serde_json::json!({
+        "command": args.command,
+        "args": if command_args.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(command_args) },
+    });
+    let encoded_session = encode_path_segment(&args.session_id);
+    let path = session_target_path(
+        &format!("/v1/sessions/{encoded_session}/commands"),
         args.target.as_deref(),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout_secs);
+    let response = session_daemon_request(
+        config,
+        base_url,
+        session_access,
+        CliMethod::Post,
+        &path,
+        Some(&body),
+    )
+    .await?;
+    let prompt_id = response["data"]["prompt_id"]
+        .as_str()
+        .ok_or_else(|| StackError::AgentInitializeFailed {
+            reason: "daemon command response missing prompt_id".to_owned(),
+        })?
+        .to_owned();
+    let advertised = response["data"]["advertised"].as_bool();
+    if advertised == Some(false) {
+        eprintln!(
+            "warning: the agent did not advertise this command; it may ignore or misinterpret it"
+        );
+    }
+    if args.no_wait {
+        if output.is_json() {
+            let mut pending = serde_json::json!({
+                "status": "pending",
+                "prompt_id": prompt_id,
+            });
+            if let (Some(advertised), Some(object)) = (advertised, pending.as_object_mut()) {
+                object.insert("advertised".to_owned(), serde_json::Value::Bool(advertised));
+            }
+            print_json(&pending)?;
+        } else {
+            println!("prompt: pending");
+            println!("prompt_id: {prompt_id}");
+        }
+        return Ok(());
+    }
+    await_prompt_settle(
+        config,
+        base_url,
+        session_access,
+        &encoded_session,
+        &prompt_id,
+        args.target.as_deref(),
+        args.timeout_secs,
+        output,
+    )
+    .await
+}
+
+/// Poll a submitted prompt until it settles (completed/cancelled), errors, or
+/// the client-side deadline passes. Shared by `sessions prompt` and
+/// `sessions commands run`.
+#[allow(clippy::too_many_arguments)]
+async fn await_prompt_settle(
+    config: &Config,
+    base_url: &str,
+    session_access: &SessionAccess,
+    encoded_session: &str,
+    prompt_id: &str,
+    target: Option<&str>,
+    timeout_secs: u64,
+    output: OutputFormat,
+) -> Result<()> {
+    let encoded_prompt = encode_path_segment(prompt_id);
+    let status_path = session_target_path(
+        &format!("/v1/sessions/{encoded_session}/prompts/{encoded_prompt}"),
+        target,
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut delay_ms: u64 = 250;
     loop {
         if std::time::Instant::now() > deadline {
             return Err(StackError::AgentInitializeFailed {
                 reason: format!(
-                    "prompt did not settle within {}s (prompt_id={})",
-                    args.timeout_secs, prompt_id
+                    "prompt did not settle within {timeout_secs}s (prompt_id={prompt_id})",
                 ),
             });
         }
@@ -639,6 +815,30 @@ async fn session_daemon_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_run_args_parse_flags_after_positional_args() {
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            run: SessionsCommandsRunArgs,
+        }
+        let parsed = <TestCli as clap::Parser>::try_parse_from([
+            "test",
+            "sess_1",
+            "review",
+            "foo",
+            "--no-wait",
+        ])
+        .expect("flags after positional args parse as flags");
+        assert!(parsed.run.no_wait);
+        assert_eq!(parsed.run.args, vec!["foo"]);
+
+        let multi =
+            <TestCli as clap::Parser>::try_parse_from(["test", "sess_1", "review", "foo", "bar"])
+                .expect("multiple bare args collect");
+        assert_eq!(multi.run.args, vec!["foo", "bar"]);
+    }
 
     #[test]
     fn list_path_defaults_to_month_range() {

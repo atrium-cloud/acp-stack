@@ -215,6 +215,8 @@ The `/v1/agent/*` routes operate on the Array `primary_target`. Session read and
 | `POST /v1/sessions/{id}/resume`             | session | resumes a session                                              |
 | `POST /v1/sessions/{id}/fork`               | session | forks a session through ACP                                    |
 | `POST /v1/sessions/{id}/prompt`             | session | enqueues a prompt and returns a prompt id                      |
+| `GET /v1/sessions/{id}/commands`            | session | returns the agent's last advertised slash-command list         |
+| `POST /v1/sessions/{id}/commands`           | session | runs an agent slash command as a prompt                        |
 | `POST /v1/sessions/{id}/cancel`             | session | cancels an in-flight prompt                                    |
 | `DELETE /v1/sessions/{id}`                  | session | closes the agent-side session and preserves local history      |
 | `POST /v1/sessions/{id}/delete`             | session | forwards ACP `session/delete` and hard-deletes local history   |
@@ -224,6 +226,8 @@ The `/v1/agent/*` routes operate on the Array `primary_target`. Session read and
 | `GET /v1/sessions/{id}/snapshot`            | session | returns session row, in-flight prompts, and recent events      |
 
 `POST /v1/sessions/{id}/prompt` is asynchronous; its body is `{ "prompt": "text" }` or `{ "prompt": [ <ACP content block>, … ] }` (camelCase ACP content blocks). A bare string becomes one text block; `null`, an empty array, and any other JSON type are rejected. Clients can poll the prompt status endpoint or subscribe to `sessions.{id}` over WebSocket.
+
+`GET /v1/sessions/{id}/commands` returns `{ available_commands, updated_at }` — the slash-command list the agent last advertised over ACP `available_commands_update` (entries are `{ name, description, input_hint? }`, names without a leading slash) and when the stored list last changed; both are empty/`null` when nothing has been advertised. `POST /v1/sessions/{id}/commands` takes `{ "command": "name", "args": "optional string" }` (a leading `/` on `command` is stripped), submits the composed `/name args` text through the normal prompt pipeline, and returns the prompt-submit shape plus an advisory `advertised` boolean: `false` means the command was absent from the stored list (the agent may ignore it), and the field is omitted when no list was ever advertised. The submission is never blocked on the list, which can be stale and does not bound what the agent accepts.
 
 `GET /v1/sessions` returns `{ sessions, agent_sync }`. `agent_sync` is `{ attempted, status, upserted, updated }` reporting the optional ACP session-list sync; `status` is `synced`, `unsupported`, or `not_running` (the latter two mean the durable list may be stale).
 
@@ -249,6 +253,7 @@ Prompt status values are `pending`, `running`, `completed`, `errored`, `cancelle
 - `in_flight_prompts` — prompts currently in `pending` or `running`, capped at 25 (`SNAPSHOT_IN_FLIGHT_PROMPTS_CAP`). Empty when the session is idle. Each entry is the same shape returned by `GET /v1/sessions/{id}/prompts/{prompt_id}`.
 - `last_event_id` — the id of the newest persisted session event, or `null` when the session has no events. Acts as a tail cursor for forward catch-up: callers fetch events newer than the snapshot via `GET /v1/sessions/{id}/events?after=last_event_id`, which paginates forward on `(created_at, id)` ascending.
 - `recent_events` — the latest session events, newest-first, capped at 50. The cap is enforced by `SNAPSHOT_RECENT_EVENTS_LIMIT` in `src/api/routes/sessions.rs` and is sized to cover one prompt-turn's worth of updates without bloating the response.
+- `available_commands` — the agent's last advertised slash-command list, same entry shape as `GET /v1/sessions/{id}/commands`. Empty when nothing has been advertised; may be stale until the agent re-advertises.
 
 The intended reconnect flow is: `GET snapshot` once to recover state, subscribe to `sessions.{id}` over WebSocket, then use `GET events?after=last_event_id` to catch up on any events that landed between the snapshot read and the WebSocket subscribe. For deeper history (older than the 50-event snapshot window), additional pagination is not currently exposed; older events are reachable only through the durable logs endpoints.
 

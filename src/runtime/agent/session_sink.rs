@@ -9,12 +9,17 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{MaybeUndefined, v1::SessionUpdate};
+use agent_client_protocol::schema::{
+    MaybeUndefined,
+    v1::{AvailableCommandInput, SessionUpdate},
+};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 use crate::runtime::agent::session_changes::SessionChangesHandle;
-use crate::state::{PromptStatus, StateStore};
+use crate::state::{
+    MAX_SESSION_AVAILABLE_COMMANDS, PromptStatus, SessionAvailableCommand, StateStore,
+};
 
 /// Sink for ACP `session/update` notifications. The bridge writes through this
 /// trait instead of holding a `StateStore` directly, so tests can substitute
@@ -216,6 +221,76 @@ fn project_session_info_update(
     store.update_session_info(session_id, title, agent_updated_at, info.meta.as_ref())
 }
 
+/// Apply the local projection of an ACP `available_commands_update` after its
+/// verbatim `session.update` event is durable. The advertised list is
+/// latest-wins (an empty list still replaces); the raw event remains the
+/// source of truth, so projection failure is logged by the writer and never
+/// removes it. `_meta` on individual commands is dropped by the compact
+/// stored shape.
+fn project_available_commands_update(
+    store: &StateStore,
+    session_id: &str,
+    payload_json: &str,
+) -> crate::error::Result<()> {
+    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "session.update",
+            reason: err.to_string(),
+        }
+    })?;
+    let Some(update) = payload.get("update") else {
+        return Ok(());
+    };
+    if update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+        != Some("available_commands_update")
+    {
+        return Ok(());
+    }
+    let update = serde_json::from_value::<SessionUpdate>(update.clone()).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "session.update.update",
+            reason: err.to_string(),
+        }
+    })?;
+    let SessionUpdate::AvailableCommandsUpdate(update) = update else {
+        return Ok(());
+    };
+    let advertised_len = update.available_commands.len();
+    let mut commands: Vec<SessionAvailableCommand> = update
+        .available_commands
+        .into_iter()
+        .map(|command| SessionAvailableCommand {
+            name: command.name,
+            description: command.description,
+            // The input enum is non-exhaustive; unknown future variants
+            // degrade to no hint rather than failing the projection.
+            input_hint: command.input.and_then(|input| match input {
+                AvailableCommandInput::Unstructured(input) => Some(input.hint),
+                _ => None,
+            }),
+        })
+        .collect();
+    let truncated = commands.len() > MAX_SESSION_AVAILABLE_COMMANDS;
+    if truncated {
+        commands.truncate(MAX_SESSION_AVAILABLE_COMMANDS);
+    }
+    let changed = store.replace_session_available_commands(session_id, &commands)?;
+    // Warn only when the truncated list actually landed, so a pathological
+    // agent re-advertising the same oversized list every turn does not spam
+    // the log on every no-op write.
+    if truncated && changed {
+        tracing::warn!(
+            session_id = %session_id,
+            advertised = advertised_len,
+            stored = MAX_SESSION_AVAILABLE_COMMANDS,
+            "agent advertised more commands than the stored cap; list truncated"
+        );
+    }
+    Ok(())
+}
+
 /// Derive a `tool.execute` event when the inbound `session/update` is a
 /// `tool_call` / `tool_call_update` that identifies itself as an `execute`
 /// tool. Agents that run shell through their own built-in tools (instead of
@@ -361,6 +436,17 @@ impl StateStoreSessionSink {
                                 error = %err,
                                 session_id = %row.session_id,
                                 "failed to apply ACP session info update"
+                            );
+                        }
+                        if let Err(err) = project_available_commands_update(
+                            &guard,
+                            &row.session_id,
+                            &row.payload_json,
+                        ) {
+                            tracing::warn!(
+                                error = %err,
+                                session_id = %row.session_id,
+                                "failed to apply ACP available commands update"
                             );
                         }
                         // Re-touch the in-flight prompt's `updated_at` so the

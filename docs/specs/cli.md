@@ -292,6 +292,8 @@ acps sessions load <session-id> [--cwd <path>] [--session-key <key>]
 acps sessions resume <session-id> [--cwd <path>] [--session-key <key>]
 acps sessions fork <session-id> [--message-id <id>] [--cwd <path>] [--session-key <key>]
 acps sessions prompt <session-id> [--session-key <key>]
+acps sessions commands list <session-id> [--session-key <key>]
+acps sessions commands run <session-id> <command> [args...] [--no-wait] [--timeout-secs <n>] [--session-key <key>]
 acps sessions cancel <session-id> [--session-key <key>]
 acps sessions close <session-id> [--session-key <key>]
 ```
@@ -302,7 +304,9 @@ acps sessions close <session-id> [--session-key <key>]
 
 Session CWD values must be existing absolute directories that canonicalize under `[workspace].root`; stored CWD defaults are rechecked before load, resume, or fork.
 
-`sessions new`, `load`, `resume`, `fork`, `prompt`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY` unless `[local].session_auth = "keyless"` is active. `sessions load` and `sessions resume` call the matching ACP session operation through the daemon. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability. `sessions close` closes the agent-side session and preserves local history; permanent deletion is deferred until product semantics are defined.
+`sessions commands list` prints the slash commands the agent last advertised for the session over ACP. `sessions commands run` submits a slash command through `POST /v1/sessions/{id}/commands` and polls it like `sessions prompt`; a leading `/` on the command name is accepted, and a command absent from the advertised list prints a warning but is still submitted.
+
+`sessions new`, `load`, `resume`, `fork`, `prompt`, `commands`, `cancel`, and `close` affect inference session state and require `--session-key` or `ACP_STACK_SESSION_KEY` unless `[local].session_auth = "keyless"` is active. `sessions load` and `sessions resume` call the matching ACP session operation through the daemon. `sessions fork` creates a child session through ACP. `--message-id` forks from an acknowledged prompt message id when the agent advertises that capability. `sessions close` closes the agent-side session and preserves local history; permanent deletion is deferred until product semantics are defined.
 
 ## Skills
 
