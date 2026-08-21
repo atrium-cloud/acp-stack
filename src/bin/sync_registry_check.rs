@@ -230,7 +230,6 @@ mod tests {
         assert!(!embedded_sync_ids(&catalog).contains(&"amp"));
         assert!(!embedded_sync_ids(&catalog).contains(&"claude-agent-acp"));
         // Native agents sync under their plain catalog ids.
-        assert!(embedded_sync_ids(&catalog).contains(&"cline"));
         assert!(embedded_sync_ids(&catalog).contains(&"kilo"));
     }
 

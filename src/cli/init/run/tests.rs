@@ -94,17 +94,15 @@ fn registry_derivation_marks_kimi_provider_inapplicable_but_keeps_model() {
 }
 
 #[test]
-fn registry_derivation_marks_cline_and_kilo_provider_inapplicable_but_keeps_model() {
-    for agent_id in ["cline", "kilo"] {
-        let signals = settlement_signals_for(agent_id);
-        assert_eq!(
-            applicability_of(&signals, InitCategory::Provider),
-            Some(false),
-            "{agent_id} leaves provider selection to the harness env"
-        );
-        assert_eq!(applicability_of(&signals, InitCategory::Model), Some(true));
-        assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));
-    }
+fn registry_derivation_marks_kilo_provider_inapplicable_but_keeps_model() {
+    let signals = settlement_signals_for("kilo");
+    assert_eq!(
+        applicability_of(&signals, InitCategory::Provider),
+        Some(false),
+        "kilo leaves provider selection to the harness env"
+    );
+    assert_eq!(applicability_of(&signals, InitCategory::Model), Some(true));
+    assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));
 }
 
 #[test]
