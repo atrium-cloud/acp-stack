@@ -2536,6 +2536,7 @@
               "github",
               "apt",
               "native",
+              "shell",
               null
             ]
           },

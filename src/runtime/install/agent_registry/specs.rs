@@ -48,6 +48,13 @@ impl HarnessSpec {
                 ),
             });
         }
+        if self.update.shell_rerun && self.install.shell.is_none() {
+            return Err(StackError::RegistryLoad {
+                reason: format!(
+                    "agent `{agent_id}` harness.update.shell_rerun requires harness.install.shell"
+                ),
+            });
+        }
         self.update.validate(agent_id, "harness.update")
     }
 }
@@ -76,6 +83,13 @@ impl AdapterSpec {
         }
         self.install
             .validate(agent_id, "adapter.install", self.github.as_deref())?;
+        if self.update.shell_rerun && self.install.shell.is_none() {
+            return Err(StackError::RegistryLoad {
+                reason: format!(
+                    "agent `{agent_id}` adapter.update.shell_rerun requires adapter.install.shell"
+                ),
+            });
+        }
         self.update.validate(agent_id, "adapter.update")
     }
 }
@@ -104,11 +118,19 @@ pub enum InstallProvidedBy {
 pub struct UpdateSet {
     #[serde(default)]
     pub apt: Option<AptUpdate>,
+    /// Update by re-running the shell install recipe. For shell-installed
+    /// harnesses with no npm/github path and no native update subcommand
+    /// (e.g. a prebuilt archive resolved from an upstream index at install
+    /// time), re-running install is the only update path; without this flag
+    /// the updater probes the installed binary for an `update`/`upgrade`
+    /// subcommand instead.
+    #[serde(default)]
+    pub shell_rerun: bool,
 }
 
 impl UpdateSet {
     pub fn is_empty(&self) -> bool {
-        self.apt.is_none()
+        self.apt.is_none() && !self.shell_rerun
     }
 
     fn validate(&self, agent_id: &str, field: &str) -> Result<()> {

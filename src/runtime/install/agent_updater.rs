@@ -82,10 +82,9 @@ pub struct AgentUpdateStepReport {
     #[schemars(extend("enum" = ["install", "harness", "adapter"]))]
     pub step: String,
     pub status: AgentUpdateStepStatus,
-    // The update path never emits `shell`: `choose_update_plan`'s shell arm
-    // re-routes to a native plan, so the reachable set is narrower than the
-    // `installer_runs` row's `method` column.
-    #[schemars(extend("enum" = ["npm", "github", "apt", "native", null]))]
+    // `shell` is reachable only for entries declaring `update.shell_rerun`;
+    // every other shell-installed entry re-routes to a native plan.
+    #[schemars(extend("enum" = ["npm", "github", "apt", "native", "shell", null]))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,6 +345,7 @@ struct UpdateComponent<'a> {
     command_id: &'a str,
     install: &'a InstallSet,
     apt: Option<&'a AptUpdate>,
+    shell_rerun: bool,
     github_url: Option<&'a str>,
     version_pin: Option<&'a str>,
 }
@@ -389,6 +389,7 @@ fn harness_component<'a>(
         command_id: &harness.id,
         install: &harness.install,
         apt: harness.update.apt.as_ref(),
+        shell_rerun: harness.update.shell_rerun,
         github_url: entry.github.as_deref(),
         version_pin: agent.harness_version.as_deref(),
     }
@@ -404,6 +405,7 @@ fn adapter_component<'a>(
         command_id: &adapter.id,
         install: &adapter.install,
         apt: adapter.update.apt.as_ref(),
+        shell_rerun: adapter.update.shell_rerun,
         github_url: adapter.github.as_deref().or(entry.github.as_deref()),
         version_pin: None,
     }
@@ -445,6 +447,9 @@ fn choose_update_plan(
             }
         }
         Some(INSTALLER_METHOD_SHELL) => {
+            if let Some(plan) = shell_rerun_plan(component) {
+                return Ok(plan);
+            }
             return Ok(native_plan_with_command(
                 component
                     .install
@@ -466,7 +471,31 @@ fn choose_update_plan(
     if component.install.github.is_some() {
         return github_plan(entry, component);
     }
+    if let Some(plan) = shell_rerun_plan(component) {
+        return Ok(plan);
+    }
     Ok(native_plan(component))
+}
+
+/// Re-running the shell install recipe is the declared update path; the plan
+/// carries only the shell install so the fallback chain cannot drift to a
+/// path the entry does not ship. `latest` stays `None` — a shell recipe has
+/// no machine-checkable upstream version, so the recipe itself is responsible
+/// for exiting cheaply when nothing changed.
+fn shell_rerun_plan(component: &UpdateComponent<'_>) -> Option<UpdatePlan> {
+    if !component.shell_rerun {
+        return None;
+    }
+    let shell = component.install.shell.as_ref()?;
+    Some(UpdatePlan {
+        method: INSTALLER_METHOD_SHELL,
+        latest: None,
+        install: InstallSet {
+            shell: Some(shell.clone()),
+            ..InstallSet::default()
+        },
+        kind: UpdatePlanKind::InstallSet,
+    })
 }
 
 fn apt_plan(apt: &AptUpdate) -> UpdatePlan {

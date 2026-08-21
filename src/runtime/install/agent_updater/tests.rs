@@ -65,6 +65,63 @@ fn update_plan_preserves_shell_install_as_native_update() {
 }
 
 #[test]
+fn update_plan_reruns_shell_install_when_the_entry_declares_it() {
+    let registry = shell_rerun_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let agent = agent_config("fake", None);
+    let component = harness_update_component(entry, &agent);
+    let installed = installer_run_with_method(Some(INSTALLER_METHOD_SHELL));
+
+    let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
+
+    assert_eq!(plan.method, INSTALLER_METHOD_SHELL);
+    assert!(matches!(plan.kind, UpdatePlanKind::InstallSet));
+    let shell = plan.install.shell.as_ref().expect("shell install");
+    assert_eq!(shell.creates, "shell-agent");
+    // The rerun plan must not fall back to other declared paths: the recipe
+    // is the update contract, not one option among peers.
+    assert!(plan.install.npm.is_none());
+    assert!(plan.install.github.is_none());
+    assert!(plan.latest.is_none());
+}
+
+#[test]
+fn update_plan_reruns_shell_install_without_a_recorded_method() {
+    let registry = RegistryCatalog::from_toml(
+        r#"
+[[agents]]
+id = "fake"
+name = "Fake"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/fake.md"
+
+[agents.harness]
+id = "fake-agent"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "shell-agent"
+
+[agents.harness.update]
+shell_rerun = true
+"#,
+    )
+    .expect("registry");
+    let entry = registry.lookup_required("fake").expect("entry");
+    let agent = agent_config("fake", None);
+    let component = harness_update_component(entry, &agent);
+    let installed = installer_run_with_method(None);
+
+    let plan = choose_update_plan(entry, &component, Some(&installed)).expect("plan");
+
+    // With no recorded method and shell as the only declared path, the rerun
+    // plan replaces the terminal native probe.
+    assert_eq!(plan.method, INSTALLER_METHOD_SHELL);
+    assert!(matches!(plan.kind, UpdatePlanKind::InstallSet));
+}
+
+#[test]
 fn update_components_skip_adapter_provided_harness() {
     let catalog = RegistryCatalog::from_toml(
         r#"
@@ -418,6 +475,34 @@ package = "fake-agent"
     .expect("registry")
 }
 
+fn shell_rerun_registry() -> RegistryCatalog {
+    RegistryCatalog::from_toml(
+        r#"
+[[agents]]
+id = "fake"
+name = "Fake"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/fake.md"
+
+[agents.harness]
+id = "fake-agent"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "shell-agent"
+
+[agents.harness.install.npm]
+package = "@example/fake-agent"
+creates = "npm-agent"
+
+[agents.harness.update]
+shell_rerun = true
+"#,
+    )
+    .expect("registry")
+}
+
 fn native_shell_registry() -> RegistryCatalog {
     RegistryCatalog::from_toml(
         r#"
@@ -563,6 +648,7 @@ fn harness_update_component<'a>(
         command_id: &harness.id,
         install: &harness.install,
         apt: harness.update.apt.as_ref(),
+        shell_rerun: harness.update.shell_rerun,
         github_url: entry.github.as_deref(),
         version_pin: agent.harness_version.as_deref(),
     }

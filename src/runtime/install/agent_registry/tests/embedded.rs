@@ -21,7 +21,7 @@ fn only_agents_with_a_native_endpoint_field_declare_set_provider_base_url() {
             "`{id}` writes a per-provider endpoint and must declare set_provider_base_url"
         );
     }
-    for id in ["goose", "amp", "kimi", "kilo"] {
+    for id in ["goose", "amp", "kimi", "kilo", "antigravity"] {
         assert!(
             !catalog.supports_provider_base_url(id),
             "`{id}` has no per-provider endpoint field and must not declare set_provider_base_url"
@@ -96,7 +96,8 @@ fn embedded_registry_advertises_tested_headless_support() {
             "claude-code",
             "kimi",
             "hermes",
-            "kilo"
+            "kilo",
+            "antigravity"
         ]
     );
     for entry in catalog
@@ -166,7 +167,8 @@ fn embedded_registry_contains_only_curated_examples() {
             "claude-code",
             "kimi",
             "hermes",
-            "kilo"
+            "kilo",
+            "antigravity"
         ]
     );
     let amp = catalog.lookup("amp").expect("amp entry exists");
@@ -399,6 +401,59 @@ fn embedded_registry_contains_only_curated_examples() {
         .expect("Kilo Code npm install");
     assert_eq!(kilo_npm.package, "@kilocode/cli");
     assert_eq!(kilo_npm.creates, "kilo");
+    let antigravity = catalog
+        .lookup("antigravity")
+        .expect("Google Antigravity entry exists");
+    assert_eq!(antigravity.name, "Google Antigravity");
+    assert_eq!(antigravity.kind, RegistryKind::Native);
+    assert!(antigravity.headless_compatible);
+    assert!(!antigravity.set_provider);
+    assert!(!antigravity.set_model);
+    assert!(!antigravity.allow_custom_provider);
+    assert!(!antigravity.allow_custom_model);
+    assert!(!antigravity.set_mode);
+    assert!(antigravity.supports_agent_skills);
+    assert_eq!(
+        antigravity.agent_skills_install_dir.as_deref(),
+        Some("~/.agents/skills")
+    );
+    assert!(!antigravity.subagents);
+    assert_eq!(antigravity.sync_id.as_deref(), Some("antigravity-acp"));
+    assert_eq!(
+        antigravity.support_doc.as_deref(),
+        Some("docs/agents/antigravity.md")
+    );
+    let antigravity_harness = antigravity
+        .harness
+        .as_ref()
+        .expect("Google Antigravity harness");
+    assert_eq!(antigravity_harness.id, "antigravity");
+    // The literal `--uid=` flag is what the upstream registry declares for the
+    // Linux targets; an `acp` subcommand would not start the server.
+    assert_eq!(antigravity_harness.acp_args, ["--uid="]);
+    assert!(
+        antigravity_harness.install.npm.is_none(),
+        "upstream distributes prebuilt zips only; there is no npm package"
+    );
+    let antigravity_shell = antigravity_harness
+        .install
+        .shell
+        .as_ref()
+        .expect("Google Antigravity shell install");
+    assert!(
+        antigravity_shell
+            .script
+            .contains("https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"),
+        "the archive URL must be resolved from the upstream index, not pinned to a dated build tag"
+    );
+    assert!(antigravity_shell.script.contains("agy_acp_server.par"));
+    assert_eq!(antigravity_shell.creates, "antigravity");
+    assert_eq!(antigravity_shell.required_tools, ["curl", "unzip", "jq"]);
+    assert!(
+        antigravity_harness.update.shell_rerun,
+        "the .par server has no update subcommand and no npm/github channel; \
+         re-running the recipe is the only update path"
+    );
     for entry in catalog.entries() {
         for shell in [
             entry
@@ -426,6 +481,15 @@ fn embedded_registry_contains_only_curated_examples() {
             entry.sync_exempt,
             entry.id == "hermes",
             "sync_exempt is a narrow escape hatch; `{}` must not carry it",
+            entry.id
+        );
+    }
+    for entry in catalog.entries() {
+        assert_eq!(
+            entry.sync_id.is_some(),
+            entry.id == "antigravity",
+            "entry-level sync_id exists only for catalog ids that differ from the upstream \
+             registry id; `{}` must not carry it",
             entry.id
         );
     }

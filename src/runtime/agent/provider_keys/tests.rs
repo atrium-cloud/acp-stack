@@ -354,6 +354,7 @@ fn direct_agent_env_refs_are_data_driven() {
     assert_eq!(env_refs_for_agent_id("amp"), ["AMP_API_KEY"]);
     assert_eq!(env_refs_for_agent_id("kilo"), ["KILO_API_KEY"]);
     assert_eq!(env_refs_for_agent_id("kimi"), ["KIMI_API_KEY"]);
+    assert_eq!(env_refs_for_agent_id("antigravity"), ["GEMINI_API_KEY"]);
     assert!(env_refs_for_agent_id("opencode").is_empty());
     // Hermes is provider-backed, not a direct-secret agent.
     assert!(env_refs_for_agent_id("hermes").is_empty());

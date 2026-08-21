@@ -98,5 +98,6 @@ The first catalog credential for a provider is aliasless. Adding a second perman
 | Kimi Code   | provider + model setup; runtime derives Kimi's process environment from the active lane's key ref |
 | Hermes Agent | provider env refs; the `model` block of `~/.hermes/config.yaml` carries the selected lane with the bare provider-native model id; endpoint-carrying configurations ride a managed `providers.acps-managed` entry (`custom:acps-managed`) |
 | Kilo Code   | env-var auth (`KILO_API_KEY` — required present by the harness; an empty placeholder is auto-recorded at init, `config import`, or `agent set --model` when a provider-native key is declared — or provider-native keys); model and `build`/`plan` modes applied through ACP session config |
+| Google Antigravity | env-var auth (`GEMINI_API_KEY`) with `modelProvider: "gemini"` written to `~/.gemini/antigravity-cli/settings.json` by headless provisioning; no provider, model, or mode selection |
 
 Some changes affect only new sessions or require the supervised agent process to restart. The CLI prints that restart guidance when applicable.
