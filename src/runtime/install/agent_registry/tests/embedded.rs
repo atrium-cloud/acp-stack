@@ -408,10 +408,10 @@ fn embedded_registry_contains_only_curated_examples() {
     assert_eq!(antigravity.kind, RegistryKind::Native);
     assert!(antigravity.headless_compatible);
     assert!(!antigravity.set_provider);
-    assert!(!antigravity.set_model);
+    assert!(antigravity.set_model);
     assert!(!antigravity.allow_custom_provider);
     assert!(!antigravity.allow_custom_model);
-    assert!(!antigravity.set_mode);
+    assert!(antigravity.set_mode);
     assert!(antigravity.supports_agent_skills);
     assert_eq!(
         antigravity.agent_skills_install_dir.as_deref(),

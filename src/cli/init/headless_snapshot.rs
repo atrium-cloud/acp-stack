@@ -36,7 +36,7 @@ pub(super) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Ve
         ],
         "antigravity" => vec![
             home.join(".gemini")
-                .join("antigravity-cli")
+                .join("antigravity-acp")
                 .join("settings.json"),
         ],
         _ => Vec::new(),

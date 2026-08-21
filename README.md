@@ -19,17 +19,18 @@
 
 These harnesses are currently supported:
 
-| Agent        | ACP Compat |
-| ------------ | ---------- |
-| Claude Code  | adapter    |
-| Codex CLI    | adapter    |
-| OpenCode     | native     |
-| Pi Agent     | adapter    |
-| Goose        | native     |
-| Amp Code     | adapter    |
-| Hermes Agent | native     |
-| Kilo Code    | native     |
-| Kimi Code    | native     |
+| Agent              | ACP Compat |
+| ------------------ | ---------- |
+| Pi Agent           | adapter    |
+| OpenCode           | native     |
+| Claude Code        | adapter    |
+| Codex CLI          | adapter    |
+| Google Antigravity | native     |
+| Kimi Code          | native     |
+| Hermes Agent       | native     |
+| Goose              | native     |
+| Amp Code           | adapter    |
+| Kilo Code          | native     |
 
 "native" means the agent harness is compatible with ACP natively; "adapter" means an ACP adapter must be installed alongside the harness to enable agent-ACP communication.
 
