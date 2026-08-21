@@ -40,7 +40,7 @@ pub(crate) async fn agent_update_handler(
             "agent.update.skipped",
             "agent update skipped",
             serde_json::json!({
-                "agent": agent_id,
+                "agent_id": agent_id,
                 "reason": "agent is running",
                 "trigger": UPDATE_TRIGGER_API,
             }),
@@ -89,7 +89,7 @@ async fn run_update_and_release(
         &state,
         "agent.update.started",
         "agent update started",
-        serde_json::json!({ "agent": agent_id, "trigger": UPDATE_TRIGGER_API }),
+        serde_json::json!({ "agent_id": agent_id, "trigger": UPDATE_TRIGGER_API }),
     )
     .await;
     let result = tokio::task::spawn_blocking(move || {
@@ -115,7 +115,7 @@ async fn run_update_and_release(
                 ("agent.update.finished", "agent update finished")
             };
             let mut payload = serde_json::to_value(&report)
-                .unwrap_or_else(|_| serde_json::json!({ "agent": report.agent }));
+                .unwrap_or_else(|_| serde_json::json!({ "agent_id": report.agent_id }));
             if let Some(object) = payload.as_object_mut() {
                 object.insert(
                     "trigger".to_owned(),
@@ -173,6 +173,7 @@ pub(crate) struct AgentAutoUpdatePolicyJson {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentUpdateStatusComponent {
+    #[schemars(extend("enum" = ["install", "harness", "adapter"]))]
     step: String,
     #[serde(flatten)]
     result: AgentVersionStatus,

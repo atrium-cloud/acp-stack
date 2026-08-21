@@ -38,7 +38,7 @@ async fn agent_switch_ports_skills_to_target_install_dir() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "amp" }))
+        .json(&serde_json::json!({ "agent_id": "amp" }))
         .send()
         .await
         .expect("send switch");
@@ -87,7 +87,7 @@ async fn agent_switch_links_skills_into_target_link_dir() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "amp" }))
+        .json(&serde_json::json!({ "agent_id": "amp" }))
         .send()
         .await
         .expect("send switch");
@@ -139,7 +139,7 @@ async fn agent_switch_reports_skills_link_error_without_failing() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "amp" }))
+        .json(&serde_json::json!({ "agent_id": "amp" }))
         .send()
         .await
         .expect("send switch");
@@ -187,7 +187,7 @@ async fn agent_switch_reports_shared_skills_dir_without_copying() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "kimi" }))
+        .json(&serde_json::json!({ "agent_id": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -241,7 +241,7 @@ async fn agent_switch_skill_port_failure_aborts_config_write() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "amp" }))
+        .json(&serde_json::json!({ "agent_id": "amp" }))
         .send()
         .await
         .expect("send switch");

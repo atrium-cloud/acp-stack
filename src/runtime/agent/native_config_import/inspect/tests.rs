@@ -733,7 +733,7 @@ fn goose_invalid_yaml_and_non_string_keys_are_redacted_errors() {
     )
     .err()
     .expect("invalid yaml rejected");
-    assert_eq!(error.error_code(), "native_config_invalid");
+    assert_eq!(error.error_code(), "agent.native_config_invalid");
 
     // A mapping with a non-string key has no JSON representation and no
     // legitimate place in a Goose config; reject it without echoing the
@@ -745,7 +745,7 @@ fn goose_invalid_yaml_and_non_string_keys_are_redacted_errors() {
     )
     .err()
     .expect("non-string key rejected");
-    assert_eq!(error.error_code(), "native_config_invalid");
+    assert_eq!(error.error_code(), "agent.native_config_invalid");
     assert!(!error.public_message().contains("sk-live-should-not-leak"));
 }
 
@@ -808,14 +808,14 @@ fn invalid_jsonc_and_oversize_inputs_are_redacted_errors() {
         Ok(_) => panic!("invalid config was accepted"),
         Err(error) => error,
     };
-    assert_eq!(error.error_code(), "native_config_invalid");
+    assert_eq!(error.error_code(), "agent.native_config_invalid");
     assert!(!error.public_message().contains("secret"));
     let oversized = "x".repeat(IMPORT_SIZE_LIMIT + 1);
     let error = match inspect_native_config("codex", Some("config.toml"), &oversized) {
         Ok(_) => panic!("oversized config was accepted"),
         Err(error) => error,
     };
-    assert_eq!(error.error_code(), "native_config_too_large");
+    assert_eq!(error.error_code(), "agent.native_config_too_large");
 }
 
 #[test]
@@ -841,12 +841,15 @@ fn rejects_auth_state_and_project_scope_filenames() {
         let error = inspect_native_config(harness, Some(filename), "{}")
             .err()
             .expect("filename rejected");
-        assert_eq!(error.error_code(), "native_config_filename_unsupported");
+        assert_eq!(
+            error.error_code(),
+            "agent.native_config_filename_unsupported"
+        );
     }
     let error = inspect_native_config("codex", None, "model = 'gpt'")
         .err()
         .expect("filename required");
-    assert_eq!(error.error_code(), "native_config_filename_required");
+    assert_eq!(error.error_code(), "agent.native_config_filename_required");
 }
 
 #[test]

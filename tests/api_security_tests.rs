@@ -236,8 +236,12 @@ async fn security_history_paginates_with_keyset_cursor() {
     assert_eq!(second_runs.len(), 1);
     assert_eq!(second_runs[0]["id"], Value::String(ids[0].clone()));
     assert!(
-        second["data"].get("next_cursor").is_none() || second["data"]["next_cursor"].is_null(),
-        "next_cursor should be absent on the final page"
+        second["data"].get("next_cursor").is_some(),
+        "next_cursor key is always emitted, like the /v1/logs/* cursors"
+    );
+    assert!(
+        second["data"]["next_cursor"].is_null(),
+        "next_cursor should be null on the final page"
     );
 }
 
@@ -566,7 +570,7 @@ async fn unknown_path_returns_envelope_not_plain_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body: Value = response.json().await.expect("envelope json");
     assert_eq!(body["ok"], Value::Bool(false));
-    assert_eq!(body["error"]["code"], "not_found");
+    assert_eq!(body["error"]["code"], "request.not_found");
 }
 
 #[tokio::test]

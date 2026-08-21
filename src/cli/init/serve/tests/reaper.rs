@@ -40,7 +40,7 @@ async fn idle_reaper_expires_abandoned_session() {
     )
     .await
     .expect("idle reaper should shut the server down");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
 }
 
 #[tokio::test(start_paused = true)]
@@ -66,7 +66,7 @@ async fn idle_reaper_skips_sessions_with_connected_websocket() {
     )
     .await
     .expect("reaper should fire once the reconnect grace lapses");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
 }
 
 #[tokio::test(start_paused = true)]
@@ -97,7 +97,7 @@ async fn idle_reaper_respects_route_lookup_activity() {
     )
     .await
     .expect("reaper should fire after polling stops");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
 }
 
 #[tokio::test(start_paused = true)]
@@ -248,7 +248,7 @@ async fn websocket_closes_when_session_turns_terminal() {
             .expect("stream ended before a close frame")
             .expect("frame");
         if let tokio_tungstenite::tungstenite::Message::Text(text) = &message {
-            assert!(text.contains("canceled"));
+            assert!(text.contains("cancelled"));
             saw_canceled = true;
         } else if message.is_close() {
             break;
@@ -274,7 +274,7 @@ async fn idle_reaper_respects_activity_touch() {
     )
     .await
     .expect("reaper should fire after activity stops");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
 }
 
 #[tokio::test(start_paused = true)]
@@ -309,7 +309,7 @@ async fn max_lifetime_enforcer_expires_active_session() {
     )
     .await
     .expect("max lifetime should shut the server down");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
 }
 
 #[tokio::test(start_paused = true)]
@@ -345,7 +345,7 @@ fn expire_clears_unacked_result_and_secrets() {
     session.cancel("backend_cancel");
     assert_eq!(session.status(), "completed_awaiting_ack");
     session.expire("idle_timeout");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
     assert!(session.result_frame().is_none());
     let snapshot = serde_json::to_string(&session.status_snapshot()).expect("snapshot");
     assert!(snapshot.contains("last_activity_age_secs"));
@@ -355,5 +355,5 @@ fn expire_clears_unacked_result_and_secrets() {
     assert!(!events.contains("acps_session_expire_secret"));
     // A second expiry is a no-op on an already terminal session.
     session.expire("max_lifetime");
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
 }

@@ -150,7 +150,7 @@ async fn cancelled_permission_does_not_block_dispatch_and_is_persisted() {
     let canceled = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = event_rx.recv().await.expect("permission event");
-            if event.topic == "permissions" && event.payload["kind"] == "permission.canceled" {
+            if event.topic == "permissions" && event.payload["kind"] == "permission.cancelled" {
                 break event;
             }
         }

@@ -82,7 +82,7 @@ fn permission_reconcile_orphans_categorizes_by_source() {
         .get_permission_request(&acp_pending.id)
         .expect("get")
         .expect("row");
-    assert_eq!(after_acp.status, "canceled");
+    assert_eq!(after_acp.status, "cancelled");
 
     let after_cmd = store
         .get_permission_request(&cmd_pending.id)
@@ -146,7 +146,7 @@ fn reconcile_orphaned_commands_settles_dependent_permissions() {
         .get_permission_request(&dependent.id)
         .expect("get")
         .expect("row");
-    assert_eq!(dependent_row.status, "canceled");
+    assert_eq!(dependent_row.status, "cancelled");
 
     let acp_row = store
         .get_permission_request(&acp_pending.id)

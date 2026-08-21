@@ -108,7 +108,7 @@ pub(crate) async fn native_config_import_handler(
             .values()
             .any(|record| operation_phase_is_pending(record.phase))
         {
-            return Err(native_error("native_config_operation_in_progress"));
+            return Err(native_error("agent.native_config_operation_in_progress"));
         }
         imports.insert_operation(NativeConfigOperationRecord {
             operation: operation.clone(),
@@ -169,7 +169,7 @@ pub(crate) async fn native_config_status_handler(
         .lock()
         .await
         .operation(&operation_id)
-        .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
     Ok(ApiSuccess::new(operation))
 }
 
@@ -182,12 +182,12 @@ pub(crate) async fn native_config_cancel_handler(
     if original.operation.status == NativeConfigOperationStatus::Applied
         && native_config_rollback_expired(&original)
     {
-        return Err(native_error("native_config_rollback_expired"));
+        return Err(native_error("agent.native_config_rollback_expired"));
     }
     let validate_applied_files = match original.phase {
         NativeConfigOperationPhase::Terminal => {
             if original.operation.status == NativeConfigOperationStatus::Applied {
-                return Err(native_error("native_config_rollback_expired"));
+                return Err(native_error("agent.native_config_rollback_expired"));
             }
             return Ok(ApiSuccess::new(original.operation));
         }
@@ -288,7 +288,7 @@ async fn ensure_latest_applied_operation(state: &AppState, operation_id: &str) -
         })
         .max();
     if latest.is_some_and(|(_, latest_id)| latest_id != operation_id) {
-        return Err(native_error("native_config_rollback_conflict"));
+        return Err(native_error("agent.native_config_rollback_conflict"));
     }
     Ok(())
 }
@@ -305,7 +305,7 @@ pub(crate) async fn recover_native_config_imports(state: &AppState) -> Result<()
         .map(|record| (record.updated_at, record.operation.operation_id.clone()))
         .collect::<Vec<_>>();
     if pending.len() > 1 {
-        return Err(native_error("native_config_journal_conflict"));
+        return Err(native_error("agent.native_config_journal_conflict"));
     }
     let terminal = records
         .iter()
@@ -362,7 +362,8 @@ async fn process_pending_operation_once(
         NativeConfigOperationPhase::Applying => {
             let _mutation = state.lock_agent_config_mutation().await?;
             let applying = operation_record(state, operation_id).await?;
-            queue_rollback_retry(state, operation_id, "native_config_apply_interrupted").await?;
+            queue_rollback_retry(state, operation_id, "agent.native_config_apply_interrupted")
+                .await?;
             if let Err(error) = persist_operation_record(state, operation_id).await {
                 replace_operation_record(state, applying).await?;
                 return Err(error);

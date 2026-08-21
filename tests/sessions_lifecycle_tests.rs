@@ -820,8 +820,8 @@ async fn unadvertised_mode_and_model_are_ignored_not_fatal() {
         .filter_map(|entry| entry["feature"].as_str())
         .collect();
     assert_eq!(features, ["agent.mode", "agent.model"], "{body}");
-    assert_eq!(ignored[0]["target"], "plan");
-    assert_eq!(ignored[1]["target"], "deepseek/deepseek-v4-flash");
+    assert_eq!(ignored[0]["value"], "plan");
+    assert_eq!(ignored[1]["value"], "deepseek/deepseek-v4-flash");
 
     let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
     let events = {

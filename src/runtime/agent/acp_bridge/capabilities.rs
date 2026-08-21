@@ -15,6 +15,7 @@ pub struct AgentCapabilitiesDto {
     /// verbatim so clients can read every field today without the daemon
     /// growing a struct for each one. Named accessors land alongside the
     /// session API.
+    #[schemars(extend("type" = "object"))]
     pub capabilities: Value,
     /// `agentInfo.name` if the agent provided it. The spec says `SHOULD`,
     /// not `MUST`, so this is best-effort.
@@ -46,9 +47,11 @@ pub struct PartitionedMcpServers {
 pub struct IgnoredFeature {
     /// What kind of configured feature was ignored: `mcp.server`,
     /// `agent.mode`, or `agent.model`.
+    #[schemars(extend("enum" = ["mcp.server", "agent.mode", "agent.model"]))]
     pub feature: &'static str,
-    /// The configured value: the MCP server name, or the mode/model value.
-    pub target: String,
+    /// The configured value that was dropped: the MCP server name, or the
+    /// mode/model value.
+    pub value: String,
     /// The capability the agent would have had to advertise
     /// (`mcpCapabilities.*`), or — for `agent.mode`/`agent.model` — the
     /// `session/new` config option that would have had to carry the value.
@@ -226,7 +229,7 @@ impl AgentCapabilitiesDto {
             .into_iter()
             .map(|skipped| IgnoredFeature {
                 feature: IGNORED_FEATURE_MCP_SERVER,
-                target: skipped.name,
+                value: skipped.name,
                 capability: skipped.capability,
                 reason: "agent does not advertise this MCP transport".to_owned(),
             })
@@ -385,9 +388,9 @@ mod tests {
 
         assert_eq!(ignored.len(), 2);
         assert_eq!(ignored[0].feature, IGNORED_FEATURE_MCP_SERVER);
-        assert_eq!(ignored[0].target, "local");
+        assert_eq!(ignored[0].value, "local");
         assert_eq!(ignored[0].capability, "mcpCapabilities");
-        assert_eq!(ignored[1].target, "linear");
+        assert_eq!(ignored[1].value, "linear");
         assert_eq!(ignored[1].capability, "mcpCapabilities.http");
     }
 

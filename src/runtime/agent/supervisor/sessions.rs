@@ -565,7 +565,7 @@ async fn provision_session_option(
         Err(StackError::AgentConfigProvision { reason, .. }) => {
             ignored.push(IgnoredFeature {
                 feature,
-                target: value.to_owned(),
+                value: value.to_owned(),
                 capability,
                 reason,
             });

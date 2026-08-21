@@ -55,7 +55,7 @@ impl PermissionStatus {
             PermissionStatus::Approved => "approved",
             PermissionStatus::Denied => "denied",
             PermissionStatus::Expired => "expired",
-            PermissionStatus::Canceled => "canceled",
+            PermissionStatus::Canceled => "cancelled",
         }
     }
 
@@ -85,7 +85,7 @@ fn parse_permission_status(value: &str) -> PermissionStatus {
         "approved" => PermissionStatus::Approved,
         "denied" => PermissionStatus::Denied,
         "expired" => PermissionStatus::Expired,
-        "canceled" => PermissionStatus::Canceled,
+        "cancelled" => PermissionStatus::Canceled,
         _ => PermissionStatus::Pending,
     }
 }
@@ -346,7 +346,7 @@ impl StateStore {
 
     /// On daemon startup, mark every `pending` permission row as terminal so
     /// clients polling the row see it settle. ACP-source rows become
-    /// `canceled` (the ACP request channel is gone after restart). Command-
+    /// `cancelled` (the ACP request channel is gone after restart). Command-
     /// source rows become `expired` so the caller's understanding (the
     /// command never executed) is preserved. Returns `(canceled, expired)`.
     pub fn reconcile_orphaned_permissions(&self) -> Result<(usize, usize)> {
@@ -362,7 +362,7 @@ impl StateStore {
 
         let external = self.external_logging_enabled();
 
-        // ACP-source pending rows become `canceled` — the request channel is
+        // ACP-source pending rows become `cancelled` — the request channel is
         // gone after restart.
         let acp_ids: Vec<String> = {
             let mut statement = transaction.prepare(
@@ -374,7 +374,7 @@ impl StateStore {
         let canceled = acp_ids.len();
         for id in &acp_ids {
             transaction.execute(
-                "UPDATE permission_requests SET status = 'canceled', updated_at = ?1 WHERE id = ?2",
+                "UPDATE permission_requests SET status = 'cancelled', updated_at = ?1 WHERE id = ?2",
                 params![now, id],
             )?;
             let decision_id = next_permission_decision_id();
@@ -382,7 +382,7 @@ impl StateStore {
                 r#"
                 INSERT INTO permission_decisions
                     (id, request_id, created_at, decision, deciding_principal, reason)
-                VALUES (?1, ?2, ?3, 'canceled', 'system', 'daemon-restart')
+                VALUES (?1, ?2, ?3, 'cancelled', 'system', 'daemon-restart')
                 "#,
                 params![decision_id, id, now],
             )?;

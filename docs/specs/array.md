@@ -18,7 +18,7 @@ name = "OpenCode"
 command = "opencode"
 args = ["acp"]
 cwd = "/workspace"
-env = ["<provider-api-key-ref>"]
+env = ["OPENCODE_API_KEY"]
 restart = "on-crash"
 
 [[array.targets]]

@@ -40,6 +40,7 @@ pub(super) fn shell_quote(s: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SecurityFinding {
     pub code: String,
+    #[schemars(extend("enum" = ["warning", "critical"]))]
     pub severity: String,
     pub message: String,
     /// Optional structured payload attached to the finding. `message` is the

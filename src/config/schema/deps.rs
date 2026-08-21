@@ -29,6 +29,8 @@ pub struct DependencyEntry {
     /// keeps Dependency Apply narrowly scoped per the Phase 4 spec:
     /// no cross-distro reconciliation, no auto-derived package names —
     /// the operator declares each install action explicitly.
+    /// Only valid under `[[dependencies.commands]]`; declaring it under
+    /// `packages`, `runtimes`, or `mcp` fails config load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install: Option<DependencyInstallAction>,
 }
@@ -65,8 +67,10 @@ pub struct DependencyInstallAction {
     pub scope: DependencyInstallScope,
     /// Optional timeout override in seconds. Defaults to 600s
     /// (10 minutes) — same cap as the agent installer. Bounded above at
-    /// validation by `MAX_INSTALL_TIMEOUT_SECS`.
+    /// validation by `MAX_INSTALL_TIMEOUT_SECS` (86400, 24 hours); `0` is
+    /// rejected, so omit the field rather than zeroing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 86400))]
     pub timeout_secs: Option<u64>,
 }
 

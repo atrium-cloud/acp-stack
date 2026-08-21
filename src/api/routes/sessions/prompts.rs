@@ -2,6 +2,10 @@ use super::*;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct SessionsPromptBody {
+    /// Either a bare string, which becomes a single text block, or an array of
+    /// ACP content blocks (camelCase, e.g. `[{"type":"text","text":"..."}]`)
+    /// deserialized element-wise. `null`, an empty array, and any other JSON
+    /// type are rejected.
     prompt: serde_json::Value,
 }
 
@@ -9,6 +13,7 @@ pub(crate) struct SessionsPromptBody {
 pub(crate) struct PromptSubmitResponse {
     prompt_id: String,
     session_id: String,
+    #[schemars(extend("enum" = ["pending", "running", "completed", "errored", "cancelled", "stalled"]))]
     status: String,
     created_at: String,
     message_id: Option<String>,

@@ -14,6 +14,7 @@ max_request_bytes = 104857600
 
 [security.http]
 allowed_origins = ["https://agent.example.com"]
+max_request_bytes = 104857600
 rate_limit_per_minute = 120
 burst = 30
 auth_failures_per_minute = 5
@@ -34,7 +35,7 @@ name = "OpenCode"
 command = "opencode"
 args = ["acp"]
 cwd = "/workspace"
-env = ["<provider-api-key-ref>"]
+env = ["OPENCODE_API_KEY"]
 restart = "on-crash"
 
 [agent.auto_update]
@@ -59,6 +60,10 @@ progress_interval = "30s"
 env_allowlist = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
 max_output_bytes = 1048576
 
+[logging]
+level = "info"
+local_retention_days = 30
+
 [[mcp.servers]]
 type = "http"
 name = "linear"
@@ -73,6 +78,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[api]`            | HTTP bind address, public URL, and request size cap                  |
 | `[security.http]`  | origin checks, rate limits, proxy trust, and auth-failure blocking   |
 | `[workspace]`      | workspace root, uploads path, shell, runtime user, and file limits   |
+| `[workspace.sandbox]` | harness/shell isolation backend (see [security.md](security.md#sandbox)) |
 | `[agent]`          | configured ACP agent process and injected secret refs (legacy input; canonical config writes `[array]`) |
 | `[agent.auto_update]` | periodic managed agent update policy                             |
 | `[agent.provider]` | selected provider/model metadata for provider-backed agents          |
@@ -82,6 +88,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 | `[updates.acp_stack]` | acp-stack self-update policy                                     |
 | `[permissions]`    | command and ACP permission policy                                    |
 | `[commands]`       | mediated shell command limits and env allowlist                      |
+| `[prompts]`        | stale-prompt sweeper thresholds (see [runtime.md](runtime.md))        |
 | `[dependencies]`   | expected external programs, runtimes, packages, and MCP declarations |
 | `[[mcp.servers]]`  | MCP servers attached to ACP sessions                                 |
 | `[[skills.sources]]` | user-declared Agent Skills sources, alongside the embedded catalog  |
@@ -96,7 +103,7 @@ headers = [{ name = "Authorization", value_ref = "LINEAR_API_KEY" }]
 
 `[security.http].allowed_origins` is the browser origin allowlist. Empty means no browser origins are allowed. `trust_proxy_headers = true` accepts forwarded client metadata only from exact IPs listed in `trusted_proxies`.
 
-Both `[api].max_request_bytes` and `[security.http].max_request_bytes` can cap HTTP request bodies. When both are present, the tighter limit is enforced.
+Both `[api].max_request_bytes` and `[security.http].max_request_bytes` are required and cap HTTP request bodies; the tighter of the two is enforced.
 
 `[local].socket_path` optionally overrides the internal Unix socket used by keyless local `acps` routes. When omitted, the daemon binds `~/.local/share/acp-stack/acps-local.sock`.
 
@@ -104,7 +111,7 @@ Both `[api].max_request_bytes` and `[security.http].max_request_bytes` can cap H
 
 ## Auth And Secrets
 
-Auth keys are not config fields and are not stored in `secrets.age`. `acps init` generates the session and admin keys on first run, prints their plaintext values once, and stores only non-recoverable verifier rows in local state.
+Auth keys are not config fields and are not stored in `secrets.age`. `acps init` generates the session and admin keys on first run, prints their plaintext values once, and stores only non-recoverable verifier rows in local state. The loader still accepts a legacy `[auth]` table (`session_key_ref`, `admin_key_ref`) for one-time migration off pre-verifier configs; the published JSON Schema describes the post-migration shape only, so a file carrying `[auth]` loads but does not validate against the schema.
 
 Fields that expect secret refs reject likely pasted secret values. Use `acps secrets set <name>` to store the value, then reference `<name>` in config.
 
@@ -143,7 +150,9 @@ Supported code sources: Git repositories. Supported data sources: absolute local
 | `args`    | argv after the executable                                 |
 | `cwd`     | launch directory; defaults to workspace root when omitted |
 | `env`     | secret refs injected as environment variables             |
+| `expected_sha256` | optional pinned digest of the installed harness binary, verified after install |
 | `restart` | process restart policy: `on-crash` or `never`             |
+| `harness_version` | optional pin to a specific GitHub Release tag for install and managed update (see [cli.md](cli.md)) |
 
 Provider and model fields are documented in [agents/config.md](agents/config.md). Root `agent.model` and `[agent.provider].model` are mutually exclusive.
 
@@ -200,7 +209,7 @@ Only `commands` entries may declare install actions. `packages`, `runtimes`, and
 
 ## Edge
 
-Cloudflare Tunnel config lives under `[edge.cloudflare]`. `mode = "generated"` writes local cloudflared artifacts only. `mode = "managed"` also requires `api_token_ref` and `account_id_ref`; init resolves those secret refs in memory, creates the tunnel, writes `tunnel_id` back to config before later provisioning steps, pushes the remote tunnel config, creates or updates the proxied CNAME, and writes an owner-only tunnel token env artifact.
+Cloudflare Tunnel config lives under `[edge.cloudflare]`. `mode = "generated"` writes local cloudflared artifacts only. `mode = "managed"` also requires `api_token_ref` and `account_id_ref`; init resolves those secret refs in memory, creates the tunnel, writes `tunnel_id` back to config before later provisioning steps, pushes the remote tunnel config, creates or updates the proxied CNAME, and writes an owner-only tunnel token env artifact. `exposure` accepts only `tunnel`, and `cloudflared_deployment` is `host`, `docker`, or `external` (default `host`); both are validated only when `enabled = true`.
 
 ## MCP Servers
 

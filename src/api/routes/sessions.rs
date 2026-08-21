@@ -50,6 +50,7 @@ pub(crate) struct SessionResponse {
     agent_session_id: String,
     created_at: String,
     updated_at: String,
+    #[schemars(extend("enum" = ["active", "available", "closed"]))]
     status: String,
     agent_id: String,
     cwd: String,
@@ -100,6 +101,7 @@ pub(crate) struct PromptStatusResponse {
     session_id: String,
     created_at: String,
     updated_at: String,
+    #[schemars(extend("enum" = ["pending", "running", "completed", "errored", "cancelled", "stalled"]))]
     status: String,
     stop_reason: Option<String>,
     error_code: Option<String>,

@@ -228,7 +228,7 @@ pub(in crate::cli::init) fn mcp_settlement_from_probe(
         .filter(|name| {
             !ignored.iter().any(|feature| {
                 feature.feature == crate::runtime::agent::acp_bridge::IGNORED_FEATURE_MCP_SERVER
-                    && feature.target == *name
+                    && feature.value == *name
             })
         })
         .collect::<Vec<_>>();

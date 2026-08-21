@@ -59,7 +59,8 @@ pub(super) async fn rollback_failed_apply(
         .is_err()
     {
         let rollback_failed =
-            queue_rollback_retry(state, operation_id, "native_config_rollback_failed").await?;
+            queue_rollback_retry(state, operation_id, "agent.native_config_rollback_failed")
+                .await?;
         if persist_operation_record(state, operation_id).await.is_err() {
             tracing::warn!(
                 operation_id,
@@ -84,9 +85,12 @@ pub(super) async fn rollback_failed_apply(
     .await?;
     if persist_operation_record(state, operation_id).await.is_err() {
         replace_operation_record(state, applying_record.clone()).await?;
-        let retry =
-            queue_rollback_retry(state, operation_id, "native_config_journal_persist_failed")
-                .await?;
+        let retry = queue_rollback_retry(
+            state,
+            operation_id,
+            "agent.native_config_journal_persist_failed",
+        )
+        .await?;
         if persist_operation_record(state, operation_id).await.is_err() {
             tracing::warn!(
                 operation_id,
@@ -133,7 +137,7 @@ pub(super) async fn resume_pending_rollback_locked(
     let prior_config = marker
         .prior_config
         .as_ref()
-        .ok_or_else(|| native_error("native_config_journal_invalid"))?;
+        .ok_or_else(|| native_error("agent.native_config_journal_invalid"))?;
     if marker.prior_was_running {
         let blockers = {
             let store = state.state.lock().await;
@@ -166,9 +170,10 @@ pub(super) async fn resume_pending_rollback_locked(
     .await
     .is_err()
     {
-        let operation = queue_rollback_retry(state, operation_id, "native_config_rollback_failed")
-            .await?
-            .operation;
+        let operation =
+            queue_rollback_retry(state, operation_id, "agent.native_config_rollback_failed")
+                .await?
+                .operation;
         persist_operation_record(state, operation_id).await?;
         return Ok(ApplyStoredOutcome::Blocked(operation));
     }
@@ -180,9 +185,12 @@ pub(super) async fn resume_pending_rollback_locked(
     };
     if persist_operation_record(state, operation_id).await.is_err() {
         replace_operation_record(state, marker.clone()).await?;
-        let retry =
-            queue_rollback_retry(state, operation_id, "native_config_journal_persist_failed")
-                .await?;
+        let retry = queue_rollback_retry(
+            state,
+            operation_id,
+            "agent.native_config_journal_persist_failed",
+        )
+        .await?;
         if persist_operation_record(state, operation_id).await.is_err() {
             tracing::warn!(
                 operation_id,
@@ -214,7 +222,7 @@ pub(super) async fn finalize_failed_rollback(
     })
     .await?;
     if record.prior_config.is_none() {
-        return Err(native_error("native_config_rollback_failed"));
+        return Err(native_error("agent.native_config_rollback_failed"));
     }
     Ok(record.operation)
 }

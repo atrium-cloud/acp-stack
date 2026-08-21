@@ -328,7 +328,7 @@ fn run_serve_with_euid(args: ServeArgs, mode: ServeMode, process_euid: u32) -> R
             let payload = serde_json::json!({
                 "prompts": reconciled_prompts,
                 "commands": reconciled_command_ids.len(),
-                "permissions_canceled": perm_canceled + command_permissions_canceled,
+                "permissions_cancelled": perm_canceled + command_permissions_canceled,
                 "permissions_expired": perm_expired,
                 "command_ids": command_ids,
                 "command_ids_truncated": command_ids_truncated,

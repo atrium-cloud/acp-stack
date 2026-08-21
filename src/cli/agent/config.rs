@@ -100,7 +100,7 @@ fn failed_operation_code(operation: &Value) -> Option<String> {
         operation
             .pointer("/error/code")
             .and_then(Value::as_str)
-            .unwrap_or("native_config_import_failed")
+            .unwrap_or("agent.native_config_import_failed")
             .to_owned()
     })
 }
@@ -216,7 +216,7 @@ fn read_native_config(path: &Path) -> Result<(String, String)> {
     }
     if metadata.len() > IMPORT_SIZE_LIMIT as u64 {
         return Err(StackError::NativeAgentConfig {
-            code: "native_config_too_large",
+            code: "agent.native_config_too_large",
         });
     }
     let filename = path
@@ -249,10 +249,10 @@ mod tests {
     fn failed_operation_preserves_typed_error_code() {
         let operation = serde_json::json!({
             "status": "failed",
-            "error": { "code": "native_config_rollback_failed" }
+            "error": { "code": "agent.native_config_rollback_failed" }
         });
         let code = failed_operation_code(&operation).expect("failed code");
         let error = StackError::NativeAgentConfigOperationFailed { code };
-        assert_eq!(error.error_code(), "native_config_rollback_failed");
+        assert_eq!(error.error_code(), "agent.native_config_rollback_failed");
     }
 }

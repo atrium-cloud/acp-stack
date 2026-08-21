@@ -49,7 +49,11 @@ impl EdgeConfig {
 #[serde(deny_unknown_fields)]
 pub struct CloudflareEdgeConfig {
     pub enabled: bool,
+    /// Tunnel provisioning mode: `"generated"` or `"managed"`. Validated only
+    /// when `enabled = true`; any string is accepted while disabled.
     pub mode: String,
+    /// Public exposure method. `"tunnel"` is the only accepted value. Validated
+    /// only when `enabled = true`; any string is accepted while disabled.
     pub exposure: String,
     pub hostname: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,6 +64,9 @@ pub struct CloudflareEdgeConfig {
     pub tunnel_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_id: Option<String>,
+    /// Where `cloudflared` runs: `"host"` (default), `"docker"`, or
+    /// `"external"`. Validated only when `enabled = true`; any string is
+    /// accepted while disabled.
     #[serde(default = "default_cloudflared_deployment")]
     pub cloudflared_deployment: String,
 }

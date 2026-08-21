@@ -187,7 +187,7 @@ Findings include severity (`warning` or `critical`), code, message, an optional 
 
 Every self-check invocation through `GET /v1/security/check` is persisted into the `security_runs` and `security_findings` tables in the local state database. The check response includes the generated `run_id` so operators can correlate the live response with the durable row. Runs are kept indefinitely; pruning is left to future operations work.
 
-- `GET /v1/security/history?limit=N&after=<run-id>` (admin tier) returns recent runs newest-first with aggregate counts and a `next_cursor` for keyset pagination. `limit` defaults to 20 and is capped at 500.
+- `GET /v1/security/history?limit=N&after=<run-id>` (admin tier) returns recent runs newest-first with aggregate counts and a `next_cursor` for keyset pagination while a full page is returned — it is `null` once a short page comes back (an exactly-full final page still yields a cursor whose follow-up returns no rows). `limit` defaults to 20 and is capped at 500 (values above it are clamped, not rejected).
 - `GET /v1/security/history/{run_id}` (admin tier) returns a single run with its findings in emit order, replaying exactly what `acps security check` produced.
 - `acps security history [--limit N] [--after <id>] [--json]` prints the operator table or raw JSON.
 - `acps security show <run-id> [--json]` prints the run summary plus its findings.
@@ -196,7 +196,7 @@ Aggregate run status is `succeeded` when no critical findings were emitted and `
 
 ### Finding categories and remediation coverage
 
-Every emitted finding carries a non-empty remediation. The category-to-code map for the operator-facing self-check is:
+Every newly emitted finding carries a non-empty remediation; findings replayed from history written before this guarantee may lack one. The category-to-code map for the operator-facing self-check is:
 
 - key: `auth.failure_threshold`
 - file permission: `runtime.path_ownership`, `runtime.path_mode_loose`, `runtime.path_uninspectable`, `runtime.workspace_not_writable`

@@ -30,8 +30,12 @@ use crate::config::SecurityHttpConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct RequestOrigin {
+    #[schemars(extend("enum" = ["unknown", "cloudflare", "trusted_proxy_missing_cloudflare", "direct", "trusted_proxy"]))]
     pub origin_kind: String,
+    #[schemars(extend("enum" = ["cloudflare", null]))]
     pub proxy_provider: Option<String>,
+    /// Redacted to `null` whenever a `RequestOrigin` is serialized into an API
+    /// response; only persisted event payloads carry the resolved address.
     pub client_ip: Option<String>,
     pub country_code: Option<String>,
     pub region_code: Option<String>,

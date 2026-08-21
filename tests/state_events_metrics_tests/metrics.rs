@@ -50,7 +50,7 @@ fn metrics_summary_aggregates_within_window() {
         .unwrap();
     assert_eq!(summary.commands.total, 1);
     assert_eq!(summary.security.auth_failures, 1);
-    assert_eq!(summary.api_connections.request_count, Some(2));
+    assert_eq!(summary.api_connections.request_count, 2);
     assert_eq!(
         summary
             .api_connections
@@ -322,6 +322,6 @@ fn metrics_summary_returns_zero_when_window_misses_all_rows() {
     // instrumentation is part of the running binary, so a quiet window reports
     // an explicit zero.
     assert!(summary.usage.tokens_input.is_none());
-    assert_eq!(summary.api_connections.request_count, Some(0));
+    assert_eq!(summary.api_connections.request_count, 0);
     assert_eq!(summary.prompt_failures.total, 0);
 }

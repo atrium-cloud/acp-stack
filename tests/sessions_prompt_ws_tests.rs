@@ -729,3 +729,176 @@ async fn stalled_prompt_suppresses_late_terminal_failure_event() {
         "late terminal failure event should be suppressed after stalled transition, got {events:?}"
     );
 }
+
+#[tokio::test]
+async fn operator_disconnect_records_supplied_reason() {
+    let harness = Harness::spawn().await;
+    let request = websocket_request(&harness, session_bearer());
+    let (_ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("websocket connects");
+    let connection_id = await_ws_connection_id(&harness, &[]).await;
+
+    let response = http()
+        .post(format!("{}/v1/ws/connections/disconnect", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({
+            "connection_ids": [connection_id.clone()],
+            "reason": "rotating the session key"
+        }))
+        .send()
+        .await
+        .expect("disconnect");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("disconnect json");
+    assert_eq!(body["data"]["requested"], 1);
+
+    let payload = await_disconnect_payload(&harness, &connection_id).await;
+    // The machine cause and the operator's text are separate fields: the
+    // former stays a closed vocabulary, the latter is free-form.
+    assert_eq!(payload["reason"], "operator_disconnect");
+    assert_eq!(payload["operator_reason"], "rotating the session key");
+}
+
+#[tokio::test]
+async fn operator_disconnect_without_reason_omits_operator_reason() {
+    let harness = Harness::spawn().await;
+    let request = websocket_request(&harness, session_bearer());
+    let (_ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("websocket connects");
+    let connection_id = await_ws_connection_id(&harness, &[]).await;
+
+    let response = http()
+        .post(format!("{}/v1/ws/connections/disconnect", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({ "connection_ids": [connection_id.clone()] }))
+        .send()
+        .await
+        .expect("disconnect");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("disconnect json");
+    assert_eq!(body["data"]["requested"], 1);
+
+    let payload = await_disconnect_payload(&harness, &connection_id).await;
+    assert_eq!(payload["reason"], "operator_disconnect");
+    assert!(
+        payload.get("operator_reason").is_none(),
+        "operator_reason must be absent, not null, when no reason was supplied: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn session_disconnect_records_supplied_reason() {
+    let harness = Harness::spawn().await;
+    let session_id = create_session(&harness).await;
+    let topic = format!("sessions.{session_id}");
+    let request = websocket_request(&harness, session_bearer());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("websocket connects");
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({ "type": "subscribe", "topics": [topic.clone()] })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("subscribe");
+    let connection_id = await_ws_connection_id(&harness, std::slice::from_ref(&topic)).await;
+
+    let response = http()
+        .post(format!("{}/v1/ws/sessions/disconnect", harness.base_url))
+        .header("Authorization", admin_bearer())
+        .json(&json!({
+            "session_ids": [session_id],
+            "reason": "session handed to another operator"
+        }))
+        .send()
+        .await
+        .expect("disconnect");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("disconnect json");
+    assert_eq!(body["data"]["requested"], 1);
+
+    let payload = await_disconnect_payload(&harness, &connection_id).await;
+    assert_eq!(payload["reason"], "operator_disconnect");
+    assert_eq!(
+        payload["operator_reason"],
+        "session handed to another operator"
+    );
+}
+
+/// Poll `/v1/ws/connections` until a connection carrying every topic in
+/// `required_topics` is listed, and return its id. Neither the registry insert
+/// nor the subscribe frame is observable the moment the client call returns —
+/// both are processed on the server's connection task.
+async fn await_ws_connection_id(harness: &Harness, required_topics: &[String]) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let listing: Value = http()
+            .get(format!("{}/v1/ws/connections", harness.base_url))
+            .header("Authorization", session_bearer())
+            .send()
+            .await
+            .expect("ws connections")
+            .json()
+            .await
+            .expect("ws connections json");
+        let matched = listing["data"]["connections"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|connection| {
+                let topics: Vec<&str> = connection["topics"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                required_topics
+                    .iter()
+                    .all(|required| topics.contains(&required.as_str()))
+            })
+            .and_then(|connection| connection["connection_id"].as_str())
+            .map(str::to_owned);
+        if let Some(connection_id) = matched {
+            return connection_id;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "websocket connection never registered"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll the durable event log for the `ws.client_disconnected` row belonging to
+/// `connection_id` and return its payload.
+async fn await_disconnect_payload(harness: &Harness, connection_id: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        {
+            let state = harness.state.lock().await;
+            let events = state
+                .query_events(acp_stack::state::LogFilter {
+                    limit: 50,
+                    kind: Some("ws.client_disconnected"),
+                    ..acp_stack::state::LogFilter::default()
+                })
+                .expect("query ws lifecycle events");
+            let matched = events.iter().find_map(|event| {
+                let payload: Value =
+                    serde_json::from_str(&event.payload_json).expect("payload json");
+                (payload["connection_id"] == connection_id).then_some(payload)
+            });
+            if let Some(payload) = matched {
+                return payload;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ws.client_disconnected was never persisted for {connection_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

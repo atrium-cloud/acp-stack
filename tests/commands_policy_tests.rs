@@ -383,7 +383,7 @@ async fn canceling_command_awaiting_permission_settles_both_rows() {
     assert_eq!(cancel_response.status(), StatusCode::OK);
 
     let final_body = wait_for_terminal(&harness, &command_id).await;
-    assert_eq!(final_body["data"]["status"], "canceled");
+    assert_eq!(final_body["data"]["status"], "cancelled");
 
     // No orphan: the permission row settles with the command...
     let permission_response = auth(session_client().get(format!(
@@ -395,7 +395,7 @@ async fn canceling_command_awaiting_permission_settles_both_rows() {
     .expect("send");
     assert_eq!(permission_response.status(), StatusCode::OK);
     let permission_body: Value = permission_response.json().await.expect("json");
-    assert_eq!(permission_body["data"]["status"], "canceled");
+    assert_eq!(permission_body["data"]["status"], "cancelled");
 
     // ...and approving it afterwards is a state conflict, not a bad request.
     let approve_response = auth(session_client().post(format!(
@@ -429,15 +429,15 @@ async fn canceling_command_awaiting_permission_settles_both_rows() {
         .expect("events array");
     let canceled_event = events
         .iter()
-        .find(|event| event["kind"] == "permission.canceled")
-        .expect("permission.canceled event in command stream");
+        .find(|event| event["kind"] == "permission.cancelled")
+        .expect("permission.cancelled event in command stream");
     let payload: Value = serde_json::from_str(
         canceled_event["payload_json"]
             .as_str()
             .expect("payload_json"),
     )
     .expect("payload json");
-    assert_eq!(payload["reason"], "command-canceled");
+    assert_eq!(payload["reason"], "command-cancelled");
     assert_eq!(payload["command_id"], command_id);
 }
 

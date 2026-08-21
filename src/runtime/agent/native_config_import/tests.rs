@@ -91,7 +91,10 @@ fn default_selection_preserves_canonical_provider_and_selected_values_replace_it
     )
     .err()
     .expect("model/provider mismatch");
-    assert_eq!(error.error_code(), "native_config_model_provider_mismatch");
+    assert_eq!(
+        error.error_code(),
+        "agent.native_config_model_provider_mismatch"
+    );
 }
 
 #[test]
@@ -210,7 +213,10 @@ fn executable_acknowledgement_is_revision_bound() {
     )
     .err()
     .expect("ack required");
-    assert_eq!(error.error_code(), "native_config_executable_ack_required");
+    assert_eq!(
+        error.error_code(),
+        "agent.native_config_executable_ack_required"
+    );
 
     let error = validate_native_config_selection(
         &inspected,
@@ -221,7 +227,7 @@ fn executable_acknowledgement_is_revision_bound() {
         },
     )
     .unwrap_err();
-    assert_eq!(error.error_code(), "native_config_revision_mismatch");
+    assert_eq!(error.error_code(), "agent.native_config_revision_mismatch");
 }
 
 #[test]
@@ -251,7 +257,10 @@ fn opencode_lsp_requires_executable_acknowledgement() {
     )
     .err()
     .expect("LSP command requires acknowledgement");
-    assert_eq!(error.error_code(), "native_config_executable_ack_required");
+    assert_eq!(
+        error.error_code(),
+        "agent.native_config_executable_ack_required"
+    );
 }
 
 #[test]
@@ -287,7 +296,10 @@ fn executable_mcp_acknowledgement_is_required_only_when_selected() {
     )
     .err()
     .expect("selected executable candidate requires acknowledgement");
-    assert_eq!(error.error_code(), "native_config_executable_ack_required");
+    assert_eq!(
+        error.error_code(),
+        "agent.native_config_executable_ack_required"
+    );
 }
 
 #[test]
@@ -528,7 +540,7 @@ fn claude_snapshot_journal_excludes_auth_state_and_digest_ignores_it() {
                 target_id: "claude-code".to_owned(),
             },
             error: Some(NativeConfigOperationError {
-                code: "native_config_rollback_failed".to_owned(),
+                code: "agent.native_config_rollback_failed".to_owned(),
             }),
         },
         transaction_fingerprint: "fingerprint".to_owned(),

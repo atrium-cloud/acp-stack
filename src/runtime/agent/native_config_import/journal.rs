@@ -32,7 +32,7 @@ impl NativeConfigImportState {
         let draft = self
             .drafts
             .get(&selection.revision)
-            .ok_or_else(|| native_error("native_config_inspection_expired"))?;
+            .ok_or_else(|| native_error("agent.native_config_inspection_expired"))?;
         prepare_native_config_import(&draft.inspected, selection, current, home)
     }
 
@@ -152,7 +152,7 @@ pub fn persist_native_config_operation(
                     file_existed: *file_existed,
                     value: *value,
                 },
-                _ => return Err(native_error("native_config_journal_invalid")),
+                _ => return Err(native_error("agent.native_config_journal_invalid")),
             };
             Ok(DurableSnapshot { kind, content })
         })
@@ -191,10 +191,10 @@ pub fn persist_native_config_operation(
         cancelled: record.cancelled,
         phase: record.phase,
     };
-    let content =
-        serde_json::to_vec(&durable).map_err(|_| native_error("native_config_journal_invalid"))?;
+    let content = serde_json::to_vec(&durable)
+        .map_err(|_| native_error("agent.native_config_journal_invalid"))?;
     if content.len() > JOURNAL_FILE_LIMIT {
-        return Err(native_error("native_config_journal_too_large"));
+        return Err(native_error("agent.native_config_journal_too_large"));
     }
     atomic_write_owner_only(&path, &content)
 }
@@ -234,7 +234,7 @@ pub fn load_native_config_operation_journal(
             continue;
         }
         if records.len() >= MAX_MANIFEST_PATHS {
-            return Err(native_error("native_config_journal_too_many"));
+            return Err(native_error("agent.native_config_journal_too_many"));
         }
         prepare_owner_managed_file_path(&journal_dir, &path)?;
         let metadata = std::fs::metadata(&path).map_err(|source| StackError::ConfigRead {
@@ -242,17 +242,17 @@ pub fn load_native_config_operation_journal(
             source,
         })?;
         if metadata.len() > JOURNAL_FILE_LIMIT as u64 {
-            return Err(native_error("native_config_journal_too_large"));
+            return Err(native_error("agent.native_config_journal_too_large"));
         }
         let content = std::fs::read(&path).map_err(|source| StackError::ConfigRead {
             path: path.clone(),
             source,
         })?;
         let durable: DurableOperationRecord = serde_json::from_slice(&content)
-            .map_err(|_| native_error("native_config_journal_invalid"))?;
+            .map_err(|_| native_error("agent.native_config_journal_invalid"))?;
         let expected_id = path.file_stem().and_then(|value| value.to_str());
         if expected_id != Some(durable.operation.operation_id.as_str()) {
-            return Err(native_error("native_config_journal_invalid"));
+            return Err(native_error("agent.native_config_journal_invalid"));
         }
         let pending_recovery = matches!(
             durable.phase,
@@ -289,17 +289,17 @@ fn inflate_durable_record(
             if prepared.revision != durable.operation.revision
                 || prepared.harness != durable.operation.harness
             {
-                return Err(native_error("native_config_journal_invalid"));
+                return Err(native_error("agent.native_config_journal_invalid"));
             }
             let native_content = base64::engine::general_purpose::STANDARD
                 .decode(prepared.native_content_base64)
-                .map_err(|_| native_error("native_config_journal_invalid"))?;
+                .map_err(|_| native_error("agent.native_config_journal_invalid"))?;
             if native_content.len() > IMPORT_SIZE_LIMIT {
-                return Err(native_error("native_config_journal_too_large"));
+                return Err(native_error("agent.native_config_journal_too_large"));
             }
             let canonical_config = crate::config::load_config_from_str(&prepared.canonical_toml)?;
             if canonical_config.agent.id != prepared.harness {
-                return Err(native_error("native_config_journal_invalid"));
+                return Err(native_error("agent.native_config_journal_invalid"));
             }
             let transaction_fingerprint = native_config_transaction_fingerprint(
                 &prepared.harness,
@@ -308,7 +308,7 @@ fn inflate_durable_record(
                 &prepared.selected_managed_field_ids,
             );
             if transaction_fingerprint != durable.transaction_fingerprint {
-                return Err(native_error("native_config_journal_invalid"));
+                return Err(native_error("agent.native_config_journal_invalid"));
             }
             Ok(PreparedNativeConfigImport {
                 revision: prepared.revision,
@@ -329,7 +329,7 @@ fn inflate_durable_record(
         NativeConfigOperationStatus::Queued
     ) && prepared.is_none()
     {
-        return Err(native_error("native_config_journal_invalid"));
+        return Err(native_error("agent.native_config_journal_invalid"));
     }
     let rollback_snapshots = durable
         .rollback_snapshots
@@ -344,7 +344,9 @@ fn inflate_durable_record(
                             .map(|content| {
                                 base64::engine::general_purpose::STANDARD
                                     .decode(content)
-                                    .map_err(|_| native_error("native_config_journal_invalid"))
+                                    .map_err(|_| {
+                                        native_error("agent.native_config_journal_invalid")
+                                    })
                             })
                             .transpose()?,
                     )
@@ -359,7 +361,7 @@ fn inflate_durable_record(
                     file_existed,
                     value,
                 },
-                _ => return Err(native_error("native_config_journal_invalid")),
+                _ => return Err(native_error("agent.native_config_journal_invalid")),
             };
             Ok(NativeConfigPathSnapshot {
                 path: path_for_snapshot_kind(
@@ -438,7 +440,7 @@ fn inflate_durable_record(
         }
     };
     if !phase_valid {
-        return Err(native_error("native_config_journal_invalid"));
+        return Err(native_error("agent.native_config_journal_invalid"));
     }
     Ok(NativeConfigOperationRecord {
         operation: durable.operation,
@@ -466,7 +468,7 @@ fn native_config_journal_path(journal_dir: &Path, operation_id: &str) -> Result<
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
     {
-        return Err(native_error("native_config_operation_invalid"));
+        return Err(native_error("agent.native_config_operation_invalid"));
     }
     Ok(journal_dir.join(format!("{operation_id}.json")))
 }
@@ -485,7 +487,7 @@ fn snapshot_kind_for_path(
     } else if harness == "claude-code" && path == home.join(".claude.json") {
         Ok(DurableSnapshotKind::ClaudeState)
     } else {
-        Err(native_error("native_config_journal_invalid"))
+        Err(native_error("agent.native_config_journal_invalid"))
     }
 }
 
@@ -502,7 +504,9 @@ fn path_for_snapshot_kind(
         DurableSnapshotKind::ClaudeState if harness == "claude-code" => {
             Ok(home.join(".claude.json"))
         }
-        DurableSnapshotKind::ClaudeState => Err(native_error("native_config_journal_invalid")),
+        DurableSnapshotKind::ClaudeState => {
+            Err(native_error("agent.native_config_journal_invalid"))
+        }
     }
 }
 

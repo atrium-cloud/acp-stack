@@ -105,8 +105,7 @@ async fn bootstrap_ensure_envelope(req: Request<Body>, next: Next) -> Response {
     }
 
     let (parts, _body) = response.into_parts();
-    let mut new_response = ApiError::new(error_code_for_status(status), message_for_status(status))
-        .into_response_with(status);
+    let mut new_response = ApiError::for_status(status).into_response_with(status);
     for (name, value) in parts.headers.iter() {
         if name == http::header::CONTENT_TYPE || name == http::header::CONTENT_LENGTH {
             continue;
@@ -273,9 +272,9 @@ async fn session_native_config_cancel_handler(
         Ok(Err(error)) => error.into_response(),
         Err(error) => StackError::NativeAgentConfig {
             code: if error.is_panic() {
-                "native_config_lock_task_panicked"
+                "agent.native_config_lock_task_panicked"
             } else {
-                "native_config_lock_task_cancelled"
+                "agent.native_config_lock_task_cancelled"
             },
         }
         .into_response(),
@@ -491,32 +490,4 @@ pub(super) struct ClientFrame {
 
 fn api_error(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Response {
     ApiError::new(code, message).into_response_with(status)
-}
-
-fn error_code_for_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "request.invalid",
-        StatusCode::UNAUTHORIZED => "auth.invalid",
-        StatusCode::FORBIDDEN => "auth.forbidden",
-        StatusCode::NOT_FOUND => "not_found",
-        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
-        StatusCode::PAYLOAD_TOO_LARGE => "request.too_large",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "request.unsupported_media_type",
-        _ if status.is_server_error() => "internal_error",
-        _ => "request.rejected",
-    }
-}
-
-fn message_for_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "bad request",
-        StatusCode::UNAUTHORIZED => "authentication required",
-        StatusCode::FORBIDDEN => "forbidden",
-        StatusCode::NOT_FOUND => "not found",
-        StatusCode::METHOD_NOT_ALLOWED => "method not allowed",
-        StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds configured size limit",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported media type",
-        _ if status.is_server_error() => "internal server error",
-        _ => "request rejected",
-    }
 }

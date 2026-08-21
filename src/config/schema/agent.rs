@@ -4,12 +4,34 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = require_array_targets)]
 pub struct ArrayConfig {
     #[serde(default)]
     pub enabled: bool,
     pub primary_target: String,
+    /// At least one target. Every load path that reads an `[array]` block
+    /// rejects an empty list; `primary_target` must name one of these ids.
     #[serde(default)]
+    #[schemars(extend("minItems" = 1))]
     pub targets: Vec<ArrayTargetConfig>,
+}
+
+/// Mark `targets` required in the derived `ArrayConfig` JSON Schema. schemars
+/// omits it because of `#[serde(default)]`, which exists so in-memory
+/// construction and [`ArrayConfig::from_agent`] can fill the list themselves.
+/// On disk the field is mandatory: an `[array]` block with no
+/// `[[array.targets]]` entry fails every merge path in the loader.
+fn require_array_targets(schema: &mut schemars::Schema) {
+    const REQUIRED_FIELD: &str = "targets";
+    let object = schema.ensure_object();
+    match object.get_mut("required") {
+        Some(serde_json::Value::Array(required)) => {
+            required.push(serde_json::Value::String(REQUIRED_FIELD.to_owned()));
+        }
+        _ => {
+            object.insert("required".to_owned(), serde_json::json!([REQUIRED_FIELD]));
+        }
+    }
 }
 
 impl ArrayConfig {
@@ -69,6 +91,8 @@ pub struct AgentConfig {
     pub env: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,
+    /// Process restart policy: `"never"` or `"on-crash"`.
+    #[schemars(extend("enum" = ["never", "on-crash"]))]
     pub restart: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
@@ -219,7 +243,9 @@ pub struct AgentAdapterConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstallConfig {
+    /// Install mechanism. `"shell"` is the only operator-facing value.
     #[serde(rename = "type")]
+    #[schemars(extend("enum" = ["shell"]))]
     pub install_type: String,
     pub creates: String,
     #[serde(skip_serializing_if = "Option::is_none")]

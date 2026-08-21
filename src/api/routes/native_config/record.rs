@@ -28,7 +28,7 @@ pub(super) async fn mark_failed(state: &AppState, operation_id: &str, code: &str
     let record = imports
         .operations
         .get_mut(operation_id)
-        .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
     record.operation.status = NativeConfigOperationStatus::Failed;
     record.operation.agent_config = native_config_projection(&current);
     record.operation.restart.queued = false;
@@ -52,7 +52,7 @@ pub(super) async fn operation_record(
         .operations
         .get(operation_id)
         .cloned()
-        .ok_or_else(|| native_error("native_config_operation_not_found"))
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))
 }
 
 pub(super) async fn mutate_operation_record(
@@ -64,7 +64,7 @@ pub(super) async fn mutate_operation_record(
     let record = imports
         .operations
         .get_mut(operation_id)
-        .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
     mutate(record);
     Ok(record.clone())
 }
@@ -78,7 +78,7 @@ pub(super) async fn replace_operation_record(
     let current = imports
         .operations
         .get_mut(&operation_id)
-        .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
     *current = record;
     Ok(())
 }
@@ -127,7 +127,7 @@ pub(super) async fn finalize_applied_cancellation(
     })
     .await?;
     if record.prior_config.is_none() {
-        return Err(native_error("native_config_rollback_failed"));
+        return Err(native_error("agent.native_config_rollback_failed"));
     }
     Ok(record.operation)
 }
@@ -140,7 +140,7 @@ pub(super) async fn persist_operation_record(state: &AppState, operation_id: &st
         .operations
         .get(operation_id)
         .cloned()
-        .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
     persist_operation_record_value(state, &record)?;
     if !operation_phase_is_pending(record.phase) {
         spawn_terminal_operation_cleanup(state.clone(), operation_id.to_owned());

@@ -3,12 +3,19 @@ use super::*;
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct StartInitResponse {
     pub(super) session_id: String,
+    /// Always `running`: the session is published only after it is created in
+    /// that state, so no other value is observable here.
+    #[schemars(extend("const" = "running"))]
     pub(super) status: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct SimpleSessionResponse {
     pub(super) session_id: String,
+    /// Session status after the request was applied. `cancelled`, `closed`, and
+    /// `errored` are terminal, as is `completed_awaiting_ack` until the result
+    /// is acknowledged.
+    #[schemars(extend("enum" = ["running", "waiting_for_input", "completed_awaiting_ack", "errored", "cancelled", "closed"]))]
     pub(super) status: String,
 }
 
@@ -21,6 +28,10 @@ pub(super) struct InitEventsResponse {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub(super) struct InitStatusResponse {
     pub(super) session_id: String,
+    /// Current session status. `waiting_for_input` is the steady state while a
+    /// prompt is pending; `cancelled`, `closed`, and `errored` are terminal, as
+    /// is `completed_awaiting_ack` until the result is acknowledged.
+    #[schemars(extend("enum" = ["running", "waiting_for_input", "completed_awaiting_ack", "errored", "cancelled", "closed"]))]
     pub(super) status: String,
     /// The full ordered signal stream, identical to the `signals` field of
     /// `hello`, so a REST poller and a socket client fold the same input into
@@ -47,6 +58,9 @@ pub(super) struct PublicInputRequest {
     /// order here is the wire order; `kind` sits beside `request_id` so a
     /// client can route on it before parsing the rest.
     pub(super) kind: &'static str,
+    /// Rendering hint. Unlike `kind`, this set is closed: a client may switch
+    /// on it exhaustively.
+    #[schemars(extend("enum" = ["select", "searchable_select", "confirm", "text", "password", "native_config_review"]))]
     pub(super) style: String,
     pub(super) prompt: String,
     pub(super) required: bool,

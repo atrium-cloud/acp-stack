@@ -132,7 +132,7 @@ pub(super) fn print_init_summary(flow: &InitFlow) {
             };
             println!(
                 "ignored: {label} \"{}\" ({}) — not supported by this agent's adapter/harness; left in acps-config.toml and skipped at runtime",
-                ignored.target, ignored.capability
+                ignored.value, ignored.capability
             );
         }
     }

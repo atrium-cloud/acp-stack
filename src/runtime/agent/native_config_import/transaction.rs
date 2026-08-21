@@ -27,7 +27,7 @@ pub fn native_config_path(harness: &str, home: &Path) -> Result<PathBuf> {
         "amp" => Ok(home.join(".config").join("amp").join("settings.json")),
         "pi" => Ok(home.join(".pi").join("agent").join("settings.json")),
         "goose" => Ok(home.join(".config").join("goose").join("config.yaml")),
-        _ => Err(native_error("native_config_harness_unsupported")),
+        _ => Err(native_error("agent.native_config_harness_unsupported")),
     }
 }
 
@@ -115,13 +115,13 @@ pub fn capture_native_config_snapshots(
                 Ok(content) => {
                     let root = match serde_json::from_slice::<JsonValue>(&content) {
                         Ok(JsonValue::Object(root)) => root,
-                        _ => return Err(native_error("native_config_claude_state_invalid")),
+                        _ => return Err(native_error("agent.native_config_claude_state_invalid")),
                     };
                     let value = match root.get("hasCompletedOnboarding") {
                         Some(JsonValue::Bool(value)) => Some(*value),
                         None => None,
                         Some(_) => {
-                            return Err(native_error("native_config_claude_state_invalid"));
+                            return Err(native_error("agent.native_config_claude_state_invalid"));
                         }
                     };
                     NativeConfigSnapshotContent::ClaudeOnboarding {
@@ -198,7 +198,7 @@ pub fn restore_native_config_snapshots(
                     })?;
                 let mut root = match serde_json::from_slice::<JsonValue>(&content) {
                     Ok(JsonValue::Object(root)) => root,
-                    _ => return Err(native_error("native_config_claude_state_invalid")),
+                    _ => return Err(native_error("agent.native_config_claude_state_invalid")),
                 };
                 match value {
                     Some(value) => {
@@ -248,13 +248,13 @@ pub fn validate_native_config_file_digests(
     home: &Path,
 ) -> Result<()> {
     if digests.is_empty() {
-        return Err(native_error("native_config_rollback_conflict"));
+        return Err(native_error("agent.native_config_rollback_conflict"));
     }
     for expected in digests {
         prepare_owner_managed_file_path(home, &expected.path)?;
         let actual = native_config_file_digest(&expected.path, home)?;
         if actual != expected.sha256 {
-            return Err(native_error("native_config_rollback_conflict"));
+            return Err(native_error("agent.native_config_rollback_conflict"));
         }
     }
     Ok(())
@@ -276,13 +276,13 @@ fn native_config_file_digest(path: &Path, home: &Path) -> Result<Option<String>>
     }
     let root = match serde_json::from_slice::<JsonValue>(&content) {
         Ok(JsonValue::Object(root)) => root,
-        _ => return Err(native_error("native_config_claude_state_invalid")),
+        _ => return Err(native_error("agent.native_config_claude_state_invalid")),
     };
     let owned_value = match root.get("hasCompletedOnboarding") {
         Some(JsonValue::Bool(true)) => b"true".as_slice(),
         Some(JsonValue::Bool(false)) => b"false".as_slice(),
         None => b"missing".as_slice(),
-        Some(_) => return Err(native_error("native_config_claude_state_invalid")),
+        Some(_) => return Err(native_error("agent.native_config_claude_state_invalid")),
     };
     Ok(Some(sha256_hex(owned_value)))
 }

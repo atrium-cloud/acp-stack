@@ -18,7 +18,7 @@
 //! Tier: pending reads + approve/deny decisions are session-tier per
 //! `docs/specs/security.md:20`. The durability is in SQLite; the in-memory
 //! state is purely the waiter map. On daemon restart `reconcile_orphaned_permissions`
-//! marks pending command rows `expired` and pending ACP rows `canceled` so
+//! marks pending command rows `expired` and pending ACP rows `cancelled` so
 //! clients never see them stay pending forever.
 
 use std::collections::HashMap;
@@ -99,7 +99,9 @@ pub struct PermissionRequestView {
     pub id: String,
     pub created_at: String,
     pub updated_at: String,
+    #[schemars(extend("enum" = ["pending", "approved", "denied", "expired", "cancelled"]))]
     pub status: String,
+    #[schemars(extend("enum" = ["command", "acp"]))]
     pub source: String,
     pub requester: Option<String>,
     pub subject_id: Option<String>,
@@ -141,6 +143,8 @@ pub struct PermissionDecisionView {
     pub id: String,
     pub request_id: String,
     pub created_at: String,
+    /// The settling status; never `pending`.
+    #[schemars(extend("enum" = ["approved", "denied", "expired", "cancelled"]))]
     pub decision: String,
     pub deciding_principal: Option<String>,
     pub reason: Option<String>,
@@ -318,7 +322,7 @@ impl PermissionService {
         let kind = match outcome {
             PermissionOutcome::Approved { .. } => "permission.approved",
             PermissionOutcome::Denied { .. } => "permission.denied",
-            PermissionOutcome::Canceled { .. } => "permission.canceled",
+            PermissionOutcome::Canceled { .. } => "permission.cancelled",
             PermissionOutcome::Expired => "permission.expired",
         };
         let mut payload = json!({
@@ -488,7 +492,7 @@ async fn persist_and_publish_permission_event(
         "permission.created" => "permission requested",
         "permission.approved" => "permission approved",
         "permission.denied" => "permission denied",
-        "permission.canceled" => "permission canceled",
+        "permission.cancelled" => "permission cancelled",
         "permission.expired" => "permission expired",
         _ => "permission event",
     };
@@ -687,7 +691,7 @@ mod tests {
         };
         let canceled = rows
             .iter()
-            .find(|row| row.kind == "permission.canceled")
+            .find(|row| row.kind == "permission.cancelled")
             .expect("canceled event");
         let payload: serde_json::Value =
             serde_json::from_str(&canceled.payload_json).expect("payload json");
@@ -711,7 +715,7 @@ mod tests {
         assert!(
             by_command
                 .iter()
-                .any(|row| row.kind == "permission.canceled"),
+                .any(|row| row.kind == "permission.cancelled"),
             "cancellation must be filterable by command_id"
         );
     }
@@ -745,7 +749,7 @@ mod tests {
         };
         let canceled = rows
             .iter()
-            .find(|row| row.kind == "permission.canceled")
+            .find(|row| row.kind == "permission.cancelled")
             .expect("canceled event");
         let payload: serde_json::Value =
             serde_json::from_str(&canceled.payload_json).expect("payload json");

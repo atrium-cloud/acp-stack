@@ -40,7 +40,12 @@ pub(crate) struct SessionsStatusResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionStatusSessionResponse {
     id: String,
+    /// Derived per request from the durable row plus in-flight prompt and
+    /// permission state; a wider set than the durable `status`.
+    #[schemars(extend("enum" = ["closed", "available", "permission_required", "idle", "working", "prompt_sent", "done", "stopped", "error", "cancelled"]))]
     state: &'static str,
+    /// Durable session status as stored.
+    #[schemars(extend("enum" = ["active", "available", "closed"]))]
     status: String,
     agent_id: String,
     cwd: String,
@@ -58,6 +63,7 @@ pub(crate) struct SessionStatusPromptResponse {
     id: String,
     created_at: String,
     updated_at: String,
+    #[schemars(extend("enum" = ["pending", "running", "completed", "errored", "cancelled", "stalled"]))]
     status: String,
     stop_reason: Option<String>,
     error_code: Option<String>,

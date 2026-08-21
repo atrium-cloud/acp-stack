@@ -408,7 +408,7 @@ fn init_reports_unsupported_mcp_transport_as_ignored() {
         .expect("ignored_features present");
     assert_eq!(ignored.len(), 1, "{body}");
     assert_eq!(ignored[0]["feature"], "mcp.server");
-    assert_eq!(ignored[0]["target"], "remote");
+    assert_eq!(ignored[0]["value"], "remote");
     assert_eq!(ignored[0]["capability"], "mcpCapabilities.http");
 
     // Keep-in-config contract: the declaration is a faithful record and stays.

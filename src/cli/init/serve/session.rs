@@ -122,7 +122,7 @@ impl HostedInitManager {
             };
         };
         match session.status().as_str() {
-            "canceled" => Err(StackError::InvalidParam {
+            "cancelled" => Err(StackError::InvalidParam {
                 field: "init",
                 reason: "hosted init session was cancelled".to_owned(),
             }),
@@ -518,7 +518,7 @@ impl HostedInitSession {
         let mut result_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
         {
             let mut inner = lock_unpoisoned(&self.inner);
-            if matches!(inner.status.as_str(), "canceled" | "closed") {
+            if matches!(inner.status.as_str(), "cancelled" | "closed") {
                 result_json.zeroize();
                 return;
             }
@@ -587,7 +587,7 @@ impl HostedInitSession {
             if is_terminal_status(&inner.status) {
                 return;
             }
-            inner.status = "canceled".to_owned();
+            inner.status = "cancelled".to_owned();
             inner.pending_input = None;
             inner.pending_response = None;
             Some(self.emit_event_locked(
@@ -612,7 +612,7 @@ impl HostedInitSession {
     pub(super) fn expire(&self, reason: &str) {
         let Some(frame) = ({
             let mut inner = lock_unpoisoned(&self.inner);
-            if matches!(inner.status.as_str(), "closed" | "canceled") {
+            if matches!(inner.status.as_str(), "closed" | "cancelled") {
                 return;
             }
             if inner.status == "errored" {
@@ -640,7 +640,7 @@ impl HostedInitSession {
             if let Some(mut result) = inner.result_json.take() {
                 result.zeroize();
             }
-            inner.status = "canceled".to_owned();
+            inner.status = "cancelled".to_owned();
             inner.pending_input = None;
             inner.pending_response = None;
             Some(self.emit_event_locked(
@@ -794,7 +794,7 @@ impl HostedInitSession {
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
-        "canceled" | "closed" | "errored" | "completed_awaiting_ack"
+        "cancelled" | "closed" | "errored" | "completed_awaiting_ack"
     )
 }
 
@@ -803,7 +803,7 @@ fn is_terminal_status(status: &str) -> bool {
 /// the thread, since no client will be asked to answer anything again.
 fn terminal_status_error(inner: &SessionInner) -> Result<()> {
     match inner.status.as_str() {
-        "canceled" | "closed" => Err(StackError::InvalidParam {
+        "cancelled" | "closed" => Err(StackError::InvalidParam {
             field: "init",
             reason: "hosted init session was cancelled".to_owned(),
         }),

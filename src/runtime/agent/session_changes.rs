@@ -85,6 +85,7 @@ impl Default for SessionChangeLimits {
     }
 }
 
+/// ACP `_meta` passed through unmodified; the shape is the agent's, not ours.
 #[derive(Clone, Debug, schemars::JsonSchema)]
 pub(crate) struct CapturedMeta(Box<RawValue>);
 
@@ -137,6 +138,9 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 #[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum CapturedToolCallContent {
+    /// `oldText`, `newText`, and `_meta` mirror ACP's `ToolCallContent::Diff`
+    /// wire shape verbatim; the camelCase spelling is intentional fidelity to
+    /// the protocol, not drift from this API's snake_case convention.
     Diff {
         path: Box<Path>,
         /// Deliberately serialized as `null` for creates instead of omitted.

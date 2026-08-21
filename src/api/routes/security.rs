@@ -19,7 +19,11 @@ const DEFAULT_HISTORY_LIMIT: u32 = 20;
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecurityCheckResponse {
     pub(crate) run_id: String,
+    #[schemars(extend("enum" = ["succeeded", "failed"]))]
     pub(crate) status: String,
+    /// Orthogonal to `status`: `ok` is false when any finding was emitted,
+    /// `status` is `failed` only on a critical one. A warnings-only run is
+    /// `status: "succeeded"` with `ok: false`.
     pub(crate) ok: bool,
     pub(crate) findings: Vec<crate::security::SecurityFinding>,
     pub(crate) auth_failure_count: i64,
@@ -30,7 +34,11 @@ pub(crate) struct SecurityRunSummary {
     pub(crate) id: String,
     pub(crate) started_at: String,
     pub(crate) finished_at: String,
+    #[schemars(extend("enum" = ["succeeded", "failed"]))]
     pub(crate) status: String,
+    /// Orthogonal to `status`: `ok` is false when any finding was emitted,
+    /// `status` is `failed` only on a critical one. A warnings-only run is
+    /// `status: "succeeded"` with `ok: false`.
     pub(crate) ok: bool,
     pub(crate) critical_count: i64,
     pub(crate) warning_count: i64,
@@ -55,7 +63,8 @@ impl From<SecurityRunRecord> for SecurityRunSummary {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SecurityHistoryResponse {
     pub(crate) runs: Vec<SecurityRunSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always emitted; `null` on the final page. Matches the `/v1/logs/*`
+    /// cursor shape so a client can page every list surface the same way.
     pub(crate) next_cursor: Option<String>,
 }
 
@@ -67,6 +76,8 @@ pub(crate) struct SecurityHistoryShowResponse {
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SecurityHistoryQuery {
+    /// Defaults to 20 when omitted. Values above 500 are silently clamped to
+    /// 500, not rejected.
     pub(crate) limit: Option<u32>,
     pub(crate) after: Option<String>,
     pub(crate) since: Option<String>,

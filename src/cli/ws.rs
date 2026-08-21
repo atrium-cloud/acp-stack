@@ -70,19 +70,23 @@ pub(super) fn run_ws_command(command: WsCommand, output: OutputFormat) -> Result
                 }
                 let key =
                     resolve_admin_key(args.admin_key.clone(), std::io::stdin().is_terminal())?;
+                // No default `reason`: the event's `operator_reason` field is
+                // meaningful only when a human actually supplied one, and a
+                // boilerplate value would duplicate the machine cause on every
+                // CLI-driven disconnect.
                 let (path, body) = if !args.connection_id.is_empty() {
                     (
                         "/v1/ws/connections/disconnect",
-                        serde_json::json!({"connection_ids": args.connection_id, "reason": "operator-request"}),
+                        serde_json::json!({"connection_ids": args.connection_id}),
                     )
                 } else {
                     (
                         "/v1/ws/sessions/disconnect",
-                        serde_json::json!({"session_ids": args.session_id, "reason": "operator-request"}),
+                        serde_json::json!({"session_ids": args.session_id}),
                     )
                 };
-                let body = daemon_request(&base_url, CliMethod::Post, path, &key, Some(&body))
-                    .await?;
+                let body =
+                    daemon_request(&base_url, CliMethod::Post, path, &key, Some(&body)).await?;
                 let requested = body
                     .get("data")
                     .and_then(|data| data.get("requested"))

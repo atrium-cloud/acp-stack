@@ -16,7 +16,7 @@ async fn agent_switch_requires_admin_key() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", session_bearer())
-        .json(&serde_json::json!({ "agent": "kimi" }))
+        .json(&serde_json::json!({ "agent_id": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -52,7 +52,7 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "kimi" }))
+        .json(&serde_json::json!({ "agent_id": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -72,7 +72,10 @@ async fn agent_switch_installs_target_and_returns_model_choices() {
         body["data"]["install"]["outcome"].as_str(),
         Some("installed" | "already_present")
     ));
-    assert_eq!(body["data"]["models"][0], "kimi/kimi-k3");
+    // Same `{value, display_name?}` shape `/v1/models` serves; ACP-advertised
+    // values carry no display name.
+    assert_eq!(body["data"]["models"][0]["value"], "kimi/kimi-k3");
+    assert!(body["data"]["models"][0].get("display_name").is_none());
 
     let written = std::fs::read_to_string(&harness.config_path).expect("read config");
     assert!(written.contains(r#"id = "kimi""#));
@@ -109,7 +112,7 @@ async fn agent_switch_preserves_mcp_runtime_config() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "kimi" }))
+        .json(&serde_json::json!({ "agent_id": "kimi" }))
         .send()
         .await
         .expect("send switch");
@@ -147,7 +150,7 @@ async fn agent_switch_preserves_adapter_metadata_and_skips_model_follow_up() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "amp" }))
+        .json(&serde_json::json!({ "agent_id": "amp" }))
         .send()
         .await
         .expect("send switch");

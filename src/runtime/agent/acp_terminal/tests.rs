@@ -305,7 +305,7 @@ async fn kill_finalizes_command_row_as_canceled() {
     let status = handle.wait_for_exit().await;
     assert_eq!(status.signal.as_deref(), Some("SIGTERM"));
 
-    // Kill-intent exits finalize as `canceled` with no exit status,
+    // Kill-intent exits finalize as `cancelled` with no exit status,
     // matching the gateway's operator-cancel mapping; the ACP-side
     // TerminalExitStatus above still carries the signal.
     let guard = state.lock().await;
@@ -316,16 +316,16 @@ async fn kill_finalizes_command_row_as_canceled() {
         })
         .expect("query commands");
     assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].status, "canceled");
+    assert_eq!(commands[0].status, "cancelled");
     assert_eq!(commands[0].exit_status, None);
     let events = guard
         .query_events(crate::state::LogFilter {
             limit: 10,
-            kind: Some("command.canceled"),
+            kind: Some("command.cancelled"),
             ..Default::default()
         })
         .expect("query events");
-    assert_eq!(events.len(), 1, "expected one command.canceled event");
+    assert_eq!(events.len(), 1, "expected one command.cancelled event");
 }
 
 #[tokio::test]

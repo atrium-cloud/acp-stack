@@ -40,7 +40,7 @@ async fn native_config_inspect_request_layer_defers_to_content_cap() {
         .expect("send inspect");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let body: Value = response.json().await.expect("inspect json");
-    assert_eq!(body["error"]["code"], "native_config_too_large");
+    assert_eq!(body["error"]["code"], "agent.native_config_too_large");
 
     // Past the whole-request cap: rejected at the body-limit layer. The
     // middleware response may not be JSON, so assert on status and only on
@@ -64,7 +64,7 @@ async fn native_config_inspect_request_layer_defers_to_content_cap() {
             let text = response.text().await.unwrap_or_default();
             if let Ok(body) = serde_json::from_str::<Value>(&text) {
                 assert_ne!(
-                    body["error"]["code"], "native_config_too_large",
+                    body["error"]["code"], "agent.native_config_too_large",
                     "oversize request should be rejected by the body-limit layer, not the content cap: {body}"
                 );
             }
@@ -93,7 +93,7 @@ async fn native_config_inspect_request_layer_defers_to_content_cap() {
                 .json()
                 .await
                 .expect("inspect json after oversize send abort");
-            assert_eq!(body["error"]["code"], "native_config_too_large");
+            assert_eq!(body["error"]["code"], "agent.native_config_too_large");
         }
     }
 }
@@ -196,7 +196,7 @@ async fn native_config_cancel_rolls_back_and_guards_digest() {
     assert_eq!(guarded_status, StatusCode::CONFLICT, "body: {guarded_body}");
     assert_eq!(
         guarded_body["error"]["code"],
-        "native_config_rollback_conflict"
+        "agent.native_config_rollback_conflict"
     );
 }
 

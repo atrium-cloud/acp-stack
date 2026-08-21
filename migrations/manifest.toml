@@ -135,3 +135,9 @@ id = 23
 name = "commands_origin"
 sqlite_file = "023_commands_origin.sqlite.sql"
 postgres_file = "023_commands_origin.postgres.sql"
+
+[[migration]]
+id = 24
+name = "terminal_status_spelling"
+sqlite_file = "024_terminal_status_spelling.sqlite.sql"
+postgres_file = "024_terminal_status_spelling.postgres.sql"
