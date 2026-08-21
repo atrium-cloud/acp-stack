@@ -50,6 +50,30 @@ restart = "on-crash"
     .expect("config parses")
 }
 
+#[test]
+fn kimi_lane_reconcile_swaps_credential_declarations() {
+    let mut config = resolver_config("kimi");
+    config.agent.env = vec!["KIMI_API_KEY".to_owned(), "EXTRA_REF".to_owned()];
+    config.agent.provider = Some(mapped_provider("moonshotai", None));
+
+    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    assert_eq!(config.agent.env, ["EXTRA_REF", "MOONSHOT_API_KEY"]);
+
+    config.agent.provider = None;
+    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    assert_eq!(config.agent.env, ["EXTRA_REF", "KIMI_API_KEY"]);
+}
+
+#[test]
+fn kimi_lane_reconcile_leaves_other_agents_alone() {
+    let mut config = resolver_config("opencode");
+    config.agent.env = vec!["KIMI_API_KEY".to_owned()];
+    config.agent.provider = Some(mapped_provider("moonshotai", None));
+
+    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    assert_eq!(config.agent.env, ["KIMI_API_KEY"]);
+}
+
 fn mapped_provider(provider_id: &str, api_key_ref: Option<&str>) -> AgentProviderConfig {
     AgentProviderConfig {
         id: provider_id.to_owned(),

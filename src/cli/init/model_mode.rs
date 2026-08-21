@@ -7,7 +7,7 @@ use crate::dev_gates::{
 };
 use crate::error::{Result, StackError};
 use crate::runtime::agent::acp_bridge::AgentSessionConfigCategory;
-use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
+use crate::runtime::agent::acp_bridge::{KIMI_CODE_AGENT_ID, kimi_default_model_for_provider};
 use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
 use crate::runtime::agent::model_discovery::{
     advertised_values_for_category, fetch_session_config, resolve_advertised_model_value,
@@ -188,11 +188,28 @@ pub(super) fn configure_model_and_mode_for_init(
     // before the mode lane may spawn the harness, which is what makes that
     // spawn legal for kimi at all.
     let mut model_lane_resolved = false;
-    if entry.set_model && config.agent.id == KIMI_CODE_AGENT_ID && args.model.is_none() {
-        if config.agent.model.is_none() {
+    if entry.set_model
+        && config.agent.id == KIMI_CODE_AGENT_ID
+        && args.model.is_none()
+        && config.agent.provider.is_some()
+    {
+        let model_settled = config.agent.model.is_some()
+            || config
+                .agent
+                .provider
+                .as_ref()
+                .is_some_and(|provider| provider.model.is_some());
+        if !model_settled {
+            // The default differs per provider: the subscription tier ships
+            // `kimi-for-coding`, which does not exist on the Moonshot platform.
+            let provider_id = config
+                .agent
+                .provider
+                .as_ref()
+                .map(|provider| provider.id.as_str());
             write_model_into_config(
                 config,
-                KIMI_CODE_DEFAULT_MODEL.to_owned(),
+                kimi_default_model_for_provider(provider_id).to_owned(),
                 entry.set_provider,
             );
             outcome.model_action = ModelModeAction::Set;

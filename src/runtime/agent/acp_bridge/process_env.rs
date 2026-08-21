@@ -3,20 +3,87 @@ use super::*;
 use crate::runtime::agent::agent_headless_config::HERMES_AGENT_ID;
 
 pub(crate) const KIMI_CODE_AGENT_ID: &str = "kimi";
-pub(super) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
+pub(crate) const KIMI_API_KEY_ENV: &str = "KIMI_API_KEY";
 pub(super) const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
 pub(super) const KIMI_MODEL_NAME_ENV: &str = "KIMI_MODEL_NAME";
 pub(super) const KIMI_MODEL_BASE_URL_ENV: &str = "KIMI_MODEL_BASE_URL";
+pub(super) const KIMI_MODEL_PROVIDER_TYPE_ENV: &str = "KIMI_MODEL_PROVIDER_TYPE";
+pub(super) const KIMI_MODEL_MAX_CONTEXT_SIZE_ENV: &str = "KIMI_MODEL_MAX_CONTEXT_SIZE";
+pub(super) const KIMI_MODEL_MAX_OUTPUT_SIZE_ENV: &str = "KIMI_MODEL_MAX_OUTPUT_SIZE";
+pub(super) const KIMI_MODEL_DISPLAY_NAME_ENV: &str = "KIMI_MODEL_DISPLAY_NAME";
 // Kimi Code requires a model before its ACP process can initialize. Init pins
 // this default into config when `--model` is not passed, and the launch env
-// falls back to it when a hand-edited config omits `agent.model`. It is the
+// falls back to it when a hand-edited config omits the model. It is the
 // one id available on every subscription tier, whereas `k3` is gated to
 // Moderato and above.
 pub(crate) const KIMI_CODE_DEFAULT_MODEL: &str = "kimi-for-coding";
-// Kimi's provider default points at the general Moonshot API. Pinning the
-// first-party coding endpoint is the boundary that keeps this catalog entry
-// scoped to Kimi Code rather than exposing an undeclared custom-provider lane.
+// The Moonshot platform bills per token and has its own model catalog, so the
+// subscription-tier default does not exist there.
+pub(crate) const KIMI_MOONSHOT_DEFAULT_MODEL: &str = "kimi-k3";
 pub(super) const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+pub(super) const KIMI_CODE_GLOBAL_BASE_URL: &str = "https://api.kimi.ai/coding/v1";
+pub(super) const KIMI_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
+pub(super) const KIMI_MOONSHOT_CN_BASE_URL: &str = "https://api.moonshot.cn/v1";
+// Alias ids of the "Kimi For Coding" providers.toml row. `[agent.provider]`
+// stores whichever alias the operator selected, so the launch-env branch must
+// recognize all of them; a test cross-checks this list against the embedded
+// provider mapping.
+pub(super) const KIMI_SUBSCRIPTION_PROVIDER_IDS: [&str; 5] = [
+    "kimi-coding",
+    "kimi-for-coding",
+    "kimi-coding-plan",
+    "kimi",
+    "kimi-code",
+];
+pub(super) const KIMI_SUBSCRIPTION_GLOBAL_PROVIDER_ID: &str = "kimi-coding-global";
+pub(super) const KIMI_MOONSHOT_PROVIDER_ID: &str = "moonshotai";
+pub(super) const KIMI_MOONSHOT_CN_PROVIDER_ID: &str = "moonshotai-cn";
+
+/// The (base URL, default api-key env ref, default model) triple the Kimi
+/// launch env derives from the configured provider. `None` (no
+/// `[agent.provider]`) keeps the historical implicit default: the
+/// first-party subscription endpoint.
+pub(crate) fn kimi_provider_profile(
+    provider_id: Option<&str>,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match provider_id {
+        None => Some((
+            KIMI_CODE_BASE_URL,
+            KIMI_API_KEY_ENV,
+            KIMI_CODE_DEFAULT_MODEL,
+        )),
+        Some(id) if KIMI_SUBSCRIPTION_PROVIDER_IDS.contains(&id) => Some((
+            KIMI_CODE_BASE_URL,
+            KIMI_API_KEY_ENV,
+            KIMI_CODE_DEFAULT_MODEL,
+        )),
+        Some(KIMI_SUBSCRIPTION_GLOBAL_PROVIDER_ID) => Some((
+            KIMI_CODE_GLOBAL_BASE_URL,
+            KIMI_API_KEY_ENV,
+            KIMI_CODE_DEFAULT_MODEL,
+        )),
+        Some(KIMI_MOONSHOT_PROVIDER_ID) => Some((
+            KIMI_MOONSHOT_BASE_URL,
+            "MOONSHOT_API_KEY",
+            KIMI_MOONSHOT_DEFAULT_MODEL,
+        )),
+        Some(KIMI_MOONSHOT_CN_PROVIDER_ID) => Some((
+            KIMI_MOONSHOT_CN_BASE_URL,
+            "MOONSHOT_API_KEY",
+            KIMI_MOONSHOT_DEFAULT_MODEL,
+        )),
+        Some(_) => None,
+    }
+}
+
+pub(crate) fn kimi_default_model_for_provider(provider_id: Option<&str>) -> &'static str {
+    // The unmapped-provider fallback is only reachable for custom providers,
+    // and every custom-provider write path requires an explicit model, so the
+    // fallback value is never launched.
+    kimi_provider_profile(provider_id)
+        .map(|(_, _, model)| model)
+        .unwrap_or(KIMI_CODE_DEFAULT_MODEL)
+}
 
 // acps owns MCP composition: this opt-out keeps Hermes' own config.yaml MCP
 // servers from launching into acps-managed sessions. The value must be
@@ -49,6 +116,38 @@ pub(super) fn build_agent_process_env(
         return Ok(env);
     }
 
+    let provider = agent.provider.as_ref();
+    let custom = provider.and_then(|provider| provider.custom.as_ref());
+    // Resolve the lane before the runtime-managed guard so every error names
+    // the credential ref the active lane actually reads.
+    let (base_url, api_key_ref, default_model) = if let Some(custom) = custom {
+        let Some(api_key_ref) = provider.and_then(|provider| provider.api_key_ref.as_deref())
+        else {
+            return Err(StackError::AgentInitializeFailed {
+                reason: "Kimi Code custom provider requires [agent.provider].api_key_ref"
+                    .to_owned(),
+            });
+        };
+        (custom.base_url.as_str(), api_key_ref, None)
+    } else {
+        let provider_id = provider.map(|provider| provider.id.as_str());
+        let Some((base_url, default_api_key_ref, default_model)) =
+            kimi_provider_profile(provider_id)
+        else {
+            return Err(StackError::AgentInitializeFailed {
+                reason: format!(
+                    "Kimi Code does not support provider `{}`; supported providers are the Kimi For Coding subscription ({}, {KIMI_SUBSCRIPTION_GLOBAL_PROVIDER_ID}), the Moonshot platform ({KIMI_MOONSHOT_PROVIDER_ID}, {KIMI_MOONSHOT_CN_PROVIDER_ID}), and custom providers",
+                    provider_id.unwrap_or_default(),
+                    KIMI_SUBSCRIPTION_PROVIDER_IDS.join(", "),
+                ),
+            });
+        };
+        let api_key_ref = provider
+            .and_then(|provider| provider.api_key_ref.as_deref())
+            .unwrap_or(default_api_key_ref);
+        (base_url, api_key_ref, Some(default_model))
+    };
+
     if let Some(name) = env
         .keys()
         .filter(|name| name.starts_with("KIMI_MODEL_"))
@@ -56,36 +155,65 @@ pub(super) fn build_agent_process_env(
     {
         return Err(StackError::AgentInitializeFailed {
             reason: format!(
-                "Kimi Code launch env `{name}` is runtime-managed; configure only `{KIMI_API_KEY_ENV}` in [agent].env"
+                "Kimi Code launch env `{name}` is runtime-managed; configure only `{api_key_ref}` in [agent].env"
             ),
         });
     }
 
     let api_key = env
-        .remove(KIMI_API_KEY_ENV)
+        .remove(api_key_ref)
         .ok_or_else(|| StackError::AgentInitializeFailed {
             reason: format!(
-                "Kimi Code requires `{KIMI_API_KEY_ENV}` in [agent].env so acp-stack can construct its headless launch environment"
+                "Kimi Code requires `{api_key_ref}` in [agent].env so acp-stack can construct its headless launch environment"
             ),
         })?;
     if api_key.trim().is_empty() {
         return Err(StackError::AgentInitializeFailed {
-            reason: format!("Kimi Code secret `{KIMI_API_KEY_ENV}` must not be empty"),
+            reason: format!("Kimi Code secret `{api_key_ref}` must not be empty"),
         });
     }
-    let model = agent.model.as_deref().unwrap_or(KIMI_CODE_DEFAULT_MODEL);
+    // Root-first, matching the supervisor's model-selection precedence; the
+    // CLI write paths clear the losing slot so only hand-edited configs can
+    // populate both.
+    let Some(model) = agent
+        .model
+        .as_deref()
+        .or_else(|| provider.and_then(|provider| provider.model.as_deref()))
+        .or(default_model)
+    else {
+        return Err(StackError::AgentInitializeFailed {
+            reason: "Kimi Code custom provider requires a model in [agent.provider]".to_owned(),
+        });
+    };
     if model.trim().is_empty() || model.len() != model.trim().len() {
         return Err(StackError::AgentInitializeFailed {
-            reason: "Kimi Code requires a non-empty, trimmed agent.model".to_owned(),
+            reason: "Kimi Code requires a non-empty, trimmed model".to_owned(),
         });
     }
 
     env.insert(KIMI_MODEL_API_KEY_ENV.to_owned(), api_key);
     env.insert(KIMI_MODEL_NAME_ENV.to_owned(), model.to_owned());
-    env.insert(
-        KIMI_MODEL_BASE_URL_ENV.to_owned(),
-        KIMI_CODE_BASE_URL.to_owned(),
-    );
+    env.insert(KIMI_MODEL_BASE_URL_ENV.to_owned(), base_url.to_owned());
+    if let Some(custom) = custom {
+        env.insert(
+            KIMI_MODEL_PROVIDER_TYPE_ENV.to_owned(),
+            custom.api.as_kimi_provider_type().to_owned(),
+        );
+        env.insert(
+            KIMI_MODEL_MAX_CONTEXT_SIZE_ENV.to_owned(),
+            custom.context.to_string(),
+        );
+        env.insert(
+            KIMI_MODEL_MAX_OUTPUT_SIZE_ENV.to_owned(),
+            custom.output_max_tokens.to_string(),
+        );
+        if let Some(model_name) = custom.model_name.as_deref() {
+            env.insert(
+                KIMI_MODEL_DISPLAY_NAME_ENV.to_owned(),
+                model_name.to_owned(),
+            );
+        }
+    }
     Ok(env)
 }
 
@@ -136,6 +264,244 @@ mod tests {
             Some(KIMI_CODE_BASE_URL)
         );
         assert!(!prepared.contains_key(KIMI_API_KEY_ENV));
+    }
+
+    fn kimi_agent_with_custom_provider(api: crate::config::CustomProviderApi) -> AgentConfig {
+        let mut agent = kimi_agent(None);
+        agent.model = None;
+        agent.env = vec!["CUSTOM_API_KEY".to_owned()];
+        agent.provider = Some(crate::config::AgentProviderConfig {
+            id: "myprovider".to_owned(),
+            model: Some("my-model".to_owned()),
+            api_key_ref: Some("CUSTOM_API_KEY".to_owned()),
+            custom: Some(crate::config::AgentCustomProviderConfig {
+                name: "My Provider".to_owned(),
+                base_url: "https://api.myprovider.example/v1".to_owned(),
+                api,
+                model_name: Some("My Model".to_owned()),
+                context: 131072,
+                output_max_tokens: 32768,
+            }),
+        });
+        agent
+    }
+
+    #[test]
+    fn kimi_process_env_custom_provider_maps_wire_to_provider_type() {
+        use crate::config::CustomProviderApi;
+        for (api, provider_type) in [
+            (CustomProviderApi::ChatCompletions, "openai"),
+            (CustomProviderApi::AnthropicMessages, "anthropic"),
+            (CustomProviderApi::Responses, "openai_responses"),
+        ] {
+            let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
+            let agent = kimi_agent_with_custom_provider(api);
+
+            let prepared = build_agent_process_env(&agent, env).expect("Kimi custom env");
+
+            assert_eq!(
+                prepared
+                    .get(KIMI_MODEL_PROVIDER_TYPE_ENV)
+                    .map(String::as_str),
+                Some(provider_type)
+            );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+                Some("https://api.myprovider.example/v1")
+            );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_API_KEY_ENV).map(String::as_str),
+                Some("secret")
+            );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_NAME_ENV).map(String::as_str),
+                Some("my-model")
+            );
+            assert_eq!(
+                prepared
+                    .get(KIMI_MODEL_MAX_CONTEXT_SIZE_ENV)
+                    .map(String::as_str),
+                Some("131072")
+            );
+            assert_eq!(
+                prepared
+                    .get(KIMI_MODEL_MAX_OUTPUT_SIZE_ENV)
+                    .map(String::as_str),
+                Some("32768")
+            );
+            assert_eq!(
+                prepared
+                    .get(KIMI_MODEL_DISPLAY_NAME_ENV)
+                    .map(String::as_str),
+                Some("My Model")
+            );
+            assert!(!prepared.contains_key("CUSTOM_API_KEY"));
+        }
+    }
+
+    #[test]
+    fn kimi_process_env_custom_provider_requires_model() {
+        let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
+        let mut agent =
+            kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
+        agent.provider.as_mut().expect("provider set").model = None;
+
+        let error =
+            build_agent_process_env(&agent, env).expect_err("custom without model must fail");
+        assert!(error.to_string().contains("requires a model"), "{error}");
+    }
+
+    #[test]
+    fn kimi_process_env_root_model_wins_over_provider_model() {
+        let env = HashMap::from([("CUSTOM_API_KEY".to_owned(), "secret".to_owned())]);
+        let mut agent =
+            kimi_agent_with_custom_provider(crate::config::CustomProviderApi::default());
+        agent.model = Some("root-model".to_owned());
+
+        let prepared = build_agent_process_env(&agent, env).expect("Kimi custom env");
+        assert_eq!(
+            prepared.get(KIMI_MODEL_NAME_ENV).map(String::as_str),
+            Some("root-model")
+        );
+    }
+
+    fn kimi_agent_with_provider(provider_id: &str, api_key_ref: Option<&str>) -> AgentConfig {
+        let mut agent = kimi_agent(None);
+        agent.env = vec![
+            api_key_ref
+                .unwrap_or(if provider_id.starts_with("moonshotai") {
+                    "MOONSHOT_API_KEY"
+                } else {
+                    KIMI_API_KEY_ENV
+                })
+                .to_owned(),
+        ];
+        agent.provider = Some(crate::config::AgentProviderConfig {
+            id: provider_id.to_owned(),
+            model: None,
+            api_key_ref: api_key_ref.map(str::to_owned),
+            custom: None,
+        });
+        agent
+    }
+
+    #[test]
+    fn kimi_process_env_moonshot_provider_targets_platform_endpoint() {
+        for (provider_id, base_url) in [
+            (KIMI_MOONSHOT_PROVIDER_ID, KIMI_MOONSHOT_BASE_URL),
+            (KIMI_MOONSHOT_CN_PROVIDER_ID, KIMI_MOONSHOT_CN_BASE_URL),
+        ] {
+            let env = HashMap::from([("MOONSHOT_API_KEY".to_owned(), "secret".to_owned())]);
+            let agent = kimi_agent_with_provider(provider_id, None);
+
+            let prepared = build_agent_process_env(&agent, env).expect("Kimi Moonshot env");
+
+            assert_eq!(
+                prepared.get(KIMI_MODEL_API_KEY_ENV).map(String::as_str),
+                Some("secret")
+            );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_NAME_ENV).map(String::as_str),
+                Some(KIMI_MOONSHOT_DEFAULT_MODEL)
+            );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+                Some(base_url)
+            );
+            assert!(!prepared.contains_key("MOONSHOT_API_KEY"));
+        }
+    }
+
+    #[test]
+    fn kimi_process_env_subscription_aliases_keep_coding_endpoint() {
+        for provider_id in KIMI_SUBSCRIPTION_PROVIDER_IDS {
+            let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+            let agent = kimi_agent_with_provider(provider_id, None);
+
+            let prepared = build_agent_process_env(&agent, env).expect("Kimi subscription env");
+
+            assert_eq!(
+                prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+                Some(KIMI_CODE_BASE_URL)
+            );
+            assert_eq!(
+                prepared.get(KIMI_MODEL_NAME_ENV).map(String::as_str),
+                Some(KIMI_CODE_DEFAULT_MODEL)
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_process_env_global_subscription_targets_global_endpoint() {
+        let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+        let agent = kimi_agent_with_provider(KIMI_SUBSCRIPTION_GLOBAL_PROVIDER_ID, None);
+
+        let prepared = build_agent_process_env(&agent, env).expect("Kimi global env");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_BASE_URL_ENV).map(String::as_str),
+            Some(KIMI_CODE_GLOBAL_BASE_URL)
+        );
+        assert_eq!(
+            prepared.get(KIMI_MODEL_API_KEY_ENV).map(String::as_str),
+            Some("secret")
+        );
+        assert_eq!(
+            prepared.get(KIMI_MODEL_NAME_ENV).map(String::as_str),
+            Some(KIMI_CODE_DEFAULT_MODEL)
+        );
+    }
+
+    #[test]
+    fn kimi_process_env_provider_model_wins_over_defaults() {
+        let env = HashMap::from([("MOONSHOT_API_KEY".to_owned(), "secret".to_owned())]);
+        let mut agent = kimi_agent_with_provider(KIMI_MOONSHOT_PROVIDER_ID, None);
+        agent.provider.as_mut().expect("provider set").model = Some("kimi-k2.5".to_owned());
+
+        let prepared = build_agent_process_env(&agent, env).expect("Kimi Moonshot env");
+
+        assert_eq!(
+            prepared.get(KIMI_MODEL_NAME_ENV).map(String::as_str),
+            Some("kimi-k2.5")
+        );
+    }
+
+    #[test]
+    fn kimi_process_env_rejects_unknown_provider() {
+        let env = HashMap::from([(KIMI_API_KEY_ENV.to_owned(), "secret".to_owned())]);
+        let agent = kimi_agent_with_provider("openrouter", None);
+
+        let error = build_agent_process_env(&agent, env).expect_err("unknown provider must fail");
+        assert!(error.to_string().contains("openrouter"), "{error}");
+    }
+
+    #[test]
+    fn kimi_subscription_alias_list_matches_embedded_provider_mapping() {
+        use crate::runtime::agent::provider_keys::providers_for_agent;
+        let subscription_ids: Vec<&str> = providers_for_agent(KIMI_CODE_AGENT_ID)
+            .into_iter()
+            .filter(|summary| summary.name == "Kimi For Coding")
+            .map(|summary| summary.id)
+            .collect();
+        assert_eq!(subscription_ids, KIMI_SUBSCRIPTION_PROVIDER_IDS);
+        for summary in providers_for_agent(KIMI_CODE_AGENT_ID) {
+            let expected_ref = if summary.name.starts_with("Kimi For Coding") {
+                KIMI_API_KEY_ENV
+            } else {
+                "MOONSHOT_API_KEY"
+            };
+            assert_eq!(
+                summary.default_api_key_ref,
+                Some(expected_ref),
+                "{}",
+                summary.id
+            );
+            assert!(
+                kimi_provider_profile(Some(summary.id)).is_some(),
+                "provider `{}` is offered to kimi but has no launch-env profile",
+                summary.id
+            );
+        }
     }
 
     #[test]

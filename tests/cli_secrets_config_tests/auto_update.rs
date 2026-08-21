@@ -5,10 +5,19 @@ use std::fs;
 #[test]
 fn init_agent_flag_updates_config_non_interactively() {
     let tempdir = tempfile::tempdir().expect("tempdir");
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
 
     acps_command()
         .env("HOME", tempdir.path())
-        .args(["dev", "init", "--agent", "kimi", "--skip-workspace-init"])
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kimi",
+            "--provider",
+            "kimi-code",
+            "--skip-workspace-init",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: Kimi Code (kimi)"));

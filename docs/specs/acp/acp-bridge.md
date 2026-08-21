@@ -10,7 +10,7 @@ The advertisement is also captured session-free: the init capability probe spawn
 
 Initialization failure prevents the agent from becoming ready and is reported in agent status.
 
-For Kimi Code, the bridge converts the encrypted `KIMI_API_KEY` ref into Kimi's process-only model API key, selected model, and first-party coding endpoint before launching `kimi acp`. Those derived values are never persisted to canonical config.
+For Kimi Code, the bridge converts the active lane's encrypted key ref into Kimi's process-only model API key, selected model, and lane endpoint (a subscription coding endpoint, a Moonshot platform endpoint, or a custom provider's base URL; a legacy config without `[agent.provider]` uses the mainland subscription endpoint) before launching `kimi acp`. Those derived values are never persisted to canonical config.
 
 For Hermes Agent, the bridge sets the process-only `HERMES_ACP_SKIP_CONFIGURED_MCP=1` before launching `hermes acp`, so MCP servers declared in Hermes' own global config never leak into acps-managed sessions; declaring that variable in `[agent].env` is rejected.
 

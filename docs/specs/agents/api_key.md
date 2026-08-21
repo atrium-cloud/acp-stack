@@ -14,7 +14,7 @@ How each harness reads resolved provider credentials:
 | Goose       | provider-native env vars plus Goose config                                             |
 | Codex       | env refs for every mapped provider, `OPENAI_API_KEY` included                           |
 | Claude Code | provider env refs exposed through Claude settings, or native cloud provider credentials |
-| Kimi Code   | stored as `KIMI_API_KEY`, translated to Kimi's process-only `KIMI_MODEL_*` contract      |
+| Kimi Code   | active lane's key ref, translated to Kimi's process-only `KIMI_MODEL_*` contract         |
 | Hermes Agent | provider-native env refs, with the model lane written to `~/.hermes/config.yaml`        |
 | Kilo Code   | reads `KILO_API_KEY` or provider-native env vars from the environment; `KILO_API_KEY` must stay declared because the harness requires the var present — init, `config import`, and `agent set --model` record an empty placeholder automatically when a provider-native credential is declared |
 
@@ -22,7 +22,7 @@ Codex requires a Responses-API-compatible upstream for any non-OpenAI provider. 
 
 Claude Code custom providers require Anthropic Messages-compatible endpoints. Google Vertex and Amazon Bedrock use Claude Code's native cloud-provider auth flow; Microsoft Foundry uses Foundry-specific Claude env refs.
 
-Kimi Code does not read `KIMI_API_KEY` directly. `acp-stack` keeps that canonical ref in encrypted storage and exposes the value to `kimi acp` as `KIMI_MODEL_API_KEY`, together with the selected model and the Kimi Code service endpoint.
+Kimi Code does not read `KIMI_API_KEY` directly. `acp-stack` keeps the active lane's ref in encrypted storage (`KIMI_API_KEY` for the Kimi For Coding subscription, `MOONSHOT_API_KEY` for the Moonshot platform, the declared `api_key_ref` for a custom provider) and exposes the value to `kimi acp` as `KIMI_MODEL_API_KEY`, together with the selected model and the lane's endpoint.
 
 Hermes Agent maps only API-key providers; Hermes' OAuth-only providers are deliberately absent from the provider mapping. The non-secret `model` block of `~/.hermes/config.yaml` is written by headless provisioning; the key itself reaches the process only through `[agent].env`. Endpoint-carrying configurations (custom providers and credential endpoint overrides) are provisioned as a managed named `providers.acps-managed` entry with `key_env` and `transport`, referenced as `model.provider: custom:acps-managed` — never as `model.base_url`.
 

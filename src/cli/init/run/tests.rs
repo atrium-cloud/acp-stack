@@ -83,11 +83,12 @@ fn registry_derivation_marks_amp_provider_and_model_inapplicable() {
 }
 
 #[test]
-fn registry_derivation_marks_kimi_provider_inapplicable_but_keeps_model() {
+fn registry_derivation_marks_kimi_provider_applicable_with_model() {
     let signals = settlement_signals_for("kimi");
     assert_eq!(
         applicability_of(&signals, InitCategory::Provider),
-        Some(false)
+        Some(true),
+        "kimi selects between the subscription and Moonshot platform lanes"
     );
     assert_eq!(applicability_of(&signals, InitCategory::Model), Some(true));
     assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));

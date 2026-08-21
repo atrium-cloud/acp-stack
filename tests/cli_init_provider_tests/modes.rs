@@ -323,7 +323,15 @@ fn init_kimi_pins_its_model_once_and_still_reaches_the_mode_lane() {
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["init", "--agent", "kimi", "--mode", "plan"])
+        .args([
+            "init",
+            "--agent",
+            "kimi",
+            "--provider",
+            "kimi-code",
+            "--mode",
+            "plan",
+        ])
         .assert()
         .success();
 
@@ -331,7 +339,14 @@ fn init_kimi_pins_its_model_once_and_still_reaches_the_mode_lane() {
         .expect("config should be readable");
     assert_eq!(config_text.matches("model = ").count(), 1);
     let config = load_config_from_str(&config_text).expect("canonical config parses");
-    assert_eq!(config.agent.model.as_deref(), Some("kimi-for-coding"));
+    assert_eq!(
+        config
+            .agent
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.model.as_deref()),
+        Some("kimi-for-coding")
+    );
     assert_eq!(config.agent.mode.as_deref(), Some("plan"));
 }
 

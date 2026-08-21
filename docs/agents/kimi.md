@@ -1,19 +1,11 @@
 # Kimi Code
 
-Kimi Code is a native ACP target. `acp-stack` launches `kimi acp`.
-
-## Headless authentication status
-
-The `Authentication required` (`-32000`) rejection that previously blocked API-key-backed ACP sessions no longer applies on current Kimi Code releases. The default `kimi acp` path (the agent-core-v2 `@moonshot-ai/acp-server` engine) accepts a config-resolved provider API key at the `session/new` auth gate without an interactive OAuth login, and the documented `KIMI_MODEL_*` environment contract synthesizes exactly such a provider from `KIMI_MODEL_API_KEY` / `KIMI_MODEL_NAME` / `KIMI_MODEL_BASE_URL` — which is the launch environment `acp-stack` constructs (see below). `acp-stack` does not automate Kimi's interactive OAuth flow, and this path does not need it.
-
-Provenance (verified against upstream `main` and `@moonshot-ai/kimi-code@0.38.0`, 2026-08-21): the agent-core-v2 engine became the default `kimi acp` surface in [PR #2627](https://github.com/MoonshotAI/kimi-code/pull/2627) (merged 2026-08-05, first shipped in the `0.34.0` release on 2026-08-06); its `session/new` gate is `ensureAuthed` in `packages/acp-server`. The legacy `acp-adapter` had received the equivalent config-provider auth fix earlier in [PR #934](https://github.com/MoonshotAI/kimi-code/pull/934) (merged 2026-07-20). The tracking issue [#1330](https://github.com/MoonshotAI/kimi-code/issues/1330) is still open and the separately proposed [PR #1570](https://github.com/MoonshotAI/kimi-code/pull/1570) was closed unmerged, so the fix arrived through a different path than the two refs we had been watching.
-
-Kimi Code is not yet listed in the README supported-harnesses table: that flip is gated on an end-to-end prompt smoke against a released build with a real key.
+Kimi Code is a native ACP target. `acp-stack` launches `kimi acp`. Authentication is headless: the `KIMI_MODEL_*` environment contract builds an in-memory provider from `KIMI_MODEL_API_KEY` / `KIMI_MODEL_NAME` / `KIMI_MODEL_BASE_URL`, which is the launch environment `acp-stack` constructs; Kimi's interactive OAuth flow is not used.
 
 ## Setup
 
 ```sh
-acps init --agent kimi
+acps init --agent kimi --provider kimi-code
 acps secrets set KIMI_API_KEY
 acps agent set --model <kimi-model-id>
 ```
@@ -28,12 +20,26 @@ args = ["acp"]
 cwd = "/workspace"
 env = ["KIMI_API_KEY"]
 restart = "on-crash"
+
+[agent.provider]
+id = "kimi-code"
 model = "k3"
 ```
 
-`KIMI_API_KEY` stays in the encrypted secret store. At launch, `acp-stack` passes its value as `KIMI_MODEL_API_KEY`, selects `agent.model` through `KIMI_MODEL_NAME`, and fixes `KIMI_MODEL_BASE_URL` to the first-party Kimi Code endpoint. Do not add `KIMI_MODEL_*` refs to `[agent].env`.
+## Providers
 
-`acps init` pins `kimi-for-coding` when `--model` is not passed because that id is available on every Kimi plan; a model already present in config is kept. K3 requires a Moderato plan or above; eligible users can select it with `acps init --agent kimi --model k3` or `acps agent set --model k3`. Model ids are accepted as supplied without ACP discovery because Kimi requires the model environment to initialize; Kimi Code validates the id when the process starts. If a hand-edited config omits `agent.model`, the runtime launches with `kimi-for-coding`. Mode values are discovered over ACP and can be selected with `acps agent set --mode <mode>`.
+Kimi Code selects between mapped provider lanes; the credential and endpoint differ per lane and are not interchangeable.
+
+- Kimi For Coding (provider ids `kimi-for-coding`, `kimi-code`, and aliases): the subscription surface at `https://api.kimi.com/coding/v1`, authenticated with `KIMI_API_KEY` (a coding-plan credential).
+- Kimi For Coding (Global) (`kimi-coding-global`): the global-region subscription surface at `https://api.kimi.ai/coding/v1`, also authenticated with `KIMI_API_KEY`.
+- Moonshot AI (`moonshotai`, or `moonshotai-cn` for the China endpoint): the pay-as-you-go platform at `https://api.moonshot.ai/v1`, authenticated with `MOONSHOT_API_KEY`. Select a lane with `acps init --agent kimi --provider <id>` or `acps agent provider use <id>`; the selection swaps the `[agent].env` credential declaration to the lane's key.
+- Custom providers: any Anthropic- or OpenAI-compatible endpoint via `--custom-provider`, with `--provider-api` `chat-completions`, `anthropic-messages`, or `responses`. The declared API maps onto Kimi Code's `KIMI_MODEL_PROVIDER_TYPE` (`openai`, `anthropic`, `openai_responses`); `responses` requires Kimi Code's v2 engine (the default). The custom base URL, context, output cap, and display name flow through the same `KIMI_MODEL_*` launch environment; model capabilities are not set and follow Kimi Code's defaults.
+
+A legacy config without `[agent.provider]` still launches on the Kimi For Coding subscription lane; all configuration surfaces now require an explicit provider selection.
+
+The api key stays in the encrypted secret store. At launch, `acp-stack` passes its value as `KIMI_MODEL_API_KEY`, selects the model through `KIMI_MODEL_NAME`, and sets `KIMI_MODEL_BASE_URL` to the selected lane's endpoint. Do not add `KIMI_MODEL_*` refs to `[agent].env`.
+
+`acps init` pins a per-lane default model when `--model` is not passed: `kimi-for-coding` on the subscription lanes (available on every Kimi plan) and `kimi-k3` on the Moonshot platform; a model already present in config is kept. K3 requires a Moderato plan or above on the subscription lanes; eligible users can select it with `acps init --agent kimi --provider kimi-code --model k3` or `acps agent set --model k3`. Model ids are accepted as supplied without ACP discovery because Kimi requires the model environment to initialize; Kimi Code validates the id when the process starts. If a hand-edited config omits the model, the runtime launches with the lane default. Mode values are discovered over ACP and can be selected with `acps agent set --mode <mode>`.
 
 Kimi Code receives configured MCP servers through ACP. Managed Agent Skills are installed into `~/.agents/skills`.
 
