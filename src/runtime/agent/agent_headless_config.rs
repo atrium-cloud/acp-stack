@@ -27,6 +27,7 @@ use crate::runtime::agent::provider_keys::{
     provider_name_for_provider_id,
 };
 
+mod antigravity;
 mod claude_code;
 mod codex;
 mod goose;
@@ -34,6 +35,7 @@ mod hermes;
 mod opencode;
 mod pi;
 
+use self::antigravity::*;
 use self::claude_code::*;
 use self::codex::*;
 use self::goose::*;
@@ -330,6 +332,15 @@ fn provision_agent_headless_config_with_previous_pi_model(
                 })
                 .collect()
         }),
+        ANTIGRAVITY_AGENT_ID => provision_antigravity_config(config, home).map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| ProvisionedAgentConfig {
+                    label: "Antigravity settings",
+                    path,
+                })
+                .collect()
+        }),
         _ => Ok(Vec::new()),
     }
 }
@@ -347,6 +358,7 @@ pub fn cleanup_agent_headless_config(
         CLAUDE_CODE_AGENT_ID => cleanup_claude_code_config(config, home, endpoint),
         "pi" => cleanup_pi_config(config, home, endpoint),
         HERMES_AGENT_ID => cleanup_hermes_config(config, home),
+        ANTIGRAVITY_AGENT_ID => cleanup_antigravity_config(config, home),
         _ => Ok(Vec::new()),
     }
 }

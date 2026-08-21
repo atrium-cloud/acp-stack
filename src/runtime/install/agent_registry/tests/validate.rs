@@ -302,6 +302,70 @@ creates = "bad"
 }
 
 #[test]
+fn validate_rejects_shell_rerun_without_a_shell_install() {
+    // The flag means "re-run the recipe", so an entry without a recipe has
+    // declared an update path that cannot exist.
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+
+[agents.harness.update]
+shell_rerun = true
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject shell_rerun without shell");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("harness.update.shell_rerun requires harness.install.shell"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_entry_sync_id_with_surrounding_whitespace() {
+    let body = r#"
+[[agents]]
+id = "bad"
+name = "Bad"
+kind = "native"
+headless_compatible = true
+sync_id = " bad-acp "
+support_doc = "docs/agents/bad.md"
+
+[agents.harness]
+id = "bad"
+
+[agents.harness.install.npm]
+package = "bad"
+creates = "bad"
+"#;
+    let err = RegistryCatalog::from_toml(body).expect_err("must reject untrimmed sync_id");
+    match err {
+        StackError::RegistryLoad { reason } => {
+            assert!(
+                reason.contains("sync_id is empty or has surrounding whitespace"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected RegistryLoad, got {other:?}"),
+    }
+}
+
+#[test]
 fn validate_rejects_blank_acp_arg() {
     // A whitespace-only argument is as unusable as an empty string.
     let body = r#"

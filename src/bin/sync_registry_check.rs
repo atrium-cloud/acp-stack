@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The embedded registry is intentionally a small curated subset. Every
-//! embedded sync id (`adapter.sync_id`, `adapter.id`, or `id`) must still exist
+//! embedded sync id (`adapter.sync_id`, `adapter.id`, entry `sync_id`, or `id`) must still exist
 //! upstream; upstream entries that are not embedded are reported for awareness
 //! but do not fail the check. Entries flagged `sync_exempt` in the catalog are
 //! excluded from the requirement but printed in their own report section so
@@ -167,6 +167,7 @@ fn sync_id_for_entry(entry: &RegistryEntry) -> &str {
         .adapter
         .as_ref()
         .map(|adapter| adapter.sync_id.as_deref().unwrap_or(adapter.id.as_str()))
+        .or(entry.sync_id.as_deref())
         .unwrap_or(entry.id.as_str())
 }
 
@@ -231,6 +232,10 @@ mod tests {
         assert!(!embedded_sync_ids(&catalog).contains(&"claude-agent-acp"));
         // Native agents sync under their plain catalog ids.
         assert!(embedded_sync_ids(&catalog).contains(&"kilo"));
+        // Unless the entry declares its own sync_id because upstream names it
+        // differently than the installed binary.
+        assert!(embedded_sync_ids(&catalog).contains(&"antigravity-acp"));
+        assert!(!embedded_sync_ids(&catalog).contains(&"antigravity"));
     }
 
     #[test]

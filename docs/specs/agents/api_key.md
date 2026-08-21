@@ -17,6 +17,7 @@ How each harness reads resolved provider credentials:
 | Kimi Code   | active lane's key ref, translated to Kimi's process-only `KIMI_MODEL_*` contract         |
 | Hermes Agent | provider-native env refs, with the model lane written to `~/.hermes/config.yaml`        |
 | Kilo Code   | reads `KILO_API_KEY` or provider-native env vars from the environment; `KILO_API_KEY` must stay declared because the harness requires the var present — init, `config import`, and `agent set --model` record an empty placeholder automatically when a provider-native credential is declared |
+| Google Antigravity | reads `GEMINI_API_KEY` (Google AI Studio) from the environment, paired with the `modelProvider: "gemini"` key headless provisioning writes into `~/.gemini/antigravity-cli/settings.json`; both are required for API-key mode |
 
 Codex requires a Responses-API-compatible upstream for any non-OpenAI provider. OpenRouter's OpenResponses (beta) endpoint is the mapped option `acps` supports today.
 

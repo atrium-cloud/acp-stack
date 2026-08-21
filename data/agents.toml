@@ -473,3 +473,101 @@ id = "kilo"
 [agents.harness.install.npm]
 package = "@kilocode/cli"
 creates = "kilo"
+
+# Google Antigravity
+
+[[agents]]
+id = "antigravity"
+name = "Google Antigravity"
+kind = "native"
+headless_compatible = true
+# Upstream publishes the official ACP server as `antigravity-acp`; the catalog
+# id doubles as the launch command, so it stays `antigravity`.
+sync_id = "antigravity-acp"
+# Auth is env-var based (GEMINI_API_KEY) against the single supported headless
+# provider (Google AI Studio), selected by the `modelProvider` key acps writes
+# into ~/.gemini/antigravity-cli/settings.json — there is nothing to select.
+set_provider = false
+# The ACP server has not been observed to advertise ACP v1 configOptions, so
+# model and mode selection stay off until the initialize response says
+# otherwise.
+set_model = false
+set_mode = false
+allow_custom_provider = false
+allow_custom_model = false
+supports_agent_skills = true
+agent_skills_install_dir = "~/.agents/skills"
+stdio_framing = "json-lines"
+website = "https://antigravity.google/docs/cli/install/"
+support_doc = "docs/agents/antigravity.md"
+testflight_prompt = "Create a file named .acp-stack-testflight.txt in the current workspace containing exactly: acp-stack testflight ok"
+testflight_expect_fs = ".acp-stack-testflight.txt"
+
+[agents.harness]
+id = "antigravity"
+# Google's ACP server enters ACP mode with this literal flag rather than an
+# `acp` subcommand; the upstream registry declares it for both Linux targets.
+acp_args = ["--uid="]
+
+[agents.harness.install.shell]
+script = '''
+set -eu
+index_url="https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
+install_dir="${HOME}/.local/share/acp-stack/antigravity"
+managed_bin="${HOME}/.local/bin"
+launcher="${managed_bin}/antigravity"
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64) platform="linux-x86_64" ;;
+    Linux:aarch64 | Linux:arm64) platform="linux-aarch64" ;;
+    *)
+        echo "Google Antigravity ships an ACP server for Linux x86_64/aarch64 only" >&2
+        exit 1
+        ;;
+esac
+mkdir -p "$managed_bin"
+# Stage next to the install dir rather than /tmp: the archive is over 500MB
+# and /tmp is RAM-backed tmpfs on many images.
+staging_root="$(dirname "$install_dir")"
+mkdir -p "$staging_root"
+work="$(mktemp -d "${staging_root}/antigravity-install.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; exit 1' INT TERM
+# Resolve the archive from the upstream ACP registry index instead of pinning
+# a dl.google.com build tag: the tag is dated and rotates, and a shell recipe
+# has no machine-checkable upstream version, so re-running install is the
+# update path.
+curl -fsSL --connect-timeout 10 --max-time 60 "$index_url" -o "${work}/registry.json"
+archive_url="$(jq -er --arg platform "$platform" \
+    '.agents[] | select(.id == "antigravity-acp") | .distribution.binary[$platform].archive' \
+    "${work}/registry.json")"
+# The recipe doubles as the update path (update.shell_rerun); the stamp lets
+# a no-change rerun skip the 500MB+ download.
+stamp="${install_dir}/.acps-archive-url"
+if [ -x "$launcher" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$archive_url" ]; then
+    echo "antigravity archive unchanged; keeping the installed build" >&2
+    exit 0
+fi
+# The generous cap only bounds a stalled transfer; the overall step budget
+# still applies.
+curl -fsSL --connect-timeout 10 --max-time 1800 "$archive_url" -o "${work}/antigravity.zip"
+rm -rf "$install_dir"
+mkdir -p "$install_dir"
+unzip -q "${work}/antigravity.zip" -d "$install_dir"
+printf '%s' "$archive_url" > "$stamp"
+test -f "${install_dir}/agy_acp_server.par"
+chmod +x "${install_dir}/agy_acp_server.par"
+# The vendor entry point is `./agy_acp_server.par` run from the extraction
+# directory, so the launcher chdir's there. ACP carries an absolute cwd per
+# session, so the process cwd does not decide where the agent writes files.
+printf '#!/bin/sh\ncd "%s"\nexec ./agy_acp_server.par "$@"\n' "$install_dir" > "$launcher"
+chmod +x "$launcher"
+test -x "$launcher"
+'''
+creates = "antigravity"
+required_tools = ["curl", "unzip", "jq"]
+
+# The .par ACP server has no update/upgrade subcommand and there is no npm or
+# GitHub Release channel, so updating means re-running the recipe; the stamp
+# check above keeps a no-change rerun cheap.
+[agents.harness.update]
+shell_rerun = true

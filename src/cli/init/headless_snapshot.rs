@@ -34,6 +34,11 @@ pub(super) fn headless_config_candidate_paths(agent_id: &str, home: &Path) -> Ve
             home.join(".pi").join("agent").join("settings.json"),
             home.join(".pi").join("agent").join("models.json"),
         ],
+        "antigravity" => vec![
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("settings.json"),
+        ],
         _ => Vec::new(),
     }
 }

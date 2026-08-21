@@ -182,6 +182,16 @@ impl RegistryCatalog {
             if let Some(github) = &entry.github {
                 github_url_from_value(&entry.id, "github", github)?;
             }
+            if let Some(sync_id) = entry.sync_id.as_deref()
+                && (sync_id.is_empty() || sync_id.trim() != sync_id)
+            {
+                return Err(StackError::RegistryLoad {
+                    reason: format!(
+                        "agent `{}` sync_id is empty or has surrounding whitespace",
+                        entry.id
+                    ),
+                });
+            }
             if let Some(expect) = entry.testflight_expect_fs.as_deref() {
                 validate_testflight_expect_fs(&entry.id, expect)?;
             }
@@ -319,6 +329,13 @@ pub struct RegistryEntry {
     /// Remove the flag once the upstream index carries the id.
     #[serde(default)]
     pub sync_exempt: bool,
+    /// Upstream ACP registry id when it differs from the catalog id. The
+    /// catalog id doubles as the launch command, so it follows the installed
+    /// binary name rather than upstream's naming (e.g. `antigravity` vs the
+    /// upstream `antigravity-acp`). Only consulted by the sync/fact-check
+    /// binaries; it has no runtime effect.
+    #[serde(default)]
+    pub sync_id: Option<String>,
     #[serde(default)]
     pub stdio_framing: RegistryStdioFraming,
     #[serde(default)]
@@ -471,6 +488,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         subagent_alias: None,
         subagent_free_models: Vec::new(),
         sync_exempt: false,
+        sync_id: None,
         stdio_framing: RegistryStdioFraming::JsonLines,
         website: None,
         github: None,

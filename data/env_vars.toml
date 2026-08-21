@@ -48,6 +48,9 @@ optional_env_vars = []
 [[api_keys]]
 env_var = "GEMINI_API_KEY"
 provider_ids = ["google"]
+# Antigravity reads the AI Studio key directly from its process env; there is
+# no provider selection, so the ref is declared per-agent.
+agent_ids = ["antigravity"]
 companion_env_vars = []
 optional_env_vars = []
 

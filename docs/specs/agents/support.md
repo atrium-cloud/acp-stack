@@ -26,6 +26,7 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | Kimi Code   | native  |                    | yes          |
 | Hermes Agent | native |                    | yes          |
 | Kilo Code   | native  |                    | yes          |
+| Google Antigravity | native |            | yes          |
 
 MCP support is determined per install from the agent's ACP `initialize` advertisement (see [registry.md](registry.md)); servers the advertisement does not cover are ignored at runtime.
 

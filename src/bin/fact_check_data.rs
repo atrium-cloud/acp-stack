@@ -419,6 +419,7 @@ fn embedded_sync_ids(catalog: &RegistryCatalog) -> BTreeSet<String> {
                         .clone()
                         .unwrap_or_else(|| adapter.id.clone())
                 })
+                .or_else(|| entry.sync_id.clone())
                 .unwrap_or_else(|| entry.id.clone())
         })
         .collect()

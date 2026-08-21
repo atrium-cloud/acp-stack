@@ -31,7 +31,9 @@ One budget covers a shell install path's whole run — fetch, upstream installer
 
 The installer verifies declared executables after each managed step. Provider secrets are never passed to install steps.
 
-Adapter `sync_id` is a maintainer-only ACP registry comparison alias for adapters whose upstream registry id differs from the local launch command. Entry-level `sync_exempt` is a maintainer-only flag for agents the ACP project documents but the upstream registry index does not list yet; `sync-registry-check` skips the upstream-existence requirement for exempt entries while reporting them, and the flag has no runtime effect. Remove it once the upstream index carries the id.
+Updates follow the recorded install method: npm and GitHub Release paths resolve a latest version, apt uses the declared package, and shell-installed harnesses are probed for a native `update`/`upgrade` subcommand. A shell-installed harness with no such subcommand and no other channel may declare `update.shell_rerun = true` instead; the update step then re-runs the shell install recipe, and the recipe is responsible for exiting cheaply when nothing changed.
+
+Adapter `sync_id` is a maintainer-only ACP registry comparison alias for adapters whose upstream registry id differs from the local launch command. Native entries may declare the same alias at the entry level (entry `sync_id`) when upstream names the agent differently than the installed binary; adapter entries resolve from the adapter block alone (`sync_id`, else adapter id), native entries from entry `sync_id`, else the entry id. Entry-level `sync_exempt` is a maintainer-only flag for agents the ACP project documents but the upstream registry index does not list yet; `sync-registry-check` skips the upstream-existence requirement for exempt entries while reporting them, and the flag has no runtime effect. Remove it once the upstream index carries the id.
 
 ## Operator Override
 
