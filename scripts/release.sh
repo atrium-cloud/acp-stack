@@ -16,7 +16,12 @@ readonly TAG_PREFIX="v"
 readonly COMMIT_PREFIX="chore: release v"
 readonly SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 readonly NIGHTLY_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-readonly RELEASE_FILES=(Cargo.toml Cargo.lock)
+readonly RELEASE_FILES=(
+    Cargo.toml
+    Cargo.lock
+    docs/specs/api/acps-schema.json
+    docs/specs/api/acps-schema.meta.json
+)
 
 usage() {
     cat <<'EOF'
@@ -242,6 +247,9 @@ if [[ "$release_type" != "nightly" ]]; then
     # Full resolution, not --no-deps: only then does cargo rewrite Cargo.lock
     # with the bumped package version, which the --locked release gates require.
     cargo metadata --format-version 1 >/dev/null
+    # The published schema meta embeds the package version, so the bump makes
+    # the checked-in files stale; regenerate before the drift-test gate runs.
+    cargo run --locked --features dev-tools --bin generate-api-schema
     git add -- "${RELEASE_FILES[@]}"
 fi
 
