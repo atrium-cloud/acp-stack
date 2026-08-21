@@ -647,7 +647,41 @@ pub fn apply_mapped_agent_provider(
     {
         providers.active.push(provider_id.to_owned());
     }
+    reconcile_kimi_lane_env_declarations(&mut config.agent);
     Ok(required_env_refs)
+}
+
+/// Kimi's credential declarations are provider-scoped: the launch env
+/// resolves every `[agent].env` entry, so a declaration left over from the
+/// previously selected Kimi lane (e.g. `KIMI_API_KEY` after switching to the
+/// Moonshot platform) fails the launch on a secret the active lane never
+/// uses. Drop the kimi-lane refs the active provider does not require and
+/// ensure the active one is declared; refs outside the kimi lanes are
+/// operator-owned and left alone.
+pub fn reconcile_kimi_lane_env_declarations(agent: &mut AgentConfig) {
+    if agent.id != crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID {
+        return;
+    }
+    let lane_refs: BTreeSet<&'static str> = providers_for_agent(&agent.id)
+        .into_iter()
+        .filter_map(|summary| summary.default_api_key_ref)
+        .collect();
+    let active_ref = agent
+        .provider
+        .as_ref()
+        .and_then(|provider| {
+            provider.api_key_ref.clone().or_else(|| {
+                env_var_for_agent_provider_id(&agent.id, &provider.id).map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| crate::runtime::agent::acp_bridge::KIMI_API_KEY_ENV.to_owned());
+    agent.env.retain(|entry| {
+        let name = crate::config::env_entry_var_name(entry);
+        name == active_ref || !lane_refs.contains(name)
+    });
+    if !crate::config::agent_env_declares(&agent.env, &active_ref) {
+        agent.env.push(active_ref);
+    }
 }
 
 /// Apply a mapped provider when credentials are supplied by the structured
@@ -702,6 +736,7 @@ pub fn apply_catalog_mapped_agent_provider(
             providers.active = vec![provider_id.to_owned()];
         }
     }
+    reconcile_kimi_lane_env_declarations(agent);
     Ok(required_env_refs)
 }
 

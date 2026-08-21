@@ -47,6 +47,9 @@ pub(crate) fn ensure_configured_provider_refs_for_init(
             env_changed = true;
         }
     }
+    let env_before_reconcile = config.agent.env.clone();
+    reconcile_kimi_lane_env_declarations(&mut config.agent);
+    env_changed = env_changed || config.agent.env != env_before_reconcile;
     collect_missing_provider_refs(
         prompts_enabled(args),
         secret_store,
@@ -159,5 +162,6 @@ pub(crate) fn apply_provider_to_config(
         api_key_ref,
         custom: None,
     });
+    reconcile_kimi_lane_env_declarations(&mut config.agent);
     Ok(required_refs)
 }

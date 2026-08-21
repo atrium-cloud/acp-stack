@@ -70,7 +70,9 @@ pub use self::capabilities::{
     AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL,
     IGNORED_FEATURE_MCP_SERVER, IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
 };
-pub(crate) use self::process_env::{KIMI_CODE_AGENT_ID, KIMI_CODE_DEFAULT_MODEL};
+pub(crate) use self::process_env::{
+    KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, kimi_default_model_for_provider,
+};
 // `spawn.rs` owns command resolution; `resolve_command_path` and
 // `agent_process_path` keep their pre-split paths for the CLI, supervisor and
 // terminal handlers that import them from this module.

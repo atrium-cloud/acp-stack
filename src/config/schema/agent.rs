@@ -211,6 +211,16 @@ impl CustomProviderApi {
             Self::AnthropicMessages => "anthropic",
         }
     }
+
+    /// Kimi Code names its provider types after the wire protocol; the ids
+    /// are the `KIMI_MODEL_PROVIDER_TYPE` values its engine registers.
+    pub fn as_kimi_provider_type(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "openai",
+            Self::Responses => "openai_responses",
+            Self::AnthropicMessages => "anthropic",
+        }
+    }
 }
 
 fn default_custom_model_context() -> u64 {

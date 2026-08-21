@@ -151,7 +151,7 @@ optional_env_vars = []
 
 [[api_keys]]
 env_var = "KIMI_API_KEY"
-provider_ids = ["kimi-coding", "kimi-for-coding", "kimi"]
+provider_ids = ["kimi-coding", "kimi-for-coding", "kimi", "kimi-coding-global"]
 agent_ids = ["kimi"]
 companion_env_vars = []
 optional_env_vars = []

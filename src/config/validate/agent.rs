@@ -289,10 +289,14 @@ fn validate_agent_custom_provider_api(
             reason: "Claude Code custom providers only support anthropic-messages".to_owned(),
         });
     }
-    if agent_id != CLAUDE_CODE_AGENT_ID && api == CustomProviderApi::AnthropicMessages {
+    if agent_id != CLAUDE_CODE_AGENT_ID
+        && agent_id != crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID
+        && api == CustomProviderApi::AnthropicMessages
+    {
         return Err(StackError::InvalidParam {
             field,
-            reason: "anthropic-messages custom providers only support Claude Code".to_owned(),
+            reason: "anthropic-messages custom providers only support Claude Code and Kimi Code"
+                .to_owned(),
         });
     }
     Ok(())

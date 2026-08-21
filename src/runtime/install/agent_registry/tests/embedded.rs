@@ -299,10 +299,10 @@ fn embedded_registry_contains_only_curated_examples() {
     assert_eq!(kimi.name, "Kimi Code");
     assert_eq!(kimi.kind, RegistryKind::Native);
     assert!(kimi.headless_compatible);
-    assert!(!kimi.set_provider);
+    assert!(kimi.set_provider);
     assert!(kimi.set_model);
-    assert!(!kimi.allow_custom_provider);
-    assert!(!kimi.allow_custom_model);
+    assert!(kimi.allow_custom_provider);
+    assert!(kimi.allow_custom_model);
     assert!(kimi.set_mode);
     assert!(kimi.supports_agent_skills);
     assert_eq!(

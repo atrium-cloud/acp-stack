@@ -257,6 +257,9 @@ fn configure_switch_provider(
         }
         config.agent.provider = Some(provider);
         append_missing_refs(&mut config.agent.env, &refs);
+        crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(
+            &mut config.agent,
+        );
         return Ok((
             AgentSwitchProviderStatus::Set {
                 provider_id: config
@@ -324,6 +327,9 @@ fn configure_switch_provider(
                 selected_aliases: BTreeMap::from([(current_provider.id.clone(), alias.clone())]),
             });
         }
+        crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(
+            &mut config.agent,
+        );
         return Ok((
             AgentSwitchProviderStatus::Reused {
                 provider_id: current_provider.id.clone(),
@@ -348,6 +354,7 @@ fn configure_switch_provider(
     )?;
     config.agent.provider = Some(provider);
     append_missing_refs(&mut config.agent.env, &refs);
+    crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(&mut config.agent);
     Ok((
         AgentSwitchProviderStatus::Reused {
             provider_id: config
@@ -632,8 +639,36 @@ mod tests {
     }
 
     #[test]
-    fn switch_to_kimi_requires_canonical_agent_secret() {
+    fn switch_to_kimi_without_provider_requires_explicit_provider() {
         let config = valid_config();
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let error = plan_agent_switch_locked(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "kimi".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect_err("provider-less switch to kimi must fail");
+
+        assert!(
+            error.to_string().contains("pass --provider"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn switch_to_kimi_reusing_moonshot_provider_swaps_credential_declaration() {
+        let mut config = valid_config();
+        config.agent.provider = Some(AgentProviderConfig {
+            id: "moonshotai".to_owned(),
+            model: Some("kimi-k3".to_owned()),
+            api_key_ref: None,
+            custom: None,
+        });
         let registry = RegistryCatalog::load_embedded().expect("registry loads");
 
         let plan = plan_agent_switch_locked(
@@ -648,12 +683,36 @@ mod tests {
         .expect("switch planned");
 
         assert_eq!(plan.target_agent_id, "kimi");
+        assert_eq!(plan.config.agent.env, ["MOONSHOT_API_KEY"]);
+    }
+
+    #[test]
+    fn switch_to_kimi_with_moonshot_provider_swaps_credential_declaration() {
+        let config = valid_config();
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = plan_agent_switch_locked(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "kimi".to_owned(),
+                provider_id: Some("moonshotai".to_owned()),
+                api_key_ref: None,
+            },
+        )
+        .expect("switch planned");
+
+        assert_eq!(plan.target_agent_id, "kimi");
+        assert_eq!(plan.required_env_refs, ["MOONSHOT_API_KEY"]);
+        assert_eq!(plan.config.agent.env, ["MOONSHOT_API_KEY"]);
         assert_eq!(
-            plan.provider_status,
-            AgentSwitchProviderStatus::NotApplicable
+            plan.config
+                .agent
+                .provider
+                .as_ref()
+                .map(|provider| provider.id.as_str()),
+            Some("moonshotai")
         );
-        assert_eq!(plan.required_env_refs, ["KIMI_API_KEY"]);
-        assert_eq!(plan.config.agent.env, ["KIMI_API_KEY"]);
     }
 
     #[test]

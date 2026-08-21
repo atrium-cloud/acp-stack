@@ -538,7 +538,7 @@ api_key_ref = "OPENCODE_API_KEY""#,
 }
 
 #[test]
-fn agent_status_reports_model_only_agent_params() {
+fn agent_status_reports_kimi_model_with_unset_provider_lane() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -570,8 +570,7 @@ creates = "opencode"
         .success()
         .stdout(predicates::str::contains("agent: kimi"))
         .stdout(predicates::str::contains("model: gpt-5.5"))
-        .stdout(predicates::str::contains("mode unset"))
-        .stdout(predicates::str::contains("provider unavailable"));
+        .stdout(predicates::str::contains("provider and mode unset"));
 }
 
 #[test]

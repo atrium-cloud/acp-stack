@@ -7,7 +7,8 @@ use crate::config::{
 use crate::error::{Result, StackError};
 use crate::fs_util::{acquire_agent_config_mutation_file_lock, atomic_write_owner_only, home_dir};
 use crate::runtime::agent::acp_bridge::{
-    AgentSessionConfigCategory, session_config_id_for_value, session_model_selection_for_value,
+    AgentSessionConfigCategory, KIMI_CODE_AGENT_ID, session_config_id_for_value,
+    session_model_selection_for_value,
 };
 use crate::runtime::agent::agent_headless_config::provision_agent_headless_config_transition;
 use crate::runtime::agent::model_discovery::{
@@ -107,6 +108,7 @@ fn run_agent_custom_provider_set(
         }),
     });
     config.agent.providers = None;
+    crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(&mut config.agent);
 
     let canonical = config.to_canonical_toml()?;
     let config = config::load_config_from_str(&canonical)?;
@@ -190,10 +192,14 @@ pub(in crate::cli) fn validate_custom_provider_api_for_agent(
             reason: "Claude Code custom providers only support anthropic-messages".to_owned(),
         });
     }
-    if agent_id != CLAUDE_CODE_AGENT_ID && api == CustomProviderApi::AnthropicMessages {
+    if agent_id != CLAUDE_CODE_AGENT_ID
+        && agent_id != KIMI_CODE_AGENT_ID
+        && api == CustomProviderApi::AnthropicMessages
+    {
         return Err(StackError::InvalidParam {
             field,
-            reason: "anthropic-messages custom providers only support Claude Code".to_owned(),
+            reason: "anthropic-messages custom providers only support Claude Code and Kimi Code"
+                .to_owned(),
         });
     }
     Ok(())

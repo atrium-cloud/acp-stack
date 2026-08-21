@@ -13,21 +13,130 @@ fn agent_set_kimi_accepts_exact_model_without_acp_discovery() {
 
     acps_command()
         .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "add",
+            "kimi-code",
+            "--from-secret",
+            "KIMI_API_KEY=KIMI_API_KEY",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "use", "kimi-code"])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
         .args(["agent", "set", "--model", "kimi-for-coding-highspeed"])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: kimi"))
         .stdout(predicates::str::contains(
             "model: kimi-for-coding-highspeed",
-        ))
-        .stdout(predicates::str::contains("required_env_refs: KIMI_API_KEY"));
+        ));
 
     let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
     assert!(config.contains(r#"env = ["KIMI_API_KEY"]"#));
+    assert!(config.contains(r#"id = "kimi-code""#));
     assert!(config.contains(r#"model = "kimi-for-coding-highspeed""#));
     assert!(!config.contains("KIMI_MODEL_"));
     assert!(!config.contains("test-kimi-key"));
-    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn agent_provider_use_kimi_moonshot_swaps_lane_and_sets_platform_model() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), kimi_config())
+        .expect("config should be written");
+    seed_init_secrets(
+        tempdir.path(),
+        &[
+            ("KIMI_API_KEY", "test-kimi-key"),
+            ("MOONSHOT_API_KEY", "test-moonshot-key"),
+        ],
+    );
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "provider",
+            "credential",
+            "add",
+            "moonshotai",
+            "--from-secret",
+            "MOONSHOT_API_KEY=MOONSHOT_API_KEY",
+        ])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "provider", "use", "moonshotai"])
+        .assert()
+        .success();
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args(["agent", "set", "--model", "kimi-k2.5"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: kimi"))
+        .stdout(predicates::str::contains("model: kimi-k2.5"));
+
+    let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(config.contains(r#"id = "moonshotai""#));
+    assert!(config.contains(r#"model = "kimi-k2.5""#));
+    assert!(!config.contains("KIMI_API_KEY"));
+    assert!(!config.contains("test-moonshot-key"));
+}
+
+#[test]
+fn agent_set_kimi_accepts_anthropic_messages_custom_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = tempdir.path().join(".config/acp-stack");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("acps-config.toml"), kimi_config())
+        .expect("config should be written");
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "agent",
+            "set",
+            "--custom-provider",
+            "--provider",
+            "myprovider",
+            "--provider-name",
+            "My Provider",
+            "--base-url",
+            "https://api.myprovider.example/v1",
+            "--api-key-ref",
+            "CUSTOM_API_KEY",
+            "--provider-api",
+            "anthropic-messages",
+            "--model",
+            "my-model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("provider: myprovider"))
+        .stdout(predicates::str::contains("model: my-model"));
+
+    let config = fs::read_to_string(config_dir.join("acps-config.toml")).expect("config readable");
+    assert!(config.contains(r#"api = "anthropic-messages""#));
+    assert!(config.contains(r#"base_url = "https://api.myprovider.example/v1""#));
+    assert!(config.contains(r#"api_key_ref = "CUSTOM_API_KEY""#));
+    assert!(!config.contains("KIMI_API_KEY"));
 }
 
 #[test]

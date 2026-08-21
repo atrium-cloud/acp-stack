@@ -250,9 +250,9 @@ together = "pi"
 togetherai = "opencode"
 
 [[providers]]
-id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi"]
+id = ["kimi-coding", "kimi-for-coding", "kimi-coding-plan", "kimi", "kimi-code"]
 name = "Kimi For Coding"
-agents = ["pi", "opencode", "claude-code", "hermes"]
+agents = ["pi", "opencode", "claude-code", "hermes", "kimi"]
 # No models_url: probed 2026-08-20 with a real subscription key — the coding
 # surface has no model-list route (/coding/* variants all 404) and the platform
 # /v1/models rejects coding-plan keys with 401.
@@ -273,9 +273,21 @@ kimi-coding = "pi"
 kimi-for-coding = "opencode"
 kimi-coding-plan = "claude-code"
 kimi = "hermes"
+kimi-code = "kimi"
 
 [providers.hermes]
 api_mode = "anthropic_messages"
+
+[[providers]]
+id = ["kimi-coding-global"]
+name = "Kimi For Coding (Global)"
+agents = ["kimi"]
+# Global-region subscription endpoint (api.kimi.ai); same coding surface as
+# the mainland row, so it shares the KIMI_API_KEY credential and has no
+# model-list route either.
+
+[providers.provider_ids]
+kimi-coding-global = "kimi"
 
 [[providers]]
 id = ["minimax"]
@@ -865,7 +877,7 @@ agents = ["opencode"]
 [[providers]]
 id = ["moonshotai"]
 name = "Moonshot AI"
-agents = ["opencode", "claude-code"]
+agents = ["opencode", "claude-code", "kimi"]
 models_url = "https://api.moonshot.ai/v1/models"
 
 [providers.claude_code]
@@ -879,7 +891,7 @@ env = { ENABLE_TOOL_SEARCH = "false", CLAUDE_CODE_AUTO_COMPACT_WINDOW = "1048576
 [[providers]]
 id = ["moonshotai-cn"]
 name = "Moonshot AI (China)"
-agents = ["opencode", "claude-code"]
+agents = ["opencode", "claude-code", "kimi"]
 
 [providers.claude_code]
 base_url = "https://api.moonshot.cn/anthropic"

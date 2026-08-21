@@ -758,6 +758,7 @@ fn apply_custom_provider(
         }),
     });
     config.agent.providers = None;
+    crate::runtime::agent::provider_keys::reconcile_kimi_lane_env_declarations(&mut config.agent);
     Ok(())
 }
 

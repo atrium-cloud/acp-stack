@@ -6,10 +6,12 @@ use crate::config::{
     DEFAULT_CUSTOM_MODEL_CONTEXT, DEFAULT_CUSTOM_MODEL_OUTPUT_MAX_TOKENS,
 };
 use crate::error::{Result, StackError};
+use crate::runtime::agent::acp_bridge::KIMI_CODE_AGENT_ID;
 use crate::runtime::agent::provider_keys::{
     AgentProviderSummary, CLAUDE_CODE_AGENT_ID, env_ref_is_satisfiable_for_config,
     env_var_for_agent_provider_id, provider_id_is_known, provider_id_supports_agent,
-    provider_uses_agent_native_auth, providers_for_agent, required_env_refs_for_agent_provider_id,
+    provider_uses_agent_native_auth, providers_for_agent, reconcile_kimi_lane_env_declarations,
+    required_env_refs_for_agent_provider_id,
 };
 use crate::runtime::install::agent_registry::RegistryCatalog;
 use crate::secrets::SecretStore;
@@ -291,6 +293,7 @@ fn configured_provider_shape_is_supported(
             && (agent_id != CLAUDE_CODE_AGENT_ID
                 || custom.api == CustomProviderApi::AnthropicMessages)
             && (agent_id == CLAUDE_CODE_AGENT_ID
+                || agent_id == KIMI_CODE_AGENT_ID
                 || custom.api != CustomProviderApi::AnthropicMessages);
     }
     provider_id_is_known(&provider.id) && provider_id_supports_agent(&provider.id, agent_id)

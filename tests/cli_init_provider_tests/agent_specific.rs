@@ -166,6 +166,8 @@ fn init_kimi_explicit_model_skips_acp_discovery_and_persists_canonical_secret_re
             "init",
             "--agent",
             "kimi",
+            "--provider",
+            "kimi-code",
             "--model",
             "k3",
             "--skip-workspace-init",
@@ -181,10 +183,100 @@ fn init_kimi_explicit_model_skips_acp_discovery_and_persists_canonical_secret_re
     assert!(config.contains(r#"command = "kimi""#));
     assert!(config.contains(r#"args = ["acp"]"#));
     assert!(config.contains(r#"env = ["KIMI_API_KEY"]"#));
+    assert!(config.contains(r#"id = "kimi-code""#));
     assert!(config.contains(r#"model = "k3""#));
     assert!(!config.contains("KIMI_MODEL_"));
     assert!(!config.contains("test-kimi-key"));
-    assert!(!config.contains("[agent.provider]"));
+}
+
+#[test]
+fn init_kimi_moonshot_provider_selects_platform_lane_and_swaps_env_ref() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("MOONSHOT_API_KEY", "test-moonshot-key")]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kimi",
+            "--provider",
+            "moonshotai",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Kimi Code (kimi)"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"env = ["MOONSHOT_API_KEY"]"#));
+    assert!(!config.contains("KIMI_API_KEY"));
+    assert!(
+        config.contains("[agent.provider]") || config.contains("[array.targets.agent.provider]")
+    );
+    assert!(config.contains(r#"id = "moonshotai""#));
+    assert!(config.contains(r#"api_key_ref = "MOONSHOT_API_KEY""#));
+    assert!(config.contains(r#"model = "kimi-k3""#));
+    assert!(!config.contains("test-moonshot-key"));
+}
+
+#[test]
+fn init_kimi_global_subscription_provider_keeps_kimi_key_and_pins_subscription_model() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kimi",
+            "--provider",
+            "kimi-coding-global",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("agent: Kimi Code (kimi)"));
+
+    let config = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains(r#"env = ["KIMI_API_KEY"]"#));
+    assert!(!config.contains("MOONSHOT_API_KEY"));
+    assert!(config.contains(r#"id = "kimi-coding-global""#));
+    assert!(config.contains(r#"model = "kimi-for-coding""#));
+    assert!(!config.contains("test-kimi-key"));
+}
+
+#[test]
+fn init_kimi_without_provider_fails_non_interactively() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_workspace_init_config(tempdir.path());
+    seed_init_secrets(tempdir.path(), &[("KIMI_API_KEY", "test-kimi-key")]);
+
+    acps_command_without_placebo()
+        .env("HOME", tempdir.path())
+        .env(TEST_SKIP_AGENT_INSTALL_ENV, "1")
+        .args([
+            "dev",
+            "init",
+            "--agent",
+            "kimi",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--provider"));
 }
 
 #[test]
@@ -338,6 +430,8 @@ fn init_kimi_without_model_pins_default_and_keeps_operator_selection_on_rerun() 
         "init",
         "--agent",
         "kimi",
+        "--provider",
+        "kimi-code",
         "--skip-workspace-init",
         "--skip-testflight",
     ];
