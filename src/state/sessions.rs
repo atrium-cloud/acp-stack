@@ -66,6 +66,26 @@ pub struct SessionRecord {
     pub metadata_json: String,
 }
 
+/// Metadata key under `sessions.metadata_json` holding the latest agent-advertised
+/// slash-command list (ACP `available_commands_update`, latest-wins replace).
+pub const SESSION_METADATA_AVAILABLE_COMMANDS: &str = "available_commands";
+/// Companion timestamp key so consumers can reason about staleness of the list.
+pub const SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT: &str = "available_commands_updated_at";
+/// Bound on the stored command list so a pathological agent cannot grow a
+/// session row without limit; the raw notification stays durable regardless.
+pub const MAX_SESSION_AVAILABLE_COMMANDS: usize = 256;
+
+/// Compact projection of an ACP `AvailableCommand`. `_meta` is deliberately
+/// dropped (agent-opaque and unbounded); the verbatim `session.update` event
+/// remains the source of truth for the full payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionAvailableCommand {
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionActivityRecord {
     pub id: String,

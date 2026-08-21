@@ -76,6 +76,10 @@ pub(crate) struct SessionSnapshotResponse {
     in_flight_prompts: Vec<PromptStatusResponse>,
     last_event_id: Option<String>,
     recent_events: Vec<LogEventJson>,
+    /// Slash commands the agent last advertised for this session via ACP
+    /// `available_commands_update` (latest-wins). Empty when nothing has been
+    /// advertised; may be stale until the agent re-advertises.
+    available_commands: Vec<AvailableCommandResponse>,
 }
 
 pub(crate) async fn sessions_snapshot_handler(
@@ -101,6 +105,15 @@ pub(crate) async fn sessions_snapshot_handler(
     let in_flight = store.in_flight_prompts_for_session(&id)?;
     let recent = store.latest_session_events(&id, SNAPSHOT_RECENT_EVENTS_LIMIT)?;
     drop(store);
+    let available_commands = stored_available_commands(&session.metadata_json)
+        .map(|stored| {
+            stored
+                .commands
+                .into_iter()
+                .map(AvailableCommandResponse::from)
+                .collect()
+        })
+        .unwrap_or_default();
     // `latest_session_events` returns newest-first; the cursor for the next
     // refresh is the id at the head of the slice (or null when empty).
     let last_event_id = recent.first().map(|event| event.id.clone());
@@ -115,5 +128,6 @@ pub(crate) async fn sessions_snapshot_handler(
         in_flight_prompts,
         last_event_id,
         recent_events,
+        available_commands,
     }))
 }

@@ -848,6 +848,26 @@
           }
         }
       },
+      "SessionCommandRunBody": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Command name as advertised (no leading slash required; one is\nstripped if present)."
+          },
+          "args": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional free-form arguments appended after the command name.",
+            "default": null
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
       "SessionsCreateBody": {
         "type": "object",
         "properties": {
@@ -5378,6 +5398,96 @@
       "CapturedMeta": {
         "description": "ACP `_meta` passed through unmodified; the shape is the agent's, not ours."
       },
+      "SessionCommandRunResponse": {
+        "type": "object",
+        "properties": {
+          "prompt_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "errored",
+              "cancelled",
+              "stalled"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "advertised": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the command matched the agent's last advertised list. `false`\nmeans the agent may ignore or misinterpret the invocation; omitted\nwhen no list has ever been advertised. Advisory only — the prompt is\nsubmitted regardless, because agents accept unadvertised commands and\nthe stored list can be stale."
+          }
+        },
+        "required": [
+          "prompt_id",
+          "session_id",
+          "status",
+          "created_at",
+          "message_id"
+        ]
+      },
+      "SessionCommandsResponse": {
+        "type": "object",
+        "properties": {
+          "available_commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AvailableCommandResponse"
+            },
+            "description": "Slash commands the agent last advertised for this session via ACP\n`available_commands_update` (latest-wins). Empty when nothing has been\nadvertised; may be stale until the agent re-advertises."
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the stored list was last replaced. `null` when no list has ever\nbeen advertised."
+          }
+        },
+        "required": [
+          "available_commands",
+          "updated_at"
+        ]
+      },
+      "AvailableCommandResponse": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "input_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "description": "Wire shape of one agent-advertised slash command (compact projection of\nthe ACP `AvailableCommand`; names carry no leading slash)."
+      },
       "SessionResponse": {
         "type": "object",
         "properties": {
@@ -5495,13 +5605,21 @@
             "items": {
               "$ref": "#/$defs/response/LogEventJson"
             }
+          },
+          "available_commands": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/AvailableCommandResponse"
+            },
+            "description": "Slash commands the agent last advertised for this session via ACP\n`available_commands_update` (latest-wins). Empty when nothing has been\nadvertised; may be stale until the agent re-advertises."
           }
         },
         "required": [
           "session",
           "in_flight_prompts",
           "last_event_id",
-          "recent_events"
+          "recent_events",
+          "available_commands"
         ]
       },
       "SessionsCancelResponse": {

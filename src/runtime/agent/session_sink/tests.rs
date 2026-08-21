@@ -343,6 +343,232 @@ fn session_info_updates_patch_title_and_agent_metadata() {
     assert_eq!(metadata["preserved"], true);
 }
 
+#[test]
+fn available_commands_updates_replace_stored_list() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session_for_target(
+            "target_a",
+            "agent_sess_1".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: r#"{"preserved":true,"agent_meta":{"old":true}}"#.to_owned(),
+            },
+        )
+        .expect("session inserted");
+
+    let advertise = serde_json::json!({
+        "sessionId": "agent_sess_1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {
+                    "name": "compact",
+                    "description": "Summarize the conversation",
+                    "input": {"hint": "optional instructions"},
+                    "_meta": {"opaque": true}
+                },
+                {"name": "init", "description": "Create AGENTS.md"}
+            ]
+        }
+    });
+    super::project_available_commands_update(&store, "sess_local", &advertise.to_string())
+        .expect("commands projection");
+    {
+        let session = store
+            .get_session("sess_local")
+            .expect("session lookup")
+            .expect("session exists");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+        let commands = metadata["available_commands"]
+            .as_array()
+            .expect("commands array");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["name"], "compact");
+        assert_eq!(commands[0]["description"], "Summarize the conversation");
+        assert_eq!(commands[0]["input_hint"], "optional instructions");
+        // `_meta` is dropped by the compact projection.
+        assert!(commands[0].get("_meta").is_none());
+        // No input spec means no hint key at all.
+        assert_eq!(commands[1]["name"], "init");
+        assert!(commands[1].get("input_hint").is_none());
+        assert!(metadata["available_commands_updated_at"].is_string());
+        // Unrelated metadata keys survive the write.
+        assert_eq!(metadata["preserved"], true);
+        assert_eq!(metadata["agent_meta"]["old"], true);
+    }
+
+    // Latest-wins: a second update replaces rather than merges.
+    let replace = serde_json::json!({
+        "sessionId": "agent_sess_1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "review", "description": "Review changes"}
+            ]
+        }
+    });
+    super::project_available_commands_update(&store, "sess_local", &replace.to_string())
+        .expect("replace projection");
+    {
+        let session = store
+            .get_session("sess_local")
+            .expect("session lookup")
+            .expect("session exists");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+        let commands = metadata["available_commands"]
+            .as_array()
+            .expect("commands array");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["name"], "review");
+    }
+
+    // An empty list is a legitimate advertisement and clears the stored list.
+    let clear = serde_json::json!({
+        "sessionId": "agent_sess_1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": []
+        }
+    });
+    super::project_available_commands_update(&store, "sess_local", &clear.to_string())
+        .expect("clear projection");
+    let session = store
+        .get_session("sess_local")
+        .expect("session lookup")
+        .expect("session exists");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+    assert_eq!(
+        metadata["available_commands"]
+            .as_array()
+            .expect("commands array")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn available_commands_projection_ignores_other_updates_and_truncates_over_cap() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session_for_target(
+            "target_a",
+            "agent_sess_1".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("session inserted");
+
+    // Non-matching payloads are a no-op, not an error.
+    let chunk = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}"#;
+    super::project_available_commands_update(&store, "sess_local", chunk).expect("chunk no-op");
+    let bare = r#"{"sessionId":"agent_sess_1"}"#;
+    super::project_available_commands_update(&store, "sess_local", bare).expect("bare no-op");
+    {
+        let session = store
+            .get_session("sess_local")
+            .expect("session lookup")
+            .expect("session exists");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+        assert!(metadata.get("available_commands").is_none());
+    }
+
+    let commands: Vec<serde_json::Value> = (0..crate::state::MAX_SESSION_AVAILABLE_COMMANDS + 5)
+        .map(|index| serde_json::json!({"name": format!("cmd{index}"), "description": ""}))
+        .collect();
+    let oversized = serde_json::json!({
+        "sessionId": "agent_sess_1",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": commands
+        }
+    });
+    super::project_available_commands_update(&store, "sess_local", &oversized.to_string())
+        .expect("oversized projection");
+    let session = store
+        .get_session("sess_local")
+        .expect("session lookup")
+        .expect("session exists");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+    assert_eq!(
+        metadata["available_commands"]
+            .as_array()
+            .expect("commands array")
+            .len(),
+        crate::state::MAX_SESSION_AVAILABLE_COMMANDS
+    );
+}
+
+#[tokio::test]
+async fn writer_projects_available_commands_and_keeps_raw_event() {
+    use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session_for_target(
+            "target_a",
+            "agent_sess_1".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            },
+        )
+        .expect("session inserted");
+    let state = Arc::new(TokioMutex::new(store));
+    let sink = StateStoreSessionSink::new("target_a".to_owned(), state.clone());
+    let payload = r#"{"sessionId":"agent_sess_1","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Summarize","input":{"hint":"optional"}}]}}"#;
+
+    sink.append("agent_sess_1", "session.update", payload).await;
+    sink.flush().await;
+
+    let guard = state.lock().await;
+    let events = guard
+        .query_events(crate::state::LogFilter {
+            limit: 10,
+            kind: Some("session.update"),
+            source: Some("acp"),
+            ..Default::default()
+        })
+        .expect("query raw events");
+    assert_eq!(events.len(), 1);
+    let session = guard
+        .get_session("sess_local")
+        .expect("session lookup")
+        .expect("session exists");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+    let commands = metadata["available_commands"]
+        .as_array()
+        .expect("commands array");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0]["name"], "compact");
+    assert_eq!(commands[0]["input_hint"], "optional");
+}
+
 #[tokio::test]
 async fn writer_keeps_raw_session_info_when_projection_fails() {
     use crate::runtime::agent::session_sink::{SessionEventSink, StateStoreSessionSink};

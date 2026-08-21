@@ -16,10 +16,12 @@ use crate::runtime::agent::supervisor::{SessionListSyncResult, resolve_session_c
 use crate::state::{
     DEFAULT_SESSION_ACTIVITY_THRESHOLD, DEFAULT_SESSION_STATUS_WINDOW,
     MAX_SESSION_STATUS_WINDOW_SECS, MIN_SESSION_STATUS_WINDOW_SECS, PromptRecord,
-    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED, SessionRecord,
-    SessionStatusRecord, SessionUpdateBounds,
+    SESSION_METADATA_AVAILABLE_COMMANDS, SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT,
+    SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE, SESSION_STATUS_CLOSED,
+    SessionAvailableCommand, SessionRecord, SessionStatusRecord, SessionUpdateBounds,
 };
 
+pub(crate) mod commands;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod list;
@@ -29,6 +31,7 @@ pub(crate) mod teardown;
 
 // Router wiring (`api::core`, `local_listener::router`) imports handlers as
 // `sessions::<handler>`; re-export them so the split is invisible to callers.
+pub(crate) use commands::{sessions_commands_handler, sessions_commands_run_handler};
 pub(crate) use events::{
     sessions_changes_handler, sessions_events_handler, sessions_snapshot_handler,
 };
@@ -87,6 +90,64 @@ impl From<crate::runtime::agent::supervisor::SessionAttachOutcome> for SessionRe
         response.ignored = outcome.ignored;
         response
     }
+}
+
+/// Wire shape of one agent-advertised slash command (compact projection of
+/// the ACP `AvailableCommand`; names carry no leading slash).
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct AvailableCommandResponse {
+    name: String,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_hint: Option<String>,
+}
+
+impl From<SessionAvailableCommand> for AvailableCommandResponse {
+    fn from(command: SessionAvailableCommand) -> Self {
+        Self {
+            name: command.name,
+            description: command.description,
+            input_hint: command.input_hint,
+        }
+    }
+}
+
+pub(crate) struct StoredAvailableCommands {
+    pub(crate) commands: Vec<SessionAvailableCommand>,
+    pub(crate) updated_at: Option<String>,
+}
+
+/// Read the last agent-advertised command list off a session's metadata.
+/// `None` means no list was ever stored; a malformed value degrades to `None`
+/// with a warning instead of failing the caller — the reading routes must not
+/// break because one agent wrote an unexpected payload.
+pub(crate) fn stored_available_commands(metadata_json: &str) -> Option<StoredAvailableCommands> {
+    let metadata = match serde_json::from_str::<serde_json::Value>(metadata_json) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(error = %err, "session metadata_json is not valid JSON");
+            return None;
+        }
+    };
+    let commands = metadata.get(SESSION_METADATA_AVAILABLE_COMMANDS)?;
+    let commands = match serde_json::from_value::<Vec<SessionAvailableCommand>>(commands.clone()) {
+        Ok(commands) => commands,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "stored session available_commands has an unexpected shape"
+            );
+            return None;
+        }
+    };
+    let updated_at = metadata
+        .get(SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Some(StoredAvailableCommands {
+        commands,
+        updated_at,
+    })
 }
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]

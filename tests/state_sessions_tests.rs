@@ -2,11 +2,129 @@ use acp_stack::state::{
     EVENT_SOURCE_ACP, EVENT_SOURCE_SYSTEM, ListedSessionRecord, NewPermissionRequest,
     NewPromptRecord, NewSessionRecord, PromptStatus, SESSION_ACTIVITY_ACTOR_AGENT,
     SESSION_ACTIVITY_ACTOR_USER, SESSION_STATUS_ACTIVE, SESSION_STATUS_AVAILABLE,
-    SESSION_STATUS_CLOSED, StateStore,
+    SESSION_STATUS_CLOSED, SessionAvailableCommand, StateStore,
 };
 
 mod common;
 use common::state::fresh_state;
+
+#[test]
+fn replace_session_available_commands_replaces_and_advances_updated_at() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state should open");
+    store.migrate().expect("migration should pass");
+
+    let missing = store.replace_session_available_commands(
+        "sess_missing",
+        &[SessionAvailableCommand {
+            name: "compact".to_owned(),
+            description: String::new(),
+            input_hint: None,
+        }],
+    );
+    assert!(matches!(
+        missing,
+        Err(acp_stack::error::StackError::SessionNotFound { .. })
+    ));
+
+    store
+        .insert_session(NewSessionRecord {
+            id: "sess_cmds".to_owned(),
+            agent_id: "fake".to_owned(),
+            cwd: "/tmp".to_owned(),
+            title: None,
+            metadata_json: r#"{"preserved":true}"#.to_owned(),
+        })
+        .expect("session inserted");
+    let before = store
+        .get_session("sess_cmds")
+        .expect("session lookup")
+        .expect("session exists")
+        .updated_at;
+
+    let changed = store
+        .replace_session_available_commands(
+            "sess_cmds",
+            &[
+                SessionAvailableCommand {
+                    name: "compact".to_owned(),
+                    description: "Summarize".to_owned(),
+                    input_hint: Some("optional instructions".to_owned()),
+                },
+                SessionAvailableCommand {
+                    name: "init".to_owned(),
+                    description: "Create AGENTS.md".to_owned(),
+                    input_hint: None,
+                },
+            ],
+        )
+        .expect("commands stored");
+    assert!(changed);
+    let session = store
+        .get_session("sess_cmds")
+        .expect("session lookup")
+        .expect("session exists");
+    assert!(session.updated_at >= before);
+    let metadata: serde_json::Value =
+        serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+    assert_eq!(metadata["preserved"], true);
+    assert_eq!(
+        metadata["available_commands"]
+            .as_array()
+            .expect("commands array")
+            .len(),
+        2
+    );
+    assert_eq!(metadata["available_commands"][0]["name"], "compact");
+    assert!(metadata["available_commands_updated_at"].is_string());
+
+    // Re-advertising an identical list is a no-op: no row rewrite, no
+    // updated_at bump.
+    let unchanged_at = session.updated_at.clone();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let changed = store
+        .replace_session_available_commands(
+            "sess_cmds",
+            &[
+                SessionAvailableCommand {
+                    name: "compact".to_owned(),
+                    description: "Summarize".to_owned(),
+                    input_hint: Some("optional instructions".to_owned()),
+                },
+                SessionAvailableCommand {
+                    name: "init".to_owned(),
+                    description: "Create AGENTS.md".to_owned(),
+                    input_hint: None,
+                },
+            ],
+        )
+        .expect("identical replace");
+    assert!(!changed);
+    let session = store
+        .get_session("sess_cmds")
+        .expect("session lookup")
+        .expect("session exists");
+    assert_eq!(session.updated_at, unchanged_at);
+
+    // Latest-wins replace, including down to an empty list.
+    store
+        .replace_session_available_commands("sess_cmds", &[])
+        .expect("empty replace");
+    let session = store
+        .get_session("sess_cmds")
+        .expect("session lookup")
+        .expect("session exists");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+    assert_eq!(
+        metadata["available_commands"]
+            .as_array()
+            .expect("commands array")
+            .len(),
+        0
+    );
+    assert_eq!(metadata["preserved"], true);
+}
 
 #[test]
 fn upsert_listed_sessions_inserts_available_and_preserves_active() {

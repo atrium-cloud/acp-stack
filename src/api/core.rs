@@ -77,10 +77,11 @@ use super::routes::security::{
 };
 use super::routes::sessions::{
     sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
-    sessions_create_handler, sessions_delete_handler, sessions_events_handler,
-    sessions_fork_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
-    sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
-    sessions_snapshot_handler, sessions_status_handler,
+    sessions_commands_handler, sessions_commands_run_handler, sessions_create_handler,
+    sessions_delete_handler, sessions_events_handler, sessions_fork_handler, sessions_get_handler,
+    sessions_list_handler, sessions_load_handler, sessions_prompt_handler,
+    sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
+    sessions_status_handler,
 };
 use super::routes::skills::{
     skills_add_handler, skills_catalog_handler, skills_list_handler, skills_remove_handler,
@@ -620,6 +621,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/sessions/{id}/resume", post(sessions_resume_handler))
         .route("/v1/sessions/{id}/fork", post(sessions_fork_handler))
         .route("/v1/sessions/{id}/prompt", post(sessions_prompt_handler))
+        .route(
+            "/v1/sessions/{id}/commands",
+            get(sessions_commands_handler).post(sessions_commands_run_handler),
+        )
         .route("/v1/sessions/{id}/cancel", post(sessions_cancel_handler))
         .route("/v1/sessions/{id}/delete", post(sessions_delete_handler))
         .route(

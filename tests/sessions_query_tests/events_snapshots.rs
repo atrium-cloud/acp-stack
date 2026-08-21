@@ -150,6 +150,83 @@ async fn sessions_snapshot_returns_session_in_flight_prompts_and_recent_events()
         .as_str()
         .expect("last_event_id present");
     assert_eq!(last_event_id, events[0]["id"].as_str().unwrap());
+    // No advertisement yet: the typed list is present and empty.
+    assert_eq!(body["data"]["available_commands"], json!([]));
+}
+
+#[tokio::test]
+async fn sessions_snapshot_surfaces_available_commands_and_tolerates_garbage_metadata() {
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.push("--no-cap-list-session".into());
+    })
+    .await;
+    let advertised = "sess_snap_commands".to_owned();
+    let garbage = "sess_snap_garbage".to_owned();
+    {
+        let store = harness.state.lock().await;
+        store
+            .insert_session(NewSessionRecord {
+                id: advertised.clone(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/snapcmd".to_owned(),
+                title: None,
+                metadata_json: "{}".to_owned(),
+            })
+            .expect("session inserted");
+        store
+            .replace_session_available_commands(
+                &advertised,
+                &[acp_stack::state::SessionAvailableCommand {
+                    name: "compact".to_owned(),
+                    description: "Summarize the conversation".to_owned(),
+                    input_hint: Some("optional instructions".to_owned()),
+                }],
+            )
+            .expect("commands stored");
+        // A wrong-shaped stored value must degrade to an empty list, not 500.
+        store
+            .insert_session(NewSessionRecord {
+                id: garbage.clone(),
+                agent_id: "placebo".to_owned(),
+                cwd: "/tmp/snapgarbage".to_owned(),
+                title: None,
+                metadata_json: r#"{"available_commands":"not-a-list"}"#.to_owned(),
+            })
+            .expect("session inserted");
+    }
+
+    let body: Value = http()
+        .get(format!(
+            "{}/v1/sessions/{}/snapshot",
+            harness.base_url, advertised
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("snapshot")
+        .json()
+        .await
+        .expect("snapshot json");
+    let commands = body["data"]["available_commands"]
+        .as_array()
+        .expect("available_commands array");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0]["name"], "compact");
+    assert_eq!(commands[0]["description"], "Summarize the conversation");
+    assert_eq!(commands[0]["input_hint"], "optional instructions");
+
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions/{}/snapshot",
+            harness.base_url, garbage
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("snapshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("snapshot json");
+    assert_eq!(body["data"]["available_commands"], json!([]));
 }
 
 #[tokio::test]

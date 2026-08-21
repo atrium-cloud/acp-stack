@@ -64,6 +64,70 @@ impl StateStore {
         })
     }
 
+    /// Replace the stored agent-advertised slash-command list for a session
+    /// (ACP `available_commands_update` is latest-wins, so an empty list is a
+    /// legitimate state and still overwrites). Bumping `sessions.updated_at`
+    /// matches the `session_info_update` precedent above. Returns whether a
+    /// write happened; an identical re-advertisement is skipped and returns
+    /// `false`.
+    pub fn replace_session_available_commands(
+        &self,
+        id: &str,
+        commands: &[SessionAvailableCommand],
+    ) -> Result<bool> {
+        let record = self
+            .get_session(id)?
+            .ok_or_else(|| StackError::SessionNotFound { id: id.to_owned() })?;
+        let mut metadata = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
+            .map_err(|err| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: err.to_string(),
+            })?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: "expected a JSON object".to_owned(),
+            })?;
+
+        let commands_value =
+            serde_json::to_value(commands).map_err(|err| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: err.to_string(),
+            })?;
+        // Agents may re-advertise an identical list on every turn; skip the
+        // row rewrite (and its outbox entry) when nothing changed.
+        if metadata.get(SESSION_METADATA_AVAILABLE_COMMANDS) == Some(&commands_value) {
+            return Ok(false);
+        }
+        let now = current_timestamp();
+        metadata.insert(
+            SESSION_METADATA_AVAILABLE_COMMANDS.to_owned(),
+            commands_value,
+        );
+        metadata.insert(
+            SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT.to_owned(),
+            serde_json::Value::String(now.clone()),
+        );
+
+        let metadata_json = serde_json::Value::Object(metadata).to_string();
+        self.persist_with_outbox("sessions", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE sessions
+                SET metadata_json = ?1, updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![metadata_json, now, id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::SessionNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
     pub fn query_sessions(&self, filter: SessionFilter<'_>) -> Result<Vec<SessionRecord>> {
         let mut sql = String::from(
             "SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json \
