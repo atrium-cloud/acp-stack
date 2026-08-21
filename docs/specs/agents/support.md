@@ -25,7 +25,6 @@ Agents that require browser OAuth, account cookies, or TUI-only setup are not su
 | Claude Code | adapter | `claude-agent-acp` | yes          |
 | Kimi Code   | native  |                    | yes          |
 | Hermes Agent | native |                    | yes          |
-| Cline       | native  |                    | yes          |
 | Kilo Code   | native  |                    | yes          |
 
 MCP support is determined per install from the agent's ACP `initialize` advertisement (see [registry.md](registry.md)); servers the advertisement does not cover are ignored at runtime.
@@ -43,6 +42,7 @@ An agent whose harness discovers skills somewhere other than its managed install
 ## Currently Unsupported
 
 - Cortex Code: Snowflake-specific, not a general-purpose ACP target.
+- Cline: in ACP mode its only credential is a Cline account key (`CLINE_API_KEY`) obtained through browser OAuth plus phone verification, and it documents no headless bring-your-own provider-key path — provider-native env vars are undocumented in ACP mode and the `-k`/`-P` CLI flags do not apply there — so a real-prompt smoke could not be completed with an API key and it fails the API-key / no-browser-OAuth eligibility bar. Users are welcome to run it as a custom harness (`cline --acp`).
 
 ## Deprecated
 

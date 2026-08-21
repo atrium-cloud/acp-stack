@@ -56,7 +56,6 @@ Beyond the embedded catalog, operators can declare their own sources in `[[skill
 | Kimi Code  | `~/.agents/skills`             |
 | Hermes Agent | `~/.agents/skills`           |
 | Claude Code | `~/.agents/skills`            |
-| Cline      | `~/.agents/skills`             |
 | Kilo Code  | `~/.agents/skills`             |
 
 Agents whose harness only discovers skills from their own directory get each installed skill symlinked there via the registry link directory: Hermes mirrors into `~/.hermes/skills` and Claude Code into `~/.claude/skills`.
