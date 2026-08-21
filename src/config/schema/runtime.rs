@@ -3,9 +3,19 @@
 
 use super::*;
 
+// CONSTANTS
+
+/// Wire spellings of [`PermissionTimeoutAction`]. Validation matches against
+/// these, and [`PermissionsConfig::effective_timeout_action`] parses them, so
+/// both stay in step with the enum's derived `Serialize`.
+pub(crate) const TIMEOUT_ACTION_DENY: &str = "deny";
+pub(crate) const TIMEOUT_ACTION_APPROVE: &str = "approve";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionsConfig {
+    /// Mediation policy: `"auto"`, `"supervised"`, or `"locked"`.
+    #[schemars(extend("enum" = ["auto", "supervised", "locked"]))]
     pub mode: String,
     #[serde(default)]
     pub review: Vec<String>,
@@ -13,7 +23,15 @@ pub struct PermissionsConfig {
     pub deny: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout: Option<String>,
+    /// Action when a pending permission request expires. Absent leaves the
+    /// `"deny"` default.
+    // A `String` on the wire, rejected at validate time like its sibling
+    // `mode`, so `/v1/config/validate`/`import` keep the actionable
+    // "must be one of deny, approve" message (a serde-level enum would fail
+    // inside TOML parsing, whose envelope message is deliberately generic).
+    // The published schema still gets the typed enum through `with`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<PermissionTimeoutAction>")]
     pub timeout_action: Option<String>,
 }
 
@@ -44,18 +62,18 @@ impl PermissionsConfig {
     }
 
     pub fn effective_timeout_action(&self) -> PermissionTimeoutAction {
-        match self
-            .timeout_action
-            .as_deref()
-            .unwrap_or(DEFAULT_PERMISSION_TIMEOUT_ACTION)
-        {
-            "approve" => PermissionTimeoutAction::Approve,
-            _ => PermissionTimeoutAction::Deny,
+        // Unknown strings fall to the default only in unvalidated in-memory
+        // configs; every load path validates first and rejects them.
+        match self.timeout_action.as_deref() {
+            Some(TIMEOUT_ACTION_APPROVE) => PermissionTimeoutAction::Approve,
+            _ => DEFAULT_PERMISSION_TIMEOUT_ACTION,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Expiry action for a pending permission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum PermissionTimeoutAction {
     Deny,
     Approve,

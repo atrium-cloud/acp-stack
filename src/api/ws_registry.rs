@@ -20,13 +20,50 @@ struct WsEntry {
     topics: Arc<std::sync::RwLock<BTreeSet<String>>>,
     origin: RequestOrigin,
     disconnect_requested: Arc<AtomicBool>,
+    /// Free-form text supplied by the operator who requested the disconnect,
+    /// recorded on the durable `ws.client_disconnected` event. `None` when the
+    /// request carried no text — there is no server-side default.
+    operator_reason: Arc<std::sync::RwLock<Option<String>>>,
     notify: Arc<Notify>,
+}
+
+impl WsEntry {
+    /// Publish the operator's text before raising the flag the connection task
+    /// polls, so the task can never observe the disconnect request without the
+    /// reason that accompanied it.
+    ///
+    /// `notify_one` rather than `notify_waiters`: exactly one connection task
+    /// waits on this entry, and it re-creates its `notified()` future on every
+    /// pass of its `select!` loop. `notify_waiters` wakes only whoever is
+    /// registered at that instant, so a request landing while the task was
+    /// servicing another branch was dropped and the client stayed connected.
+    /// `notify_one` stores a permit instead, which the next `notified()`
+    /// consumes immediately.
+    fn request_disconnect(&self, reason: Option<&str>) {
+        if let Ok(mut operator_reason) = self.operator_reason.write() {
+            *operator_reason = reason.map(str::to_owned);
+        }
+        self.disconnect_requested.store(true, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
 }
 
 pub struct WsRegistration {
     pub connection_id: String,
     pub disconnect_requested: Arc<AtomicBool>,
+    pub operator_reason: Arc<std::sync::RwLock<Option<String>>>,
     pub notify: Arc<Notify>,
+}
+
+impl WsRegistration {
+    /// Snapshot of the operator-supplied disconnect text, if any. A poisoned
+    /// lock degrades to "no text" rather than failing the disconnect path.
+    pub fn operator_reason(&self) -> Option<String> {
+        self.operator_reason
+            .read()
+            .ok()
+            .and_then(|operator_reason| operator_reason.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -55,11 +92,13 @@ impl WsRegistry {
             topics: Arc::new(std::sync::RwLock::new(BTreeSet::new())),
             origin,
             disconnect_requested: Arc::new(AtomicBool::new(false)),
+            operator_reason: Arc::new(std::sync::RwLock::new(None)),
             notify: Arc::new(Notify::new()),
         };
         let registration = WsRegistration {
             connection_id: connection_id.clone(),
             disconnect_requested: entry.disconnect_requested.clone(),
+            operator_reason: entry.operator_reason.clone(),
             notify: entry.notify.clone(),
         };
         self.entries.insert(connection_id, entry);
@@ -133,19 +172,18 @@ impl WsRegistry {
             .collect()
     }
 
-    pub fn disconnect_connections(&self, connection_ids: &[String]) -> usize {
+    pub fn disconnect_connections(&self, connection_ids: &[String], reason: Option<&str>) -> usize {
         let mut count = 0;
         for id in connection_ids {
             if let Some(entry) = self.entries.get(id) {
-                entry.disconnect_requested.store(true, Ordering::Relaxed);
-                entry.notify.notify_waiters();
+                entry.request_disconnect(reason);
                 count += 1;
             }
         }
         count
     }
 
-    pub fn disconnect_sessions(&self, session_ids: &[String]) -> usize {
+    pub fn disconnect_sessions(&self, session_ids: &[String], reason: Option<&str>) -> usize {
         let requested: BTreeSet<&str> = session_ids.iter().map(String::as_str).collect();
         let mut count = 0;
         for entry in self.entries.iter() {
@@ -158,8 +196,7 @@ impl WsRegistry {
                 .iter()
                 .any(|session_id| requested.contains(session_id.as_str()))
             {
-                entry.disconnect_requested.store(true, Ordering::Relaxed);
-                entry.notify.notify_waiters();
+                entry.request_disconnect(reason);
                 count += 1;
             }
         }

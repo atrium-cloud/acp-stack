@@ -49,6 +49,7 @@ pub(crate) struct FilesListResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FilesListEntry {
     name: String,
+    #[schemars(extend("enum" = ["file", "directory", "symlink", "other"]))]
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
@@ -89,6 +90,7 @@ pub(crate) async fn files_list_handler(
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct FilesContentResponse {
     path: String,
+    #[schemars(extend("enum" = ["utf8", "base64"]))]
     encoding: String,
     content: String,
     size: u64,

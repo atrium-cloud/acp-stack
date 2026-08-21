@@ -110,7 +110,8 @@ pub(crate) struct MetricsSecurityJson {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsApiConnectionsJson {
-    request_count: Option<i64>,
+    /// A quiet window reports `0`.
+    request_count: i64,
     by_status: std::collections::BTreeMap<String, i64>,
     by_method: std::collections::BTreeMap<String, i64>,
     by_route: std::collections::BTreeMap<String, i64>,
@@ -124,6 +125,13 @@ pub(crate) struct MetricsApiConnectionsJson {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct MetricsWsConnectionsJson {
+    /// All three fields are `null` together when the window contains no
+    /// `ws.client_connected` and no `ws.client_disconnected` rows; otherwise
+    /// `connections_opened` and `connections_closed` are numbers (possibly
+    /// `0`), while `average_duration_ms` stays `null` until some disconnect
+    /// in the window carried a `duration_ms`. Unlike
+    /// `api_connections.request_count`, a fully quiet window is reported as
+    /// `null`, not `0`.
     connections_opened: Option<i64>,
     connections_closed: Option<i64>,
     average_duration_ms: Option<i64>,

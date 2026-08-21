@@ -276,9 +276,9 @@ impl AppState {
         .await
         .map_err(|error| StackError::NativeAgentConfig {
             code: if error.is_panic() {
-                "native_config_lock_task_panicked"
+                "agent.native_config_lock_task_panicked"
             } else {
-                "native_config_lock_task_cancelled"
+                "agent.native_config_lock_task_cancelled"
             },
         })??;
         Ok(AgentConfigMutationGuard {

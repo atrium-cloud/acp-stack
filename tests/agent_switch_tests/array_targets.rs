@@ -55,7 +55,7 @@ async fn agent_switch_selects_existing_array_target_config() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "codex" }))
+        .json(&json!({ "agent_id": "codex" }))
         .send()
         .await
         .expect("switch target");
@@ -102,7 +102,7 @@ async fn agent_switch_same_target_bare_body_is_noop() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "opencode" }))
+        .json(&json!({ "agent_id": "opencode" }))
         .send()
         .await
         .expect("switch to current target");
@@ -131,7 +131,7 @@ async fn agent_switch_same_target_with_provider_flag_is_rejected() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "opencode", "provider": "openrouter" }))
+        .json(&json!({ "agent_id": "opencode", "provider": "openrouter" }))
         .send()
         .await
         .expect("switch with provider flag");
@@ -151,7 +151,7 @@ async fn agent_switch_same_target_with_api_key_ref_flag_is_rejected() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "opencode", "api_key_ref": "OPENCODE_API_KEY" }))
+        .json(&json!({ "agent_id": "opencode", "api_key_ref": "OPENCODE_API_KEY" }))
         .send()
         .await
         .expect("switch with api_key_ref flag");
@@ -171,7 +171,7 @@ async fn agent_switch_same_target_with_drop_is_rejected() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "opencode", "drop": true }))
+        .json(&json!({ "agent_id": "opencode", "drop": true }))
         .send()
         .await
         .expect("switch with drop flag");
@@ -200,7 +200,7 @@ async fn agent_switch_existing_kimi_target_reports_canonical_secret_ref() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "kimi" }))
+        .json(&json!({ "agent_id": "kimi" }))
         .send()
         .await
         .expect("switch target");
@@ -232,7 +232,7 @@ async fn agent_switch_existing_hermes_target_reports_required_env_refs() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "hermes" }))
+        .json(&json!({ "agent_id": "hermes" }))
         .send()
         .await
         .expect("switch target");
@@ -279,7 +279,7 @@ async fn agent_switch_to_existing_running_target_keeps_it_running() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "codex" }))
+        .json(&json!({ "agent_id": "codex" }))
         .send()
         .await
         .expect("switch target");
@@ -332,7 +332,7 @@ async fn agent_switch_to_array_target_without_endpoint_field_is_rejected_with_ov
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "kimi" }))
+        .json(&json!({ "agent_id": "kimi" }))
         .send()
         .await
         .expect("switch target");
@@ -383,7 +383,7 @@ async fn agent_switch_to_codex_target_reusing_overridden_openai_is_rejected() {
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": "codex" }))
+        .json(&json!({ "agent_id": "codex" }))
         .send()
         .await
         .expect("switch target");

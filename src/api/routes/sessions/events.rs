@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsEventsParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     #[serde(default)]

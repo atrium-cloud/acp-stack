@@ -41,7 +41,7 @@ async fn switch_request(harness: &AgentHarness, agent: &str) -> (StatusCode, Val
         .await
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&json!({ "agent": agent }))
+        .json(&json!({ "agent_id": agent }))
         .send()
         .await
         .expect("send switch");

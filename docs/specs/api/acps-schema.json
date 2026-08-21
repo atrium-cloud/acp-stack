@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json",
   "title": "acp-stack /v1 API and configuration contract",
+  "description": "Generated from the Rust wire types of acp-stack; do not edit by hand — regenerate with `cargo run --features dev-tools --bin generate-api-schema`. This root is a container of definitions, not a validatable body: validate a payload against `#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's `default` and `skip_serializing_if` attributes place a field in `required` under one direction but not the other — `request` is the deserialize contract (what a client sends), `response` is the serialize contract (what the server emits), and `config` is the deserialize contract for `acps-config.toml`. A type used on both sides appears once per namespace. Conventions: timestamp fields are RFC 3339 strings; an optional response field is omitted when absent rather than emitted as null, so its nullable type means absent and null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the `acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden tests), the envelope-bypassing binary download handler and the `health/ready` handler (whose readiness body is hand-built, not a typed DTO), and the untyped `config` import response. Cross-field rules (mutually-required or mutually-exclusive fields, exactly-one-of constraints, blank-as-absent) are mostly inexpressible in JSON Schema and stay enforced in code; `ApiError.code` is likewise an open dotted-namespace string rather than a closed enum. See docs/specs/api/api.md for both.",
   "$defs": {
     "request": {
       "AgentRestartQuery": {
@@ -20,7 +21,7 @@
       "AgentSwitchRequest": {
         "type": "object",
         "properties": {
-          "agent": {
+          "agent_id": {
             "type": "string"
           },
           "drop": {
@@ -43,7 +44,7 @@
           }
         },
         "required": [
-          "agent"
+          "agent_id"
         ]
       },
       "AgentUpdateRequest": {
@@ -66,12 +67,13 @@
           "schema_version": {
             "type": "integer",
             "format": "uint16",
-            "minimum": 0,
-            "maximum": 65535
+            "minimum": 1,
+            "maximum": 1
           },
           "revision": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "minimum": 1
           },
           "desired": {
             "$ref": "#/$defs/request/DesiredState"
@@ -150,6 +152,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "after": {
@@ -164,7 +167,12 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "asc",
+              "desc",
+              null
+            ]
           }
         }
       },
@@ -244,6 +252,7 @@
               "string",
               "null"
             ],
+            "description": "Recorded as `operator_reason` on each `ws.client_disconnected` event.\nOmitted here means the event carries no `operator_reason` field.",
             "default": null
           }
         },
@@ -265,6 +274,7 @@
               "string",
               "null"
             ],
+            "description": "Recorded as `operator_reason` on each `ws.client_disconnected` event.\nOmitted here means the event carries no `operator_reason` field.",
             "default": null
           }
         },
@@ -351,6 +361,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "since": {
@@ -386,7 +397,12 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "asc",
+              "desc",
+              null
+            ]
           }
         }
       },
@@ -397,6 +413,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "level": {
@@ -446,7 +463,14 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "rate_limit",
+              "origin_cors",
+              "ip_block",
+              "oversized_request",
+              null
+            ]
           },
           "since": {
             "type": [
@@ -474,7 +498,12 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "asc",
+              "desc",
+              null
+            ]
           }
         }
       },
@@ -485,6 +514,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           }
         }
@@ -496,6 +526,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "kind": {
@@ -545,7 +576,12 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "asc",
+              "desc",
+              null
+            ]
           }
         }
       },
@@ -556,6 +592,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "since": {
@@ -598,14 +635,26 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "rate_limit",
+              "origin_cors",
+              "ip_block",
+              "oversized_request",
+              null
+            ]
           },
           "order": {
             "type": [
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "asc",
+              "desc",
+              null
+            ]
           }
         }
       },
@@ -616,6 +665,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "since": {
@@ -651,7 +701,12 @@
               "string",
               "null"
             ],
-            "default": null
+            "default": null,
+            "enum": [
+              "asc",
+              "desc",
+              null
+            ]
           }
         }
       },
@@ -770,7 +825,8 @@
               "null"
             ],
             "format": "uint32",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Defaults to 20 when omitted. Values above 500 are silently clamped to\n500, not rejected."
           },
           "after": {
             "type": [
@@ -818,6 +874,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "after": {
@@ -869,6 +926,7 @@
             "type": "integer",
             "format": "uint32",
             "minimum": 0,
+            "description": "Values above 1000 are silently clamped to 1000, not rejected.",
             "default": 100
           },
           "since": {
@@ -924,7 +982,9 @@
       "SessionsPromptBody": {
         "type": "object",
         "properties": {
-          "prompt": {}
+          "prompt": {
+            "description": "Either a bare string, which becomes a single text block, or an array of\nACP content blocks (camelCase, e.g. `[{\"type\":\"text\",\"text\":\"...\"}]`)\ndeserialized element-wise. `null`, an empty array, and any other JSON\ntype are rejected."
+          }
         },
         "required": [
           "prompt"
@@ -1081,7 +1141,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Escape-hatch agent declared inline, mirroring the `--custom-agent-*`\nflags: its prompts are never streamed, so the whole spec must arrive\nhere. Requires non-blank `custom_agent_command` and\n`custom_agent_install`; conflicts with `agent`, `provider`, `model`,\n`mode`, and `custom_provider: true`. Every other `custom_agent_*` field\nrequires it."
           },
           "custom_agent_name": {
             "type": [
@@ -1124,7 +1185,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Requires `provider`."
           },
           "model": {
             "type": [
@@ -1143,7 +1205,8 @@
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Requires `provider`. Gates the custom-provider fields below\n(`provider_name`, `base_url`, `provider_api`, `model_name`, `context`,\n`output_max_tokens`), each of which requires `custom_provider: true`."
           },
           "provider_name": {
             "type": [
@@ -1161,6 +1224,13 @@
             "type": [
               "string",
               "null"
+            ],
+            "description": "Custom-provider API flavor. Requires `custom_provider: true`.",
+            "enum": [
+              "chat-completions",
+              "responses",
+              "anthropic-messages",
+              null
             ]
           },
           "model_name": {
@@ -1203,6 +1273,14 @@
             "type": [
               "string",
               "null"
+            ],
+            "description": "Sandbox isolation backend for the agent workload.",
+            "enum": [
+              "off",
+              "unshare",
+              "bwrap",
+              "custom",
+              null
             ]
           },
           "code_from": {
@@ -1264,20 +1342,23 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Both-or-neither with `skills`."
           },
           "skills": {
             "type": "array",
             "items": {
               "type": "string"
             },
+            "description": "Both-or-neither with `skills_source`.",
             "default": []
           },
           "essential_skills": {
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Conflicts with `skills_source` / `skills`."
           },
           "deps": {
             "type": "array",
@@ -1295,13 +1376,15 @@
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Both-or-neither with `deps_apply_yes`."
           },
           "deps_apply_yes": {
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Both-or-neither with `deps_apply`."
           },
           "standard_agent_work_deps": {
             "type": [
@@ -1319,31 +1402,47 @@
             "type": [
               "string",
               "null"
+            ],
+            "description": "Stack self-update policy, declared up-front rather than streamed,\nmirroring `--stack-update`. Absent leaves the `[updates.acp_stack]`\nschema default.",
+            "enum": [
+              "on",
+              "security",
+              "off",
+              null
             ]
           },
           "stack_update_frequency": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Requires `stack_update`. Day/week units, e.g. `1d`, `3w`."
           },
           "agent_update": {
             "type": [
               "string",
               "null"
+            ],
+            "description": "Agent auto-update policy, mirroring `--agent-update`; honored only for\nmanaged registry agents. Absent leaves the `[agent.auto_update]` default.",
+            "enum": [
+              "on",
+              "off",
+              null
             ]
           },
           "agent_update_frequency": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`."
           },
           "defer_provider_credentials": {
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "The caller's declaration that it will push a configured custom provider's\ncredential through the managed-state extension after init. Only then does\na missing custom-provider api-key ref soft-pass; otherwise init hard-fails\non it exactly like a terminal run. Absent → false."
           },
           "data_sources": {
             "type": "array",
@@ -1355,13 +1454,15 @@
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Continue the most recent unfinished or failed run instead of starting a\nnew one, matching `--resume`. Conflicts with `fresh`."
           },
           "fresh": {
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Force a new run, matching `--fresh`. Conflicts with `resume`."
           }
         },
         "additionalProperties": false
@@ -1407,7 +1508,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Secret ref names exported into the server's environment.",
+            "description": "A bare secret-ref name exported under that name, or a `VAR=template`\nentry whose template interpolates `${SECRET_REF}` (see config.md).",
             "default": []
           }
         },
@@ -1657,7 +1758,9 @@
         "type": "object",
         "properties": {
           "ok": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Always `true` on a success envelope; the discriminator against\n[`ApiErrorEnvelope`], whose `ok` is always `false`.",
+            "const": true
           },
           "data": {}
         },
@@ -1670,7 +1773,9 @@
         "type": "object",
         "properties": {
           "ok": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Always `false` on an error envelope; the discriminator against\n[`ApiSuccess`], whose `ok` is always `true`.",
+            "const": false
           },
           "error": {
             "$ref": "#/$defs/response/ApiError"
@@ -1685,7 +1790,8 @@
         "type": "object",
         "properties": {
           "code": {
-            "type": "string"
+            "type": "string",
+            "description": "Stable machine-readable error identifier. An open, versioned set of\ndotted `<domain>.<condition>` strings (e.g. `config.invalid`,\n`request.invalid_param`, `agent.inference_5xx`). Not a closed enum —\nclients match known values and treat unknown codes as generic\nfailures. See docs/specs/api/api.md and docs/specs/state-logging.md."
           },
           "message": {
             "type": "string"
@@ -1721,9 +1827,12 @@
           "captured_at": {
             "type": "string"
           },
-          "capabilities": {},
+          "capabilities": {
+            "description": "Raw ACP `initialize` capability JSON, surfaced verbatim. Always a JSON\nobject; its inner shape is the agent's, not ours.",
+            "type": "object"
+          },
           "process_state": {
-            "type": "string"
+            "$ref": "#/$defs/response/AgentStateLabel"
           }
         },
         "required": [
@@ -1760,11 +1869,25 @@
         },
         "additionalProperties": false
       },
+      "AgentStateLabel": {
+        "type": "string",
+        "enum": [
+          "stopped",
+          "starting",
+          "running",
+          "stopping",
+          "updating"
+        ]
+      },
       "AgentInstallResponse": {
         "type": "object",
         "properties": {
           "outcome": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "installed",
+              "already_present"
+            ]
           },
           "path": {
             "type": "string"
@@ -1807,7 +1930,13 @@
             "type": "string"
           },
           "state": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "prompt_sent",
+              "working",
+              "permission_required",
+              "blocked"
+            ]
           },
           "prompt_id": {
             "type": [
@@ -1819,6 +1948,11 @@
             "type": [
               "string",
               "null"
+            ],
+            "enum": [
+              "pending",
+              "running",
+              null
             ]
           },
           "prompt_stop_reason": {
@@ -1903,7 +2037,8 @@
             "maximum": 65535
           },
           "capabilities": {
-            "description": "Raw JSON object of the agent's advertised capabilities. We surface it\nverbatim so clients can read every field today without the daemon\ngrowing a struct for each one. Named accessors land alongside the\nsession API."
+            "description": "Raw JSON object of the agent's advertised capabilities. We surface it\nverbatim so clients can read every field today without the daemon\ngrowing a struct for each one. Named accessors land alongside the\nsession API.",
+            "type": "object"
           },
           "agent_name": {
             "type": [
@@ -2028,7 +2163,15 @@
             "type": "string"
           },
           "provider_status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "not_applicable",
+              "reused",
+              "set",
+              "selected",
+              "resumed",
+              "no_op"
+            ]
           },
           "provider": {
             "type": [
@@ -2077,7 +2220,7 @@
           "models": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/response/ModelJson"
             }
           },
           "follow_up": {
@@ -2154,6 +2297,24 @@
         "required": [
           "from_ref",
           "to_ref"
+        ]
+      },
+      "ModelJson": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "Model id accepted verbatim by `acps agent set --model`."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value"
         ]
       },
       "ProvisionedAgentConfigJson": {
@@ -2302,7 +2463,7 @@
       "AgentUpdateReport": {
         "type": "object",
         "properties": {
-          "agent": {
+          "agent_id": {
             "type": "string"
           },
           "updated": {
@@ -2325,7 +2486,7 @@
           }
         },
         "required": [
-          "agent",
+          "agent_id",
           "updated",
           "skipped",
           "steps"
@@ -2335,7 +2496,12 @@
         "type": "object",
         "properties": {
           "step": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "install",
+              "harness",
+              "adapter"
+            ]
           },
           "status": {
             "$ref": "#/$defs/response/AgentUpdateStepStatus"
@@ -2344,6 +2510,13 @@
             "type": [
               "string",
               "null"
+            ],
+            "enum": [
+              "npm",
+              "github",
+              "apt",
+              "native",
+              null
             ]
           },
           "installed": {
@@ -2436,7 +2609,12 @@
         "type": "object",
         "properties": {
           "step": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "install",
+              "harness",
+              "adapter"
+            ]
           }
         },
         "required": [
@@ -2522,7 +2700,12 @@
             "format": "int64"
           },
           "outcome": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "applied",
+              "cleared",
+              "noop"
+            ]
           }
         },
         "required": [
@@ -2563,12 +2746,19 @@
             "type": "boolean"
           },
           "local_session_auth": {
-            "type": "string"
+            "$ref": "#/$defs/response/LocalSessionAuth"
           }
         },
         "required": [
           "ready",
           "local_session_auth"
+        ]
+      },
+      "LocalSessionAuth": {
+        "type": "string",
+        "enum": [
+          "session-key",
+          "keyless"
         ]
       },
       "ArrayTargetStatusResponse": {
@@ -2587,7 +2777,7 @@
             "type": "boolean"
           },
           "process_state": {
-            "type": "string"
+            "$ref": "#/$defs/response/AgentStateLabel"
           },
           "pid": {
             "type": [
@@ -2640,7 +2830,8 @@
         "type": "object",
         "properties": {
           "provider_id": {
-            "type": "string"
+            "type": "string",
+            "description": "Provider id, same namespace as `ProviderJson.id`."
           },
           "alias": {
             "type": [
@@ -2695,7 +2886,11 @@
             "type": "string"
           },
           "stream": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "stdout",
+              "stderr"
+            ]
           },
           "seq": {
             "type": "integer",
@@ -2727,7 +2922,14 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "exited",
+              "failed",
+              "cancelled"
+            ]
           },
           "command": {
             "type": "string"
@@ -2797,7 +2999,11 @@
             ]
           },
           "origin": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "operator",
+              "acp"
+            ]
           },
           "session_id": {
             "type": [
@@ -3019,7 +3225,7 @@
             "properties": {
               "kind": {
                 "type": "string",
-                "const": "alreadypresent"
+                "const": "already_present"
               }
             },
             "required": [
@@ -3037,7 +3243,7 @@
               },
               "kind": {
                 "type": "string",
-                "const": "privilegerequired"
+                "const": "privilege_required"
               }
             },
             "required": [
@@ -3168,7 +3374,11 @@
             "type": "string"
           },
           "encoding": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "utf8",
+              "base64"
+            ]
           },
           "content": {
             "type": "string"
@@ -3215,7 +3425,13 @@
             "type": "string"
           },
           "kind": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "file",
+              "directory",
+              "symlink",
+              "other"
+            ]
           },
           "size": {
             "type": [
@@ -3254,13 +3470,15 @@
         "type": "object",
         "properties": {
           "version": {
-            "type": "string"
+            "type": "string",
+            "description": "Running three-part base version. Not a capability signal: a nightly's\nfourth component lives only in the git tag, so builds with and without\na feature report the same version. Test `features` membership instead."
           },
           "features": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Advertised capability names, currently `network-provider-workload-env`,\n`agent-test-json`, and `managed-credential-base-url`. The list grows\nover time; an absent or empty list means none are present."
           }
         },
         "required": [
@@ -3364,13 +3582,6 @@
           "session_auth"
         ]
       },
-      "LocalSessionAuth": {
-        "type": "string",
-        "enum": [
-          "session-key",
-          "keyless"
-        ]
-      },
       "LogsCommandsResponse": {
         "type": "object",
         "properties": {
@@ -3405,7 +3616,14 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "exited",
+              "failed",
+              "cancelled"
+            ]
           },
           "command": {
             "type": "string"
@@ -3458,10 +3676,12 @@
             "type": "string"
           },
           "level": {
-            "type": "string"
+            "type": "string",
+            "description": "Conventionally `info`, `warn`, `error`, or `debug`. Open set: the event\nwriter accepts any label."
           },
           "kind": {
-            "type": "string"
+            "type": "string",
+            "description": "Dotted namespace (e.g. `command.started`). Open set; filterable by\nexact match, or by prefix when the filter ends in `.`."
           },
           "message": {
             "type": "string"
@@ -3470,7 +3690,8 @@
             "type": "string"
           },
           "source": {
-            "type": "string"
+            "type": "string",
+            "description": "Conventionally `system`, `api`, `acp`, `command`, `permission`, `cli`,\nor `local`. Open set: nothing enforces the named constants."
           }
         },
         "required": [
@@ -3528,10 +3749,22 @@
             "type": "string"
           },
           "key_kind": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "session",
+              "admin",
+              "local",
+              "unknown"
+            ]
           },
           "reason": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "missing",
+              "invalid",
+              "wrong_kind",
+              "malformed_header"
+            ]
           },
           "client_ip": {
             "type": [
@@ -3593,7 +3826,12 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "active",
+              "available",
+              "closed"
+            ]
           }
         },
         "required": [
@@ -3996,11 +4234,9 @@
         "type": "object",
         "properties": {
           "request_count": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
+            "type": "integer",
+            "format": "int64",
+            "description": "A quiet window reports `0`."
           },
           "by_status": {
             "type": "object",
@@ -4087,7 +4323,8 @@
               "integer",
               "null"
             ],
-            "format": "int64"
+            "format": "int64",
+            "description": "All three fields are `null` together when the window contains no\n`ws.client_connected` and no `ws.client_disconnected` rows; otherwise\n`connections_opened` and `connections_closed` are numbers (possibly\n`0`), while `average_duration_ms` stays `null` until some disconnect\nin the window carried a `duration_ms`. Unlike\n`api_connections.request_count`, a fully quiet window is reported as\n`null`, not `0`."
           },
           "connections_closed": {
             "type": [
@@ -4157,7 +4394,11 @@
           },
           "source": {
             "type": "string",
-            "description": "`\"provider_catalog\"` when `models` comes from the provider's live\nmodel listing; `\"acp_advertised\"` when it comes from the agent's\nACP `session/new` config options."
+            "description": "`\"provider_catalog\"` when `models` comes from the provider's live\nmodel listing; `\"acp_advertised\"` when it comes from the agent's\nACP `session/new` config options.",
+            "enum": [
+              "provider_catalog",
+              "acp_advertised"
+            ]
           },
           "models": {
             "type": "array",
@@ -4185,24 +4426,6 @@
           "source",
           "models",
           "modes"
-        ]
-      },
-      "ModelJson": {
-        "type": "object",
-        "properties": {
-          "value": {
-            "type": "string",
-            "description": "Model id accepted verbatim by `acps agent set --model`."
-          },
-          "display_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "value"
         ]
       },
       "NativeConfigInspection": {
@@ -4469,7 +4692,14 @@
             "type": "string"
           },
           "decision": {
-            "type": "string"
+            "type": "string",
+            "description": "The settling status; never `pending`.",
+            "enum": [
+              "approved",
+              "denied",
+              "expired",
+              "cancelled"
+            ]
           },
           "deciding_principal": {
             "type": [
@@ -4506,10 +4736,21 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "denied",
+              "expired",
+              "cancelled"
+            ]
           },
           "source": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "command",
+              "acp"
+            ]
           },
           "requester": {
             "type": [
@@ -4574,7 +4815,15 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "errored",
+              "cancelled",
+              "stalled"
+            ]
           },
           "stop_reason": {
             "type": [
@@ -4627,7 +4876,15 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "errored",
+              "cancelled",
+              "stalled"
+            ]
           },
           "created_at": {
             "type": "string"
@@ -4669,7 +4926,8 @@
         "type": "object",
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "description": "Provider id, same namespace as `ProviderStatusJson.provider_id`."
           },
           "name": {
             "type": "string"
@@ -4766,10 +5024,15 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed"
+            ]
           },
           "ok": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Orthogonal to `status`: `ok` is false when any finding was emitted,\n`status` is `failed` only on a critical one. A warnings-only run is\n`status: \"succeeded\"` with `ok: false`."
           },
           "findings": {
             "type": "array",
@@ -4797,7 +5060,11 @@
             "type": "string"
           },
           "severity": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "warning",
+              "critical"
+            ]
           },
           "message": {
             "type": "string"
@@ -4832,11 +5099,13 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Always emitted; `null` on the final page. Matches the `/v1/logs/*`\ncursor shape so a client can page every list surface the same way."
           }
         },
         "required": [
-          "runs"
+          "runs",
+          "next_cursor"
         ]
       },
       "SecurityRunSummary": {
@@ -4852,10 +5121,15 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed"
+            ]
           },
           "ok": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Orthogonal to `status`: `ok` is false when any finding was emitted,\n`status` is `failed` only on a critical one. A warnings-only run is\n`status: \"succeeded\"` with `ok: false`."
           },
           "critical_count": {
             "type": "integer",
@@ -5096,11 +5370,14 @@
               "path",
               "oldText",
               "newText"
-            ]
+            ],
+            "description": "`oldText`, `newText`, and `_meta` mirror ACP's `ToolCallContent::Diff`\nwire shape verbatim; the camelCase spelling is intentional fidelity to\nthe protocol, not drift from this API's snake_case convention."
           }
         ]
       },
-      "CapturedMeta": {},
+      "CapturedMeta": {
+        "description": "ACP `_meta` passed through unmodified; the shape is the agent's, not ours."
+      },
       "SessionResponse": {
         "type": "object",
         "properties": {
@@ -5120,7 +5397,12 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "active",
+              "available",
+              "closed"
+            ]
           },
           "agent_id": {
             "type": "string"
@@ -5163,11 +5445,16 @@
         "properties": {
           "feature": {
             "type": "string",
-            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, or `agent.model`."
+            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, or `agent.model`.",
+            "enum": [
+              "mcp.server",
+              "agent.mode",
+              "agent.model"
+            ]
           },
-          "target": {
+          "value": {
             "type": "string",
-            "description": "The configured value: the MCP server name, or the mode/model value."
+            "description": "The configured value that was dropped: the MCP server name, or the\nmode/model value."
           },
           "capability": {
             "type": "string",
@@ -5179,7 +5466,7 @@
         },
         "required": [
           "feature",
-          "target",
+          "value",
           "capability",
           "reason"
         ],
@@ -5282,7 +5569,12 @@
             "type": "boolean"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "synced",
+              "unsupported",
+              "not_running"
+            ]
           },
           "upserted": {
             "type": "integer",
@@ -5359,10 +5651,29 @@
             "type": "string"
           },
           "state": {
-            "type": "string"
+            "type": "string",
+            "description": "Derived per request from the durable row plus in-flight prompt and\npermission state; a wider set than the durable `status`.",
+            "enum": [
+              "closed",
+              "available",
+              "permission_required",
+              "idle",
+              "working",
+              "prompt_sent",
+              "done",
+              "stopped",
+              "error",
+              "cancelled"
+            ]
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "Durable session status as stored.",
+            "enum": [
+              "active",
+              "available",
+              "closed"
+            ]
           },
           "agent_id": {
             "type": "string"
@@ -5440,7 +5751,15 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "errored",
+              "cancelled",
+              "stalled"
+            ]
           },
           "stop_reason": {
             "type": [
@@ -5841,7 +6160,7 @@
             "$ref": "#/$defs/response/AgentStatusJson"
           },
           "process_state": {
-            "type": "string"
+            "$ref": "#/$defs/response/AgentStateLabel"
           },
           "pid": {
             "type": [
@@ -5931,7 +6250,11 @@
             ]
           },
           "restart": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "never",
+              "on-crash"
+            ]
           },
           "adapter": {
             "anyOf": [
@@ -6133,19 +6456,31 @@
         "type": "object",
         "properties": {
           "origin_kind": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "unknown",
+              "cloudflare",
+              "trusted_proxy_missing_cloudflare",
+              "direct",
+              "trusted_proxy"
+            ]
           },
           "proxy_provider": {
             "type": [
               "string",
               "null"
+            ],
+            "enum": [
+              "cloudflare",
+              null
             ]
           },
           "client_ip": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Redacted to `null` whenever a `RequestOrigin` is serialized into an API\nresponse; only persisted event payloads carry the resolved address."
           },
           "country_code": {
             "type": [
@@ -6220,7 +6555,9 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "Always `running`: the session is published only after it is created in\nthat state, so no other value is observable here.",
+            "const": "running"
           }
         },
         "required": [
@@ -6235,7 +6572,16 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "Session status after the request was applied. `cancelled`, `closed`, and\n`errored` are terminal, as is `completed_awaiting_ack` until the result\nis acknowledged.",
+            "enum": [
+              "running",
+              "waiting_for_input",
+              "completed_awaiting_ack",
+              "errored",
+              "cancelled",
+              "closed"
+            ]
           }
         },
         "required": [
@@ -6266,7 +6612,16 @@
             "type": "string"
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "Current session status. `waiting_for_input` is the steady state while a\nprompt is pending; `cancelled`, `closed`, and `errored` are terminal, as\nis `completed_awaiting_ack` until the result is acknowledged.",
+            "enum": [
+              "running",
+              "waiting_for_input",
+              "completed_awaiting_ack",
+              "errored",
+              "cancelled",
+              "closed"
+            ]
           },
           "signals": {
             "type": "array",
@@ -6334,7 +6689,16 @@
             "description": "Machine-readable prompt identity, from `HostedPromptKind::as_str`. Field\norder here is the wire order; `kind` sits beside `request_id` so a\nclient can route on it before parsing the rest."
           },
           "style": {
-            "type": "string"
+            "type": "string",
+            "description": "Rendering hint. Unlike `kind`, this set is closed: a client may switch\non it exhaustively.",
+            "enum": [
+              "select",
+              "searchable_select",
+              "confirm",
+              "text",
+              "password",
+              "native_config_review"
+            ]
           },
           "prompt": {
             "type": "string"
@@ -6437,7 +6801,9 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0,
-            "default": 1
+            "description": "Config schema version. `1` is the only supported value; every other\nvalue is rejected at load.",
+            "default": 1,
+            "const": 1
           },
           "api": {
             "$ref": "#/$defs/config/ApiConfig"
@@ -6645,10 +7011,12 @@
             "type": "boolean"
           },
           "mode": {
-            "type": "string"
+            "type": "string",
+            "description": "Tunnel provisioning mode: `\"generated\"` or `\"managed\"`. Validated only\nwhen `enabled = true`; any string is accepted while disabled."
           },
           "exposure": {
-            "type": "string"
+            "type": "string",
+            "description": "Public exposure method. `\"tunnel\"` is the only accepted value. Validated\nonly when `enabled = true`; any string is accepted while disabled."
           },
           "hostname": {
             "type": "string"
@@ -6679,6 +7047,7 @@
           },
           "cloudflared_deployment": {
             "type": "string",
+            "description": "Where `cloudflared` runs: `\"host\"` (default), `\"docker\"`, or\n`\"external\"`. Validated only when `enabled = true`; any string is\naccepted while disabled.",
             "default": "host"
           }
         },
@@ -6936,12 +7305,14 @@
         ],
         "properties": {
           "level": {
-            "type": "string"
+            "type": "string",
+            "description": "Conventional tracing level name: `\"error\"`, `\"warn\"`, `\"info\"`,\n`\"debug\"`, or `\"trace\"`. Not validated, and not currently read by the\nruntime, which logs at `warn`."
           },
           "local_retention_days": {
             "type": "integer",
             "format": "uint64",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Retention window in days for local log records. Not currently read by\nthe runtime."
           },
           "supabase": {
             "anyOf": [
@@ -7046,7 +7417,12 @@
             ]
           },
           "restart": {
-            "type": "string"
+            "type": "string",
+            "description": "Process restart policy: `\"never\"` or `\"on-crash\"`.",
+            "enum": [
+              "never",
+              "on-crash"
+            ]
           },
           "mode": {
             "type": [
@@ -7258,7 +7634,11 @@
         "description": "Operator-facing escape hatch for installing an agent whose entry is not\nin the embedded registry (private fork, unreleased build, custom adapter).\nThe runtime resolves registry-listed agents from `data/agents.toml`\nkeyed off `[agent].id`; this struct is consulted only when the operator\nexplicitly writes `[agent.install]` to override that resolution.",
         "properties": {
           "type": {
-            "type": "string"
+            "type": "string",
+            "description": "Install mechanism. `\"shell\"` is the only operator-facing value.",
+            "enum": [
+              "shell"
+            ]
           },
           "creates": {
             "type": "string"
@@ -7279,7 +7659,8 @@
       "ArrayConfig": {
         "type": "object",
         "required": [
-          "primary_target"
+          "primary_target",
+          "targets"
         ],
         "properties": {
           "enabled": {
@@ -7294,7 +7675,9 @@
             "items": {
               "$ref": "#/$defs/config/ArrayTargetConfig"
             },
-            "default": []
+            "description": "At least one target. Every load path that reads an `[array]` block\nrejects an empty list; `primary_target` must name one of these ids.",
+            "default": [],
+            "minItems": 1
           }
         },
         "additionalProperties": false
@@ -7322,7 +7705,13 @@
         ],
         "properties": {
           "mode": {
-            "type": "string"
+            "type": "string",
+            "description": "Mediation policy: `\"auto\"`, `\"supervised\"`, or `\"locked\"`.",
+            "enum": [
+              "auto",
+              "supervised",
+              "locked"
+            ]
           },
           "review": {
             "type": "array",
@@ -7345,13 +7734,26 @@
             ]
           },
           "timeout_action": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/PermissionTimeoutAction"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Action when a pending permission request expires. Absent leaves the\n`\"deny\"` default."
           }
         },
         "additionalProperties": false
+      },
+      "PermissionTimeoutAction": {
+        "type": "string",
+        "enum": [
+          "deny",
+          "approve"
+        ],
+        "description": "Expiry action for a pending permission request."
       },
       "CommandsConfig": {
         "type": "object",
@@ -7461,7 +7863,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped per the Phase 4 spec:\nno cross-distro reconciliation, no auto-derived package names —\nthe operator declares each install action explicitly."
+            "description": "Optional install action for `acps deps apply`. When absent, the\ncommand is \"check-only\" and `acps deps apply` will report it as\nnot actionable rather than guessing a package manager. This\nkeeps Dependency Apply narrowly scoped per the Phase 4 spec:\nno cross-distro reconciliation, no auto-derived package names —\nthe operator declares each install action explicitly.\nOnly valid under `[[dependencies.commands]]`; declaring it under\n`packages`, `runtimes`, or `mcp` fails config load."
           }
         },
         "additionalProperties": false
@@ -7492,8 +7894,9 @@
               "null"
             ],
             "format": "uint64",
-            "minimum": 0,
-            "description": "Optional timeout override in seconds. Defaults to 600s\n(10 minutes) — same cap as the agent installer. Bounded above at\nvalidation by `MAX_INSTALL_TIMEOUT_SECS`."
+            "minimum": 1,
+            "description": "Optional timeout override in seconds. Defaults to 600s\n(10 minutes) — same cap as the agent installer. Bounded above at\nvalidation by `MAX_INSTALL_TIMEOUT_SECS` (86400, 24 hours); `0` is\nrejected, so omit the field rather than zeroing it.",
+            "maximum": 86400
           }
         },
         "required": [

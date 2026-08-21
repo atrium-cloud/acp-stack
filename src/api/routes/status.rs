@@ -50,7 +50,13 @@ const SERVER_FEATURES: &[&str] = &[
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ServerInfo {
+    /// Running three-part base version. Not a capability signal: a nightly's
+    /// fourth component lives only in the git tag, so builds with and without
+    /// a feature report the same version. Test `features` membership instead.
     version: &'static str,
+    /// Advertised capability names, currently `network-provider-workload-env`,
+    /// `agent-test-json`, and `managed-credential-base-url`. The list grows
+    /// over time; an absent or empty list means none are present.
     features: &'static [&'static str],
 }
 
@@ -90,6 +96,7 @@ pub(crate) async fn status_handler(
 pub(crate) struct StatusAgentResponse {
     configured: bool,
     agent: AgentStatusJson,
+    #[schemars(with = "crate::runtime::agent::supervisor::AgentStateLabel")]
     process_state: String,
     pid: Option<u32>,
     latest_failure: Option<AgentFailureJson>,
@@ -106,6 +113,7 @@ pub(crate) struct StatusAgentResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ProviderStatusJson {
+    /// Provider id, same namespace as `ProviderJson.id`.
     provider_id: String,
     alias: Option<String>,
     env_names: Vec<String>,
@@ -167,6 +175,7 @@ pub(crate) struct AgentStatusJson {
     command: String,
     args: Vec<String>,
     cwd: Option<String>,
+    #[schemars(extend("enum" = ["never", "on-crash"]))]
     restart: String,
     adapter: Option<AgentAdapterConfig>,
 }

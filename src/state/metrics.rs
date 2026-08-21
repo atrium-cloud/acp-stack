@@ -112,11 +112,10 @@ pub struct SecurityMetrics {
 
 #[derive(Debug, Clone, Default)]
 pub struct ApiConnectionMetrics {
-    /// `None` when no `api.request` events were emitted in the window. The
-    /// running binary always has this instrument, so a quiet window reports
-    /// `Some(0)` rather than leaving consumers to distinguish that case from a
-    /// missing metrics block.
-    pub request_count: Option<i64>,
+    /// Count of `api.request` events in the window. The running binary always
+    /// carries this instrument, so a quiet window is `0` — never an absent
+    /// measurement.
+    pub request_count: i64,
     pub by_status: std::collections::BTreeMap<String, i64>,
     pub by_method: std::collections::BTreeMap<String, i64>,
     pub by_route: std::collections::BTreeMap<String, i64>,
@@ -545,10 +544,7 @@ impl StateStore {
             |row| row.get(0),
         )?;
         if request_count == 0 {
-            return Ok(ApiConnectionMetrics {
-                request_count: Some(0),
-                ..ApiConnectionMetrics::default()
-            });
+            return Ok(ApiConnectionMetrics::default());
         }
         let by_status = self.api_request_group_counts(
             window,
@@ -589,7 +585,7 @@ impl StateStore {
             .query_map(params![window.since, window.until], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(ApiConnectionMetrics {
-            request_count: Some(request_count),
+            request_count,
             by_status,
             by_method,
             by_route,

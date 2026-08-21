@@ -247,7 +247,7 @@ fn update_agent_offline(
 }
 
 fn print_update_report(report: &crate::runtime::install::agent_updater::AgentUpdateReport) {
-    println!("agent update: {}", report.agent);
+    println!("agent update: {}", report.agent_id);
     if report.skipped {
         println!(
             "skipped: {}",

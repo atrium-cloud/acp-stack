@@ -74,7 +74,7 @@ Supported Agent user-global configs are imported as configuration meaning rather
 
 Existing-instance apply is serialized through the agent-config mutation file lock, held by native config import/cancel, `acps agent set`, agent lifecycle transitions, config import, and hosted-init apply; other config writers are not serialized. Apply checks restart blockers before touching live files. A blocked import stages the entire transaction in the owner-only operation journal. Immediate apply stops the running primary agent when needed, snapshots canonical and native files, writes them atomically, refreshes live state, and restores the prior files and process on failure. Pending apply and rollback phases are resumed from the journal after daemon restart.
 
-Terminal operations stay queryable for 24 hours, then journal and in-memory state are pruned. Cancel-of-applied rollback expires after 15 minutes; cancellation after expiry returns `native_config_rollback_expired`.
+Terminal operations stay queryable for 24 hours, then journal and in-memory state are pruned. Cancel-of-applied rollback expires after 15 minutes; cancellation after expiry returns `agent.native_config_rollback_expired`.
 
 ## Workspace And Files
 
@@ -105,7 +105,7 @@ The Command Gateway runs shell commands through the configured default shell ins
 
 Persisted output chunks are command-scoped events with stream name, sequence number, timestamp, event id, and command id. Command rows track the latest output event, output byte count, and latest progress timestamp so clients can reconnect and distinguish quiet work from a stalled runtime. Durable command state writes must succeed before side effects continue; volatile WebSocket fanout remains best effort.
 
-While a command is running, the gateway emits `command.progress` events every `[commands].progress_interval` when no output has reset the quiet timer. Cancellation produces a terminal `command.canceled` event after the child process is settled.
+While a command is running, the gateway emits `command.progress` events every `[commands].progress_interval` when no output has reset the quiet timer. Cancellation produces a terminal `command.cancelled` event after the child process is settled.
 
 A command that reaches a terminal status while its permission request is still pending cancels that permission with a reason naming the cause (see the reason table in `docs/specs/state-logging.md`); a permission request never outlives its command. The startup command sweep upholds the same invariant by canceling dependent pending permissions in the transaction that fails the orphaned commands.
 

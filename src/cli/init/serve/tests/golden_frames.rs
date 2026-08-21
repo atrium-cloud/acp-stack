@@ -153,7 +153,7 @@ fn golden_canceled_event_bytes() {
     session.cancel("backend_cancel");
     assert_eq!(
         recorded_frame(&session, 2),
-        r#"{"reason":"backend_cancel","seq":2,"session_id":"init_golden_cancel","type":"canceled"}"#
+        r#"{"reason":"backend_cancel","seq":2,"session_id":"init_golden_cancel","type":"cancelled"}"#
     );
 }
 

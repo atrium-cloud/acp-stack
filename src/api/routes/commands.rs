@@ -24,6 +24,7 @@ pub(crate) struct CommandResponse {
     id: String,
     created_at: String,
     updated_at: String,
+    #[schemars(extend("enum" = ["pending", "running", "exited", "failed", "cancelled"]))]
     status: String,
     command: String,
     exit_status: Option<i64>,
@@ -37,6 +38,7 @@ pub(crate) struct CommandResponse {
     last_output_seq: Option<i64>,
     output_bytes: i64,
     last_progress_at: Option<String>,
+    #[schemars(extend("enum" = ["operator", "acp"]))]
     origin: String,
     session_id: Option<String>,
 }
@@ -96,9 +98,11 @@ pub(crate) async fn commands_get_handler(
 #[derive(Debug, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct CommandOutputParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     after: Option<String>,
+    #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
 }
 
@@ -113,6 +117,7 @@ pub(crate) struct CommandOutputFrame {
     event_id: String,
     created_at: String,
     command_id: String,
+    #[schemars(extend("enum" = ["stdout", "stderr"]))]
     stream: String,
     seq: i64,
     data: String,

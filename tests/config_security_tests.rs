@@ -79,9 +79,16 @@ fn rejects_invalid_permissions_timeout_action() {
     assert!(
         error
             .to_string()
-            .contains("permissions.timeout_action must be one of"),
+            .contains("permissions.timeout_action must be one of deny, approve"),
         "got: {error}",
     );
+    // The sentence must also reach remote operators: `/v1/config/validate` and
+    // `/v1/config/import` send `public_message`, not `Display`.
+    assert_eq!(
+        error.public_message(),
+        "permissions.timeout_action must be one of deny, approve"
+    );
+    assert_eq!(error.error_code(), "config.invalid");
 }
 
 #[test]
@@ -114,6 +121,14 @@ fn accepts_explicit_permissions_timeout() {
         config.permissions.effective_timeout_action(),
         acp_stack::config::PermissionTimeoutAction::Approve
     ));
+    // The stored value must serialize back to its lowercase wire spelling, or
+    // a canonical export would no longer reload.
+    let canonical = config.to_canonical_toml().expect("canonical toml");
+    assert!(
+        canonical.contains(r#"timeout_action = "approve""#),
+        "canonical toml = {canonical}"
+    );
+    load_config_from_str(&canonical).expect("canonical toml reloads");
 }
 
 #[test]

@@ -33,7 +33,7 @@ fn migrations_are_idempotent() {
 
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        23
+        24
     );
 }
 
@@ -130,7 +130,7 @@ fn rejects_state_database_from_newer_schema_version() {
     assert!(
         error
             .to_string()
-            .contains("state schema version 99 is newer than supported version 23")
+            .contains("state schema version 99 is newer than supported version 24")
     );
 }
 
@@ -328,6 +328,165 @@ fn migration_022_backfills_array_session_columns() {
 
     assert_eq!(session.target_id, "opencode");
     assert_eq!(session.agent_session_id, "local_session");
+}
+
+#[test]
+fn migration_024_rewrites_legacy_single_l_cancelled_spelling() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be created");
+    let path = tempdir.path().join("state.sqlite");
+    let connection = Connection::open(&path).expect("sqlite should open");
+    let migrations = [
+        include_str!("../migrations/001_init.sqlite.sql"),
+        include_str!("../migrations/002_auth_failures_schema.sqlite.sql"),
+        include_str!("../migrations/003_agent_capabilities.sqlite.sql"),
+        include_str!("../migrations/004_sessions.sqlite.sql"),
+        include_str!("../migrations/005_commands_schema.sqlite.sql"),
+        include_str!("../migrations/006_permissions.sqlite.sql"),
+        include_str!("../migrations/007_events_source.sqlite.sql"),
+        include_str!("../migrations/008_sink_outbox.sqlite.sql"),
+        include_str!("../migrations/009_installer_runs_step.sqlite.sql"),
+        include_str!("../migrations/010_installer_runs_version.sqlite.sql"),
+        include_str!("../migrations/011_installer_runs_log_dir.sqlite.sql"),
+        include_str!("../migrations/012_init_runs.sqlite.sql"),
+        include_str!("../migrations/013_installer_runs_apply_run_id.sqlite.sql"),
+        include_str!("../migrations/014_security_runs.sqlite.sql"),
+        include_str!("../migrations/015_prompts_lifecycle_extension.sqlite.sql"),
+        include_str!("../migrations/016_command_output_reconnect.sqlite.sql"),
+        include_str!("../migrations/017_prompt_message_ids.sqlite.sql"),
+        include_str!("../migrations/018_installer_runs_operation_method.sqlite.sql"),
+        include_str!("../migrations/019_stack_update_runs.sqlite.sql"),
+        include_str!("../migrations/020_prompt_status_indexes.sqlite.sql"),
+        include_str!("../migrations/021_auth_keys.sqlite.sql"),
+        include_str!("../migrations/022_array_sessions.sqlite.sql"),
+        include_str!("../migrations/023_commands_origin.sqlite.sql"),
+    ];
+    for migration in migrations {
+        connection
+            .execute_batch(migration)
+            .expect("legacy migration should apply");
+    }
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations (version, name, applied_at)
+            VALUES
+                (1, 'm1', '2026-05-13T00:00:00Z'),
+                (2, 'm2', '2026-05-13T00:00:00Z'),
+                (3, 'm3', '2026-05-13T00:00:00Z'),
+                (4, 'm4', '2026-05-13T00:00:00Z'),
+                (5, 'm5', '2026-05-13T00:00:00Z'),
+                (6, 'm6', '2026-05-13T00:00:00Z'),
+                (7, 'm7', '2026-05-13T00:00:00Z'),
+                (8, 'm8', '2026-05-13T00:00:00Z'),
+                (9, 'm9', '2026-05-13T00:00:00Z'),
+                (10, 'm10', '2026-05-13T00:00:00Z'),
+                (11, 'm11', '2026-05-13T00:00:00Z'),
+                (12, 'm12', '2026-05-13T00:00:00Z'),
+                (13, 'm13', '2026-05-13T00:00:00Z'),
+                (14, 'm14', '2026-05-13T00:00:00Z'),
+                (15, 'm15', '2026-05-13T00:00:00Z'),
+                (16, 'm16', '2026-05-13T00:00:00Z'),
+                (17, 'm17', '2026-05-13T00:00:00Z'),
+                (18, 'm18', '2026-05-13T00:00:00Z'),
+                (19, 'm19', '2026-05-13T00:00:00Z'),
+                (20, 'm20', '2026-05-13T00:00:00Z'),
+                (21, 'm21', '2026-05-13T00:00:00Z'),
+                (22, 'm22', '2026-05-13T00:00:00Z'),
+                (23, 'm23', '2026-05-13T00:00:00Z');
+
+            INSERT INTO commands (id, created_at, updated_at, status, command)
+            VALUES
+                ('cmd_legacy', '2026-05-13T00:00:00Z', '2026-05-13T00:01:00Z', 'canceled', 'sleep 30'),
+                ('cmd_failed', '2026-05-13T00:00:00Z', '2026-05-13T00:01:00Z', 'failed', 'false');
+
+            INSERT INTO permission_requests
+                (id, created_at, updated_at, status, source, requester, subject_id, detail_json, expires_at)
+            VALUES
+                ('prm_legacy', '2026-05-13T00:00:00Z', '2026-05-13T00:01:00Z', 'canceled', 'command',
+                 'command:cmd_legacy', 'cmd_legacy', '{}', NULL);
+
+            INSERT INTO permission_decisions
+                (id, request_id, created_at, decision, deciding_principal, reason)
+            VALUES
+                ('dec_legacy', 'prm_legacy', '2026-05-13T00:01:00Z', 'canceled', 'system', 'command-canceled');
+
+            INSERT INTO events (id, created_at, level, kind, message, payload_json)
+            VALUES
+                ('evt_cmd', '2026-05-13T00:01:00Z', 'info', 'command.canceled', 'command canceled',
+                 '{"command_id":"cmd_legacy"}'),
+                ('evt_prm', '2026-05-13T00:01:00Z', 'info', 'permission.canceled', 'permission canceled',
+                 '{"permission_id":"prm_legacy"}'),
+                ('evt_other', '2026-05-13T00:01:00Z', 'info', 'command.failed', 'command failed', '{}');
+            "#,
+        )
+        .expect("legacy rows with the old spelling should seed");
+    drop(connection);
+
+    let store = StateStore::open(&path).expect("state should open");
+    store.migrate().expect("migration should pass");
+    drop(store);
+
+    let inspection = Connection::open(&path).expect("sqlite inspection should open");
+    let scalar = |sql: &str| -> String {
+        inspection
+            .query_row(sql, [], |row| row.get::<_, String>(0))
+            .expect("legacy row should still be readable")
+    };
+
+    assert_eq!(
+        scalar("SELECT status FROM commands WHERE id = 'cmd_legacy'"),
+        "cancelled"
+    );
+    assert_eq!(
+        scalar("SELECT status FROM permission_requests WHERE id = 'prm_legacy'"),
+        "cancelled"
+    );
+    assert_eq!(
+        scalar("SELECT decision FROM permission_decisions WHERE id = 'dec_legacy'"),
+        "cancelled"
+    );
+    assert_eq!(
+        scalar("SELECT kind FROM events WHERE id = 'evt_cmd'"),
+        "command.cancelled"
+    );
+    assert_eq!(
+        scalar("SELECT kind FROM events WHERE id = 'evt_prm'"),
+        "permission.cancelled"
+    );
+
+    // Rows that never carried the old spelling must be left exactly as they were.
+    assert_eq!(
+        scalar("SELECT status FROM commands WHERE id = 'cmd_failed'"),
+        "failed"
+    );
+    assert_eq!(
+        scalar("SELECT kind FROM events WHERE id = 'evt_other'"),
+        "command.failed"
+    );
+
+    // A spelling rename is not a state transition: `updated_at` must not move,
+    // and the append-only payload/message columns are deliberately untouched.
+    assert_eq!(
+        scalar("SELECT updated_at FROM commands WHERE id = 'cmd_legacy'"),
+        "2026-05-13T00:01:00Z"
+    );
+    assert_eq!(
+        scalar("SELECT updated_at FROM permission_requests WHERE id = 'prm_legacy'"),
+        "2026-05-13T00:01:00Z"
+    );
+    assert_eq!(
+        scalar("SELECT reason FROM permission_decisions WHERE id = 'dec_legacy'"),
+        "command-canceled"
+    );
+    assert_eq!(
+        scalar("SELECT message FROM events WHERE id = 'evt_prm'"),
+        "permission canceled"
+    );
 }
 
 #[test]
@@ -618,7 +777,7 @@ fn migration_015_preserves_rows_inserted_at_schema_14() {
     store.migrate().expect("migration to latest should pass");
     assert_eq!(
         store.schema_version().expect("schema version should load"),
-        23
+        24
     );
     let inspection = Connection::open(&path).expect("sqlite inspection should open");
     let columns = inspection

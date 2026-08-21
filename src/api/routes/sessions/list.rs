@@ -9,6 +9,7 @@ pub(crate) struct SessionsListResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionsAgentSyncResponse {
     attempted: bool,
+    #[schemars(extend("enum" = ["synced", "unsupported", "not_running"]))]
     status: String,
     upserted: u32,
     updated: u32,
@@ -27,6 +28,7 @@ impl From<SessionListSyncResult> for SessionsAgentSyncResponse {
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 pub(crate) struct SessionsListParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     since: Option<String>,

@@ -727,17 +727,17 @@ impl InspectionBuilder {
     }
 
     pub(super) fn finish_json(mut self, residual: Vec<u8>) -> Result<InspectedNativeConfig> {
-        let value: JsonValue =
-            serde_json::from_slice(&residual).map_err(|_| native_error("native_config_invalid"))?;
+        let value: JsonValue = serde_json::from_slice(&residual)
+            .map_err(|_| native_error("agent.native_config_invalid"))?;
         collect_json_paths(&value, "", &mut self.inspection.unmanaged_field_paths);
         self.finish(residual)
     }
 
     pub(super) fn finish_toml(mut self, residual: Vec<u8>) -> Result<InspectedNativeConfig> {
-        let text =
-            std::str::from_utf8(&residual).map_err(|_| native_error("native_config_invalid"))?;
+        let text = std::str::from_utf8(&residual)
+            .map_err(|_| native_error("agent.native_config_invalid"))?;
         let value: TomlValue =
-            toml::from_str(text).map_err(|_| native_error("native_config_invalid"))?;
+            toml::from_str(text).map_err(|_| native_error("agent.native_config_invalid"))?;
         collect_toml_paths(&value, "", &mut self.inspection.unmanaged_field_paths);
         self.finish(residual)
     }
@@ -747,8 +747,8 @@ impl InspectionBuilder {
         // dotted-path shape matches the JSON harnesses. The residual is stored
         // as YAML, so re-parse it through the same non-string-key guard used on
         // input before projecting.
-        let text =
-            std::str::from_utf8(&residual).map_err(|_| native_error("native_config_invalid"))?;
+        let text = std::str::from_utf8(&residual)
+            .map_err(|_| native_error("agent.native_config_invalid"))?;
         let root = parse_goose_root(text)?;
         let value = JsonValue::Object(root);
         collect_json_paths(&value, "", &mut self.inspection.unmanaged_field_paths);
@@ -757,7 +757,7 @@ impl InspectionBuilder {
 
     pub(super) fn finish(mut self, residual: Vec<u8>) -> Result<InspectedNativeConfig> {
         if residual.len() > IMPORT_SIZE_LIMIT {
-            return Err(native_error("native_config_normalized_too_large"));
+            return Err(native_error("agent.native_config_normalized_too_large"));
         }
         self.inspection
             .managed_fields

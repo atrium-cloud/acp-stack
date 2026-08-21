@@ -16,6 +16,9 @@ use crate::error::StackError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiSuccess<T> {
+    /// Always `true` on a success envelope; the discriminator against
+    /// [`ApiErrorEnvelope`], whose `ok` is always `false`.
+    #[schemars(extend("const" = true))]
     pub ok: bool,
     pub data: T,
 }
@@ -28,12 +31,20 @@ impl<T> ApiSuccess<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiErrorEnvelope {
+    /// Always `false` on an error envelope; the discriminator against
+    /// [`ApiSuccess`], whose `ok` is always `true`.
+    #[schemars(extend("const" = false))]
     pub ok: bool,
     pub error: ApiError,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApiError {
+    /// Stable machine-readable error identifier. An open, versioned set of
+    /// dotted `<domain>.<condition>` strings (e.g. `config.invalid`,
+    /// `request.invalid_param`, `agent.inference_5xx`). Not a closed enum —
+    /// clients match known values and treat unknown codes as generic
+    /// failures. See docs/specs/api/api.md and docs/specs/state-logging.md.
     pub code: String,
     pub message: String,
     // Always serialized, even when empty. The API spec example at
@@ -58,6 +69,17 @@ impl ApiError {
         self
     }
 
+    /// Code + message for a bare HTTP status, used by the envelope-rewrapping
+    /// middlewares that turn framework-generated responses (axum's 404/405
+    /// fallbacks, body-limit 413s) into `{ok:false, ...}` bodies. Both the
+    /// main API and the `acps init --serve` bootstrap server rewrap the same
+    /// statuses, so the tables live here — on the type that owns the wire
+    /// shape — rather than being duplicated per middleware where they can
+    /// drift apart.
+    pub fn for_status(status: StatusCode) -> Self {
+        Self::new(error_code_for_status(status), message_for_status(status))
+    }
+
     /// Build a wire-ready error from a `StackError`. The dotted code comes
     /// from `StackError::error_code`; the message comes from
     /// `StackError::public_message` so API clients do not receive local paths
@@ -78,6 +100,34 @@ impl ApiError {
     /// notably the auth middleware, which constructs envelopes directly.
     pub fn into_response_with(self, status: StatusCode) -> Response {
         (status, Json(self.into_envelope())).into_response()
+    }
+}
+
+fn error_code_for_status(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "request.invalid",
+        StatusCode::UNAUTHORIZED => "auth.invalid",
+        StatusCode::FORBIDDEN => "auth.forbidden",
+        StatusCode::NOT_FOUND => "request.not_found",
+        StatusCode::METHOD_NOT_ALLOWED => "request.method_not_allowed",
+        StatusCode::PAYLOAD_TOO_LARGE => "request.too_large",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "request.unsupported_media_type",
+        _ if status.is_server_error() => "server.internal_error",
+        _ => "request.rejected",
+    }
+}
+
+fn message_for_status(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "bad request",
+        StatusCode::UNAUTHORIZED => "authentication required",
+        StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::NOT_FOUND => "not found",
+        StatusCode::METHOD_NOT_ALLOWED => "method not allowed",
+        StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds configured size limit",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported media type",
+        _ if status.is_server_error() => "internal server error",
+        _ => "request rejected",
     }
 }
 
@@ -328,5 +378,40 @@ mod tests {
         let response = ApiError::new("auth.missing", "Missing Authorization header")
             .into_response_with(StatusCode::UNAUTHORIZED);
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn for_status_emits_domain_prefixed_codes() {
+        // Every published code carries a `<domain>.` prefix; the rewrapping
+        // middlewares must not reintroduce bare identifiers for the statuses
+        // axum generates on its own.
+        let code = |status| ApiError::for_status(status).code;
+        assert_eq!(code(StatusCode::BAD_REQUEST), "request.invalid");
+        assert_eq!(code(StatusCode::UNAUTHORIZED), "auth.invalid");
+        assert_eq!(code(StatusCode::FORBIDDEN), "auth.forbidden");
+        assert_eq!(code(StatusCode::NOT_FOUND), "request.not_found");
+        assert_eq!(
+            code(StatusCode::METHOD_NOT_ALLOWED),
+            "request.method_not_allowed"
+        );
+        assert_eq!(code(StatusCode::PAYLOAD_TOO_LARGE), "request.too_large");
+        assert_eq!(
+            code(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            "request.unsupported_media_type"
+        );
+        assert_eq!(
+            code(StatusCode::INTERNAL_SERVER_ERROR),
+            "server.internal_error"
+        );
+        assert_eq!(code(StatusCode::BAD_GATEWAY), "server.internal_error");
+        assert_eq!(code(StatusCode::CONFLICT), "request.rejected");
+    }
+
+    #[test]
+    fn for_status_pairs_each_code_with_a_message() {
+        let error = ApiError::for_status(StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(error.code, "request.method_not_allowed");
+        assert_eq!(error.message, "method not allowed");
+        assert!(error.details.is_empty());
     }
 }

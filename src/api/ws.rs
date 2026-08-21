@@ -76,11 +76,13 @@ async fn ws_connection(
     .await;
 
     let mut disconnect_reason = "client_disconnect";
+    let mut operator_reason: Option<String> = None;
     loop {
         tokio::select! {
             () = registration.notify.notified() => {
                 if registration.disconnect_requested.load(Ordering::Relaxed) {
                     disconnect_reason = "operator_disconnect";
+                    operator_reason = registration.operator_reason();
                     let _ = socket.send(Message::Close(None)).await;
                     break;
                 }
@@ -132,18 +134,25 @@ async fn ws_connection(
         .filter_map(|topic| topic.strip_prefix("sessions.").map(str::to_owned))
         .collect::<Vec<_>>();
     state.ws_registry.unregister(&registration.connection_id);
-    persist_ws_lifecycle_event(
-        &state,
-        "ws.client_disconnected",
-        serde_json::json!({
-            "connection_id": connection_id,
-            "topics": topics,
-            "session_ids": session_ids,
-            "duration_ms": duration_ms,
-            "reason": disconnect_reason,
-        }),
-    )
-    .await;
+    let mut payload = serde_json::json!({
+        "connection_id": connection_id,
+        "topics": topics,
+        "session_ids": session_ids,
+        "duration_ms": duration_ms,
+        "reason": disconnect_reason,
+    });
+    // `reason` stays the machine-readable cause; the operator's free-form text
+    // is a separate optional annotation, absent unless the disconnect request
+    // carried one.
+    if let Some(operator_reason) = operator_reason
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "operator_reason".to_owned(),
+            serde_json::Value::String(operator_reason),
+        );
+    }
+    persist_ws_lifecycle_event(&state, "ws.client_disconnected", payload).await;
 }
 
 /// Monotonically-increasing connection identifier. Pairs the connect/disconnect

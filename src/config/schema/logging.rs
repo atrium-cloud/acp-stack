@@ -5,7 +5,12 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
+    /// Conventional tracing level name: `"error"`, `"warn"`, `"info"`,
+    /// `"debug"`, or `"trace"`. Not validated, and not currently read by the
+    /// runtime, which logs at `warn`.
     pub level: String,
+    /// Retention window in days for local log records. Not currently read by
+    /// the runtime.
     pub local_retention_days: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase: Option<SupabaseLoggingConfig>,

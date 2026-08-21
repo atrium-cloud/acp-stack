@@ -83,7 +83,7 @@ impl CommandStatus {
             CommandStatus::Running => "running",
             CommandStatus::Exited => "exited",
             CommandStatus::Failed => "failed",
-            CommandStatus::Canceled => "canceled",
+            CommandStatus::Canceled => "cancelled",
         }
     }
 }
@@ -489,7 +489,7 @@ impl StateStore {
             permissions_canceled += permission_ids.len();
             for permission_id in &permission_ids {
                 tx.execute(
-                    "UPDATE permission_requests SET status = 'canceled', updated_at = ?1 WHERE id = ?2",
+                    "UPDATE permission_requests SET status = 'cancelled', updated_at = ?1 WHERE id = ?2",
                     params![now, permission_id],
                 )?;
                 let decision_id = next_permission_decision_id();
@@ -497,7 +497,7 @@ impl StateStore {
                     r#"
                     INSERT INTO permission_decisions
                         (id, request_id, created_at, decision, deciding_principal, reason)
-                    VALUES (?1, ?2, ?3, 'canceled', 'system', ?4)
+                    VALUES (?1, ?2, ?3, 'cancelled', 'system', ?4)
                     "#,
                     params![decision_id, permission_id, now, COMMAND_RECONCILED_REASON],
                 )?;

@@ -239,9 +239,11 @@ pub(crate) struct AgentRestartBlockersResponse {
 pub(crate) struct AgentRestartBlockerResponse {
     session_id: String,
     target_id: String,
+    #[schemars(extend("enum" = ["prompt_sent", "working", "permission_required", "blocked"]))]
     state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_id: Option<String>,
+    #[schemars(extend("enum" = ["pending", "running", null]))]
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

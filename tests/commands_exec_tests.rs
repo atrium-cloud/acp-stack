@@ -419,7 +419,7 @@ async fn cwd_symlink_replacement_before_approval_fails_spawn() {
 }
 
 #[tokio::test]
-async fn cancel_transitions_running_command_to_canceled() {
+async fn cancel_transitions_running_command_to_cancelled() {
     let harness = Harness::spawn().await;
     let response = submit(&harness, serde_json::json!({"command": "sleep 30"})).await;
     let body: Value = response.json().await.expect("json");
@@ -436,10 +436,10 @@ async fn cancel_transitions_running_command_to_canceled() {
     assert_eq!(cancel.status(), StatusCode::OK);
 
     let final_body = wait_for_terminal(&harness, &id).await;
-    assert_eq!(final_body["data"]["status"], "canceled");
+    assert_eq!(final_body["data"]["status"], "cancelled");
 
     let events = auth(session_client().get(format!(
-        "{}/v1/logs/events?kind=command.canceled&command_id={id}",
+        "{}/v1/logs/events?kind=command.cancelled&command_id={id}",
         harness.base_url
     )))
     .send()

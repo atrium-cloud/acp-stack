@@ -38,18 +38,18 @@ fn a_cancel_mid_prompt_freezes_the_category_frontier() {
 
     session.apply_state_signal(InitStateSignal::CategoryFailed {
         category: InitCategory::Provider,
-        code: "init.canceled".to_owned(),
+        code: "init.cancelled".to_owned(),
     });
     session.apply_state_signal(InitStateSignal::StepFinished {
         kind: step_kind::PROVIDER_CONFIGURE,
         disposition: StepDisposition::Executed,
-        error_code: Some("init.canceled".to_owned()),
+        error_code: Some("init.cancelled".to_owned()),
     });
 
     let events = session.events_after(0);
     assert_eq!(
         events.last().expect("session recorded no events")["type"],
-        json!("canceled"),
+        json!("cancelled"),
         "the cancellation must be the last thing the client is told: {events:?}"
     );
     for frontier in [folded_state(&session), folded_from_hello(&session)] {

@@ -27,9 +27,12 @@ impl WireGuard {
 #[serde(deny_unknown_fields)]
 pub(super) struct StartInitRequest {
     agent: Option<String>,
-    // Escape-hatch agent declared inline, mirroring the `--custom-agent-*`
-    // flags. Its own prompts are never streamed, so the whole spec has to
-    // arrive here or a hosted client cannot bring a non-registry agent at all.
+    /// Escape-hatch agent declared inline, mirroring the `--custom-agent-*`
+    /// flags: its prompts are never streamed, so the whole spec must arrive
+    /// here. Requires non-blank `custom_agent_command` and
+    /// `custom_agent_install`; conflicts with `agent`, `provider`, `model`,
+    /// `mode`, and `custom_provider: true`. Every other `custom_agent_*` field
+    /// requires it.
     custom_agent_id: Option<String>,
     custom_agent_name: Option<String>,
     custom_agent_command: Option<String>,
@@ -38,15 +41,21 @@ pub(super) struct StartInitRequest {
     custom_agent_install: Option<String>,
     custom_agent_creates: Option<String>,
     provider: Option<String>,
+    /// Requires `provider`.
     api_key_ref: Option<String>,
     model: Option<String>,
     /// Declared up front like `model`, so a hosted client that already knows
     /// the session mode it wants skips the streamed picker entirely. Validated
     /// against the agent's advertised modes by the shared mode lane.
     mode: Option<String>,
+    /// Requires `provider`. Gates the custom-provider fields below
+    /// (`provider_name`, `base_url`, `provider_api`, `model_name`, `context`,
+    /// `output_max_tokens`), each of which requires `custom_provider: true`.
     custom_provider: Option<bool>,
     provider_name: Option<String>,
     base_url: Option<String>,
+    /// Custom-provider API flavor. Requires `custom_provider: true`.
+    #[schemars(extend("enum" = ["chat-completions", "responses", "anthropic-messages", null]))]
     provider_api: Option<String>,
     model_name: Option<String>,
     context: Option<String>,
@@ -54,6 +63,8 @@ pub(super) struct StartInitRequest {
     workspace_root: Option<String>,
     workspace_uploads: Option<String>,
     runtime_user: Option<String>,
+    /// Sandbox isolation backend for the agent workload.
+    #[schemars(extend("enum" = ["off", "unshare", "bwrap", "custom", null]))]
     sandbox: Option<String>,
     #[serde(default)]
     code_from: Vec<String>,
@@ -68,40 +79,47 @@ pub(super) struct StartInitRequest {
     mcp_stdio: Vec<McpStdioServerRequest>,
     #[serde(default)]
     mcp_http: Vec<McpHttpServerRequest>,
+    /// Both-or-neither with `skills`.
     skills_source: Option<String>,
+    /// Both-or-neither with `skills_source`.
     #[serde(default)]
     skills: Vec<String>,
+    /// Conflicts with `skills_source` / `skills`.
     essential_skills: Option<bool>,
     #[serde(default)]
     deps: Vec<DepRequest>,
     #[serde(default)]
     deps_system: Vec<DepRequest>,
+    /// Both-or-neither with `deps_apply_yes`.
     deps_apply: Option<bool>,
+    /// Both-or-neither with `deps_apply`.
     deps_apply_yes: Option<bool>,
     standard_agent_work_deps: Option<bool>,
     browser_use: Option<bool>,
-    // Update policies the interactive wizard collects after model selection.
-    // They are declared up-front here rather than streamed, so the hosted flow
-    // reaches the same `[updates.acp_stack]`/`[agent.auto_update]` parity as the
-    // CLI's `--stack-update`/`--agent-update` flags. Absent → schema defaults.
+    /// Stack self-update policy, declared up-front rather than streamed,
+    /// mirroring `--stack-update`. Absent leaves the `[updates.acp_stack]`
+    /// schema default.
+    #[schemars(extend("enum" = ["on", "security", "off", null]))]
     stack_update: Option<String>,
+    /// Requires `stack_update`. Day/week units, e.g. `1d`, `3w`.
     stack_update_frequency: Option<String>,
+    /// Agent auto-update policy, mirroring `--agent-update`; honored only for
+    /// managed registry agents. Absent leaves the `[agent.auto_update]` default.
+    #[schemars(extend("enum" = ["on", "off", null]))]
     agent_update: Option<String>,
+    /// Requires `agent_update`. Hour/day/week units, e.g. `12h`, `1d`.
     agent_update_frequency: Option<String>,
-    // The caller declares here that it will push a custom provider's credential
-    // through the managed-state extension after init. Only then does a missing
-    // custom-provider api-key ref soft-pass; otherwise init hard-fails on it
-    // exactly like a terminal run. Replaces the old inference from "a hosted
-    // driver is attached", which conflated transport with an orchestration
-    // guarantee. Absent → false.
+    /// The caller's declaration that it will push a configured custom provider's
+    /// credential through the managed-state extension after init. Only then does
+    /// a missing custom-provider api-key ref soft-pass; otherwise init hard-fails
+    /// on it exactly like a terminal run. Absent → false.
     defer_provider_credentials: Option<bool>,
     #[serde(default)]
     data_sources: Vec<DataSourceRequest>,
-    // Run selection, matching `--resume`/`--fresh`. The interactive
-    // config-source picker is not hostable (it returns unhandled and the run
-    // proceeds as if nothing was chosen), so these are the only way a hosted
-    // client can continue a crashed run instead of silently starting another.
+    /// Continue the most recent unfinished or failed run instead of starting a
+    /// new one, matching `--resume`. Conflicts with `fresh`.
     resume: Option<bool>,
+    /// Force a new run, matching `--fresh`. Conflicts with `resume`.
     fresh: Option<bool>,
 }
 
@@ -119,7 +137,8 @@ struct McpStdioServerRequest {
     command: String,
     #[serde(default)]
     args: Vec<String>,
-    /// Secret ref names exported into the server's environment.
+    /// A bare secret-ref name exported under that name, or a `VAR=template`
+    /// entry whose template interpolates `${SECRET_REF}` (see config.md).
     #[serde(default)]
     env: Vec<String>,
 }

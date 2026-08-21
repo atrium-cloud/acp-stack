@@ -97,7 +97,7 @@ impl SupervisorTask {
                 PermissionOutcome::Canceled { reason } => {
                     self.finalize_without_spawn(
                         CommandStatus::Canceled,
-                        "command.canceled",
+                        "command.cancelled",
                         json!({"command_id": self.command_id, "reason": reason}),
                     )
                     .await;
@@ -304,7 +304,7 @@ impl SupervisorTask {
                     (CommandStatus::Failed, code, "command.failed")
                 }
             }
-            Outcome::Canceled => (CommandStatus::Canceled, None, "command.canceled"),
+            Outcome::Canceled => (CommandStatus::Canceled, None, "command.cancelled"),
             Outcome::TimedOut => (CommandStatus::Failed, None, "command.timeout"),
             Outcome::SpawnError => (CommandStatus::Failed, None, "command.failed"),
             Outcome::PersistenceError => {
@@ -544,7 +544,7 @@ impl SupervisorTask {
                     command_id = %self.command_id,
                     permission_id = %permission_id,
                     reason = permission_reason,
-                    "canceled permission left pending by command teardown",
+                    "cancelled permission left pending by command teardown",
                 );
             }
             Ok(false) => {}
@@ -561,7 +561,7 @@ impl SupervisorTask {
     }
 
     /// Settle a command row that never reached the spawn step. Sets the
-    /// terminal status (`failed` for denied/expired, `canceled` for
+    /// terminal status (`failed` for denied/expired, `cancelled` for
     /// caller-initiated cancel) and emits the corresponding event.
     async fn finalize_without_spawn(
         &self,
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(command.status, "failed");
 
         let permission = fixture.permissions.get(&record.id).await.expect("get");
-        assert_eq!(permission.status, "canceled");
+        assert_eq!(permission.status, "cancelled");
 
         let events = {
             let store = fixture.state.lock().await;
@@ -756,7 +756,7 @@ mod tests {
         };
         let canceled = events
             .iter()
-            .find(|event| event.kind == "permission.canceled")
+            .find(|event| event.kind == "permission.cancelled")
             .expect("canceled event");
         let payload: Value = serde_json::from_str(&canceled.payload_json).expect("payload");
         assert_eq!(

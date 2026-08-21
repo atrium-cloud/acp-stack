@@ -21,6 +21,7 @@ const ORDER_DESC: &str = "desc";
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsEventsParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     level: Option<String>,
@@ -29,10 +30,12 @@ pub(crate) struct LogsEventsParams {
     session_id: Option<String>,
     command_id: Option<String>,
     permission_id: Option<String>,
+    #[schemars(extend("enum" = ["rate_limit", "origin_cors", "ip_block", "oversized_request", null]))]
     category: Option<String>,
     since: Option<String>,
     until: Option<String>,
     after: Option<String>,
+    #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
 }
 
@@ -89,10 +92,16 @@ pub(crate) struct LogsEventsResponse {
 pub(crate) struct LogEventJson {
     id: String,
     created_at: String,
+    /// Conventionally `info`, `warn`, `error`, or `debug`. Open set: the event
+    /// writer accepts any label.
     level: String,
+    /// Dotted namespace (e.g. `command.started`). Open set; filterable by
+    /// exact match, or by prefix when the filter ends in `.`.
     kind: String,
     message: String,
     payload_json: String,
+    /// Conventionally `system`, `api`, `acp`, `command`, `permission`, `cli`,
+    /// or `local`. Open set: nothing enforces the named constants.
     source: String,
 }
 
@@ -194,18 +203,21 @@ pub(crate) struct SessionLogJson {
     id: String,
     created_at: String,
     updated_at: String,
+    #[schemars(extend("enum" = ["active", "available", "closed"]))]
     status: String,
 }
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsSessionsParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     since: Option<String>,
     until: Option<String>,
     status: Option<String>,
     after: Option<String>,
+    #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
 }
 
@@ -244,6 +256,7 @@ pub(crate) async fn logs_sessions_handler(
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsLimitParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     pub(super) limit: u32,
 }
@@ -251,12 +264,14 @@ pub(crate) struct LogsLimitParams {
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsCommandsParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     since: Option<String>,
     until: Option<String>,
     status: Option<String>,
     after: Option<String>,
+    #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
 }
 
@@ -271,6 +286,7 @@ pub(crate) struct CommandLogJson {
     id: String,
     created_at: String,
     updated_at: String,
+    #[schemars(extend("enum" = ["pending", "running", "exited", "failed", "cancelled"]))]
     status: String,
     command: String,
     exit_status: Option<i64>,
@@ -312,6 +328,7 @@ pub(crate) async fn logs_commands_handler(
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsPermissionsParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     kind: Option<String>,
@@ -320,6 +337,7 @@ pub(crate) struct LogsPermissionsParams {
     until: Option<String>,
     after: Option<String>,
     permission_id: Option<String>,
+    #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
 }
 
@@ -366,6 +384,7 @@ pub(crate) struct LogsSecurityResponse {
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct LogsSecurityParams {
+    /// Values above 1000 are silently clamped to 1000, not rejected.
     #[serde(default = "default_logs_limit")]
     limit: u32,
     since: Option<String>,
@@ -373,7 +392,9 @@ pub(crate) struct LogsSecurityParams {
     after: Option<String>,
     auth_failures_after: Option<String>,
     events_after: Option<String>,
+    #[schemars(extend("enum" = ["rate_limit", "origin_cors", "ip_block", "oversized_request", null]))]
     category: Option<String>,
+    #[schemars(extend("enum" = ["asc", "desc", null]))]
     order: Option<String>,
 }
 
@@ -381,7 +402,9 @@ pub(crate) struct LogsSecurityParams {
 pub(crate) struct AuthFailureJson {
     id: String,
     created_at: String,
+    #[schemars(extend("enum" = ["session", "admin", "local", "unknown"]))]
     key_kind: String,
+    #[schemars(extend("enum" = ["missing", "invalid", "wrong_kind", "malformed_header"]))]
     reason: String,
     client_ip: Option<String>,
     route: Option<String>,

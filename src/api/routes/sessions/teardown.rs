@@ -12,7 +12,7 @@ pub(crate) async fn sessions_cancel_handler(
 ) -> std::result::Result<ApiSuccess<SessionsCancelResponse>, StackError> {
     let target = target_for_session_wind_down(&state, &id, params.target_id.as_deref()).await?;
     target.supervisor.cancel_session(&id, &state.state).await?;
-    cancel_pending_acp_permissions_for_session(&state, &id, "session-canceled").await;
+    cancel_pending_acp_permissions_for_session(&state, &id, "session-cancelled").await;
     Ok(ApiSuccess::new(SessionsCancelResponse { session_id: id }))
 }
 

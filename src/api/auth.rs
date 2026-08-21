@@ -528,8 +528,7 @@ pub(crate) async fn ensure_envelope(
         .await;
     }
     let (parts, _body) = response.into_parts();
-    let mut new_response = ApiError::new(error_code_for_status(status), message_for_status(status))
-        .into_response_with(status);
+    let mut new_response = ApiError::for_status(status).into_response_with(status);
     // Preserve any non-payload headers from the original framework response.
     // Skip content-type/content-length because we're replacing the body with
     // a JSON envelope; let axum's response builder set those fresh.
@@ -593,34 +592,6 @@ pub(super) async fn enforce_http_origin(
         );
     }
     next.run(req).await
-}
-
-fn error_code_for_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "request.invalid",
-        StatusCode::UNAUTHORIZED => "auth.invalid",
-        StatusCode::FORBIDDEN => "auth.forbidden",
-        StatusCode::NOT_FOUND => "not_found",
-        StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
-        StatusCode::PAYLOAD_TOO_LARGE => "request.too_large",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "request.unsupported_media_type",
-        _ if status.is_server_error() => "internal_error",
-        _ => "request.rejected",
-    }
-}
-
-fn message_for_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "bad request",
-        StatusCode::UNAUTHORIZED => "authentication required",
-        StatusCode::FORBIDDEN => "forbidden",
-        StatusCode::NOT_FOUND => "not found",
-        StatusCode::METHOD_NOT_ALLOWED => "method not allowed",
-        StatusCode::PAYLOAD_TOO_LARGE => "request body exceeds configured size limit",
-        StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported media type",
-        _ if status.is_server_error() => "internal server error",
-        _ => "request rejected",
-    }
 }
 
 fn parse_bearer(header: &http::HeaderValue) -> Option<String> {

@@ -65,7 +65,7 @@ impl AgentAutoUpdater {
                         "agent.update.skipped",
                         "agent update skipped",
                         serde_json::json!({
-                            "agent": config.agent.id,
+                            "agent_id": config.agent.id,
                             "reason": "agent is running",
                         }),
                     )
@@ -79,7 +79,7 @@ impl AgentAutoUpdater {
                     &state,
                     "agent.update.started",
                     "agent update started",
-                    serde_json::json!({ "agent": config.agent.id }),
+                    serde_json::json!({ "agent_id": config.agent.id }),
                 )
                 .await
                 {
@@ -110,8 +110,9 @@ impl AgentAutoUpdater {
                             &state,
                             event_kind,
                             event_message,
-                            serde_json::to_value(&report)
-                                .unwrap_or_else(|_| serde_json::json!({ "agent": report.agent })),
+                            serde_json::to_value(&report).unwrap_or_else(
+                                |_| serde_json::json!({ "agent_id": report.agent_id }),
+                            ),
                         )
                         .await
                         {

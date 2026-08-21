@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn parse_json_object(content: &str) -> Result<JsonMap<String, JsonValue>> {
     match serde_json::from_str::<JsonValue>(content) {
         Ok(JsonValue::Object(root)) => Ok(root),
-        _ => Err(native_error("native_config_invalid")),
+        _ => Err(native_error("agent.native_config_invalid")),
     }
 }
 
@@ -18,7 +18,7 @@ pub(super) fn parse_jsonc_object(content: &str) -> Result<JsonMap<String, JsonVa
 pub(super) fn parse_toml_table(content: &str) -> Result<TomlMap<String, TomlValue>> {
     match toml::from_str::<TomlValue>(content) {
         Ok(TomlValue::Table(root)) => Ok(root),
-        _ => Err(native_error("native_config_invalid")),
+        _ => Err(native_error("agent.native_config_invalid")),
     }
 }
 
@@ -30,10 +30,10 @@ pub(super) fn parse_toml_table(content: &str) -> Result<TomlMap<String, TomlValu
 /// as invalid rather than lossily coerced.
 pub(super) fn parse_goose_root(content: &str) -> Result<JsonMap<String, JsonValue>> {
     let value: YamlValue =
-        serde_norway::from_str(content).map_err(|_| native_error("native_config_invalid"))?;
+        serde_norway::from_str(content).map_err(|_| native_error("agent.native_config_invalid"))?;
     match yaml_value_to_json(value)? {
         JsonValue::Object(root) => Ok(root),
-        _ => Err(native_error("native_config_invalid")),
+        _ => Err(native_error("agent.native_config_invalid")),
     }
 }
 
@@ -56,13 +56,13 @@ fn yaml_value_to_json(value: YamlValue) -> Result<JsonValue> {
                 // config never uses them, and a silent coercion could collide
                 // two distinct keys or smuggle content past the sanitize pass.
                 let YamlValue::String(key) = key else {
-                    return Err(native_error("native_config_invalid"));
+                    return Err(native_error("agent.native_config_invalid"));
                 };
                 object.insert(key, yaml_value_to_json(value)?);
             }
             Ok(JsonValue::Object(object))
         }
-        YamlValue::Tagged(_) => Err(native_error("native_config_invalid")),
+        YamlValue::Tagged(_) => Err(native_error("agent.native_config_invalid")),
     }
 }
 
@@ -77,7 +77,7 @@ fn yaml_number_to_json(number: serde_norway::Number) -> Result<JsonValue> {
         .as_f64()
         .and_then(serde_json::Number::from_f64)
         .map(JsonValue::Number)
-        .ok_or_else(|| native_error("native_config_invalid"))
+        .ok_or_else(|| native_error("agent.native_config_invalid"))
 }
 
 fn json_value_to_yaml(value: JsonValue) -> YamlValue {
@@ -115,20 +115,20 @@ fn json_number_to_yaml(number: serde_json::Number) -> YamlValue {
 pub(super) fn goose_yaml_bytes(root: JsonMap<String, JsonValue>) -> Result<Vec<u8>> {
     let value = json_value_to_yaml(JsonValue::Object(root));
     let text =
-        serde_norway::to_string(&value).map_err(|_| native_error("native_config_invalid"))?;
+        serde_norway::to_string(&value).map_err(|_| native_error("agent.native_config_invalid"))?;
     Ok(text.into_bytes())
 }
 
 pub(super) fn json_bytes(root: JsonMap<String, JsonValue>) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(&JsonValue::Object(root))
-        .map_err(|_| native_error("native_config_invalid"))?;
+        .map_err(|_| native_error("agent.native_config_invalid"))?;
     bytes.push(b'\n');
     Ok(bytes)
 }
 
 pub(super) fn toml_bytes(root: TomlMap<String, TomlValue>) -> Result<Vec<u8>> {
     let text = toml::to_string_pretty(&TomlValue::Table(root))
-        .map_err(|_| native_error("native_config_invalid"))?;
+        .map_err(|_| native_error("agent.native_config_invalid"))?;
     Ok(text.into_bytes())
 }
 
@@ -441,7 +441,7 @@ fn strip_jsonc_comments(input: &str) -> Result<String> {
                 index += 1;
             }
             if !closed {
-                return Err(native_error("native_config_invalid"));
+                return Err(native_error("agent.native_config_invalid"));
             }
             continue;
         }
@@ -449,9 +449,9 @@ fn strip_jsonc_comments(input: &str) -> Result<String> {
         index += 1;
     }
     if in_string {
-        return Err(native_error("native_config_invalid"));
+        return Err(native_error("agent.native_config_invalid"));
     }
-    String::from_utf8(output).map_err(|_| native_error("native_config_invalid"))
+    String::from_utf8(output).map_err(|_| native_error("agent.native_config_invalid"))
 }
 
 fn strip_jsonc_trailing_commas(input: &str) -> Result<String> {
@@ -493,5 +493,5 @@ fn strip_jsonc_trailing_commas(input: &str) -> Result<String> {
         output.push(byte);
         index += 1;
     }
-    String::from_utf8(output).map_err(|_| native_error("native_config_invalid"))
+    String::from_utf8(output).map_err(|_| native_error("agent.native_config_invalid"))
 }

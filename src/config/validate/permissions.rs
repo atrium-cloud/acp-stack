@@ -2,7 +2,9 @@
 
 use std::net::IpAddr;
 
-use crate::config::schema::{PermissionsConfig, SecurityHttpConfig};
+use crate::config::schema::{
+    PermissionsConfig, SecurityHttpConfig, TIMEOUT_ACTION_APPROVE, TIMEOUT_ACTION_DENY,
+};
 use crate::config::validate::primitives::validate_duration_field;
 use crate::error::{Result, StackError};
 
@@ -21,7 +23,7 @@ pub(crate) fn validate_permissions(permissions: &PermissionsConfig) -> Result<()
     }
     if let Some(action) = permissions.timeout_action.as_deref() {
         match action {
-            "deny" | "approve" => {}
+            TIMEOUT_ACTION_DENY | TIMEOUT_ACTION_APPROVE => {}
             _ => return Err(StackError::InvalidTimeoutAction),
         }
     }

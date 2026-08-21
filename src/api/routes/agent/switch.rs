@@ -1,6 +1,9 @@
 //! Agent switch: repoint the default target to a different harness.
 
 use super::*;
+// Same shape the `/v1/models` route serves; reused verbatim so a client can
+// render either response with one model renderer.
+use crate::api::routes::providers::ModelJson;
 use crate::runtime::agent::switch_journal::{
     SwitchJournal, SwitchJournalPhase, candidate_fingerprint, load_switch_journal,
     persist_switch_journal, remove_switch_journal,
@@ -8,7 +11,7 @@ use crate::runtime::agent::switch_journal::{
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct AgentSwitchRequest {
-    agent: String,
+    agent_id: String,
     #[serde(default, rename = "drop")]
     drop_configs: bool,
     #[serde(default)]
@@ -21,6 +24,7 @@ pub(crate) struct AgentSwitchRequest {
 pub(crate) struct AgentSwitchResponse {
     old_agent_id: String,
     agent_id: String,
+    #[schemars(extend("enum" = ["not_applicable", "reused", "set", "selected", "resumed", "no_op"]))]
     provider_status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<String>,
@@ -38,7 +42,7 @@ pub(crate) struct AgentSwitchResponse {
     restarted: bool,
     restart_started: bool,
     set_model: bool,
-    models: Vec<String>,
+    models: Vec<ModelJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     follow_up: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -105,7 +109,7 @@ pub(crate) async fn agent_switch_handler(
     // completed switch must be recognized before the fresh-path validation
     // below rejects it as "already configured".
     let resume_journal = match load_switch_journal(&state.runtime_paths.config_path)? {
-        Some(journal) => match classify_switch_journal(&journal, &body.agent, &fresh_config)? {
+        Some(journal) => match classify_switch_journal(&journal, &body.agent_id, &fresh_config)? {
             SwitchJournalAction::NoOp => {
                 return Ok(completed_switch_response(
                     &fresh_config,
@@ -133,7 +137,7 @@ pub(crate) async fn agent_switch_handler(
     // never-switched twin of the completed-journal retry above. Flagged bodies
     // keep their explicit-intent rejections in the existing-target path below.
     if resume_journal.is_none()
-        && fresh_config.array.primary_target == body.agent
+        && fresh_config.array.primary_target == body.agent_id
         && !body.drop_configs
         && body.provider.is_none()
         && body.api_key_ref.is_none()
@@ -143,7 +147,7 @@ pub(crate) async fn agent_switch_handler(
             &fresh_config.agent.id,
         ));
     }
-    if fresh_config.array.target(&body.agent).is_some() {
+    if fresh_config.array.target(&body.agent_id).is_some() {
         return switch_to_existing_array_target(
             &state,
             &home,
@@ -158,7 +162,7 @@ pub(crate) async fn agent_switch_handler(
         &fresh_config,
         &registry,
         PlannedAgentSwitchRequest {
-            target_agent: body.agent.clone(),
+            target_agent: body.agent_id.clone(),
             provider_id: body.provider.clone(),
             api_key_ref: body.api_key_ref.clone(),
         },
@@ -201,6 +205,14 @@ pub(crate) async fn agent_switch_handler(
         )
         .await?;
         advertised_values_for_category(&response, AgentSessionConfigCategory::Model)?
+            .into_iter()
+            // ACP advertises bare values with no separate label, so there is
+            // no display name to carry here.
+            .map(|value| ModelJson {
+                value,
+                display_name: None,
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -217,7 +229,7 @@ pub(crate) async fn agent_switch_handler(
     let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
     let mut journal = SwitchJournal {
         old_target_id: old_target_id.clone(),
-        new_target_id: body.agent.clone(),
+        new_target_id: body.agent_id.clone(),
         target_agent_id: plan.target_agent_id.clone(),
         candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,
@@ -302,24 +314,24 @@ async fn switch_to_existing_array_target(
             reason: "--drop is not supported when selecting an existing Array target".to_owned(),
         });
     }
-    if fresh_config.array.primary_target == body.agent {
+    if fresh_config.array.primary_target == body.agent_id {
         return Err(StackError::InvalidParam {
-            field: "agent",
-            reason: format!("agent `{}` is already the default target", body.agent),
+            field: "agent_id",
+            reason: format!("agent `{}` is already the default target", body.agent_id),
         });
     }
     let target_agent = fresh_config
         .array
-        .target(&body.agent)
+        .target(&body.agent_id)
         .ok_or_else(|| StackError::InvalidParam {
-            field: "agent",
-            reason: format!("unknown Array target `{}`", body.agent),
+            field: "agent_id",
+            reason: format!("unknown Array target `{}`", body.agent_id),
         })?
         .agent
         .clone();
     let target_entry = registry.lookup_required(&target_agent.id)?;
     let mut candidate_config = fresh_config.clone();
-    candidate_config.array.primary_target = body.agent.clone();
+    candidate_config.array.primary_target = body.agent_id.clone();
     candidate_config.agent = target_agent;
     let canonical = candidate_config.to_canonical_toml()?;
     let mut candidate_config = crate::config::load_config_from_str(&canonical)?;
@@ -365,7 +377,7 @@ async fn switch_to_existing_array_target(
     let was_running = old_target.supervisor.snapshot().await.state.as_wire_str() == "running";
     let mut journal = SwitchJournal {
         old_target_id: old_target_id.clone(),
-        new_target_id: body.agent.clone(),
+        new_target_id: body.agent_id.clone(),
         target_agent_id: candidate_config.agent.id.clone(),
         candidate_fingerprint: candidate_fingerprint(&canonical),
         was_running,

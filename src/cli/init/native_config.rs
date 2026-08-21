@@ -180,7 +180,7 @@ pub(super) fn apply_for_init(
             || current.agent.id != prepared.harness
         {
             return Err(StackError::NativeAgentConfig {
-                code: "native_config_base_config_changed",
+                code: "agent.native_config_base_config_changed",
             });
         }
         let paths = prepare_native_config_file_paths(&prepared, config_path, home)?;
@@ -206,7 +206,7 @@ pub(super) fn apply_for_init(
             let model = native_config_projection(&prepared.canonical_config)
                 .model
                 .ok_or(StackError::NativeAgentConfig {
-                    code: "native_config_model_invalid",
+                    code: "agent.native_config_model_invalid",
                 })?;
             let response = fetch_session_config(home, &prepared.canonical_config)?;
             validate_advertised_value(&response, AgentSessionConfigCategory::Model, &model)?;
@@ -226,12 +226,12 @@ pub(super) fn apply_for_init(
             persist_native_config_operation(state_path, config_path, home, record)?;
             if restore_native_config_snapshots(&record.rollback_snapshots, home).is_err() {
                 record.operation.error = Some(NativeConfigOperationError {
-                    code: "native_config_rollback_failed".to_owned(),
+                    code: "agent.native_config_rollback_failed".to_owned(),
                 });
                 record.updated_at = chrono::Utc::now();
                 persist_native_config_operation(state_path, config_path, home, record)?;
                 return Err(StackError::NativeAgentConfig {
-                    code: "native_config_rollback_failed",
+                    code: "agent.native_config_rollback_failed",
                 });
             }
             reset_for_retry(record);
@@ -274,11 +274,11 @@ pub(super) fn cancel_applied_for_init(
         .into_iter()
         .find(|record| record.operation.operation_id == operation_id)
         .ok_or(StackError::NativeAgentConfig {
-            code: "native_config_operation_not_found",
+            code: "agent.native_config_operation_not_found",
         })?;
     if record.operation.revision != revision {
         return Err(StackError::NativeAgentConfig {
-            code: "native_config_revision_mismatch",
+            code: "agent.native_config_revision_mismatch",
         });
     }
     if record.cancelled
@@ -289,7 +289,7 @@ pub(super) fn cancel_applied_for_init(
     }
     if record.phase != NativeConfigOperationPhase::Applied {
         return Err(StackError::NativeAgentConfig {
-            code: "native_config_rollback_conflict",
+            code: "agent.native_config_rollback_conflict",
         });
     }
     // Later init steps legitimately rewrite the canonical config (and may
@@ -301,7 +301,7 @@ pub(super) fn cancel_applied_for_init(
         .prior_config
         .as_ref()
         .ok_or(StackError::NativeAgentConfig {
-            code: "native_config_rollback_failed",
+            code: "agent.native_config_rollback_failed",
         })?;
     restore_native_config_snapshots(&record.rollback_snapshots, home)?;
     record.operation.status = NativeConfigOperationStatus::Cancelled;
@@ -570,7 +570,10 @@ mod tests {
             home.path(),
         )
         .expect_err("revision mismatch must fail");
-        assert_eq!(mismatch.error_code(), "native_config_revision_mismatch");
+        assert_eq!(
+            mismatch.error_code(),
+            "agent.native_config_revision_mismatch"
+        );
 
         let cancelled = cancel_applied_for_init(
             &operation.operation_id,
@@ -616,7 +619,10 @@ mod tests {
             home.path(),
         )
         .expect_err("unknown operation must fail");
-        assert_eq!(missing.error_code(), "native_config_operation_not_found");
+        assert_eq!(
+            missing.error_code(),
+            "agent.native_config_operation_not_found"
+        );
     }
 
     #[test]

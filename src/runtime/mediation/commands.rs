@@ -48,7 +48,7 @@ use self::supervisor::SupervisorTask;
 /// anomaly (the in-memory waiter vanished without a durable decision); the
 /// rest are race-safe no-ops on the corresponding path and exist so a genuine
 /// orphan always records the true cause.
-pub(crate) const PERMISSION_REASON_COMMAND_CANCELED: &str = "command-canceled";
+pub(crate) const PERMISSION_REASON_COMMAND_CANCELED: &str = "command-cancelled";
 pub(crate) const PERMISSION_REASON_DENIED: &str = "command-permission-denied";
 pub(crate) const PERMISSION_REASON_WAITER_LOST: &str = "command-permission-waiter-lost";
 pub(crate) const PERMISSION_REASON_START_FAILED: &str = "command-start-failed";

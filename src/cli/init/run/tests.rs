@@ -302,7 +302,7 @@ fn config_with_mcp_servers(names: &[&str]) -> Config {
 fn ignored_mcp_server(name: &str) -> crate::runtime::agent::acp_bridge::IgnoredFeature {
     crate::runtime::agent::acp_bridge::IgnoredFeature {
         feature: crate::runtime::agent::acp_bridge::IGNORED_FEATURE_MCP_SERVER,
-        target: name.to_owned(),
+        value: name.to_owned(),
         capability: "mcpCapabilities.stdio",
         reason: "agent does not advertise this MCP transport".to_owned(),
     }

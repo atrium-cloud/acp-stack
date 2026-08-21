@@ -39,6 +39,7 @@ pub(crate) struct ProvidersResponse {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ProviderJson {
+    /// Provider id, same namespace as `ProviderStatusJson.provider_id`.
     id: &'static str,
     name: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,6 +86,7 @@ pub(crate) struct ModelsResponse {
     /// `"provider_catalog"` when `models` comes from the provider's live
     /// model listing; `"acp_advertised"` when it comes from the agent's
     /// ACP `session/new` config options.
+    #[schemars(extend("enum" = ["provider_catalog", "acp_advertised"]))]
     source: &'static str,
     models: Vec<ModelJson>,
     /// ACP-advertised `mode` values. Empty when the agent does not
@@ -100,9 +102,9 @@ pub(crate) struct ModelsResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ModelJson {
     /// Model id accepted verbatim by `acps agent set --model`.
-    value: String,
+    pub(crate) value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    display_name: Option<String>,
+    pub(crate) display_name: Option<String>,
 }
 
 const MODELS_SOURCE_PROVIDER_CATALOG: &str = "provider_catalog";

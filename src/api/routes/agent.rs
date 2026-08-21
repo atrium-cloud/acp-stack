@@ -56,6 +56,7 @@ pub(crate) use self::update::{agent_update_handler, agent_update_status_handler}
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct AgentInstallResponse {
+    #[schemars(extend("enum" = ["installed", "already_present"]))]
     outcome: &'static str,
     path: String,
     sha256: String,
@@ -79,6 +80,7 @@ pub(crate) struct ArrayStatusResponse {
 #[derive(Serialize, schemars::JsonSchema)]
 pub(crate) struct ArrayDelegationStatusResponse {
     ready: bool,
+    #[schemars(with = "crate::config::LocalSessionAuth")]
     local_session_auth: &'static str,
 }
 
@@ -88,6 +90,7 @@ pub(crate) struct ArrayTargetStatusResponse {
     agent_id: String,
     name: String,
     primary: bool,
+    #[schemars(with = "crate::runtime::agent::supervisor::AgentStateLabel")]
     process_state: String,
     pid: Option<u32>,
     configured_providers: Vec<super::status::ProviderStatusJson>,
@@ -337,7 +340,11 @@ pub(crate) struct AgentCapabilitiesResponseBody {
     agent_id: String,
     adapter: Option<AgentAdapterConfig>,
     captured_at: String,
+    /// Raw ACP `initialize` capability JSON, surfaced verbatim. Always a JSON
+    /// object; its inner shape is the agent's, not ours.
+    #[schemars(extend("type" = "object"))]
     capabilities: serde_json::Value,
+    #[schemars(with = "crate::runtime::agent::supervisor::AgentStateLabel")]
     process_state: String,
 }
 
@@ -378,6 +385,6 @@ async fn capabilities_agent_target(
         adapter: agent.adapter,
         captured_at: record.captured_at,
         capabilities,
-        process_state: format!("{:?}", snapshot.state).to_lowercase(),
+        process_state: snapshot.state.as_wire_str().to_owned(),
     }))
 }

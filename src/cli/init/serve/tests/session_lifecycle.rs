@@ -96,7 +96,7 @@ fn cancel_prevents_late_result_publication() {
     }));
     session.set_error("init.failed", "should not replace cancel".to_owned());
 
-    assert_eq!(session.status(), "canceled");
+    assert_eq!(session.status(), "cancelled");
     assert!(session.result_frame().is_none());
     let snapshot = serde_json::to_string(&session.status_snapshot()).expect("snapshot");
     assert!(!snapshot.contains("acps_session_after_cancel"));

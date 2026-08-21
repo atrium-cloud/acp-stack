@@ -308,7 +308,7 @@ async fn own_terminal(
 
     // Kill-intent latch: distinguishes exits the owner caused (terminal/kill,
     // release of a running terminal, shutdown drain) from natural signal
-    // deaths (OOM kill, segfault), so the command row can record `canceled`
+    // deaths (OOM kill, segfault), so the command row can record `cancelled`
     // for the former — matching the gateway's operator-cancel mapping —
     // while genuine failures stay `failed`.
     let mut canceled = false;
@@ -407,7 +407,7 @@ async fn own_terminal(
         // Mirrors the gateway's finalize mapping, including canceled rows
         // carrying no exit status.
         let (command_status, event_kind) = if canceled {
-            (CommandStatus::Canceled, "command.canceled")
+            (CommandStatus::Canceled, "command.cancelled")
         } else {
             match (&status.exit_code, &status.signal) {
                 (Some(0), _) => (CommandStatus::Exited, "command.exited"),

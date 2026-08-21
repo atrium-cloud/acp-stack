@@ -36,7 +36,9 @@ const MAX_VALUE_BYTES: usize = 16 * 1024;
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyRequest {
+    #[schemars(range(min = 1, max = 1))]
     pub schema_version: u16,
+    #[schemars(range(min = 1))]
     pub revision: i64,
     pub desired: DesiredState,
 }
@@ -152,6 +154,7 @@ impl std::fmt::Debug for CredentialSelection {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ApplyResponse {
     pub applied_revision: i64,
+    #[schemars(extend("enum" = ["applied", "cleared", "noop"]))]
     pub outcome: &'static str,
 }
 

@@ -59,7 +59,7 @@ impl ServerEvent {
             ServerEvent::InputAccepted { .. } => "input_accepted",
             ServerEvent::ResultReady => "result_ready",
             ServerEvent::ResultAcked => "result_acked",
-            ServerEvent::Canceled { .. } => "canceled",
+            ServerEvent::Canceled { .. } => "cancelled",
             ServerEvent::Error { .. } => "error",
             ServerEvent::ErrorAcked => "error_acked",
             ServerEvent::ErrorExpired { .. } => "error_expired",

@@ -203,6 +203,32 @@ fn escalation_unavailable_still_refuses_system_scope() {
 }
 
 #[test]
+fn outcome_kinds_serialize_as_snake_case() {
+    // The `kind` discriminator is a wire value read by API clients and
+    // mirrored by hand in `crate::cli::deps`; word-joined spellings like
+    // `alreadypresent` are not part of the contract.
+    let kind_of = |outcome: &DepApplyOutcome| {
+        serde_json::to_value(outcome).expect("serialize outcome")["kind"]
+            .as_str()
+            .expect("kind string")
+            .to_owned()
+    };
+    assert_eq!(kind_of(&DepApplyOutcome::Installed), "installed");
+    assert_eq!(kind_of(&DepApplyOutcome::AlreadyPresent), "already_present");
+    assert_eq!(
+        kind_of(&DepApplyOutcome::PrivilegeRequired { uid: 1001 }),
+        "privilege_required"
+    );
+    assert_eq!(
+        kind_of(&DepApplyOutcome::Failed {
+            exit_code: Some(1),
+            stderr_tail: String::new(),
+        }),
+        "failed"
+    );
+}
+
+#[test]
 fn not_needed_escalation_is_revalidated_against_euid_at_apply_time() {
     // `NotNeeded` doubles as "nothing was pending at probe time, so no
     // probe ran". If a system-scope action becomes pending afterwards,

@@ -77,7 +77,7 @@ pub struct DepApplyResult {
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DepApplyOutcome {
     /// Action ran and the `creates` postcheck resolved.
     Installed,

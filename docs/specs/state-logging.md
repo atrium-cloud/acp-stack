@@ -114,24 +114,25 @@ The `prompt.inference_failed` payload is intentionally sanitized. Only `status_c
 
 ### Permission Decision Events
 
-Every permission decision event (`permission.approved`, `permission.denied`, `permission.canceled`, `permission.expired`) carries the request's `source` and `subject_id` in its payload, plus a `command_id` field when the request is command-source (`subject_id` is the command id there; ACP-source `subject_id` is a session id and is never presented as a command id). This makes a decision visible through `GET /v1/logs/events?command_id=` alongside the command's own events.
+Every permission decision event (`permission.approved`, `permission.denied`, `permission.cancelled`, `permission.expired`) carries the request's `source` and `subject_id` in its payload, plus a `command_id` field when the request is command-source (`subject_id` is the command id there; ACP-source `subject_id` is a session id and is never presented as a command id). This makes a decision visible through `GET /v1/logs/events?command_id=` alongside the command's own events.
 
 The `reason` field in a decision payload (and in `permission_decisions.reason`) is a machine-readable kebab-case string naming the cause:
 
 | Reason | Meaning |
 | ------ | ------- |
 | `timeout` | The `[permissions].request_timeout` timer fired |
-| `command-canceled` | The command was canceled while awaiting approval |
+| `command-cancelled` | The command was cancelled while awaiting approval |
 | `command-permission-denied` | Settled alongside an operator deny (normally a no-op) |
 | `command-permission-waiter-lost` | The in-memory waiter vanished without a durable decision; teardown settled the row |
 | `command-start-failed` | The command could not transition to `running` |
 | `command-spawn-failed` | The child process failed to spawn |
 | `command-persistence-failed` | The command died on a persistence error |
 | `command-finished` | Settled at normal command teardown (normally a no-op) |
-| `command-reconciled` | The startup sweep failed the command and canceled its permission in the same transaction |
+| `command-reconciled` | The startup sweep failed the command and cancelled its permission in the same transaction |
 | `daemon-restart` | The startup permission sweep settled a row orphaned by a restart |
-| `agent-stopped` / `agent-restarted` | Agent lifecycle canceled pending ACP-source rows |
-| `native-config-import` | A native agent config import canceled pending ACP-source rows |
+| `agent-stopped` / `agent-restarted` | Agent lifecycle cancelled pending ACP-source rows |
+| `native-config-import` | A native agent config import cancelled pending ACP-source rows |
+| `session-cancelled` / `session-closed` / `session-deleted` | Session wind-down cancelled the session's pending ACP-source rows |
 | `acp-request-cancelled` | The agent cancelled its own ACP permission request |
 
 A command that reaches a terminal status while its permission request is still `pending` cancels that permission with one of the reasons above — a permission request never outlives its command.
@@ -142,9 +143,9 @@ The startup sweeps (orphaned prompts, permissions, commands) are individually be
 
 | Kind                | Level | Source   | Payload |
 | ------------------- | ----- | -------- | ------- |
-| `server.reconciled` | info  | `system` | `{ "prompts", "commands", "permissions_canceled", "permissions_expired", "command_ids": [...], "command_ids_truncated": <bool>, "reason": "daemon-restart" }` |
+| `server.reconciled` | info  | `system` | `{ "prompts", "commands", "permissions_cancelled", "permissions_expired", "command_ids": [...], "command_ids_truncated": <bool>, "reason": "daemon-restart" }` |
 
-`command_ids` is capped at 50 entries; `command_ids_truncated` is `true` when the sweep settled more. `permissions_canceled` includes permissions canceled by the command sweep's in-transaction settle, not just the permission sweep's own cancellations.
+`command_ids` is capped at 50 entries; `command_ids_truncated` is `true` when the sweep settled more. `permissions_cancelled` includes permissions cancelled by the command sweep's in-transaction settle, not just the permission sweep's own cancellations.
 
 ## Logs API
 
@@ -169,13 +170,15 @@ Unknown category labels are rejected with a 4xx `invalid_param`.
 
 `GET /v1/metrics/summary` returns counts and percentiles over a `[since, until)` window. Fields:
 
+- `window` — the resolved `{ since, until }` bounds (RFC 3339)
+- `counts` — row totals for `events`, `sessions`, `commands`, `auth_failures`, `agent_lifecycle`, `installer_runs`, `agent_capabilities`, `prompts`, `permission_requests`, and `permission_decisions`
 - `sessions.active`, `sessions.closed`, plus closed-session duration p50/p95
 - `turns.total`, `turns.by_status`, `turns.average_per_session`
 - `commands.total`, `commands.by_status`, command duration p50/p95, `commands.truncated_count`
 - `permissions.total`, `permissions.by_outcome`, permission response_ms p50/p95
 - `security.auth_failures`, `security.by_reason`, `security.events_by_kind`
-- `api_connections.request_count`, average duration, and count maps by status bucket, method, route template, key kind, event source, origin kind, country code, and region code
-- `ws_connections.connections_opened`, `connections_closed`, `average_duration_ms`
+- `api_connections.request_count` (always present, `0` on an empty window), average duration, and count maps by status bucket, method, route template, key kind, event source, origin kind, country code, and region code; any missing or empty grouping key buckets under `unknown`, and `/v1/ws`, `/v1/health/*`, and `/v1/status*` are excluded for public-tier callers
+- `ws_connections.connections_opened`, `connections_closed`, `average_duration_ms` (all three `null` together when the window has no `ws.client_connected` and no `ws.client_disconnected` rows; otherwise the two counts are numbers, possibly `0`, while `average_duration_ms` stays `null` until some disconnect in the window carried a `duration_ms`)
 - `usage.tokens_input`, `usage.tokens_output`, `usage.context_window_used_max`, `usage.context_window_max`
 - `prompt_failures.total`, explicit `failure_class` counters, `by_class`, `by_status_code`, and `by_reason_category`
 

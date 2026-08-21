@@ -44,7 +44,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
 
     let base_url = daemon_base_url(config.api.public_url.as_deref(), &config.api.bind)?;
     let request = serde_json::json!({
-        "agent": args.agent,
+        "agent_id": args.agent,
         "provider": args.provider,
         "api_key_ref": args.api_key_ref,
         "drop": args.drop_configs,
@@ -72,7 +72,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
         .map(|values| {
             values
                 .iter()
-                .filter_map(Value::as_str)
+                .filter_map(|model| model.get("value").and_then(Value::as_str))
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         })

@@ -53,7 +53,10 @@ pub(crate) use self::validate::{STACK_UPDATE_FREQUENCY_LIMITS, validate_supabase
 #[serde(deny_unknown_fields)]
 #[schemars(transform = relax_agent_array_requirement)]
 pub struct Config {
+    /// Config schema version. `1` is the only supported value; every other
+    /// value is rejected at load.
     #[serde(default = "default_config_version")]
+    #[schemars(extend("const" = 1))]
     pub config_version: u64,
     pub api: ApiConfig,
     pub security: SecurityConfig,

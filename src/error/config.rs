@@ -118,26 +118,26 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
     use StackError::*;
     Some(match err {
         NativeAgentConfig {
-            code: "native_config_operation_not_found",
+            code: "agent.native_config_operation_not_found",
         } => StatusCode::NOT_FOUND,
         NativeAgentConfig {
             code:
-                "native_config_rollback_conflict"
-                | "native_config_rollback_expired"
-                | "native_config_base_config_changed"
-                | "native_config_operation_in_progress"
-                | "native_config_journal_conflict",
+                "agent.native_config_rollback_conflict"
+                | "agent.native_config_rollback_expired"
+                | "agent.native_config_base_config_changed"
+                | "agent.native_config_operation_in_progress"
+                | "agent.native_config_journal_conflict",
         } => StatusCode::CONFLICT,
         NativeAgentConfig {
-            code: "native_config_too_large" | "native_config_normalized_too_large",
+            code: "agent.native_config_too_large" | "agent.native_config_normalized_too_large",
         } => StatusCode::PAYLOAD_TOO_LARGE,
         NativeAgentConfig {
             code:
-                "native_config_journal_invalid"
-                | "native_config_journal_too_large"
-                | "native_config_journal_too_many"
-                | "native_config_rollback_failed"
-                | "native_config_claude_state_invalid",
+                "agent.native_config_journal_invalid"
+                | "agent.native_config_journal_too_large"
+                | "agent.native_config_journal_too_many"
+                | "agent.native_config_rollback_failed"
+                | "agent.native_config_claude_state_invalid",
         } => StatusCode::INTERNAL_SERVER_ERROR,
         ConfigToml(_)
         | ConfigSerialize(_)

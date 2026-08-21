@@ -44,12 +44,36 @@ pub use coverage::{CoverageReport, NamespaceCoverage, coverage_report};
 // CONSTANTS
 /// In-repo location of the generated schema, relative to the crate manifest.
 pub const SCHEMA_PATH: &str = "docs/specs/api/acps-schema.json";
-/// In-repo location of the generated route/version metadata sidecar.
+/// In-repo location of the generated schema version/definition-count sidecar.
 pub const META_PATH: &str = "docs/specs/api/acps-schema.meta.json";
 /// `$id` of the published schema — the durable stable-release download URL.
 const SCHEMA_ID: &str =
     "https://github.com/atrium-cloud/acp-stack/releases/latest/download/acps-schema.json";
 const SCHEMA_TITLE: &str = "acp-stack /v1 API and configuration contract";
+/// Root `description` of the published schema. Consumers fetch this file
+/// standalone from the release asset, so it has to explain what the document
+/// is, how the three namespaces differ, that the root is a container rather
+/// than a validatable body, and what is deliberately absent.
+const SCHEMA_DESCRIPTION: &str = concat!(
+    "Generated from the Rust wire types of acp-stack; do not edit by hand — regenerate with ",
+    "`cargo run --features dev-tools --bin generate-api-schema`. This root is a container of ",
+    "definitions, not a validatable body: validate a payload against ",
+    "`#/$defs/<namespace>/<TypeName>`. `$defs` splits into three namespaces because serde's ",
+    "`default` and `skip_serializing_if` attributes place a field in `required` under one ",
+    "direction but not the other — `request` is the deserialize contract (what a client sends), ",
+    "`response` is the serialize contract (what the server emits), and `config` is the ",
+    "deserialize contract for `acps-config.toml`. A type used on both sides appears once per ",
+    "namespace. Conventions: timestamp fields are RFC 3339 strings; an optional response field ",
+    "is omitted when absent rather than emitted as null, so its nullable type means absent and ",
+    "null are equivalent. Not covered, by design: the `/v1/ws` `LiveEvent` frames and the ",
+    "`acps init serve` streaming frames and state signals (hand-built and byte-pinned by golden ",
+    "tests), the envelope-bypassing binary download handler and the `health/ready` handler ",
+    "(whose readiness body is hand-built, not a typed DTO), and the untyped `config` import ",
+    "response. Cross-field rules (mutually-required or mutually-exclusive ",
+    "fields, exactly-one-of constraints, blank-as-absent) are mostly inexpressible in JSON Schema ",
+    "and stay enforced in code; `ApiError.code` is likewise an open dotted-namespace string ",
+    "rather than a closed enum. See docs/specs/api/api.md for both."
+);
 const META_SCHEMA_VERSION: u16 = 1;
 /// Draft the schema is emitted in; also the `$schema` value of the merged root.
 const META_SCHEMA_DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -115,10 +139,28 @@ fn rewrite_refs(value: &mut Value, namespace: &str) {
     }
 }
 
-/// Merge a set of (ref-rewritten) definitions into `accumulator`.
+/// Merge a set of (ref-rewritten) definitions into `accumulator`. schemars keys
+/// `$defs` by a type's short name. One type legitimately arrives twice when it
+/// is reached from two umbrellas in the same namespace (e.g.
+/// `NativeConfigInspection`, pulled by both the main-API and init response
+/// passes) — those definitions are byte-identical and collapse harmlessly. But
+/// two *different* types sharing a short name would overwrite each other and the
+/// published schema would describe the wrong type. This is a dev-tools-only
+/// generator, so a hard panic on a *conflicting* redefinition is the correct
+/// failure.
 fn merge_defs(defs: Value, accumulator: &mut Map<String, Value>) {
     if let Value::Object(map) = defs {
-        accumulator.extend(map);
+        for (name, definition) in map {
+            if let Some(existing) = accumulator.get(&name) {
+                assert!(
+                    existing == &definition,
+                    "conflicting schema definitions for short name `{name}`: two different types \
+                     share it within one namespace. Rename one, or split the umbrella."
+                );
+                continue;
+            }
+            accumulator.insert(name, definition);
+        }
     }
 }
 
@@ -151,6 +193,7 @@ pub fn acps_schema() -> Value {
         "$schema": META_SCHEMA_DRAFT,
         "$id": SCHEMA_ID,
         "title": SCHEMA_TITLE,
+        "description": SCHEMA_DESCRIPTION,
         "$defs": {
             "request": Value::Object(request),
             "response": Value::Object(response),

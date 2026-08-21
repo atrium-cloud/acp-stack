@@ -49,7 +49,7 @@ pub struct AgentUpdateOptions {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AgentUpdateReport {
-    pub agent: String,
+    pub agent_id: String,
     pub updated: bool,
     pub skipped: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,9 +60,9 @@ pub struct AgentUpdateReport {
 impl AgentUpdateReport {
     /// A no-op report for an update that never ran (agent busy, or a
     /// non-registry agent with nothing to update).
-    pub fn skipped(agent: String, reason: impl Into<String>) -> Self {
+    pub fn skipped(agent_id: String, reason: impl Into<String>) -> Self {
         Self {
-            agent,
+            agent_id,
             updated: false,
             skipped: true,
             reason: Some(reason.into()),
@@ -79,8 +79,13 @@ impl AgentUpdateReport {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct AgentUpdateStepReport {
+    #[schemars(extend("enum" = ["install", "harness", "adapter"]))]
     pub step: String,
     pub status: AgentUpdateStepStatus,
+    // The update path never emits `shell`: `choose_update_plan`'s shell arm
+    // re-routes to a native plan, so the reachable set is narrower than the
+    // `installer_runs` row's `method` column.
+    #[schemars(extend("enum" = ["npm", "github", "apt", "native", null]))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,7 +188,7 @@ pub fn update_agent_for_config(
         .iter()
         .any(|step| step.status == AgentUpdateStepStatus::Updated);
     Ok(AgentUpdateReport {
-        agent: config.agent.id.clone(),
+        agent_id: config.agent.id.clone(),
         updated,
         skipped: false,
         reason: None,

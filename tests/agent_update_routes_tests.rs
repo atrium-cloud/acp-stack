@@ -209,7 +209,7 @@ async fn update_skips_non_registry_agent() {
     let body: Value = response.json().await.expect("json");
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["data"]["agent"], "custom-agent");
+    assert_eq!(body["data"]["agent_id"], "custom-agent");
     assert_eq!(body["data"]["skipped"], true);
     assert_eq!(body["data"]["updated"], false);
     assert_eq!(body["data"]["reason"], NON_REGISTRY_SKIP_REASON);

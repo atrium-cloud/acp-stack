@@ -55,7 +55,7 @@ async fn agent_switch_copies_provider_secret_to_target_default_ref() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "pi" }))
+        .json(&serde_json::json!({ "agent_id": "pi" }))
         .send()
         .await
         .expect("send switch");
@@ -132,7 +132,7 @@ async fn agent_switch_drop_cleans_source_config_and_preserves_secrets() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "kimi", "drop": true }))
+        .json(&serde_json::json!({ "agent_id": "kimi", "drop": true }))
         .send()
         .await
         .expect("send switch");
@@ -199,7 +199,7 @@ async fn agent_switch_drop_reports_cleanup_failure_without_failing_switch() {
     let response = client
         .post(format!("{}/v1/agent/switch", harness.base_url))
         .header("Authorization", admin_bearer())
-        .json(&serde_json::json!({ "agent": "kimi", "drop": true }))
+        .json(&serde_json::json!({ "agent_id": "kimi", "drop": true }))
         .send()
         .await
         .expect("send switch");

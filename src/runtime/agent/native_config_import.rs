@@ -418,13 +418,13 @@ pub fn inspect_native_config(
     filename: Option<&str>,
     content: &str,
 ) -> Result<InspectedNativeConfig> {
-    let filename = filename.ok_or_else(|| native_error("native_config_filename_required"))?;
+    let filename = filename.ok_or_else(|| native_error("agent.native_config_filename_required"))?;
     validate_native_config_filename(harness, filename)?;
     if content.is_empty() {
-        return Err(native_error("native_config_invalid"));
+        return Err(native_error("agent.native_config_invalid"));
     }
     if content.len() > IMPORT_SIZE_LIMIT {
-        return Err(native_error("native_config_too_large"));
+        return Err(native_error("agent.native_config_too_large"));
     }
     let revision = sha256_hex(content.as_bytes());
     match harness {
@@ -434,7 +434,7 @@ pub fn inspect_native_config(
         "amp" => inspect_amp(content, revision),
         "pi" => inspect_pi(content, revision),
         "goose" => inspect_goose(content, revision),
-        _ => Err(native_error("native_config_harness_unsupported")),
+        _ => Err(native_error("agent.native_config_harness_unsupported")),
     }
 }
 
@@ -452,10 +452,10 @@ fn validate_native_config_filename(harness: &str, filename: &str) -> Result<()> 
         // API keys and `permission.yaml` carries per-tool approval levels, both
         // of which acps must never import.
         "goose" => filename == "config.yaml",
-        _ => return Err(native_error("native_config_harness_unsupported")),
+        _ => return Err(native_error("agent.native_config_harness_unsupported")),
     };
     if !accepted {
-        return Err(native_error("native_config_filename_unsupported"));
+        return Err(native_error("agent.native_config_filename_unsupported"));
     }
     Ok(())
 }
@@ -468,7 +468,7 @@ pub fn prepare_native_config_import(
 ) -> Result<PreparedNativeConfigImport> {
     validate_native_config_selection(inspected, selection)?;
     if inspected.harness() != current.agent.id {
-        return Err(native_error("native_config_harness_mismatch"));
+        return Err(native_error("agent.native_config_harness_mismatch"));
     }
 
     let base_config_revision = sha256_hex(current.to_canonical_toml()?.as_bytes());
@@ -483,10 +483,10 @@ pub fn prepare_native_config_import(
                     provider,
                     entry.multiple_active_providers,
                 )
-                .map_err(|_| native_error("native_config_provider_unsupported"))?;
+                .map_err(|_| native_error("agent.native_config_provider_unsupported"))?;
             } else {
                 apply_mapped_agent_provider(&mut candidate, provider, None)
-                    .map_err(|_| native_error("native_config_provider_unsupported"))?;
+                    .map_err(|_| native_error("agent.native_config_provider_unsupported"))?;
             }
         }
     }
@@ -498,18 +498,17 @@ pub fn prepare_native_config_import(
                 provider_hint,
             }) => {
                 if let Some(provider_hint) = provider_hint {
-                    let effective_provider = candidate
-                        .agent
-                        .provider
-                        .as_ref()
-                        .ok_or_else(|| native_error("native_config_model_provider_mismatch"))?;
+                    let effective_provider =
+                        candidate.agent.provider.as_ref().ok_or_else(|| {
+                            native_error("agent.native_config_model_provider_mismatch")
+                        })?;
                     let effective_native = agent_provider_id_for_provider_id(
                         &candidate.agent.id,
                         &effective_provider.id,
                     )
                     .unwrap_or(&effective_provider.id);
                     if effective_native != provider_hint {
-                        return Err(native_error("native_config_model_provider_mismatch"));
+                        return Err(native_error("agent.native_config_model_provider_mismatch"));
                     }
                 }
                 apply_model(&mut candidate, value);
@@ -517,7 +516,7 @@ pub fn prepare_native_config_import(
             }
             Some(CandidateValue::Mcp(server)) => apply_mcp(&mut candidate, server.clone()),
             Some(CandidateValue::Provider(_)) => {}
-            None => return Err(native_error("native_config_selection_invalid")),
+            None => return Err(native_error("agent.native_config_selection_invalid")),
         }
     }
 
@@ -550,7 +549,7 @@ pub fn rebase_prepared_native_config_import(
     current: &Config,
 ) -> Result<()> {
     if current.agent.id != prepared.harness {
-        return Err(native_error("native_config_harness_mismatch"));
+        return Err(native_error("agent.native_config_harness_mismatch"));
     }
     let imported = prepared.canonical_config.clone();
     let mut candidate = current.clone();
@@ -576,7 +575,7 @@ pub fn rebase_prepared_native_config_import(
     {
         let model = native_config_projection(&imported)
             .model
-            .ok_or_else(|| native_error("native_config_model_invalid"))?;
+            .ok_or_else(|| native_error("agent.native_config_model_invalid"))?;
         apply_model(&mut candidate, &model);
     }
     for id in &prepared.selected_managed_field_ids {
@@ -589,7 +588,7 @@ pub fn rebase_prepared_native_config_import(
             .iter()
             .find(|server| server.name() == name)
             .cloned()
-            .ok_or_else(|| native_error("native_config_selection_invalid"))?;
+            .ok_or_else(|| native_error("agent.native_config_selection_invalid"))?;
         apply_mcp(&mut candidate, server);
     }
     let canonical_toml = candidate.to_canonical_toml()?;
@@ -631,10 +630,10 @@ pub fn validate_native_config_selection(
     selection: &NativeConfigSelection,
 ) -> Result<()> {
     if selection.revision != inspected.revision() {
-        return Err(native_error("native_config_revision_mismatch"));
+        return Err(native_error("agent.native_config_revision_mismatch"));
     }
     if selection.selected_managed_field_ids.len() > MAX_MANIFEST_PATHS {
-        return Err(native_error("native_config_selection_invalid"));
+        return Err(native_error("agent.native_config_selection_invalid"));
     }
     let selected_executable_candidate = selection
         .selected_managed_field_ids
@@ -643,12 +642,12 @@ pub fn validate_native_config_selection(
     if (inspected.residual_has_executable || selected_executable_candidate)
         && !selection.executable_settings_acknowledged
     {
-        return Err(native_error("native_config_executable_ack_required"));
+        return Err(native_error("agent.native_config_executable_ack_required"));
     }
     let mut selected = HashSet::new();
     for id in &selection.selected_managed_field_ids {
         if !selected.insert(id.as_str()) {
-            return Err(native_error("native_config_selection_invalid"));
+            return Err(native_error("agent.native_config_selection_invalid"));
         }
         let Some(field) = inspected
             .inspection
@@ -656,10 +655,10 @@ pub fn validate_native_config_selection(
             .iter()
             .find(|field| field.id == *id)
         else {
-            return Err(native_error("native_config_selection_invalid"));
+            return Err(native_error("agent.native_config_selection_invalid"));
         };
         if !field.compatible {
-            return Err(native_error("native_config_selection_invalid"));
+            return Err(native_error("agent.native_config_selection_invalid"));
         }
     }
 

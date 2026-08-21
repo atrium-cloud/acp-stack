@@ -166,7 +166,7 @@ The handover prints the two values. The values are never stored in plaintext, ne
 
 `session_key` and `admin_key` appear only when that invocation freshly generated or rotated the keys (rotated keys are reported under `generated_keys`). A later run without `--rotate-keys` preserves the verifier rows and reports `"preserved_keys": ["session", "admin"]` without reprinting either plaintext key. If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"` so automation can capture the one-time keys before retrying.
 
-The payload carries an `ignored_features` array (omitted when empty) listing configured features the capability probe found unsupported: `[{"feature": "mcp.server", "target": "linear", "capability": "mcpCapabilities.http", "reason": "..."}]`.
+The payload carries an `ignored_features` array (omitted when empty) listing configured features the capability probe found unsupported: `[{"feature": "mcp.server", "value": "linear", "capability": "mcpCapabilities.http", "reason": "..."}]`.
 
 ## Hosted Streaming Init
 

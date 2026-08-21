@@ -294,10 +294,10 @@ fn deps_apply_report_json(
             let outcome = match &result.outcome {
                 DepApplyOutcome::Installed => serde_json::json!({ "kind": "installed" }),
                 DepApplyOutcome::AlreadyPresent => {
-                    serde_json::json!({ "kind": "alreadypresent" })
+                    serde_json::json!({ "kind": "already_present" })
                 }
                 DepApplyOutcome::PrivilegeRequired { uid } => {
-                    serde_json::json!({ "kind": "privilegerequired", "uid": uid })
+                    serde_json::json!({ "kind": "privilege_required", "uid": uid })
                 }
                 DepApplyOutcome::Failed { exit_code, .. } => {
                     serde_json::json!({

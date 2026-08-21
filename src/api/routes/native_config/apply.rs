@@ -24,7 +24,7 @@ pub(super) async fn apply_stored_operation_locked(
         let record = imports
             .operations
             .get(operation_id)
-            .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+            .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
         if record.cancelled {
             return Ok(ApplyStoredOutcome::Blocked(record.operation.clone()));
         }
@@ -32,7 +32,7 @@ pub(super) async fn apply_stored_operation_locked(
             record
                 .prepared
                 .clone()
-                .ok_or_else(|| native_error("native_config_operation_invalid"))?,
+                .ok_or_else(|| native_error("agent.native_config_operation_invalid"))?,
             record.phase,
             record.prior_config.clone(),
             record.rollback_snapshots.clone(),
@@ -43,7 +43,7 @@ pub(super) async fn apply_stored_operation_locked(
     validate_native_config_secret_refs_read_only(&prepared, &home)?;
     let resuming_apply = phase == NativeConfigOperationPhase::Applying;
     let prior_config = if resuming_apply {
-        stored_prior.ok_or_else(|| native_error("native_config_journal_invalid"))?
+        stored_prior.ok_or_else(|| native_error("agent.native_config_journal_invalid"))?
     } else {
         state.refresh_array_runtime_from_disk().await?
     };
@@ -54,7 +54,7 @@ pub(super) async fn apply_stored_operation_locked(
         if current_revision != prepared.base_config_revision
             || prior_config.agent.id != prepared.harness
         {
-            return Err(native_error("native_config_base_config_changed"));
+            return Err(native_error("agent.native_config_base_config_changed"));
         }
     }
     let target_id = prior_config.array.primary_target.clone();
@@ -68,7 +68,7 @@ pub(super) async fn apply_stored_operation_locked(
     );
     let (snapshots, prior_was_running) = if resuming_apply {
         if stored_snapshots.is_empty() {
-            return Err(native_error("native_config_journal_invalid"));
+            return Err(native_error("agent.native_config_journal_invalid"));
         }
         (stored_snapshots, stored_prior_was_running)
     } else {
@@ -92,7 +92,7 @@ pub(super) async fn apply_stored_operation_locked(
                 .operations
                 .get(operation_id)
                 .map(|record| record.operation.clone())
-                .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+                .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
             return Ok(ApplyStoredOutcome::Blocked(operation));
         }
         let prior_was_running = supervisor_state == AgentStateLabel::Running;
@@ -167,7 +167,7 @@ pub(super) async fn apply_stored_operation_locked(
                     .operations
                     .get(operation_id)
                     .map(|record| record.operation.clone())
-                    .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+                    .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
                 return Ok(ApplyStoredOutcome::Blocked(operation));
             }
             Err(error) => {
@@ -220,7 +220,7 @@ pub(super) async fn apply_stored_operation_locked(
     let record = imports
         .operations
         .get_mut(operation_id)
-        .ok_or_else(|| native_error("native_config_operation_not_found"))?;
+        .ok_or_else(|| native_error("agent.native_config_operation_not_found"))?;
     record.operation.status = NativeConfigOperationStatus::Applied;
     record.operation.restart.queued = false;
     record.operation.restart.required = prior_was_running;
@@ -261,7 +261,7 @@ pub(super) async fn apply_files_and_runtime(
     {
         let model = native_config_projection(&prepared.canonical_config)
             .model
-            .ok_or_else(|| native_error("native_config_model_invalid"))?;
+            .ok_or_else(|| native_error("agent.native_config_model_invalid"))?;
         let response = fetch_session_config_with_timeout(
             &home_dir()?,
             &prepared.canonical_config,
