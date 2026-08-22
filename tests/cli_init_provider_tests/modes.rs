@@ -9,9 +9,9 @@ use crate::support::write_workspace_init_config;
 
 #[test]
 fn init_rejects_mode_flag_for_agents_without_set_mode() {
-    // pi/goose/hermes declare set_mode=false; `--mode` must fail fast as a
+    // pi/hermes declare set_mode=false; `--mode` must fail fast as a
     // capability check rather than being silently dropped.
-    for agent in ["pi", "goose", "hermes"] {
+    for agent in ["pi", "hermes"] {
         let tempdir = tempfile::tempdir().expect("tempdir");
 
         acps_command()

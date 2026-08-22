@@ -31,6 +31,8 @@ OpenCode mode can be set with:
 acps agent set --mode <build|plan>
 ```
 
+Reasoning effort follows the runtime advertisement: OpenCode advertises an `effort` (`thought_level`) option when the active model has effort variants, and `acps agent set --effort <effort>` validates against that advertisement.
+
 ### Cloudflare Providers
 
 Cloudflare providers require companion env refs alongside the main API key. Set each one with `acps secrets set` before running `acps agent set --provider`.
