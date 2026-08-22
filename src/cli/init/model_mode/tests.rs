@@ -70,7 +70,7 @@ fn amp_config() -> Config {
 #[test]
 fn explicit_mode_is_written_and_settled_at_the_write() {
     let mut config = amp_config();
-    let args = parse_init_args(&["--mode", "deep"]);
+    let args = parse_init_args(&["--mode", "bypass"]);
     let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
 
     let action = prompt::with_hosted_driver(driver.clone(), || {
@@ -78,19 +78,19 @@ fn explicit_mode_is_written_and_settled_at_the_write() {
             &args,
             &mut config,
             Path::new("acps-config.toml"),
-            &response_with(&[], &["smart", "rush", "deep"]),
+            &response_with(&[], &["default", "bypass"]),
             true,
         )
     })
     .expect("advertised mode is accepted");
 
     assert_eq!(action, ModelModeAction::Set);
-    assert_eq!(config.agent.mode.as_deref(), Some("deep"));
+    assert_eq!(config.agent.mode.as_deref(), Some("bypass"));
     assert_eq!(
         driver.recorded(),
         vec![InitStateSignal::CategorySettled {
             category: InitCategory::Mode,
-            value: Some("deep".to_owned()),
+            value: Some("bypass".to_owned()),
         }],
     );
 }
@@ -104,7 +104,7 @@ fn explicit_mode_that_is_not_advertised_lists_the_advertised_modes() {
         &args,
         &mut config,
         Path::new("acps-config.toml"),
-        &response_with(&[], &["smart", "rush", "deep"]),
+        &response_with(&[], &["default", "bypass"]),
         true,
     )
     .expect_err("unadvertised mode must be rejected");
@@ -112,7 +112,7 @@ fn explicit_mode_that_is_not_advertised_lists_the_advertised_modes() {
     assert!(
         error
             .to_string()
-            .contains("advertised modes: [deep, rush, smart]"),
+            .contains("advertised modes: [bypass, default]"),
         "error: {error}"
     );
     assert!(config.agent.mode.is_none());
@@ -136,6 +136,30 @@ fn a_mode_picker_with_nothing_advertised_skips_without_writing() {
 
     assert_eq!(action, ModelModeAction::Skipped);
     assert!(config.agent.mode.is_none());
+}
+
+// Model twin of the mode picker skip: an agent that advertises no `model`
+// option (e.g. amp-acp older than v0.8.0) must skip the lane rather than
+// fail init when no `--model` was requested.
+#[test]
+fn a_model_picker_with_nothing_advertised_skips_without_writing() {
+    let mut config = amp_config();
+    let args = parse_init_args(&[]);
+    let tempdir = tempfile::tempdir().expect("tempdir");
+
+    let action = configure_model_for_init(
+        &args,
+        tempdir.path(),
+        &mut config,
+        Path::new("acps-config.toml"),
+        &response_with(&[], &["default", "bypass"]),
+        "Amp Code",
+        false,
+    )
+    .expect("an absent model option must not fail init");
+
+    assert_eq!(action, ModelModeAction::Skipped);
+    assert!(config.agent.model.is_none());
 }
 
 #[test]
@@ -272,14 +296,14 @@ fn a_repeated_advertised_value_is_offered_once() {
             &args,
             &mut config,
             Path::new("acps-config.toml"),
-            &response_with(&[], &["smart", "deep", "smart"]),
+            &response_with(&[], &["default", "bypass", "default"]),
             true,
         )
     })
     .expect("a duplicated advertised value is not a failure");
 
     assert_eq!(action, ModelModeAction::Set);
-    assert_eq!(config.agent.mode.as_deref(), Some("deep"));
+    assert_eq!(config.agent.mode.as_deref(), Some("bypass"));
     assert_eq!(
         driver
             .offered
@@ -287,8 +311,8 @@ fn a_repeated_advertised_value_is_offered_once() {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_slice(),
         [vec![
-            "deep".to_owned(),
-            "smart".to_owned(),
+            "bypass".to_owned(),
+            "default".to_owned(),
             "__skip".to_owned()
         ]]
     );

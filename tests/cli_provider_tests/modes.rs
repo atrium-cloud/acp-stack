@@ -23,23 +23,23 @@ creates = "opencode"
             "",
         );
     fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
-    let options_path = write_acp_config_options(tempdir.path(), &[], &["smart", "rush", "deep"]);
+    let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "bypass"]);
 
     acps_command()
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["agent", "set", "--mode", "smart"])
+        .args(["agent", "set", "--mode", "bypass"])
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: amp"))
-        .stdout(predicates::str::contains("mode: smart"))
+        .stdout(predicates::str::contains("mode: bypass"))
         .stdout(predicates::str::contains(
             "restart the supervised agent (`POST /v1/agent/restart`) to reload from disk",
         ));
 
     let config =
         fs::read_to_string(config_dir.join("acps-config.toml")).expect("config should be readable");
-    assert!(config.contains(r#"mode = "smart""#));
+    assert!(config.contains(r#"mode = "bypass""#));
     assert!(!config.contains("[array.targets.agent.provider]"));
 }
 

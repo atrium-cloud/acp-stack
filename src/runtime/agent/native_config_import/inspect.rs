@@ -290,9 +290,10 @@ pub(super) fn inspect_codex(content: &str, revision: String) -> Result<Inspected
 
 pub(super) fn inspect_amp(content: &str, revision: String) -> Result<InspectedNativeConfig> {
     let mut root = parse_json_object(content)?;
-    // Amp is provider/model-opaque (set_provider=false, set_model=false), so
-    // `settings.json` yields only MCP-server candidates. Its keys are flat
-    // dotted strings (`"amp.mcpServers"`), matched as literal object keys.
+    // Amp is provider-opaque (set_provider=false) and keeps its model in ACP
+    // session config rather than settings, so `settings.json` yields only
+    // MCP-server candidates. Its keys are flat dotted strings
+    // (`"amp.mcpServers"`), matched as literal object keys.
     let mut builder =
         InspectionBuilder::new("amp", NativeConfigFormat::Json, revision, content.len());
     if let Some(mcp) = root.remove("amp.mcpServers") {
