@@ -426,6 +426,46 @@ fn effort_values_match_by_thought_level_category_and_by_id_fallback() {
 }
 
 #[test]
+fn typed_lane_matching_skips_boolean_options() {
+    // With the boolean client capability advertised, an agent may ship a
+    // boolean option under a typed category; the typed lanes only speak
+    // select values, so the match must fall through to the select twin.
+    let options: Vec<SessionConfigOption> = serde_json::from_str(
+        r#"[
+                {
+                    "id": "thinking_toggle",
+                    "name": "Thinking",
+                    "category": "thought_level",
+                    "type": "boolean",
+                    "currentValue": false
+                },
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "medium", "name": "Medium"}
+                    ]
+                }
+            ]"#,
+    )
+    .expect("session config options deserialize");
+    assert_eq!(
+        session_config_values(Some(&options), AgentSessionConfigCategory::Effort)
+            .expect("effort values come from the select twin"),
+        ["low", "medium"]
+    );
+    assert_eq!(
+        session_config_id_for_value(Some(&options), AgentSessionConfigCategory::Effort, "low")
+            .expect("select value accepted"),
+        "reasoning_effort"
+    );
+}
+
+#[test]
 fn session_model_helpers_reject_removed_legacy_model_state() {
     // ACP v1 dropped the pre-1.0 `models` session state; an agent that
     // only advertises the legacy shape gets a clear provisioning error

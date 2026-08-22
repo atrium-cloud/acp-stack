@@ -131,8 +131,12 @@ impl AgentSupervisor {
         let response = bridge.new_session(cwd_path, accepted).await?;
         let agent_session_id = response.session_id.0.to_string();
         let mut ignored: Vec<IgnoredFeature> = Vec::new();
-        if let Some(mode) = agent.mode.as_deref() {
-            provision_session_option(
+        // The last refreshed option list from a successful set; the stored
+        // per-session snapshot must reflect what was actually applied, not
+        // the pre-provisioning `session/new` state.
+        let mut latest_options: Option<Vec<SessionConfigOption>> = None;
+        if let Some(mode) = agent.mode.as_deref()
+            && let Some(refreshed) = provision_session_option(
                 &bridge,
                 &response.session_id,
                 session_config_id_for_value(
@@ -145,7 +149,9 @@ impl AgentSupervisor {
                 "sessionConfig.mode",
                 &mut ignored,
             )
-            .await?;
+            .await?
+        {
+            latest_options = Some(refreshed);
         }
         if let Some(model) = agent.model.as_deref().or_else(|| {
             agent
@@ -163,11 +169,17 @@ impl AgentSupervisor {
                     "model provisioned on disk; skipping session/set_config_option"
                 );
             } else {
-                let lookup = match session_model_selection_for_value(&response, model) {
-                    Ok(AgentSessionModelSelection::ConfigOption { config_id }) => Ok(config_id),
-                    Err(err) => Err(err),
-                };
-                provision_session_option(
+                // Judged against the freshest advertised list, like the effort
+                // lane and generic map below: the mode set above may have
+                // refreshed the option set.
+                let lookup = session_config_id_for_value(
+                    latest_options
+                        .as_deref()
+                        .or(response.config_options.as_deref()),
+                    AgentSessionConfigCategory::Model,
+                    model,
+                );
+                if let Some(refreshed) = provision_session_option(
                     &bridge,
                     &response.session_id,
                     lookup,
@@ -176,19 +188,24 @@ impl AgentSupervisor {
                     "sessionConfig.model",
                     &mut ignored,
                 )
-                .await?;
+                .await?
+                {
+                    latest_options = Some(refreshed);
+                }
             }
         }
-        // Applied after the model: adapters advertise effort levels for the
-        // currently selected model, so a configured effort is judged against
-        // the `session/new` snapshot and lands in `ignored` when the agent
-        // (or its active model) no longer advertises it.
-        if let Some(effort) = agent.effort.as_deref() {
-            provision_session_option(
+        // Applied after the model and judged against the freshest advertised
+        // list: adapters advertise effort levels for the currently selected
+        // model, so an effort option that appears only once the configured
+        // model is set must be visible here. A miss still lands in `ignored`.
+        if let Some(effort) = agent.effort.as_deref()
+            && let Some(refreshed) = provision_session_option(
                 &bridge,
                 &response.session_id,
                 session_config_id_for_value(
-                    response.config_options.as_deref(),
+                    latest_options
+                        .as_deref()
+                        .or(response.config_options.as_deref()),
                     AgentSessionConfigCategory::Effort,
                     effort,
                 ),
@@ -197,7 +214,48 @@ impl AgentSupervisor {
                 "sessionConfig.effort",
                 &mut ignored,
             )
-            .await?;
+            .await?
+        {
+            latest_options = Some(refreshed);
+        }
+        // The generic `[agent.config_options]` map applies last, deliberately:
+        // the typed lanes stay authoritative for their categories, and each
+        // map entry is judged against the freshest advertised list so a
+        // model-dependent option observes the model set above. Any miss —
+        // unknown id, unadvertised select value, kind mismatch — is an
+        // ignored record, never an error.
+        for (option_id, configured) in &agent.config_options {
+            let advertised = latest_options
+                .as_deref()
+                .or(response.config_options.as_deref());
+            let lookup = resolve_generic_config_option(advertised, option_id, configured);
+            let (value, display_value) = match configured {
+                crate::config::AgentConfigOptionValue::Bool(value) => (
+                    SessionConfigOptionValue::Boolean { value: *value },
+                    value.to_string(),
+                ),
+                crate::config::AgentConfigOptionValue::Text(text) => (
+                    SessionConfigOptionValue::ValueId {
+                        value: SessionConfigValueId::new(text.clone()),
+                    },
+                    text.clone(),
+                ),
+            };
+            if let Some(refreshed) = provision_session_option_value(
+                &bridge,
+                &response.session_id,
+                lookup,
+                value,
+                display_value,
+                IGNORED_FEATURE_AGENT_CONFIG_OPTION,
+                "sessionConfig.configOption",
+                Some(option_id.clone()),
+                &mut ignored,
+            )
+            .await?
+            {
+                latest_options = Some(refreshed);
+            }
         }
 
         // Persist after the agent confirms. If we inserted first and the
@@ -228,6 +286,33 @@ impl AgentSupervisor {
         )?;
         append_mcp_skipped_event(&guard, &inserted.id, &skipped)?;
         append_capability_ignored_event(&guard, &inserted.id, &ignored)?;
+        // Seed the per-session config-option snapshot from the freshest list
+        // in hand. A snapshot failure must not undo an already-confirmed
+        // session; the raw events remain the source of truth.
+        let advertised = latest_options
+            .or(response.config_options)
+            .unwrap_or_default();
+        let mut snapshot =
+            crate::runtime::agent::config_options::project_config_options(&advertised);
+        if snapshot.len() > crate::state::MAX_SESSION_CONFIG_OPTIONS {
+            tracing::warn!(
+                session = %inserted.id,
+                advertised = advertised.len(),
+                stored = crate::state::MAX_SESSION_CONFIG_OPTIONS,
+                "agent advertised more config options than the stored cap; list truncated"
+            );
+            snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
+        }
+        match serde_json::to_value(&snapshot) {
+            Ok(value) => {
+                if let Err(error) = guard.replace_session_config_options(&inserted.id, value) {
+                    tracing::warn!(%error, session = %inserted.id, "config-option snapshot write failed");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, session = %inserted.id, "config-option snapshot serialize failed");
+            }
+        }
         Ok(SessionAttachOutcome {
             record: inserted,
             attached_mcp: accepted_names,
@@ -530,6 +615,61 @@ impl AgentSupervisor {
         let guard = state.lock().await;
         guard.delete_session(session_id)
     }
+
+    /// `POST /v1/sessions/{id}/config-options`. Forwards one
+    /// `session/set_config_option` to the live agent and rewrites the stored
+    /// per-session snapshot from the refreshed list in the response. Unlike
+    /// session-create provisioning there is no ignored softening here: the
+    /// caller asked for exactly this set, so a failure is the answer.
+    pub async fn set_session_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: SessionConfigOptionValue,
+        state: &Arc<TokioMutex<StateStore>>,
+    ) -> Result<Vec<crate::runtime::agent::config_options::SessionConfigOptionSnapshot>> {
+        let record = fetch_open_session(state, session_id).await?;
+        let bridge = self.bridge().await?;
+        let response = bridge
+            .set_session_config_option_value(
+                AcpSessionId::new(record.agent_session_id.clone()),
+                config_id,
+                value,
+            )
+            .await?;
+        let guard = state.lock().await;
+        // A live set changes agent behavior for the rest of the session, so
+        // it leaves a durable trace like create-time provisioning does.
+        guard.append_session_event(
+            session_id,
+            "info",
+            "session.config_option_set",
+            "session config option set",
+            &json!({ "config_id": config_id }).to_string(),
+        )?;
+        // Same lax-adapter guard as session-create provisioning: an empty
+        // response right after a successful set must not wipe the snapshot —
+        // such agents refresh through `config_option_update` notifications
+        // instead, which the session sink projects as they arrive.
+        if response.config_options.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut snapshot =
+            crate::runtime::agent::config_options::project_config_options(&response.config_options);
+        snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
+        match serde_json::to_value(&snapshot) {
+            Ok(options_value) => {
+                if let Err(error) = guard.replace_session_config_options(session_id, options_value)
+                {
+                    tracing::warn!(%error, session = %session_id, "config-option snapshot write failed");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, session = %session_id, "config-option snapshot serialize failed");
+            }
+        }
+        Ok(snapshot)
+    }
 }
 
 /// Which ACP method [`AgentSupervisor::attach_session`] sends for an existing
@@ -567,6 +707,10 @@ async fn fetch_open_session(
 /// `AgentConfigProvision` lookup failure is softened — an error from
 /// `set_session_config_option` itself means the agent advertised the option and
 /// then failed the RPC, which stays a hard failure.
+///
+/// Returns the refreshed option list from the agent's response (`None` when
+/// the set was skipped as ignored), so the caller's config-option snapshot
+/// can reflect what was actually applied.
 async fn provision_session_option(
     bridge: &AcpBridge,
     session_id: &AcpSessionId,
@@ -575,22 +719,113 @@ async fn provision_session_option(
     feature: &'static str,
     capability: &'static str,
     ignored: &mut Vec<IgnoredFeature>,
-) -> Result<()> {
+) -> Result<Option<Vec<SessionConfigOption>>> {
+    provision_session_option_value(
+        bridge,
+        session_id,
+        lookup,
+        SessionConfigOptionValue::ValueId {
+            value: SessionConfigValueId::new(value.to_owned()),
+        },
+        value.to_owned(),
+        feature,
+        capability,
+        None,
+        ignored,
+    )
+    .await
+}
+
+/// Resolve one `[agent.config_options]` entry against the advertised list.
+/// Every miss shape — unknown id, kind mismatch, unadvertised select value —
+/// is an `AgentConfigProvision` error, which the provisioning path softens
+/// into an ignored record.
+fn resolve_generic_config_option(
+    advertised: Option<&[SessionConfigOption]>,
+    option_id: &str,
+    configured: &crate::config::AgentConfigOptionValue,
+) -> Result<String> {
+    use agent_client_protocol::schema::v1::SessionConfigKind;
+
+    let provision_error = |reason: String| StackError::AgentConfigProvision {
+        path: std::path::PathBuf::from("ACP session config options"),
+        reason,
+    };
+    let option = advertised
+        .unwrap_or_default()
+        .iter()
+        .find(|option| option.id.0.as_ref() == option_id)
+        .ok_or_else(|| {
+            provision_error(format!(
+                "agent did not advertise config option `{option_id}`"
+            ))
+        })?;
+    match (configured, &option.kind) {
+        (crate::config::AgentConfigOptionValue::Bool(_), SessionConfigKind::Boolean(_)) => {
+            Ok(option_id.to_owned())
+        }
+        (crate::config::AgentConfigOptionValue::Text(text), SessionConfigKind::Select(_)) => {
+            if crate::runtime::agent::acp_codec::session_config_option_contains_value(option, text)
+            {
+                Ok(option_id.to_owned())
+            } else {
+                Err(provision_error(format!(
+                    "agent did not advertise `{text}` as a value of config option `{option_id}`"
+                )))
+            }
+        }
+        (configured, kind) => Err(provision_error(format!(
+            "config option `{option_id}` is configured as {} but advertised as {}",
+            match configured {
+                crate::config::AgentConfigOptionValue::Bool(_) => "a boolean",
+                crate::config::AgentConfigOptionValue::Text(_) => "a select value",
+            },
+            match kind {
+                SessionConfigKind::Boolean(_) => "a boolean option",
+                SessionConfigKind::Select(_) => "a select option",
+                _ => "an unsupported option kind",
+            },
+        ))),
+    }
+}
+
+/// Kind-generic twin of `provision_session_option`, shared with the
+/// `[agent.config_options]` map apply. `option_id` rides into the ignored
+/// record for map entries, where `feature` alone cannot say which option was
+/// dropped.
+#[allow(clippy::too_many_arguments)]
+async fn provision_session_option_value(
+    bridge: &AcpBridge,
+    session_id: &AcpSessionId,
+    lookup: Result<String>,
+    value: SessionConfigOptionValue,
+    display_value: String,
+    feature: &'static str,
+    capability: &'static str,
+    option_id: Option<String>,
+    ignored: &mut Vec<IgnoredFeature>,
+) -> Result<Option<Vec<SessionConfigOption>>> {
     match lookup {
         Ok(config_id) => {
-            bridge
-                .set_session_config_option(session_id.clone(), &config_id, value)
+            let response = bridge
+                .set_session_config_option_value(session_id.clone(), &config_id, value)
                 .await?;
+            // A lax adapter may respond with an empty list and carry the
+            // refreshed state only in a `config_option_update` notification;
+            // an empty "full set" right after a successful set is
+            // contradictory, so it must not become the snapshot.
+            Ok((!response.config_options.is_empty()).then_some(response.config_options))
         }
         Err(StackError::AgentConfigProvision { reason, .. }) => {
             ignored.push(IgnoredFeature {
                 feature,
-                value: value.to_owned(),
+                value: display_value,
                 capability,
                 reason,
+                option_id,
             });
+            Ok(None)
         }
-        Err(other) => return Err(other),
+        Err(other) => Err(other),
     }
-    Ok(())
 }

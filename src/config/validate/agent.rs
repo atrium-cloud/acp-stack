@@ -2,8 +2,8 @@
 //! restart policy, agent install escape hatch.
 
 use crate::config::schema::{
-    AgentAutoUpdateConfig, AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig,
-    AgentProvidersConfig, AgentSubagentConfig, CustomProviderApi,
+    AgentAutoUpdateConfig, AgentConfigOptionValue, AgentCustomProviderConfig, AgentInstallConfig,
+    AgentProviderConfig, AgentProvidersConfig, AgentSubagentConfig, CustomProviderApi,
 };
 use crate::config::validate::primitives::{
     DurationLimits, DurationUnit, normalize_duration, require_present, validate_non_empty_trimmed,
@@ -114,6 +114,83 @@ pub(crate) fn validate_agent_providers(
     for (provider_id, alias) in &providers.selected_aliases {
         validate_mapped_provider_id(agent_id, provider_id, "agent.providers.selected_aliases")?;
         validate_secret_ref_name_value(alias)?;
+    }
+    Ok(())
+}
+
+/// Bounds for `[agent.config_options]`. Keys follow ACP config-option id
+/// shape: a leading `_` is explicitly legal (ACP reserves `_`-prefixed ids
+/// for implementation-specific options). Values carry no charset restriction
+/// because advertised select ids legitimately contain `/`, `.`, and brackets.
+const MAX_AGENT_CONFIG_OPTIONS: usize = 32;
+const MAX_AGENT_CONFIG_OPTION_KEY_BYTES: usize = 128;
+const MAX_AGENT_CONFIG_OPTION_VALUE_BYTES: usize = 512;
+
+pub(crate) fn validate_agent_config_options(
+    config_options: &std::collections::BTreeMap<String, AgentConfigOptionValue>,
+) -> Result<()> {
+    if config_options.len() > MAX_AGENT_CONFIG_OPTIONS {
+        return Err(StackError::InvalidParam {
+            field: "agent.config_options",
+            reason: format!(
+                "at most {MAX_AGENT_CONFIG_OPTIONS} entries are supported (found {})",
+                config_options.len()
+            ),
+        });
+    }
+    for (key, value) in config_options {
+        if key.is_empty() || key.len() > MAX_AGENT_CONFIG_OPTION_KEY_BYTES {
+            return Err(StackError::InvalidParam {
+                field: "agent.config_options",
+                reason: format!(
+                    "option id `{key}` must be 1..={MAX_AGENT_CONFIG_OPTION_KEY_BYTES} bytes"
+                ),
+            });
+        }
+        if !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
+            return Err(StackError::InvalidParam {
+                field: "agent.config_options",
+                reason: format!(
+                    "option id `{key}` may only contain ASCII alphanumerics, `_`, `.`, and `-`"
+                ),
+            });
+        }
+        // The typed lanes own their ids (and aliases) so a map entry cannot
+        // silently fight `agent.mode`/`agent.model`/`agent.effort`.
+        for category in [
+            crate::runtime::agent::acp_bridge::AgentSessionConfigCategory::Mode,
+            crate::runtime::agent::acp_bridge::AgentSessionConfigCategory::Model,
+            crate::runtime::agent::acp_bridge::AgentSessionConfigCategory::Effort,
+        ] {
+            if category.matches_id(key) {
+                return Err(StackError::InvalidParam {
+                    field: "agent.config_options",
+                    reason: format!(
+                        "option id `{key}` belongs to the typed `agent.{}` setting; configure that instead",
+                        category.id()
+                    ),
+                });
+            }
+        }
+        if let AgentConfigOptionValue::Text(text) = value {
+            if text.trim().is_empty() || text.len() != text.trim().len() {
+                return Err(StackError::InvalidParam {
+                    field: "agent.config_options",
+                    reason: format!("option `{key}` has a blank or untrimmed value"),
+                });
+            }
+            if text.len() > MAX_AGENT_CONFIG_OPTION_VALUE_BYTES {
+                return Err(StackError::InvalidParam {
+                    field: "agent.config_options",
+                    reason: format!(
+                        "option `{key}` value exceeds {MAX_AGENT_CONFIG_OPTION_VALUE_BYTES} bytes"
+                    ),
+                });
+            }
+        }
     }
     Ok(())
 }

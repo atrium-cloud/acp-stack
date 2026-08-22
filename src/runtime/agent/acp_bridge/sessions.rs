@@ -100,18 +100,33 @@ impl AcpBridge {
         }
     }
 
+    /// Typed-lane convenience: mode/model/effort selections are always
+    /// `ValueId` strings, so their callers keep a signature that cannot send
+    /// a boolean by accident.
     pub async fn set_session_config_option(
         &self,
         session_id: SessionId,
         config_id: &str,
         value: &str,
     ) -> Result<SetSessionConfigOptionResponse> {
-        let connection = self.connection().await?;
-        let request = SetSessionConfigOptionRequest::new(
+        self.set_session_config_option_value(
             session_id,
-            config_id.to_owned(),
-            SessionConfigValueId::new(value.to_owned()),
-        );
+            config_id,
+            SessionConfigOptionValue::ValueId {
+                value: SessionConfigValueId::new(value.to_owned()),
+            },
+        )
+        .await
+    }
+
+    pub async fn set_session_config_option_value(
+        &self,
+        session_id: SessionId,
+        config_id: &str,
+        value: SessionConfigOptionValue,
+    ) -> Result<SetSessionConfigOptionResponse> {
+        let connection = self.connection().await?;
+        let request = SetSessionConfigOptionRequest::new(session_id, config_id.to_owned(), value);
         connection
             .send_request(request)
             .block_task()

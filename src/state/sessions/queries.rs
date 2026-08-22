@@ -128,6 +128,58 @@ impl StateStore {
         Ok(true)
     }
 
+    /// Replace the stored session config-option snapshot (latest-wins, like
+    /// the available-commands twin above). Takes the already-serialized list
+    /// so the state layer stays free of the runtime's projection types.
+    /// Returns whether a write happened; an identical snapshot is skipped.
+    pub fn replace_session_config_options(
+        &self,
+        id: &str,
+        options_value: serde_json::Value,
+    ) -> Result<bool> {
+        let record = self
+            .get_session(id)?
+            .ok_or_else(|| StackError::SessionNotFound { id: id.to_owned() })?;
+        let mut metadata = serde_json::from_str::<serde_json::Value>(&record.metadata_json)
+            .map_err(|err| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: err.to_string(),
+            })?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| StackError::StateInvalidJson {
+                field: "sessions.metadata_json",
+                reason: "expected a JSON object".to_owned(),
+            })?;
+
+        if metadata.get(SESSION_METADATA_CONFIG_OPTIONS) == Some(&options_value) {
+            return Ok(false);
+        }
+        let now = current_timestamp();
+        metadata.insert(SESSION_METADATA_CONFIG_OPTIONS.to_owned(), options_value);
+        metadata.insert(
+            SESSION_METADATA_CONFIG_OPTIONS_UPDATED_AT.to_owned(),
+            serde_json::Value::String(now.clone()),
+        );
+
+        let metadata_json = serde_json::Value::Object(metadata).to_string();
+        self.persist_with_outbox("sessions", id, &now, |conn| {
+            let affected = conn.execute(
+                r#"
+                UPDATE sessions
+                SET metadata_json = ?1, updated_at = ?2
+                WHERE id = ?3
+                "#,
+                params![metadata_json, now, id],
+            )?;
+            if affected == 0 {
+                return Err(StackError::SessionNotFound { id: id.to_owned() });
+            }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
     pub fn query_sessions(&self, filter: SessionFilter<'_>) -> Result<Vec<SessionRecord>> {
         let mut sql = String::from(
             "SELECT id, target_id, agent_session_id, created_at, updated_at, status, agent_id, cwd, title, metadata_json \

@@ -8,7 +8,8 @@ use axum::routing::{get, post};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::api::routes::agent::{
-    agent_capabilities_handler, array_agent_capabilities_handler, array_status_handler,
+    agent_capabilities_handler, agent_config_options_handler, array_agent_capabilities_handler,
+    array_status_handler,
 };
 use crate::api::routes::commands::{
     commands_cancel_handler, commands_get_handler, commands_list_handler, commands_output_handler,
@@ -30,10 +31,11 @@ use crate::api::routes::providers::{models_handler, providers_handler};
 use crate::api::routes::security::security_check_handler;
 use crate::api::routes::sessions::{
     sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
-    sessions_commands_handler, sessions_commands_run_handler, sessions_create_handler,
-    sessions_events_handler, sessions_fork_handler, sessions_get_handler, sessions_list_handler,
-    sessions_load_handler, sessions_prompt_handler, sessions_prompt_status_handler,
-    sessions_resume_handler, sessions_snapshot_handler, sessions_status_handler,
+    sessions_commands_handler, sessions_commands_run_handler, sessions_config_options_handler,
+    sessions_config_options_set_handler, sessions_create_handler, sessions_events_handler,
+    sessions_fork_handler, sessions_get_handler, sessions_list_handler, sessions_load_handler,
+    sessions_prompt_handler, sessions_prompt_status_handler, sessions_resume_handler,
+    sessions_snapshot_handler, sessions_status_handler,
 };
 use crate::api::routes::skills::{
     skills_catalog_handler, skills_list_handler, skills_source_get_handler,
@@ -68,6 +70,10 @@ pub fn build_local_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route(
+            "/v1/agent/config-options",
+            get(agent_config_options_handler),
+        )
         .route("/v1/agent/skills", get(skills_list_handler))
         .route("/v1/agent/skills/catalog", get(skills_catalog_handler))
         .route("/v1/agent/skills/source", get(skills_source_get_handler))
@@ -102,6 +108,10 @@ pub fn build_local_router(state: AppState) -> Router {
         .route(
             "/v1/sessions/{id}/commands",
             get(sessions_commands_handler).post(sessions_commands_run_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/config-options",
+            get(sessions_config_options_handler).post(sessions_config_options_set_handler),
         )
         .route("/v1/sessions/{id}/cancel", post(sessions_cancel_handler))
         .route(

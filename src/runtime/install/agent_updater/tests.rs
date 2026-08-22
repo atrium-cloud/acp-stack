@@ -667,6 +667,7 @@ fn agent_config(id: &str, harness_version: Option<&str>) -> crate::config::Agent
         mode: None,
         model: None,
         effort: None,
+        config_options: Default::default(),
         harness_version: harness_version.map(str::to_owned),
         adapter: None,
         provider: None,

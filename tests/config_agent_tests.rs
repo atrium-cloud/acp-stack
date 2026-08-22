@@ -613,6 +613,56 @@ fn rejects_blank_agent_effort() {
 }
 
 #[test]
+fn accepts_agent_config_options_map() {
+    let config = VALID_CONFIG.to_owned()
+        + "\n[agent.config_options]\n_custom_toggle = true\n\"agent.persona\" = \"researcher\"\nfast = false\n";
+    let parsed = load_config_from_str(&config).expect("config options map should be accepted");
+    let options = &parsed.agent.config_options;
+    assert_eq!(
+        options.get("_custom_toggle"),
+        Some(&acp_stack::config::AgentConfigOptionValue::Bool(true))
+    );
+    assert_eq!(
+        options.get("agent.persona"),
+        Some(&acp_stack::config::AgentConfigOptionValue::Text(
+            "researcher".to_owned()
+        ))
+    );
+    // Round-trip: a boolean survives canonicalization as a TOML bool, not a
+    // string.
+    let canonical = parsed.to_canonical_toml().expect("canonical TOML");
+    assert!(canonical.contains("_custom_toggle = true"));
+    assert!(!canonical.contains(r#"_custom_toggle = "true""#));
+    load_config_from_str(&canonical).expect("canonical config round-trips");
+}
+
+#[test]
+fn rejects_typed_lane_ids_in_agent_config_options() {
+    for key in ["mode", "model", "effort", "reasoning_effort"] {
+        let config =
+            VALID_CONFIG.to_owned() + &format!("\n[agent.config_options]\n{key} = \"anything\"\n");
+        let error = load_config_from_str(&config).expect_err("typed-lane id must be rejected");
+        assert!(error.to_string().contains("typed"), "key `{key}`: {error}");
+    }
+}
+
+#[test]
+fn rejects_malformed_agent_config_options() {
+    for (label, body) in [
+        ("blank value", "opt = \" \"".to_owned()),
+        ("bad charset", "\"bad id\" = \"value\"".to_owned()),
+        ("oversized value", format!("opt = \"{}\"", "v".repeat(513))),
+    ] {
+        let config = VALID_CONFIG.to_owned() + &format!("\n[agent.config_options]\n{body}\n");
+        let error = load_config_from_str(&config).expect_err(label);
+        assert!(
+            error.to_string().contains("agent.config_options"),
+            "{label}: {error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_root_model_when_provider_model_is_set() {
     let config = VALID_CONFIG.replace(
         r#"restart = "on-crash""#,

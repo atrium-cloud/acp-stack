@@ -182,6 +182,7 @@ fn apply_switch_registry_entry(config: &mut Config, entry: &RegistryEntry) {
     config.agent.mode = None;
     config.agent.model = None;
     config.agent.effort = None;
+    config.agent.config_options = Default::default();
     config.agent.provider = None;
     config.agent.providers = None;
     config.agent.subagent = None;

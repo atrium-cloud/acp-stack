@@ -112,6 +112,22 @@ pub(crate) struct AcpArgs {
     pub(crate) model_config_option: Option<String>,
     #[arg(long, default_value = "model")]
     pub(crate) model_config_option_id: String,
+    /// Extra select config option: `<id>[@<category>]=<current>:<v1>,<v2>,...`.
+    /// Repeatable. An empty category segment advertises a category-less option.
+    #[arg(long)]
+    pub(crate) config_option_select: Vec<String>,
+    /// Extra boolean config option: `<id>[@<category>]=<true|false>`. Repeatable.
+    #[arg(long)]
+    pub(crate) config_option_boolean: Vec<String>,
+    /// After each `session/set_config_option`, also emit a
+    /// `config_option_update` session notification carrying the full list.
+    #[arg(long)]
+    pub(crate) emit_config_option_update: bool,
+    /// Strict-agent mode: `session/set_config_option` responds with an empty
+    /// list, so the notification (see `--emit-config-option-update`) is the
+    /// only carrier of the refreshed state.
+    #[arg(long)]
+    pub(crate) set_config_option_responds_empty: bool,
     /// Strict-agent mode: return session config options only when the client
     /// advertised `session.configOptions` support at initialize.
     #[arg(long)]

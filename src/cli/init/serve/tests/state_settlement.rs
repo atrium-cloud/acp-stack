@@ -331,6 +331,7 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
         // Provider-backed agents keep the model inside `[agent.provider]`.
         ("model", "deepseek-v4-flash"),
         ("mode", "smart"),
+        ("effort", "high"),
     ] {
         assert_eq!(category(&state, id)["status"], json!("settled"), "`{id}`");
         assert_eq!(
@@ -339,13 +340,6 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
             "`{id}` must report what is on disk, not null"
         );
     }
-    // The registry outranks the disk: opencode takes no effort, so a stray
-    // `agent.effort` in config renders the lane not applicable rather than
-    // settled with a value no session will honor.
-    assert_eq!(
-        category(&state, "effort")["status"],
-        json!("not_applicable")
-    );
     // MCP is the exception: declaring servers says nothing about whether
     // the installed agent can be handed any, so the lane is still open here
     // and the probe is what closes it.

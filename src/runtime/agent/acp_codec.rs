@@ -114,6 +114,14 @@ pub fn session_config_id_for_value(
         });
     };
     for option in config_options {
+        // With boolean client capability advertised, an agent may ship a
+        // boolean option under a typed-lane category or id (e.g. a boolean
+        // "thinking" toggle). The typed lanes only speak select values, so a
+        // non-select match must not shadow a later select with the same
+        // category.
+        if !matches!(option.kind, SessionConfigKind::Select(_)) {
+            continue;
+        }
         let category_matches = option
             .category
             .as_ref()
@@ -146,6 +154,11 @@ pub fn session_config_values(
         });
     };
     for option in config_options {
+        // Same select-only guard as `session_config_id_for_value`: the typed
+        // lanes' value lists are meaningful only for select options.
+        if !matches!(option.kind, SessionConfigKind::Select(_)) {
+            continue;
+        }
         let category_matches = option
             .category
             .as_ref()
@@ -193,7 +206,10 @@ pub fn session_model_values(response: &NewSessionResponse) -> Result<Vec<String>
     )
 }
 
-fn session_config_option_contains_value(option: &SessionConfigOption, value: &str) -> bool {
+pub(crate) fn session_config_option_contains_value(
+    option: &SessionConfigOption,
+    value: &str,
+) -> bool {
     session_config_option_values(option)
         .iter()
         .any(|candidate| candidate == value)

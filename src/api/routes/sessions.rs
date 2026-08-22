@@ -22,6 +22,7 @@ use crate::state::{
 };
 
 pub(crate) mod commands;
+pub(crate) mod config_options;
 pub(crate) mod events;
 pub(crate) mod lifecycle;
 pub(crate) mod list;
@@ -32,6 +33,9 @@ pub(crate) mod teardown;
 // Router wiring (`api::core`, `local_listener::router`) imports handlers as
 // `sessions::<handler>`; re-export them so the split is invisible to callers.
 pub(crate) use commands::{sessions_commands_handler, sessions_commands_run_handler};
+pub(crate) use config_options::{
+    sessions_config_options_handler, sessions_config_options_set_handler,
+};
 pub(crate) use events::{
     sessions_changes_handler, sessions_events_handler, sessions_snapshot_handler,
 };

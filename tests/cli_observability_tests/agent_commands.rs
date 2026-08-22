@@ -516,6 +516,7 @@ fn agent_status_reports_all_configured_params() {
         r#"restart = "on-crash""#,
         r#"restart = "on-crash"
 mode = "build"
+effort = "high"
 
 [agent.provider]
 id = "opencode-go"
@@ -533,8 +534,9 @@ api_key_ref = "OPENCODE_API_KEY""#,
         .stdout(predicates::str::contains("provider: opencode-go"))
         .stdout(predicates::str::contains("model: deepseek-v4-pro"))
         .stdout(predicates::str::contains("mode: build"))
+        .stdout(predicates::str::contains("effort: high"))
         .stdout(predicates::str::contains(" unset").not())
-        .stdout(predicates::str::contains("effort unavailable"));
+        .stdout(predicates::str::contains(" unavailable").not());
 }
 
 #[test]
@@ -570,7 +572,9 @@ creates = "opencode"
         .success()
         .stdout(predicates::str::contains("agent: kimi"))
         .stdout(predicates::str::contains("model: gpt-5.5"))
-        .stdout(predicates::str::contains("provider and mode unset"));
+        .stdout(predicates::str::contains(
+            "provider, mode, and effort unset",
+        ));
 }
 
 #[test]
@@ -625,8 +629,10 @@ fn agent_status_reports_all_supported_params_unset() {
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: opencode"))
-        .stdout(predicates::str::contains("provider, model, and mode unset"))
-        .stdout(predicates::str::contains("effort unavailable"));
+        .stdout(predicates::str::contains(
+            "provider, model, mode, and effort unset",
+        ))
+        .stdout(predicates::str::contains("unavailable").not());
 }
 
 #[tokio::test(flavor = "multi_thread")]

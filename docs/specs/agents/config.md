@@ -16,6 +16,7 @@ acps agent provider credential delete <provider-id> [alias]
 acps agent set --custom-provider --provider <id> --provider-name <name> --base-url <url> --api-key-ref <ref> --model <model-id>
 acps agent set --model <model>
 acps agent set --mode <mode>
+acps agent set --effort <effort>
 ```
 
 OpenCode also supports:
@@ -37,6 +38,11 @@ acps subagent disable
 [agent]
 model = "<agent-model-id>"
 mode = "<agent-mode>"
+effort = "<agent-effort>"
+
+[agent.config_options]
+"<option-id>" = "<select-value>"
+"<boolean-option-id>" = true
 
 [agent.provider]
 id = "<provider-id>"
@@ -65,6 +71,8 @@ api_key_ref = "<provider-api-key-ref>"
 `acps subagent match` clears any explicit subagent provider/model so OpenCode `small_model` follows the main agent model.
 
 `[agent.provider]` remains the default provider/model lane. Without `[agent.providers]`, the implicit active set is that default provider plus any enabled subagent provider. A mapped provider may retain `api_key_ref` as legacy input; the first provider or credential mutation migrates it into the encrypted credential catalog. Custom providers keep their existing flat ref behavior.
+
+`[agent.config_options]` maps generic ACP session config-option ids to values (a string for select options, a TOML boolean for boolean options), applied on session creation after the typed mode/model/effort settings; entries the agent does not advertise (unknown id, off-list select value, kind mismatch) are reported through the ignored-features path, never a hard error. Ids the typed settings own (`mode`, `model`, `effort`, `reasoning_effort`) are rejected at validation with a pointer to the typed key; this is an id check only — an agent-specific id that happens to carry a typed category (e.g. kimi's `thinking` under `thought_level`) passes validation, applies after the typed setting, and wins, so prefer the typed key when one covers the option. A leading `_` is legal (ACP reserves `_`-prefixed ids for implementation-specific options); at most 32 entries. The map is cleared when the agent changes, like `mode`/`model`/`effort`.
 
 The first catalog credential for a provider is aliasless. Adding a second permanently promotes that provider to named, case-sensitive aliases and keeps each affected target on its existing key. Alias selection is manual and target-scoped; aliases do not provide automatic failover.
 

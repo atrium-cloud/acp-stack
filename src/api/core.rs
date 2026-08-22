@@ -40,11 +40,11 @@ use super::auth::{
     require_session, track_active_requests,
 };
 use super::routes::agent::{
-    agent_capabilities_handler, agent_install_handler, agent_restart_blockers_handler,
-    agent_restart_handler, agent_start_handler, agent_stop_handler, agent_switch_handler,
-    agent_update_handler, agent_update_status_handler, array_agent_capabilities_handler,
-    array_agent_install_handler, array_agent_restart_handler, array_agent_start_handler,
-    array_agent_stop_handler, array_status_handler,
+    agent_capabilities_handler, agent_config_options_handler, agent_install_handler,
+    agent_restart_blockers_handler, agent_restart_handler, agent_start_handler, agent_stop_handler,
+    agent_switch_handler, agent_update_handler, agent_update_status_handler,
+    array_agent_capabilities_handler, array_agent_install_handler, array_agent_restart_handler,
+    array_agent_start_handler, array_agent_stop_handler, array_status_handler,
 };
 use super::routes::auth::{auth_local_session_access_handler, auth_regenerate_session_key_handler};
 use super::routes::commands::{
@@ -77,11 +77,11 @@ use super::routes::security::{
 };
 use super::routes::sessions::{
     sessions_cancel_handler, sessions_changes_handler, sessions_close_handler,
-    sessions_commands_handler, sessions_commands_run_handler, sessions_create_handler,
-    sessions_delete_handler, sessions_events_handler, sessions_fork_handler, sessions_get_handler,
-    sessions_list_handler, sessions_load_handler, sessions_prompt_handler,
-    sessions_prompt_status_handler, sessions_resume_handler, sessions_snapshot_handler,
-    sessions_status_handler,
+    sessions_commands_handler, sessions_commands_run_handler, sessions_config_options_handler,
+    sessions_config_options_set_handler, sessions_create_handler, sessions_delete_handler,
+    sessions_events_handler, sessions_fork_handler, sessions_get_handler, sessions_list_handler,
+    sessions_load_handler, sessions_prompt_handler, sessions_prompt_status_handler,
+    sessions_resume_handler, sessions_snapshot_handler, sessions_status_handler,
 };
 use super::routes::skills::{
     skills_add_handler, skills_catalog_handler, skills_list_handler, skills_remove_handler,
@@ -587,6 +587,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/config/export", get(config_export_handler))
         .route("/v1/config/validate", post(config_validate_handler))
         .route("/v1/agent/capabilities", get(agent_capabilities_handler))
+        .route(
+            "/v1/agent/config-options",
+            get(agent_config_options_handler),
+        )
         .route("/v1/agent/update/status", get(agent_update_status_handler))
         .route("/v1/agent/skills", get(skills_list_handler))
         .route("/v1/agent/skills/catalog", get(skills_catalog_handler))
@@ -624,6 +628,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/sessions/{id}/commands",
             get(sessions_commands_handler).post(sessions_commands_run_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/config-options",
+            get(sessions_config_options_handler).post(sessions_config_options_set_handler),
         )
         .route("/v1/sessions/{id}/cancel", post(sessions_cancel_handler))
         .route("/v1/sessions/{id}/delete", post(sessions_delete_handler))

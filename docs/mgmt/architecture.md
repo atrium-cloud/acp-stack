@@ -32,6 +32,7 @@ flowchart LR
 | Array            | multi-target fleet: per-target supervision with one primary target as the default and coordination point |
 | ACP bridge       | ACP initialization, sessions, prompts, updates, and permissions   |
 | Session changes  | bounded process-local reduction of explicit ACP diff tool content |
+| Config options   | generic ACP session config-option projection and per-session snapshot (`src/runtime/agent/config_options.rs`) backing `GET /v1/agent/config-options` and `GET/POST /v1/sessions/{id}/config-options` |
 | ACP terminals    | client-side `terminal/*` handlers: per-terminal owning task, registry, capped output buffer, and command-log recording (`src/runtime/agent/acp_terminal.rs`, sharing spawn/kill/read primitives with the command gateway via `src/runtime/mediation/commands/exec.rs`) |
 | Model catalog    | cached `models.dev` model metadata for prompt modality gating     |
 | Provider model catalog | live provider `GET /models` fetch and per-provider cache (`src/runtime/agent/provider_model_catalog.rs`, cache at `~/.config/acp-stack/provider-models.json`) backing `settings.json` `availableModels` provisioning and `GET /v1/models` |

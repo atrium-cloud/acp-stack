@@ -49,11 +49,26 @@ fn agent_set_codex_rejects_unadvertised_effort() {
 }
 
 #[test]
-fn agent_set_opencode_rejects_effort() {
+fn agent_set_amp_rejects_effort() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
-    fs::write(config_dir.join("acps-config.toml"), VALID_CONFIG).expect("config should be written");
+    let config = VALID_CONFIG
+        .replace(r#"id = "opencode""#, r#"id = "amp""#)
+        .replace(r#"name = "OpenCode""#, r#"name = "Amp Code""#)
+        .replace(r#"command = "opencode""#, r#"command = "amp-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#)
+        .replace(r#"env = ["OPENCODE_API_KEY"]"#, r#"env = ["AMP_API_KEY"]"#)
+        .replace(
+            r#"
+[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#,
+            "",
+        );
+    fs::write(config_dir.join("acps-config.toml"), config).expect("config should be written");
 
     acps_command()
         .env("HOME", tempdir.path())
@@ -61,7 +76,7 @@ fn agent_set_opencode_rejects_effort() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "OpenCode does not support reasoning-effort configuration",
+            "Amp Code does not support reasoning-effort configuration",
         ));
 }
 
