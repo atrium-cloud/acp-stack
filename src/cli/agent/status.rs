@@ -179,6 +179,7 @@ fn agent_status_params(
             .and_then(|provider| provider.model.clone())
     });
     let mode = config.agent.mode.clone();
+    let effort = config.agent.effort.clone();
 
     vec![
         agent_status_param(
@@ -195,6 +196,11 @@ fn agent_status_params(
             "mode",
             mode,
             registry_entry.is_some_and(|entry| entry.set_mode),
+        ),
+        agent_status_param(
+            "effort",
+            effort,
+            registry_entry.is_some_and(|entry| entry.set_effort),
         ),
     ]
 }

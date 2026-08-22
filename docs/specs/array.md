@@ -61,7 +61,7 @@ Secret refs in a non-primary target's `env` may intentionally be shared across t
 | `acps array status` | session | Array config plus, when the daemon is reachable, per-target process state and pid, and local-delegation readiness |
 | `acps array on` / `off` | local | flip `array.enabled`; `off` keeps configured targets |
 | `acps array add <agent>` | local | add a target for a registry agent; rejects an already-configured harness |
-| `acps array set --target <id> ...` | local | configure model, mode, or a custom provider for one target |
+| `acps array set --target <id> ...` | local | configure model, mode, effort, or a custom provider for one target |
 | `acps array provider use\|set-active\|list-active --target <id> ...` | local | select the default mapped provider or inspect/replace its active set |
 | `acps array provider credential select --target <id> <provider> <alias>` | local | select one catalog alias for a target; catalog mutations use `acps agent provider credential` |
 | `acps array install\|start\|stop\|restart [--target <id>] [--admin-key <key>]` | admin | drive one target, or every configured target when `--target` is omitted |

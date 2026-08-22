@@ -11,7 +11,7 @@ Registry entries describe:
 - native command or adapter-backed command
 - optional `harness.acp_args` when the harness enters ACP mode through something other than an `acp` subcommand (e.g. a harness launched with a `--acp` flag); it must be non-empty and defaults to `["acp"]`
 - install steps and post-install executable checks
-- provider/model/mode support flags
+- provider/model/mode/effort support flags
 - Agent Skills support flag
 - Agent Skills install directory when skills are supported
 - optional Agent Skills link directory when the harness discovers skills somewhere other than the install directory (e.g. Claude Code's `~/.claude/skills`); it must not equal the install directory, and neither may nest within the other

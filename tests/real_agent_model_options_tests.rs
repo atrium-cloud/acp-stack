@@ -43,6 +43,7 @@ fn real_agent_config(id: &str, name: &str, command: &str, args: &[&str]) -> Agen
         restart: "never".to_owned(),
         mode: None,
         model: None,
+        effort: None,
         harness_version: None,
         adapter: None,
         provider: None,

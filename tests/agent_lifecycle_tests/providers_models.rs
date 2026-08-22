@@ -134,6 +134,18 @@ async fn models_returns_fixture_advertised_values() {
                 { "value": "default", "name": "default" },
                 { "value": "yolo", "name": "yolo" }
             ]
+        },
+        {
+            "id": "reasoning_effort",
+            "name": "Reasoning Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "medium",
+            "options": [
+                { "value": "low", "name": "Low" },
+                { "value": "medium", "name": "Medium" },
+                { "value": "high", "name": "High" }
+            ]
         }
     ]);
     std::fs::write(&fixture_path, fixture_body.to_string()).expect("write fixture");
@@ -168,6 +180,11 @@ async fn models_returns_fixture_advertised_values() {
     assert!(
         modes.iter().any(|m| m.as_str() == Some("default")),
         "advertised mode values missing: {modes:?}",
+    );
+    let efforts = body["data"]["efforts"].as_array().expect("efforts array");
+    assert!(
+        efforts.iter().any(|e| e.as_str() == Some("medium")),
+        "advertised effort values missing: {efforts:?}",
     );
 }
 
@@ -224,8 +241,9 @@ fn hermes_openrouter_config() -> Config {
     config
 }
 
-/// Config-options fixture with `model` and `mode` categories: the catalog
-/// path reads only the modes, the ACP fallback reads both.
+/// Config-options fixture with `model`, `mode`, and `thought_level`
+/// categories: the catalog path reads only the modes and efforts, the ACP
+/// fallback reads all three.
 fn write_models_mode_fixture(root: &std::path::Path) -> std::path::PathBuf {
     let fixture_path = root.join("config-options.json");
     let fixture_body = serde_json::json!([
@@ -249,6 +267,18 @@ fn write_models_mode_fixture(root: &std::path::Path) -> std::path::PathBuf {
             "options": [
                 { "value": "default", "name": "default" },
                 { "value": "yolo", "name": "yolo" }
+            ]
+        },
+        {
+            "id": "reasoning_effort",
+            "name": "Reasoning Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "medium",
+            "options": [
+                { "value": "low", "name": "Low" },
+                { "value": "medium", "name": "Medium" },
+                { "value": "high", "name": "High" }
             ]
         }
     ]);
@@ -334,6 +364,11 @@ async fn models_serves_provider_catalog_for_codex_openrouter() {
     assert!(
         modes.iter().any(|mode| mode.as_str() == Some("default")),
         "fixture mode values missing: {modes:?}",
+    );
+    let efforts = body["data"]["efforts"].as_array().expect("efforts array");
+    assert!(
+        efforts.iter().any(|effort| effort.as_str() == Some("high")),
+        "fixture effort values missing on the catalog path: {efforts:?}",
     );
 }
 
@@ -460,6 +495,11 @@ async fn models_degrades_to_empty_for_hermes_on_catalog_outage() {
     assert!(
         modes.iter().any(|mode| mode.as_str() == Some("default")),
         "fixture mode values missing: {modes:?}",
+    );
+    assert_eq!(
+        body["data"]["efforts"].as_array().expect("efforts array"),
+        &Vec::<Value>::new(),
+        "an agent advertising no effort option serves an empty list: {body}"
     );
 }
 

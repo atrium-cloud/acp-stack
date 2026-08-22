@@ -20,7 +20,7 @@ use crate::runtime::init_runner::StepDisposition;
 #[cfg(test)]
 use crate::runtime::init_runner::step_kind;
 
-/// The nine things init can settle. `id` is shared wire surface with hosted
+/// The ten things init can settle. `id` is shared wire surface with hosted
 /// clients (it rides as the `category` field of the `category_*` signals), so a
 /// rename is a wire break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,7 @@ pub(super) enum InitCategory {
     Provider,
     Model,
     Mode,
+    Effort,
     Workspace,
     NativeConfig,
     Mcp,
@@ -43,6 +44,7 @@ impl InitCategory {
             InitCategory::Provider => "provider",
             InitCategory::Model => "model",
             InitCategory::Mode => "mode",
+            InitCategory::Effort => "effort",
             InitCategory::Workspace => "workspace",
             InitCategory::NativeConfig => "native_config",
             InitCategory::Mcp => "mcp",
@@ -253,6 +255,7 @@ mod tests {
             (InitCategory::Provider, "provider"),
             (InitCategory::Model, "model"),
             (InitCategory::Mode, "mode"),
+            (InitCategory::Effort, "effort"),
             (InitCategory::Workspace, "workspace"),
             (InitCategory::NativeConfig, "native_config"),
             (InitCategory::Mcp, "mcp"),

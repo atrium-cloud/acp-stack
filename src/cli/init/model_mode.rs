@@ -42,8 +42,9 @@ const SKIP_OPTION_ID: &str = "__skip";
 /// L87 path where non-interactive init prints advertised values but
 /// declines to mutate config; `Set` triggers a canonical re-write.
 ///
-/// The mode lane never yields `PrintedList`: it has no print-and-skip
-/// behavior, because an unattended run without `--mode` never enters it.
+/// The mode and effort lanes never yield `PrintedList`: they have no
+/// print-and-skip behavior, because an unattended run without
+/// `--mode`/`--effort` never enters them.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModelModeAction {
     #[default]
@@ -56,9 +57,10 @@ pub(super) enum ModelModeAction {
 pub(super) struct ModelModeOutcome {
     pub(super) model_action: ModelModeAction,
     pub(super) mode_action: ModelModeAction,
+    pub(super) effort_action: ModelModeAction,
 }
 
-/// Capability gates for both lanes, evaluated before any side effects. An
+/// Capability gates for all three lanes, evaluated before any side effects. An
 /// explicit flag is never silently dropped: the operator gets a precise
 /// capability error instead of a downstream "binary not on PATH" / "no
 /// advertised values" / silent no-op.
@@ -87,6 +89,12 @@ pub(super) fn preflight_model_and_mode_for_init(
                 reason: "custom agents configure modes through their own environment; `--mode` applies only to supported registry agents".to_owned(),
             });
         }
+        if args.effort.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "--effort",
+                reason: "custom agents configure reasoning effort through their own environment; `--effort` applies only to supported registry agents".to_owned(),
+            });
+        }
     }
     let Some(entry) = registry.lookup(&config.agent.id) else {
         return Ok(());
@@ -105,6 +113,15 @@ pub(super) fn preflight_model_and_mode_for_init(
             path: config_path.to_path_buf(),
             reason: format!(
                 "{} does not support mode configuration through `acps init`",
+                entry.name,
+            ),
+        });
+    }
+    if args.effort.is_some() && !entry.set_effort {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path.to_path_buf(),
+            reason: format!(
+                "{} does not support reasoning-effort configuration through `acps init`",
                 entry.name,
             ),
         });
@@ -140,29 +157,41 @@ pub(super) fn preflight_model_and_mode_for_init(
             ),
         });
     }
+    // Effort shares the mode's rationale: it lives at the config root and its
+    // advertised list needs a launchable provisional session.
+    if args.effort.is_some() && provider_missing {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason: format!(
+                "{} needs a configured provider before its reasoning-effort values can be discovered; pass --provider <id> together with --effort, or run `acps agent set` after init",
+                entry.name,
+            ),
+        });
+    }
     Ok(())
 }
 
-/// Drives the model and mode ACP-discovery flows during `acps init`.
+/// Drives the model, mode, and effort ACP-discovery flows during `acps init`.
 ///
 /// - L84: spawns one provisional ACP session via `fetch_session_config`
-///   when the configured agent supports model or mode setup, so the advertised
-///   lists come straight from the installed harness instead
-///   of a stale registry snapshot. Both lanes share the one session.
-/// - L85: reads `model` and `mode` `session/new` config_options before
-///   accepting or printing any choice.
-/// - L86: explicit `--model`/`--mode` values are validated against the
-///   advertised list before being written to canonical config.
+///   when the configured agent supports model, mode, or effort setup, so the
+///   advertised lists come straight from the installed harness instead
+///   of a stale registry snapshot. All lanes share the one session.
+/// - L85: reads the `model`, `mode`, and effort (`thought_level`)
+///   `session/new` config_options before accepting or printing any choice.
+/// - L86: explicit `--model`/`--mode`/`--effort` values are validated against
+///   the advertised list before being written to canonical config.
 /// - L87: non-interactive runs without `--model` print the
 ///   advertised values and return `PrintedList` so the caller does NOT
 ///   mutate that field; init continues with the existing config so
-///   downstream steps stay usable. Mode has no such lane: a non-interactive
-///   run without `--mode` never enters it and prints nothing.
+///   downstream steps stay usable. Mode and effort have no such lane: a
+///   non-interactive run without `--mode`/`--effort` never enters them and
+///   prints nothing.
 ///
 /// Lane resolution is deliberately fall-through rather than early-return: a
 /// model lane that is skipped, pinned, or written without discovery must still
-/// let the mode lane reach the same session (amp, set_model=false/set_mode=true,
-/// has nothing but a mode lane).
+/// let the mode and effort lanes reach the same session (amp,
+/// set_model=false/set_mode=true, has nothing but a mode lane).
 pub(super) fn configure_model_and_mode_for_init(
     args: &InitArgs,
     home: &Path,
@@ -175,7 +204,7 @@ pub(super) fn configure_model_and_mode_for_init(
         return Ok(ModelModeOutcome::default());
     };
     preflight_model_and_mode_for_init(args, registry, config, config_path)?;
-    if !entry.set_model && !entry.set_mode {
+    if !entry.set_model && !entry.set_mode && !entry.set_effort {
         return Ok(ModelModeOutcome::default());
     }
     let mut outcome = ModelModeOutcome::default();
@@ -266,25 +295,32 @@ pub(super) fn configure_model_and_mode_for_init(
         outcome.model_action = ModelModeAction::Set;
         model_lane_active = false;
     }
-    // The mode lane has no "print the list" fallback, so an unattended run
-    // without `--mode` stays out of it entirely: no spawn, no output.
+    // The mode and effort lanes have no "print the list" fallback, so an
+    // unattended run without `--mode`/`--effort` stays out of them entirely:
+    // no spawn, no output.
     let mode_lane_active =
         entry.set_mode && provider_present && (args.mode.is_some() || interactive);
-    if !model_lane_active && !mode_lane_active {
+    let effort_lane_active =
+        entry.set_effort && provider_present && (args.effort.is_some() || interactive);
+    if !model_lane_active && !mode_lane_active && !effort_lane_active {
         return Ok(outcome);
     }
     // `explicit_flags` gates and names the failure path of the preflight checks
     // below: only a flag whose lane is still live can be validated by this
     // session, and the operator must be told which one could not be honored.
-    let explicit_flags = match (
-        model_lane_active && args.model.is_some(),
-        mode_lane_active && args.mode.is_some(),
-    ) {
-        (true, true) => Some("--model and --mode"),
-        (true, false) => Some("--model"),
-        (false, true) => Some("--mode"),
-        (false, false) => None,
+    let live_flags: Vec<&str> = [
+        (model_lane_active && args.model.is_some()).then_some("--model"),
+        (mode_lane_active && args.mode.is_some()).then_some("--mode"),
+        (effort_lane_active && args.effort.is_some()).then_some("--effort"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let explicit_flags = match live_flags.as_slice() {
+        [] => None,
+        flags => Some(flags.join(" and ")),
     };
+    let explicit_flags = explicit_flags.as_deref();
 
     let fixture_discovery = std::env::var_os(FIXTURE_CONFIG_OPTIONS_ENV).is_some()
         || std::env::var_os(FIXTURE_NEW_SESSION_RESPONSE_ENV).is_some();
@@ -305,14 +341,19 @@ pub(super) fn configure_model_and_mode_for_init(
                 path: config_path.to_path_buf(),
                 reason: format!("cannot validate {flags} for {}: {reason}", entry.name),
             };
-            signal_lane_failure(model_lane_active, mode_lane_active, &error);
+            signal_lane_failure(
+                model_lane_active,
+                mode_lane_active,
+                effort_lane_active,
+                &error,
+            );
             return Err(error);
         }
         init_progress(
             args,
             &format!(
                 "{} discovery skipped: {reason}",
-                active_lane_label(model_lane_active, mode_lane_active)
+                active_lane_label(model_lane_active, mode_lane_active, effort_lane_active)
             ),
         );
         return Ok(outcome);
@@ -369,10 +410,15 @@ pub(super) fn configure_model_and_mode_for_init(
                 path: config_path.to_path_buf(),
                 reason: format!("cannot validate {flags} for {}: {reason}", entry.name),
             };
-            signal_lane_failure(model_lane_active, mode_lane_active, &error);
+            signal_lane_failure(
+                model_lane_active,
+                mode_lane_active,
+                effort_lane_active,
+                &error,
+            );
             return Err(error);
         }
-        let lanes = active_lane_label(model_lane_active, mode_lane_active);
+        let lanes = active_lane_label(model_lane_active, mode_lane_active, effort_lane_active);
         let skip_reason = if binary_missing {
             format!(
                 "{lanes} discovery skipped: agent command `{}` not found on PATH",
@@ -431,36 +477,67 @@ pub(super) fn configure_model_and_mode_for_init(
             home, config,
         );
         crate::runtime::agent::agent_headless_config::provision_agent_headless_config(config, home)
-            .inspect_err(|error| signal_lane_failure(model_lane_active, mode_lane_active, error))?;
+            .inspect_err(|error| {
+                signal_lane_failure(
+                    model_lane_active,
+                    mode_lane_active,
+                    effort_lane_active,
+                    error,
+                )
+            })?;
         let response = match fetch_session_config(home, config) {
             Ok(response) => response,
-            // A mode-only lane with no explicit `--mode` is pure enrichment:
-            // before the mode lane existed these agents never spawned here at
-            // all, so a harness that cannot complete a provisional session must
-            // not turn an otherwise good init into a failure. Swallowing inside
-            // the closure also keeps the headless provision, which step 5
-            // re-runs unconditionally; the outer snapshot restore exists for
-            // rejected explicit values, which still propagate.
-            Err(error) if !model_lane_active && args.mode.is_none() => {
-                let reason = format!("mode discovery skipped: {error}");
+            // A mode/effort-only lane with no explicit `--mode`/`--effort` is
+            // pure enrichment: before these lanes existed such agents never
+            // spawned here at all, so a harness that cannot complete a
+            // provisional session must not turn an otherwise good init into a
+            // failure. Swallowing inside the closure also keeps the headless
+            // provision, which step 5 re-runs unconditionally; the outer
+            // snapshot restore exists for rejected explicit values, which
+            // still propagate.
+            Err(error) if !model_lane_active && args.mode.is_none() && args.effort.is_none() => {
+                let reason = format!(
+                    "{} discovery skipped: {error}",
+                    active_lane_label(false, mode_lane_active, effort_lane_active)
+                );
                 init_progress(args, &reason);
-                prompt::emit_state_signal(|| InitStateSignal::CategoryApplicability {
-                    category: InitCategory::Mode,
-                    applicable: false,
-                    // The session never completed, so this says nothing about
-                    // whether the agent has modes — only that this run cannot
-                    // find out. A mode already in config outlives it.
-                    source: ApplicabilitySource::DiscoveryUnavailable,
-                    reason: Some(reason),
+                prompt::emit_state_signals(|| {
+                    [
+                        (mode_lane_active, InitCategory::Mode),
+                        (effort_lane_active, InitCategory::Effort),
+                    ]
+                    .into_iter()
+                    .filter(|(live, _)| *live)
+                    .map(|(_, category)| InitStateSignal::CategoryApplicability {
+                        category,
+                        applicable: false,
+                        // The session never completed, so this says nothing
+                        // about whether the agent has the option — only that
+                        // this run cannot find out. A value already in
+                        // config outlives it.
+                        source: ApplicabilitySource::DiscoveryUnavailable,
+                        reason: Some(reason.clone()),
+                    })
+                    .collect()
                 });
                 return Ok(outcome);
             }
             Err(error) => {
-                signal_lane_failure(model_lane_active, mode_lane_active, &error);
+                signal_lane_failure(
+                    model_lane_active,
+                    mode_lane_active,
+                    effort_lane_active,
+                    &error,
+                );
                 return Err(error);
             }
         };
-        emit_discovery_applicability_corrections(&response, entry.set_model, entry.set_mode);
+        emit_discovery_applicability_corrections(
+            &response,
+            entry.set_model,
+            entry.set_mode,
+            entry.set_effort,
+        );
         if model_lane_active {
             outcome.model_action = configure_model_for_init(
                 args,
@@ -471,12 +548,17 @@ pub(super) fn configure_model_and_mode_for_init(
                 &entry.name,
                 entry.set_provider,
             )
-            .inspect_err(|error| signal_lane_failure(true, false, error))?;
+            .inspect_err(|error| signal_lane_failure(true, false, false, error))?;
         }
         if mode_lane_active {
             outcome.mode_action =
                 configure_mode_for_init(args, config, config_path, &response, interactive)
-                    .inspect_err(|error| signal_lane_failure(false, true, error))?;
+                    .inspect_err(|error| signal_lane_failure(false, true, false, error))?;
+        }
+        if effort_lane_active {
+            outcome.effort_action =
+                configure_effort_for_init(args, config, config_path, &response, interactive)
+                    .inspect_err(|error| signal_lane_failure(false, false, true, error))?;
         }
         Ok::<ModelModeOutcome, StackError>(outcome)
     })();
@@ -493,11 +575,22 @@ pub(super) fn configure_model_and_mode_for_init(
 
 /// Name the lanes that were about to run, so an amp-class agent with nothing
 /// but a mode lane is not told its model discovery was skipped.
-fn active_lane_label(model_lane_active: bool, mode_lane_active: bool) -> &'static str {
-    match (model_lane_active, mode_lane_active) {
-        (false, true) => "mode",
-        (true, true) => "model and mode",
-        _ => "model",
+fn active_lane_label(
+    model_lane_active: bool,
+    mode_lane_active: bool,
+    effort_lane_active: bool,
+) -> String {
+    let lanes: Vec<&str> = [
+        model_lane_active.then_some("model"),
+        mode_lane_active.then_some("mode"),
+        effort_lane_active.then_some("effort"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    match lanes.as_slice() {
+        [] => "model".to_owned(),
+        lanes => lanes.join(" and "),
     }
 }
 
@@ -801,6 +894,52 @@ fn write_mode_into_config(config: &mut Config, mode: String) {
     config.agent.mode = Some(mode);
 }
 
+/// Effort counterpart to `configure_mode_for_init`, sharing the caller's one
+/// provisional session and the mode lane's shape exactly: no print-and-skip
+/// lane, explicit values validated against the advertised list, interactive
+/// selection otherwise.
+fn configure_effort_for_init(
+    args: &InitArgs,
+    config: &mut Config,
+    config_path: &Path,
+    response: &agent_client_protocol::schema::v1::NewSessionResponse,
+    interactive: bool,
+) -> Result<ModelModeAction> {
+    let values = advertised_values_for_category(response, AgentSessionConfigCategory::Effort)
+        .unwrap_or_default();
+    if let Some(explicit) = args.effort.as_deref() {
+        validate_advertised_value(response, AgentSessionConfigCategory::Effort, explicit).map_err(
+            |err| StackError::AgentConfigProvision {
+                path: config_path.to_path_buf(),
+                reason: format!("{err}; advertised efforts: [{}]", values.join(", ")),
+            },
+        )?;
+        write_effort_into_config(config, explicit.to_owned());
+        return Ok(ModelModeAction::Set);
+    }
+    let Some(selected) = prompt_session_config_selection(
+        prompt::HostedPromptKind::Effort,
+        interactive,
+        &values,
+        AgentSessionConfigCategory::Effort,
+    )?
+    else {
+        return Ok(ModelModeAction::Skipped);
+    };
+    write_effort_into_config(config, selected);
+    Ok(ModelModeAction::Set)
+}
+
+/// Effort lives at the config root like `mode`; settlement is signalled at the
+/// write for the same drift-proofing reason.
+fn write_effort_into_config(config: &mut Config, effort: String) {
+    prompt::emit_state_signal(|| InitStateSignal::CategorySettled {
+        category: InitCategory::Effort,
+        value: Some(effort.clone()),
+    });
+    config.agent.effort = Some(effort);
+}
+
 /// Live corrections to the registry's applicability verdict, from the one
 /// thing that actually knows: the installed harness's `session/new`
 /// config_options. The correction runs one way only. `applicable` promises the
@@ -812,6 +951,7 @@ fn emit_discovery_applicability_corrections(
     response: &agent_client_protocol::schema::v1::NewSessionResponse,
     registry_set_model: bool,
     registry_set_mode: bool,
+    registry_set_effort: bool,
 ) {
     prompt::emit_state_signals(|| {
         [
@@ -824,6 +964,11 @@ fn emit_discovery_applicability_corrections(
                 InitCategory::Mode,
                 AgentSessionConfigCategory::Mode,
                 registry_set_mode,
+            ),
+            (
+                InitCategory::Effort,
+                AgentSessionConfigCategory::Effort,
+                registry_set_effort,
             ),
         ]
         .into_iter()
@@ -845,13 +990,14 @@ fn emit_discovery_applicability_corrections(
     });
 }
 
-/// The durable `provider_configure` step holds both lanes, so a step-level
-/// failure alone cannot say which one broke. Badge the lanes that were live
-/// when the error surfaced, before it propagates.
-fn signal_lane_failure(model_lane: bool, mode_lane: bool, error: &StackError) {
+/// The durable `provider_configure` step holds all three lanes, so a
+/// step-level failure alone cannot say which one broke. Badge the lanes that
+/// were live when the error surfaced, before it propagates.
+fn signal_lane_failure(model_lane: bool, mode_lane: bool, effort_lane: bool, error: &StackError) {
     for (live, category) in [
         (model_lane, InitCategory::Model),
         (mode_lane, InitCategory::Mode),
+        (effort_lane, InitCategory::Effort),
     ] {
         if live {
             prompt::emit_state_signal(|| InitStateSignal::CategoryFailed {

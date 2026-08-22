@@ -489,7 +489,7 @@ fn agent_test_writes_no_session_row() {
 }
 
 #[test]
-fn agent_status_reports_provider_with_unset_model_and_mode() {
+fn agent_status_reports_provider_with_unset_model_mode_and_effort() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -503,7 +503,7 @@ fn agent_status_reports_provider_with_unset_model_and_mode() {
         .success()
         .stdout(predicates::str::contains("agent: codex"))
         .stdout(predicates::str::contains("provider: openai"))
-        .stdout(predicates::str::contains("model and mode unset"))
+        .stdout(predicates::str::contains("model, mode, and effort unset"))
         .stdout(predicates::str::contains("unavailable").not());
 }
 
@@ -534,7 +534,7 @@ api_key_ref = "OPENCODE_API_KEY""#,
         .stdout(predicates::str::contains("model: deepseek-v4-pro"))
         .stdout(predicates::str::contains("mode: build"))
         .stdout(predicates::str::contains(" unset").not())
-        .stdout(predicates::str::contains(" unavailable").not());
+        .stdout(predicates::str::contains("effort unavailable"));
 }
 
 #[test]
@@ -607,7 +607,9 @@ creates = "opencode"
         .success()
         .stdout(predicates::str::contains("agent: amp"))
         .stdout(predicates::str::contains("mode: smart"))
-        .stdout(predicates::str::contains("provider and model unavailable"));
+        .stdout(predicates::str::contains(
+            "provider, model, and effort unavailable",
+        ));
 }
 
 #[test]
@@ -624,7 +626,7 @@ fn agent_status_reports_all_supported_params_unset() {
         .success()
         .stdout(predicates::str::contains("agent: opencode"))
         .stdout(predicates::str::contains("provider, model, and mode unset"))
-        .stdout(predicates::str::contains("unavailable").not());
+        .stdout(predicates::str::contains("effort unavailable"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

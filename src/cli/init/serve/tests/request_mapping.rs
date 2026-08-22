@@ -108,6 +108,7 @@ fn start_init_request_rejects_custom_agent_conflicts_without_echoing_values() {
         r#"{"custom_agent_id": "housebot", "provider": "openrouter"}"#,
         r#"{"custom_agent_id": "housebot", "model": "openai/gpt-5"}"#,
         r#"{"custom_agent_id": "housebot", "mode": "plan"}"#,
+        r#"{"custom_agent_id": "housebot", "effort": "high"}"#,
         r#"{"custom_agent_id": "housebot", "custom_provider": true}"#,
     ] {
         let error = request_from_json(payload)
@@ -116,7 +117,14 @@ fn start_init_request_rejects_custom_agent_conflicts_without_echoing_values() {
         match error {
             StackError::InvalidParam { field, ref reason } => {
                 assert_eq!(field, "custom_agent_id");
-                for value in ["housebot", "opencode", "openrouter", "openai/gpt-5", "plan"] {
+                for value in [
+                    "housebot",
+                    "opencode",
+                    "openrouter",
+                    "openai/gpt-5",
+                    "plan",
+                    "high",
+                ] {
                     assert!(!reason.contains(value), "{reason} echoed a submitted value");
                 }
             }
@@ -195,6 +203,21 @@ fn start_init_request_maps_mode_into_args() {
         .into_init_args()
         .expect("valid request");
     assert_eq!(absent.mode, None);
+}
+
+#[test]
+fn start_init_request_maps_effort_into_args() {
+    // Declare-up-front parity with mode: a hosted client that knows its
+    // reasoning effort must not have to answer the streamed picker.
+    let args = request_from_json(r#"{"agent": "codex", "effort": "high"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(args.effort.as_deref(), Some("high"));
+
+    let absent = request_from_json(r#"{"agent": "codex"}"#)
+        .into_init_args()
+        .expect("valid request");
+    assert_eq!(absent.effort, None);
 }
 
 #[test]

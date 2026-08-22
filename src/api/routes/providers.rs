@@ -8,7 +8,7 @@
 //!
 //! `GET /v1/models` spawns a provisional ACP session against the
 //! configured agent, reads its `session/new` advertised
-//! `config_options`, and returns the model + mode value lists. This
+//! `config_options`, and returns the model + mode + effort value lists. This
 //! mirrors what `acps agent set` does interactively, so a UI driver
 //! can render exactly the same picker without shelling out to the CLI.
 //! The endpoint is session-tier (valid session key required).
@@ -93,6 +93,11 @@ pub(crate) struct ModelsResponse {
     /// expose a mode option (or, on the catalog fallback path, when ACP
     /// discovery failed).
     modes: Vec<String>,
+    /// ACP-advertised reasoning-effort values (the `thought_level`
+    /// session config option). Empty when the agent does not expose an
+    /// effort option (or, on the catalog fallback path, when ACP
+    /// discovery failed).
+    efforts: Vec<String>,
     /// Set when the provider declares a model listing endpoint but the
     /// catalog is unavailable (fetch failed and no cache).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,22 +160,25 @@ pub(crate) async fn models_handler(
     };
 
     if let Some(models) = catalog {
-        // ACP discovery still supplies the mode list; a discovery failure
-        // must not take down a response the catalog can serve on its own.
-        let modes = match fetch_session_config_with_timeout(
+        // ACP discovery still supplies the mode and effort lists; a discovery
+        // failure must not take down a response the catalog can serve on its
+        // own.
+        let (modes, efforts) = match fetch_session_config_with_timeout(
             &home,
             &config,
             DEFAULT_MODELS_DISCOVERY_TIMEOUT,
         )
         .await
         {
-            Ok(response) => {
+            Ok(response) => (
                 advertised_values_for_category(&response, AgentSessionConfigCategory::Mode)
-                    .unwrap_or_default()
-            }
+                    .unwrap_or_default(),
+                advertised_values_for_category(&response, AgentSessionConfigCategory::Effort)
+                    .unwrap_or_default(),
+            ),
             Err(error) => {
-                tracing::warn!(error = %error, "mode discovery failed; serving catalog models without modes");
-                Vec::new()
+                tracing::warn!(error = %error, "config-option discovery failed; serving catalog models without modes or efforts");
+                (Vec::new(), Vec::new())
             }
         };
         return Ok(ApiSuccess::new(ModelsResponse {
@@ -184,6 +192,7 @@ pub(crate) async fn models_handler(
                 })
                 .collect(),
             modes,
+            efforts,
             catalog_error: None,
         }));
     }
@@ -207,6 +216,8 @@ pub(crate) async fn models_handler(
     };
     let modes = advertised_values_for_category(&response, AgentSessionConfigCategory::Mode)
         .unwrap_or_default();
+    let efforts = advertised_values_for_category(&response, AgentSessionConfigCategory::Effort)
+        .unwrap_or_default();
 
     Ok(ApiSuccess::new(ModelsResponse {
         agent_id,
@@ -219,6 +230,7 @@ pub(crate) async fn models_handler(
             })
             .collect(),
         modes,
+        efforts,
         catalog_error,
     }))
 }

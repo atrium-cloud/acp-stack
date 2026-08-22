@@ -98,6 +98,10 @@ pub struct AgentConfig {
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// ACP-advertised reasoning-effort value (the agent's `thought_level`
+    /// session config option), applied on session creation like `mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Pin the harness to a specific GitHub Release tag (e.g. `"v0.42.0"`).
     /// Consulted by both install and managed update when the harness install
     /// path is `github_release`; updates target the pin instead of the latest

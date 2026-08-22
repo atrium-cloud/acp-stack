@@ -95,6 +95,7 @@ pub(super) fn run_agent_switch(args: AgentSwitchArgs) -> Result<()> {
                 context: None,
                 output_max_tokens: None,
                 mode: None,
+                effort: None,
                 api_key_ref: None,
             })?;
             if data

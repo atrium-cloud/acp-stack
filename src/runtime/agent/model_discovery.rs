@@ -1,8 +1,9 @@
 //! Provisional ACP session helpers for model/mode discovery.
 //!
 //! Both `acps agent set` (CLI) and `GET /v1/models` (HTTP API) need to
-//! query the configured agent for its ACP-advertised `model` and `mode`
-//! `session/new` config options before letting the operator pick one.
+//! query the configured agent for its ACP-advertised `model`, `mode`,
+//! and effort (`thought_level`) `session/new` config options before
+//! letting the operator pick one.
 //! That requires spawning the agent's binary, opening one short-lived
 //! ACP session, reading the response's `config_options`, and shutting
 //! the agent down — all in-process and synchronous from the caller's
@@ -213,15 +214,15 @@ pub async fn fetch_agent_capabilities_async(
 /// Convenience for callers that just want the advertised string values
 /// for one category. `Model` flows through the legacy-aware
 /// `session_model_values` so older agents that surface model lists in
-/// non-config-options shapes still work; `Mode` reads straight from
-/// `config_options`.
+/// non-config-options shapes still work; `Mode` and `Effort` read
+/// straight from `config_options`.
 pub fn advertised_values_for_category(
     response: &NewSessionResponse,
     category: AgentSessionConfigCategory,
 ) -> Result<Vec<String>> {
     match category {
         AgentSessionConfigCategory::Model => session_model_values(response),
-        AgentSessionConfigCategory::Mode => {
+        AgentSessionConfigCategory::Mode | AgentSessionConfigCategory::Effort => {
             session_config_values(response.config_options.as_deref(), category)
         }
     }
@@ -232,7 +233,7 @@ pub fn advertised_values_for_category(
 /// `StackError::AgentConfigProvision` describing the rejection.
 ///
 /// Both `acps agent set` and `acps init` use this before writing
-/// `agent.provider.model`, `agent.model`, or `agent.mode` to disk so
+/// `agent.provider.model`, `agent.model`, `agent.mode`, or `agent.effort` to disk so
 /// the canonical config never disagrees with what the harness itself
 /// will accept on `session/new`.
 pub fn validate_advertised_value(
@@ -244,7 +245,7 @@ pub fn validate_advertised_value(
         AgentSessionConfigCategory::Model => {
             session_model_selection_for_value(response, value).map(|_| ())
         }
-        AgentSessionConfigCategory::Mode => {
+        AgentSessionConfigCategory::Mode | AgentSessionConfigCategory::Effort => {
             session_config_id_for_value(response.config_options.as_deref(), category, value)
                 .map(|_| ())
         }
@@ -345,6 +346,7 @@ mod tests {
             restart: "on-crash".to_owned(),
             mode: None,
             model: None,
+            effort: None,
             harness_version: None,
             adapter: None,
             install: None,

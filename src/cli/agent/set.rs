@@ -36,6 +36,9 @@ pub(super) fn run_agent_set(args: AgentSetArgs) -> Result<()> {
     if let Some(mode) = args.mode.clone() {
         return run_agent_mode_set(config, config_path, &home, args, entry, mode);
     }
+    if let Some(effort) = args.effort.clone() {
+        return run_agent_effort_set(config, config_path, &home, args, entry, effort);
+    }
     let Some(provider_id) = args.provider.clone() else {
         return run_agent_model_set(config, config_path, &home, args, entry);
     };
@@ -479,11 +482,16 @@ fn run_agent_mode_set(
     mode: String,
 ) -> Result<()> {
     reject_custom_provider_args(&args)?;
-    if args.provider.is_some() || args.model.is_some() || args.api_key_ref.is_some() {
+    if args.provider.is_some()
+        || args.model.is_some()
+        || args.api_key_ref.is_some()
+        || args.effort.is_some()
+    {
         return Err(StackError::InvalidParam {
             field: "mode",
-            reason: "--mode cannot be combined with --provider, --model, or --api-key-ref"
-                .to_owned(),
+            reason:
+                "--mode cannot be combined with --provider, --model, --effort, or --api-key-ref"
+                    .to_owned(),
         });
     }
     if !entry.set_mode {
@@ -503,6 +511,54 @@ fn run_agent_mode_set(
     atomic_write_owner_only(&config_path, canonical.as_bytes())?;
     print_agent_set_agent(&config);
     println!("mode: {mode}");
+    print_agent_set_effective_notice_for(Some(&config.agent.id));
+    Ok(())
+}
+
+fn run_agent_effort_set(
+    mut config: Config,
+    config_path: PathBuf,
+    home: &Path,
+    args: AgentSetArgs,
+    entry: &RegistryEntry,
+    effort: String,
+) -> Result<()> {
+    reject_custom_provider_args(&args)?;
+    // `args.mode` is in the check even though the mode branch dispatches
+    // first, so the rejection does not depend on dispatch order.
+    if args.provider.is_some()
+        || args.model.is_some()
+        || args.api_key_ref.is_some()
+        || args.mode.is_some()
+    {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason:
+                "--effort cannot be combined with --provider, --model, --mode, or --api-key-ref"
+                    .to_owned(),
+        });
+    }
+    if !entry.set_effort {
+        return Err(StackError::AgentConfigProvision {
+            path: config_path,
+            reason: format!(
+                "{} does not support reasoning-effort configuration through `acps agent set`",
+                entry.name
+            ),
+        });
+    }
+    config.agent.effort = Some(effort.clone());
+    let canonical = config.to_canonical_toml()?;
+    let config = config::load_config_from_str(&canonical)?;
+    validate_agent_session_config_value(
+        home,
+        &config,
+        AgentSessionConfigCategory::Effort,
+        &effort,
+    )?;
+    atomic_write_owner_only(&config_path, canonical.as_bytes())?;
+    print_agent_set_agent(&config);
+    println!("effort: {effort}");
     print_agent_set_effective_notice_for(Some(&config.agent.id));
     Ok(())
 }
@@ -648,7 +704,7 @@ pub(in crate::cli) fn validate_agent_session_config_value(
         AgentSessionConfigCategory::Model => {
             session_model_selection_for_value(&response, value).map(|_| ())
         }
-        AgentSessionConfigCategory::Mode => {
+        AgentSessionConfigCategory::Mode | AgentSessionConfigCategory::Effort => {
             session_config_id_for_value(response.config_options.as_deref(), category, value)
                 .map(|_| ())
         }
@@ -678,6 +734,7 @@ mod tests {
             restart: "on-crash".to_owned(),
             mode: None,
             model: None,
+            effort: None,
             harness_version: None,
             adapter: None,
             install: None,

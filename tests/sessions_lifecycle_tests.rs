@@ -793,15 +793,16 @@ async fn attached_mcp_event_lists_servers_for_an_mcp_capable_agent() {
 }
 
 #[tokio::test]
-async fn unadvertised_mode_and_model_are_ignored_not_fatal() {
-    // The placebo advertises neither a `mode` nor a `model` config option
-    // unless told to, so a config-declared mode/model used to make every
+async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
+    // The placebo advertises neither a `mode`, `model`, nor effort config
+    // option unless told to, so a config-declared value used to make every
     // session create fail with `agent.config_provision`. The session must
     // instead proceed on the agent's defaults, report what was ignored in
     // the response, and record a `session.capability_ignored` event.
     let harness = Harness::spawn_with(|config| {
         config.agent.mode = Some("plan".to_owned());
         config.agent.model = Some("deepseek/deepseek-v4-flash".to_owned());
+        config.agent.effort = Some("high".to_owned());
     })
     .await;
 
@@ -819,9 +820,14 @@ async fn unadvertised_mode_and_model_are_ignored_not_fatal() {
         .iter()
         .filter_map(|entry| entry["feature"].as_str())
         .collect();
-    assert_eq!(features, ["agent.mode", "agent.model"], "{body}");
+    assert_eq!(
+        features,
+        ["agent.mode", "agent.model", "agent.effort"],
+        "{body}"
+    );
     assert_eq!(ignored[0]["value"], "plan");
     assert_eq!(ignored[1]["value"], "deepseek/deepseek-v4-flash");
+    assert_eq!(ignored[2]["value"], "high");
 
     let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
     let events = {
@@ -837,7 +843,8 @@ async fn unadvertised_mode_and_model_are_ignored_not_fatal() {
     assert_eq!(capability_events.len(), 1, "{events:?}");
     assert!(
         capability_events[0].payload_json.contains("agent.mode")
-            && capability_events[0].payload_json.contains("agent.model"),
+            && capability_events[0].payload_json.contains("agent.model")
+            && capability_events[0].payload_json.contains("agent.effort"),
         "{events:?}"
     );
 

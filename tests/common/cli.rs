@@ -339,6 +339,15 @@ pub fn write_acp_config_options(
     models: &[&str],
     modes: &[&str],
 ) -> std::path::PathBuf {
+    write_acp_config_options_with_efforts(root, models, modes, &[])
+}
+
+pub fn write_acp_config_options_with_efforts(
+    root: &std::path::Path,
+    models: &[&str],
+    modes: &[&str],
+    efforts: &[&str],
+) -> std::path::PathBuf {
     let options_path = root.join("acp-config-options.json");
     let mut options = Vec::new();
     if !models.is_empty() {
@@ -362,6 +371,22 @@ pub fn write_acp_config_options(
             "type": "select",
             "currentValue": modes[0],
             "options": modes
+                .iter()
+                .map(|value| serde_json::json!({ "value": value, "name": value }))
+                .collect::<Vec<_>>()
+        }));
+    }
+    if !efforts.is_empty() {
+        // codex-acp's shape: a non-"effort" option id under the reserved
+        // `thought_level` category, so the fixture exercises the category
+        // match rather than the id fallback.
+        options.push(serde_json::json!({
+            "id": "reasoning_effort",
+            "name": "Reasoning Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": efforts[0],
+            "options": efforts
                 .iter()
                 .map(|value| serde_json::json!({ "value": value, "name": value }))
                 .collect::<Vec<_>>()

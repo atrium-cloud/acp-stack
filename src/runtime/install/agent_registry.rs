@@ -305,6 +305,8 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub set_mode: bool,
     #[serde(default)]
+    pub set_effort: bool,
+    #[serde(default)]
     pub supports_agent_skills: bool,
     #[serde(default)]
     pub agent_skills_install_dir: Option<String>,
@@ -481,6 +483,7 @@ fn development_placebo_entry(placebo_path: &str, install: InstallSet) -> Registr
         set_provider_base_url: false,
         allow_custom_model: false,
         set_mode: false,
+        set_effort: false,
         supports_agent_skills: false,
         agent_skills_install_dir: None,
         agent_skills_link_dir: None,

@@ -32,10 +32,11 @@ OpenRouter config is written to `~/.codex/config.toml` with `https://openrouter.
 
 For OpenRouter and custom providers the model id is accepted verbatim and written to `config.toml` without validation against the adapter's advertised model list — `codex-acp` advertises codex-core's builtin OpenAI preset catalog regardless of the configured provider, so that list must not gate provider-native slugs like `deepseek/deepseek-v4-flash-0731`. The `openai` provider still validates against advertised models. During init the model list for these lanes comes from the provider's live catalog (the same listing that backs `GET /v1/models`), so the picker shows real provider slugs; when no catalog is available (custom provider or an offline fetch) init skips the list and asks for an explicit `--model` rather than showing the OpenAI presets.
 
-Codex mode values are not fixed here: the `codex-acp` adapter advertises them at runtime and a mode is validated against that advertisement when it is set, so the accepted set follows whichever adapter version is installed (currently `read-only`, `agent`, `agent-full-access`). Modes are set through:
+Codex mode values are not fixed here: the `codex-acp` adapter advertises them at runtime and a mode is validated against that advertisement when it is set, so the accepted set follows whichever adapter version is installed (currently `read-only`, `agent`, `agent-full-access`). Reasoning-effort values follow the same rule: the adapter advertises them as the `reasoning_effort` (`thought_level`) session config option when the active model preset supports more than one effort. Modes and efforts are set through:
 
 ```sh
 acps agent set --mode <mode>
+acps agent set --effort <effort>
 ```
 
 ## Session Resume

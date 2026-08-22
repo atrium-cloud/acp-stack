@@ -118,7 +118,7 @@ pub fn session_config_id_for_value(
             .category
             .as_ref()
             .is_some_and(|option_category| category.matches(option_category));
-        let id_matches = option.id.0.as_ref() == category.id();
+        let id_matches = category.matches_id(option.id.0.as_ref());
         if (category_matches || id_matches) && session_config_option_contains_value(option, value) {
             return Ok(option.id.0.to_string());
         }
@@ -150,7 +150,7 @@ pub fn session_config_values(
             .category
             .as_ref()
             .is_some_and(|option_category| category.matches(option_category));
-        let id_matches = option.id.0.as_ref() == category.id();
+        let id_matches = category.matches_id(option.id.0.as_ref());
         if category_matches || id_matches {
             let mut values = session_config_option_values(option);
             values.sort();

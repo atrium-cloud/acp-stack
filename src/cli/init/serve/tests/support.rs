@@ -246,11 +246,12 @@ pub(crate) fn awaiting_ids(state: &Value) -> Vec<String> {
         .collect()
 }
 
-pub(crate) const CANONICAL_CATEGORY_IDS: [&str; 9] = [
+pub(crate) const CANONICAL_CATEGORY_IDS: [&str; 10] = [
     "agent",
     "provider",
     "model",
     "mode",
+    "effort",
     "workspace",
     "native_config",
     "mcp",

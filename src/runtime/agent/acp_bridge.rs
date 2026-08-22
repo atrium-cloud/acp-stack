@@ -67,8 +67,9 @@ mod spawn;
 use self::process_env::build_agent_process_env;
 
 pub use self::capabilities::{
-    AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL,
-    IGNORED_FEATURE_MCP_SERVER, IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
+    AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE,
+    IGNORED_FEATURE_AGENT_MODEL, IGNORED_FEATURE_MCP_SERVER, IgnoredFeature, PartitionedMcpServers,
+    SkippedMcpServer,
 };
 pub(crate) use self::process_env::{
     KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, kimi_default_model_for_provider,
@@ -133,6 +134,7 @@ const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub enum AgentSessionConfigCategory {
     Mode,
     Model,
+    Effort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +147,7 @@ impl AgentSessionConfigCategory {
         match self {
             Self::Mode => "mode",
             Self::Model => "model",
+            Self::Effort => "effort",
         }
     }
 
@@ -153,7 +156,18 @@ impl AgentSessionConfigCategory {
             (self, category),
             (Self::Mode, SessionConfigOptionCategory::Mode)
                 | (Self::Model, SessionConfigOptionCategory::Model)
+                | (Self::Effort, SessionConfigOptionCategory::ThoughtLevel)
         )
+    }
+
+    // ACP reserves the `thought_level` category but not the option id, and
+    // shipping adapters disagree on the id (claude-code-acp uses `effort`,
+    // codex-acp uses `reasoning_effort`), so the id fallback accepts both.
+    pub(super) fn matches_id(self, id: &str) -> bool {
+        match self {
+            Self::Effort => id == "effort" || id == "reasoning_effort",
+            Self::Mode | Self::Model => id == self.id(),
+        }
     }
 }
 

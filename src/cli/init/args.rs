@@ -67,7 +67,7 @@ pub struct InitArgs {
     #[arg(
         long = "custom-agent-id",
         value_name = "ID",
-        conflicts_with_all = ["agent", "provider", "model", "mode", "custom_provider"]
+        conflicts_with_all = ["agent", "provider", "model", "mode", "effort", "custom_provider"]
     )]
     pub(super) custom_agent_id: Option<String>,
     /// Display name for the custom agent (defaults to the id).
@@ -207,6 +207,11 @@ pub struct InitArgs {
     /// `mode` values discovered via the same provisional session as `--model`.
     #[arg(long)]
     pub(super) mode: Option<String>,
+    /// Initial reasoning-effort value, validated against the agent's
+    /// ACP-advertised effort values discovered via the same provisional
+    /// session as `--model`.
+    #[arg(long)]
+    pub(super) effort: Option<String>,
     /// Display name for a custom model.
     #[arg(long = "model-name", requires = "custom_provider")]
     pub(super) model_name: Option<String>,
@@ -410,6 +415,7 @@ impl Default for InitArgs {
             provider_api: None,
             model: None,
             mode: None,
+            effort: None,
             model_name: None,
             context: None,
             output_max_tokens: None,

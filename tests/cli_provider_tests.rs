@@ -6,6 +6,8 @@ mod common;
 mod claude_code;
 #[path = "cli_provider_tests/codex.rs"]
 mod codex;
+#[path = "cli_provider_tests/efforts.rs"]
+mod efforts;
 #[path = "cli_provider_tests/install_registry.rs"]
 mod install_registry;
 #[path = "cli_provider_tests/modes.rs"]

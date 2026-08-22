@@ -281,10 +281,10 @@ fn hosted_custom_agent_settles_the_agent_and_strands_no_harness_lane() {
     let state = latest_state(&session);
     assert_eq!(category(&state, "agent")["status"], json!("settled"));
     assert_eq!(category(&state, "agent")["value"], json!("housebot"));
-    // A registry-less agent takes its provider, model, mode, and skills
-    // from its own environment, so a client must never render those lanes
-    // as input that is still coming.
-    for id in ["provider", "model", "mode", "skills"] {
+    // A registry-less agent takes its provider, model, mode, effort, and
+    // skills from its own environment, so a client must never render those
+    // lanes as input that is still coming.
+    for id in ["provider", "model", "mode", "effort", "skills"] {
         assert_eq!(
             category(&state, id)["status"],
             json!("not_applicable"),
@@ -312,6 +312,7 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
         custom: None,
     });
     config.agent.mode = Some("smart".to_owned());
+    config.agent.effort = Some("high".to_owned());
     config.mcp.servers = vec![crate::config::McpServerConfig::Stdio(
         crate::config::McpStdioServer {
             name: "linear".to_owned(),
@@ -338,6 +339,13 @@ fn hosted_settlement_reports_the_harness_values_already_in_the_config() {
             "`{id}` must report what is on disk, not null"
         );
     }
+    // The registry outranks the disk: opencode takes no effort, so a stray
+    // `agent.effort` in config renders the lane not applicable rather than
+    // settled with a value no session will honor.
+    assert_eq!(
+        category(&state, "effort")["status"],
+        json!("not_applicable")
+    );
     // MCP is the exception: declaring servers says nothing about whether
     // the installed agent can be handed any, so the lane is still open here
     // and the probe is what closes it.

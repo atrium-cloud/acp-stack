@@ -344,6 +344,13 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
             field: "agent.model",
         });
     }
+    if let Some(effort) = agent.effort.as_deref()
+        && (effort.trim().is_empty() || effort.len() != effort.trim().len())
+    {
+        return Err(StackError::MissingField {
+            field: "agent.effort",
+        });
+    }
     Ok(())
 }
 

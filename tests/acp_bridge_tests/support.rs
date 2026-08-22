@@ -49,6 +49,7 @@ pub(crate) fn fake_agent_config() -> AgentConfig {
         restart: "never".into(),
         mode: None,
         model: None,
+        effort: None,
         harness_version: None,
         adapter: None,
         provider: None,

@@ -366,6 +366,66 @@ fn session_config_helpers_validate_select_values_by_category() {
 }
 
 #[test]
+fn effort_values_match_by_thought_level_category_and_by_id_fallback() {
+    // codex-acp's shape: id `reasoning_effort` under the reserved
+    // `thought_level` category — the category match must find it.
+    let by_category: Vec<SessionConfigOption> = serde_json::from_str(
+        r#"[
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "medium", "name": "Medium"},
+                        {"value": "high", "name": "High"}
+                    ]
+                }
+            ]"#,
+    )
+    .expect("session config options deserialize");
+    assert_eq!(
+        session_config_values(Some(&by_category), AgentSessionConfigCategory::Effort)
+            .expect("effort values"),
+        ["high", "low", "medium"]
+    );
+    assert_eq!(
+        session_config_id_for_value(
+            Some(&by_category),
+            AgentSessionConfigCategory::Effort,
+            "high"
+        )
+        .expect("advertised effort should be accepted"),
+        "reasoning_effort"
+    );
+
+    // A category-less option is still found through the known effort ids
+    // (`effort` is claude-code-acp's spelling).
+    let by_id: Vec<SessionConfigOption> = serde_json::from_str(
+        r#"[
+                {
+                    "id": "effort",
+                    "name": "Effort",
+                    "type": "select",
+                    "currentValue": "default",
+                    "options": [
+                        {"value": "default", "name": "Default"},
+                        {"value": "max", "name": "Max"}
+                    ]
+                }
+            ]"#,
+    )
+    .expect("session config options deserialize");
+    assert_eq!(
+        session_config_values(Some(&by_id), AgentSessionConfigCategory::Effort)
+            .expect("effort values"),
+        ["default", "max"]
+    );
+}
+
+#[test]
 fn session_model_helpers_reject_removed_legacy_model_state() {
     // ACP v1 dropped the pre-1.0 `models` session state; an agent that
     // only advertises the legacy shape gets a clear provisioning error

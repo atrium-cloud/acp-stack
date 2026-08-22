@@ -23,14 +23,16 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
         || {
             // Provider config is idempotent only when there's no explicit
             // change requested for any lane this step owns (provider, model,
-            // mode). We always re-run on resume so partial writes (e.g. missing
-            // secret refs) get re-collected, and so a resumed `--model`/`--mode`
-            // still gets validated and persisted rather than silently skipped
-            // because the prior succeeded row passes the verifier.
+            // mode, effort). We always re-run on resume so partial writes
+            // (e.g. missing secret refs) get re-collected, and so a resumed
+            // `--model`/`--mode`/`--effort` still gets validated and persisted
+            // rather than silently skipped because the prior succeeded row
+            // passes the verifier.
             let secret_store = SecretStore::open(&provider_verify_home)?;
             Ok(args.provider.is_none()
                 && args.model.is_none()
                 && args.mode.is_none()
+                && args.effort.is_none()
                 && configured_provider_refs_satisfied(
                     registry,
                     &provider_verify_config,
@@ -72,7 +74,8 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
             }
             let model_mode_changed =
                 matches!(model_mode_outcome.model_action, ModelModeAction::Set)
-                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set);
+                    || matches!(model_mode_outcome.mode_action, ModelModeAction::Set)
+                    || matches!(model_mode_outcome.effort_action, ModelModeAction::Set);
             let subagent_configured =
                 configure_subagent_inherit_for_init(prompts_enabled(args), registry, config)?;
             if agent_selected
@@ -86,8 +89,10 @@ pub(super) fn run_provider_configure_step(flow: &mut InitFlow) -> Result<()> {
                 atomic_write_owner_only(config_path, canonical.as_bytes())?;
             }
             Ok(StepOutcome::with_payload(format!(
-                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
-                model_mode_outcome.model_action, model_mode_outcome.mode_action,
+                r#"{{"provider_configured":{provider_configured},"model_action":"{:?}","mode_action":"{:?}","effort_action":"{:?}","subagent_configured":{subagent_configured}}}"#,
+                model_mode_outcome.model_action,
+                model_mode_outcome.mode_action,
+                model_mode_outcome.effort_action,
             )))
         },
     );
