@@ -347,6 +347,7 @@ pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAge
         config.agent.mode = None;
         config.agent.model = None;
         config.agent.effort = None;
+        config.agent.config_options = Default::default();
         config.agent.provider = None;
         config.agent.providers = None;
         config.agent.auto_update = None;
@@ -379,6 +380,7 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         config.agent.mode = None;
         config.agent.model = None;
         config.agent.effort = None;
+        config.agent.config_options = Default::default();
         config.agent.provider = None;
         config.agent.providers = None;
         config.agent.auto_update = default_supported_agent_auto_update();

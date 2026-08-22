@@ -351,6 +351,7 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
             field: "agent.effort",
         });
     }
+    agent::validate_agent_config_options(&agent.config_options)?;
     Ok(())
 }
 

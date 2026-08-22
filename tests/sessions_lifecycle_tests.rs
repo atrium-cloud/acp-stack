@@ -12,7 +12,8 @@ mod common;
 use std::time::Duration;
 
 use acp_stack::config::{
-    ArrayTargetConfig, Config, McpHttpServer, McpServerConfig, McpStdioServer,
+    AgentConfigOptionValue, ArrayTargetConfig, Config, McpHttpServer, McpServerConfig,
+    McpStdioServer,
 };
 use acp_stack::secrets::SecretStore;
 use acp_stack::state::{NewPromptRecord, NewSessionRecord};
@@ -860,6 +861,233 @@ async fn unadvertised_mode_model_and_effort_are_ignored_not_fatal() {
         .await
         .expect("prompt");
     assert_eq!(prompt.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn config_options_are_applied_snapshotted_and_settable() {
+    // The placebo advertises one select (`persona`) and one boolean
+    // (`fast`, category model_config). The configured map applies both,
+    // the unadvertised `ghost` entry degrades to an ignored record, and
+    // the per-session snapshot + set route reflect the applied state.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--config-option-select".to_owned(),
+            "persona=default:default,researcher".to_owned(),
+            "--config-option-boolean".to_owned(),
+            "fast@model_config=false".to_owned(),
+        ]);
+        config
+            .agent
+            .config_options
+            .insert("fast".to_owned(), AgentConfigOptionValue::Bool(true));
+        config.agent.config_options.insert(
+            "persona".to_owned(),
+            AgentConfigOptionValue::Text("researcher".to_owned()),
+        );
+        config.agent.config_options.insert(
+            "ghost".to_owned(),
+            AgentConfigOptionValue::Text("anything".to_owned()),
+        );
+    })
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let ignored = body["data"]["ignored"].as_array().expect("ignored array");
+    assert_eq!(ignored.len(), 1, "{body}");
+    assert_eq!(ignored[0]["feature"], "agent.config_option");
+    assert_eq!(ignored[0]["option_id"], "ghost");
+    assert_eq!(ignored[0]["value"], "anything");
+    let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
+
+    // The stored snapshot reflects the applied values.
+    let response = http()
+        .get(format!(
+            "{}/v1/sessions/{}/config-options",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("get config options");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let options = body["data"]["config_options"]
+        .as_array()
+        .expect("options array");
+    let fast = options
+        .iter()
+        .find(|option| option["id"] == "fast")
+        .expect("fast option");
+    assert_eq!(fast["type"], "boolean");
+    assert_eq!(fast["category"], "model_config");
+    assert_eq!(fast["current_value"], json!(true), "{body}");
+    let persona = options
+        .iter()
+        .find(|option| option["id"] == "persona")
+        .expect("persona option");
+    assert_eq!(persona["type"], "select");
+    assert_eq!(persona["current_value"], "researcher", "{body}");
+    assert!(persona.get("category").is_none(), "{body}");
+    assert!(body["data"]["updated_at"].is_string());
+
+    // Live set: the refreshed list reflects the new value.
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/config-options",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "config_id": "persona", "value": "default" }))
+        .send()
+        .await
+        .expect("set config option");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let persona = body["data"]["config_options"]
+        .as_array()
+        .expect("options array")
+        .iter()
+        .find(|option| option["id"] == "persona")
+        .cloned()
+        .expect("persona option");
+    assert_eq!(persona["current_value"], "default", "{body}");
+
+    // Off-list requests are retryable 400s, not agent round-trips.
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/config-options",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "config_id": "nope", "value": "x" }))
+        .send()
+        .await
+        .expect("set unknown option");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A kind mismatch (string for a boolean option) is also a 400.
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/config-options",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "config_id": "fast", "value": "on" }))
+        .send()
+        .await
+        .expect("set mismatched kind");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A boolean set round-trips natively.
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/config-options",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "config_id": "fast", "value": false }))
+        .send()
+        .await
+        .expect("set boolean option");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let fast = body["data"]["config_options"]
+        .as_array()
+        .expect("options array")
+        .iter()
+        .find(|option| option["id"] == "fast")
+        .cloned()
+        .expect("fast option");
+    assert_eq!(fast["current_value"], json!(false), "{body}");
+}
+
+#[tokio::test]
+async fn config_option_notifications_refresh_the_stored_snapshot() {
+    // Strict-lax split: the placebo answers `session/set_config_option` with
+    // an empty list and carries the refreshed state only in a
+    // `config_option_update` notification, so the value observed by the GET
+    // can only have arrived through the notification projection.
+    let harness = Harness::spawn_with(|config| {
+        config.agent.args.extend([
+            "--config-option-select".to_owned(),
+            "persona=default:default,researcher".to_owned(),
+            "--emit-config-option-update".to_owned(),
+            "--set-config-option-responds-empty".to_owned(),
+        ]);
+    })
+    .await;
+
+    let response = http()
+        .post(format!("{}/v1/sessions", harness.base_url))
+        .header("Authorization", session_bearer())
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json");
+    let session_id = body["data"]["id"].as_str().expect("session id").to_owned();
+
+    let response = http()
+        .post(format!(
+            "{}/v1/sessions/{}/config-options",
+            harness.base_url, session_id
+        ))
+        .header("Authorization", session_bearer())
+        .json(&json!({ "config_id": "persona", "value": "researcher" }))
+        .send()
+        .await
+        .expect("set config option");
+    assert_eq!(response.status(), StatusCode::OK);
+    // The agent answered with an empty list, so the response must fall back
+    // to the stored snapshot rather than claiming the session advertises
+    // nothing.
+    let body: Value = response.json().await.expect("json");
+    assert!(
+        !body["data"]["config_options"]
+            .as_array()
+            .expect("options array")
+            .is_empty(),
+        "{body}"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = http()
+            .get(format!(
+                "{}/v1/sessions/{}/config-options",
+                harness.base_url, session_id
+            ))
+            .header("Authorization", session_bearer())
+            .send()
+            .await
+            .expect("get config options");
+        let body: Value = response.json().await.expect("json");
+        let current = body["data"]["config_options"]
+            .as_array()
+            .and_then(|options| {
+                options
+                    .iter()
+                    .find(|option| option["id"] == "persona")
+                    .map(|option| option["current_value"].clone())
+            });
+        if current == Some(json!("researcher")) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "notification never refreshed the snapshot: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]

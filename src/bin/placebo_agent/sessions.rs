@@ -86,7 +86,8 @@ pub(crate) async fn handle_new_session(
         id: session_id.clone(),
         cwd: request.cwd,
     });
-    let response = NewSessionResponse::new(session_id).config_options(state.model_config_options());
+    let response = NewSessionResponse::new(session_id.clone())
+        .config_options(state.config_options(&session_id));
     responder.respond(response)
 }
 
@@ -152,21 +153,37 @@ pub(crate) async fn handle_set_config_option(
     state: SharedState,
     request: SetSessionConfigOptionRequest,
     responder: Responder<SetSessionConfigOptionResponse>,
-    _connection: ConnectionTo<Client>,
+    connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let mut state = state.lock().await;
-    let SessionConfigOptionValue::ValueId { value } = &request.value else {
-        return responder.respond_with_error(Error::new(
-            -32000,
-            "placebo expects value-id session config values".to_owned(),
-        ));
-    };
-    if state.args.expect_model_config.as_deref() == Some(value.0.as_ref())
+    if let SessionConfigOptionValue::ValueId { value } = &request.value
+        && state.args.expect_model_config.as_deref() == Some(value.0.as_ref())
         && request.config_id.0.as_ref() == state.args.model_config_option_id.as_str()
     {
         state.model_configured = true;
     }
-    responder.respond(SetSessionConfigOptionResponse::new(Vec::new()))
+    state.config_option_values.insert(
+        (
+            request.session_id.0.to_string(),
+            request.config_id.0.to_string(),
+        ),
+        request.value.clone(),
+    );
+    let refreshed = state
+        .config_options(request.session_id.0.as_ref())
+        .unwrap_or_default();
+    if state.args.emit_config_option_update {
+        connection.send_notification(SessionNotification::new(
+            request.session_id.clone(),
+            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(refreshed.clone())),
+        ))?;
+    }
+    let responded = if state.args.set_config_option_responds_empty {
+        Vec::new()
+    } else {
+        refreshed
+    };
+    responder.respond(SetSessionConfigOptionResponse::new(responded))
 }
 
 pub(crate) async fn handle_load_session(
@@ -180,12 +197,15 @@ pub(crate) async fn handle_load_session(
 
 pub(crate) async fn handle_resume_session(
     state: SharedState,
-    _request: ResumeSessionRequest,
+    request: ResumeSessionRequest,
     responder: Responder<ResumeSessionResponse>,
     _connection: ConnectionTo<Client>,
 ) -> agent_client_protocol::Result<()> {
     let state = state.lock().await;
-    responder.respond(ResumeSessionResponse::new().config_options(state.model_config_options()))
+    responder.respond(
+        ResumeSessionResponse::new()
+            .config_options(state.config_options(request.session_id.0.as_ref())),
+    )
 }
 
 pub(crate) async fn handle_close_session(

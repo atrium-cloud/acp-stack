@@ -102,6 +102,12 @@ pub struct AgentConfig {
     /// session config option), applied on session creation like `mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Generic ACP session config options (option id → value), applied on
+    /// session creation after the typed mode/model/effort lanes. Ids the
+    /// typed lanes own are rejected at validation; entries the agent does
+    /// not advertise are reported as ignored features, never errors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_options: BTreeMap<String, AgentConfigOptionValue>,
     /// Pin the harness to a specific GitHub Release tag (e.g. `"v0.42.0"`).
     /// Consulted by both install and managed update when the harness install
     /// path is `github_release`; updates target the pin instead of the latest
@@ -123,6 +129,17 @@ pub struct AgentConfig {
     pub auto_update: Option<AgentAutoUpdateConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<AgentInstallConfig>,
+}
+
+/// One `[agent.config_options]` value. `Bool` must stay first in the untagged
+/// order so TOML `true` never parses as the string `"true"` — a select option
+/// may legitimately advertise the ValueId `"true"`, and only the TOML type
+/// distinguishes the two.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum AgentConfigOptionValue {
+    Bool(bool),
+    Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]

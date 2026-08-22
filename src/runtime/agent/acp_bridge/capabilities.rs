@@ -46,24 +46,31 @@ pub struct PartitionedMcpServers {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct IgnoredFeature {
     /// What kind of configured feature was ignored: `mcp.server`,
-    /// `agent.mode`, `agent.model`, or `agent.effort`.
-    #[schemars(extend("enum" = ["mcp.server", "agent.mode", "agent.model", "agent.effort"]))]
+    /// `agent.mode`, `agent.model`, `agent.effort`, or `agent.config_option`.
+    #[schemars(extend("enum" = ["mcp.server", "agent.mode", "agent.model", "agent.effort", "agent.config_option"]))]
     pub feature: &'static str,
     /// The configured value that was dropped: the MCP server name, or the
-    /// mode/model/effort value.
+    /// mode/model/effort/config-option value.
     pub value: String,
     /// The capability the agent would have had to advertise
     /// (`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/
-    /// `agent.effort` — the `session/new` config option that would have had
-    /// to carry the value.
+    /// `agent.effort`/`agent.config_option` — the `session/new` config
+    /// option that would have had to carry the value
+    /// (`sessionConfig.configOption` for map entries).
     pub capability: &'static str,
     pub reason: String,
+    /// The `[agent.config_options]` id the record is about. Present only for
+    /// `agent.config_option` features, where `feature` alone cannot name the
+    /// dropped option.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
 }
 
 pub const IGNORED_FEATURE_MCP_SERVER: &str = "mcp.server";
 pub const IGNORED_FEATURE_AGENT_MODE: &str = "agent.mode";
 pub const IGNORED_FEATURE_AGENT_MODEL: &str = "agent.model";
 pub const IGNORED_FEATURE_AGENT_EFFORT: &str = "agent.effort";
+pub const IGNORED_FEATURE_AGENT_CONFIG_OPTION: &str = "agent.config_option";
 
 impl AgentCapabilitiesDto {
     pub fn to_json(&self) -> Result<String> {
@@ -234,6 +241,7 @@ impl AgentCapabilitiesDto {
                 value: skipped.name,
                 capability: skipped.capability,
                 reason: "agent does not advertise this MCP transport".to_owned(),
+                option_id: None,
             })
             .collect())
     }

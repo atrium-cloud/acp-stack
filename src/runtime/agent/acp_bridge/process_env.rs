@@ -236,6 +236,7 @@ mod tests {
             mode: None,
             model: model.map(str::to_owned),
             effort: None,
+            config_options: Default::default(),
             harness_version: None,
             adapter: None,
             provider: None,

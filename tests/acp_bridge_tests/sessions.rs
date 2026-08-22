@@ -229,3 +229,63 @@ async fn new_session_advertises_config_options_to_strict_agent() {
     assert_eq!(options[0].id.0.as_ref(), "model");
     bridge.shutdown().await.expect("shutdown ok");
 }
+
+// Boolean round-trip: the agent advertises a boolean-kind option, the bridge
+// sends a native boolean payload, and the refreshed list in the response
+// reflects the applied value.
+#[tokio::test]
+async fn set_config_option_sends_boolean_values() {
+    use agent_client_protocol::schema::v1::{SessionConfigKind, SessionConfigOptionValue};
+
+    let mut config = fake_agent_config();
+    config.id = "placebo".into();
+    config.args.extend([
+        "--config-option-boolean".into(),
+        "fast@model_config=false".into(),
+    ]);
+    let bridge = AcpBridge::spawn(
+        &config,
+        fake_env(),
+        std::env::temp_dir(),
+        null_sink(),
+        AcpPermissionPolicy::Cancel,
+        &Default::default(),
+        None,
+        None,
+    )
+    .await
+    .expect("spawn");
+
+    let new_session = bridge
+        .new_session(std::env::temp_dir(), vec![])
+        .await
+        .expect("session/new");
+    let options = new_session.config_options.as_ref().expect("config options");
+    let fast = options
+        .iter()
+        .find(|option| option.id.0.as_ref() == "fast")
+        .expect("boolean option advertised");
+    assert!(matches!(
+        &fast.kind,
+        SessionConfigKind::Boolean(boolean) if !boolean.current_value
+    ));
+
+    let response = bridge
+        .set_session_config_option_value(
+            new_session.session_id.clone(),
+            "fast",
+            SessionConfigOptionValue::Boolean { value: true },
+        )
+        .await
+        .expect("boolean set accepted");
+    let refreshed = response
+        .config_options
+        .iter()
+        .find(|option| option.id.0.as_ref() == "fast")
+        .expect("refreshed list carries the option");
+    assert!(matches!(
+        &refreshed.kind,
+        SessionConfigKind::Boolean(boolean) if boolean.current_value
+    ));
+    bridge.shutdown().await.expect("shutdown ok");
+}

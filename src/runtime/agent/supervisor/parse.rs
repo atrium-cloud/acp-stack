@@ -375,6 +375,7 @@ mod tests {
             mode: None,
             model: None,
             effort: None,
+            config_options: Default::default(),
             harness_version: None,
             adapter: None,
             provider: None,

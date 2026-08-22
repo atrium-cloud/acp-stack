@@ -188,6 +188,79 @@ async fn models_returns_fixture_advertised_values() {
     );
 }
 
+#[tokio::test]
+async fn agent_config_options_returns_the_full_advertised_set() {
+    // The generic endpoint carries everything the typed `/v1/models` lanes
+    // do not: `model_config`, boolean kinds, and category-less options.
+    let tempdir = TempDir::new().expect("tempdir");
+    let fixture_path = tempdir.path().join("config-options.json");
+    let fixture_body = serde_json::json!([
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "openai/gpt-4o",
+            "options": [{ "value": "openai/gpt-4o", "name": "openai/gpt-4o" }]
+        },
+        {
+            "id": "fast",
+            "name": "Fast mode",
+            "category": "model_config",
+            "type": "boolean",
+            "currentValue": false
+        },
+        {
+            "id": "agent",
+            "name": "Agent",
+            "type": "select",
+            "currentValue": "default",
+            "options": [
+                { "value": "default", "name": "Default" },
+                { "value": "researcher", "name": "Researcher" }
+            ]
+        }
+    ]);
+    std::fs::write(&fixture_path, fixture_body.to_string()).expect("write fixture");
+    let _fixture_guard = EnvVarGuard::set("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &fixture_path);
+
+    let harness = AgentHarness::spawn().await;
+    let response = http()
+        .await
+        .get(format!("{}/v1/agent/config-options", harness.base_url))
+        .header("Authorization", session_bearer())
+        .send()
+        .await
+        .expect("send");
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "body: {body_text}");
+    let body: Value = serde_json::from_str(&body_text).expect("config options json");
+    assert_eq!(body["ok"], true);
+    let options = body["data"]["config_options"]
+        .as_array()
+        .expect("options array");
+    assert_eq!(options.len(), 3, "{body}");
+    let fast = options
+        .iter()
+        .find(|option| option["id"] == "fast")
+        .expect("boolean option present");
+    assert_eq!(fast["type"], "boolean");
+    assert_eq!(fast["category"], "model_config");
+    assert_eq!(fast["current_value"], Value::Bool(false));
+    let agent_option = options
+        .iter()
+        .find(|option| option["id"] == "agent")
+        .expect("category-less option present");
+    assert!(agent_option.get("category").is_none(), "{body}");
+    assert_eq!(
+        agent_option["options"].as_array().map(Vec::len),
+        Some(2),
+        "{body}"
+    );
+}
+
 /// Seed a structured provider credential (plus the flat secret) under `home`,
 /// mirroring `common::cli::seed_provider_credential` — that module is gated
 /// behind `dev-tools`, which this binary does not build with.

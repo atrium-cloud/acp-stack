@@ -75,6 +75,16 @@ pub const SESSION_METADATA_AVAILABLE_COMMANDS_UPDATED_AT: &str = "available_comm
 /// session row without limit; the raw notification stays durable regardless.
 pub const MAX_SESSION_AVAILABLE_COMMANDS: usize = 256;
 
+/// Metadata key under `sessions.metadata_json` holding the latest advertised
+/// session config-option list (latest-wins replace, seeded at session create
+/// and refreshed from `session/set_config_option` responses and
+/// `config_option_update` notifications).
+pub const SESSION_METADATA_CONFIG_OPTIONS: &str = "config_options";
+/// Companion timestamp key so consumers can reason about staleness.
+pub const SESSION_METADATA_CONFIG_OPTIONS_UPDATED_AT: &str = "config_options_updated_at";
+/// Bound on the stored option list, mirroring the available-commands cap.
+pub const MAX_SESSION_CONFIG_OPTIONS: usize = 64;
+
 /// Compact projection of an ACP `AvailableCommand`. `_meta` is deliberately
 /// dropped (agent-opaque and unbounded); the verbatim `session.update` event
 /// remains the source of truth for the full payload.

@@ -291,6 +291,69 @@ fn project_available_commands_update(
     Ok(())
 }
 
+/// Project an ACP `config_option_update` into the per-session config-option
+/// snapshot, mirroring `project_available_commands_update`: latest-wins
+/// replace, capped, and never removing the verbatim event row on failure.
+/// Unlike the set-response writers, an empty list is applied here: a
+/// notification is the agent's authoritative full-set advertisement (an
+/// agent may legitimately drop to none), whereas an empty list in a
+/// `session/set_config_option` response right after a successful set is
+/// contradictory and gets skipped.
+fn project_config_options_update(
+    store: &StateStore,
+    session_id: &str,
+    payload_json: &str,
+) -> crate::error::Result<()> {
+    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "session.update",
+            reason: err.to_string(),
+        }
+    })?;
+    let Some(update) = payload.get("update") else {
+        return Ok(());
+    };
+    if update
+        .get("sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+        != Some("config_option_update")
+    {
+        return Ok(());
+    }
+    let update = serde_json::from_value::<SessionUpdate>(update.clone()).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "session.update.update",
+            reason: err.to_string(),
+        }
+    })?;
+    let SessionUpdate::ConfigOptionUpdate(update) = update else {
+        return Ok(());
+    };
+    let advertised_len = update.config_options.len();
+    let mut snapshot =
+        crate::runtime::agent::config_options::project_config_options(&update.config_options);
+    let truncated = snapshot.len() > crate::state::MAX_SESSION_CONFIG_OPTIONS;
+    if truncated {
+        snapshot.truncate(crate::state::MAX_SESSION_CONFIG_OPTIONS);
+    }
+    let options_value = serde_json::to_value(&snapshot).map_err(|err| {
+        crate::error::StackError::StateInvalidJson {
+            field: "sessions.metadata_json",
+            reason: err.to_string(),
+        }
+    })?;
+    let changed = store.replace_session_config_options(session_id, options_value)?;
+    if truncated && changed {
+        tracing::warn!(
+            session_id = %session_id,
+            advertised = advertised_len,
+            stored = crate::state::MAX_SESSION_CONFIG_OPTIONS,
+            "agent advertised more config options than the stored cap; list truncated"
+        );
+    }
+    Ok(())
+}
+
 /// Derive a `tool.execute` event when the inbound `session/update` is a
 /// `tool_call` / `tool_call_update` that identifies itself as an `execute`
 /// tool. Agents that run shell through their own built-in tools (instead of
@@ -447,6 +510,17 @@ impl StateStoreSessionSink {
                                 error = %err,
                                 session_id = %row.session_id,
                                 "failed to apply ACP available commands update"
+                            );
+                        }
+                        if let Err(err) = project_config_options_update(
+                            &guard,
+                            &row.session_id,
+                            &row.payload_json,
+                        ) {
+                            tracing::warn!(
+                                error = %err,
+                                session_id = %row.session_id,
+                                "failed to apply ACP config option update"
                             );
                         }
                         // Re-touch the in-flight prompt's `updated_at` so the

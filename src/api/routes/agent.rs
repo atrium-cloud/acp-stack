@@ -39,6 +39,7 @@ use crate::runtime::install::skill_installer::{
 use crate::runtime::workspace_sources::workspace_init::prepare_workspace_base_dirs;
 use crate::secrets::SecretStore;
 
+pub(crate) mod config_options;
 pub(crate) mod lifecycle;
 pub(crate) mod switch;
 pub(crate) mod update;
@@ -46,6 +47,7 @@ pub(crate) mod update;
 // Cross-seam helpers keep their visibility; re-import them here so each
 // sibling's `use super::*;` resolves items defined in the other siblings, and
 // re-export the handlers/helpers the router and other routes reference by path.
+pub(crate) use self::config_options::agent_config_options_handler;
 pub(crate) use self::lifecycle::{
     agent_restart_blockers_handler, agent_restart_handler, agent_start_handler, agent_stop_handler,
     array_agent_restart_handler, array_agent_start_handler, array_agent_stop_handler,

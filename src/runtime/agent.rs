@@ -3,6 +3,7 @@ pub mod acp_codec;
 pub(crate) mod acp_terminal;
 pub mod agent_headless_config;
 pub mod config_io;
+pub mod config_options;
 pub(crate) mod inference_failure;
 pub mod mcp;
 pub mod model_catalog;

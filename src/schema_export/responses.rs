@@ -24,6 +24,9 @@ pub(super) enum AcpsResponseTypes {
     ApiError(crate::envelope::ApiError),
     // Per-endpoint response payloads.
     AgentCapabilitiesResponseBody(crate::api::routes::agent::AgentCapabilitiesResponseBody),
+    AgentConfigOptionsResponse(
+        crate::api::routes::agent::config_options::AgentConfigOptionsResponse,
+    ),
     AgentInstallResponse(crate::api::routes::agent::AgentInstallResponse),
     AgentRestartBlockersResponse(
         crate::api::routes::agent::lifecycle::AgentRestartBlockersResponse,
@@ -76,6 +79,9 @@ pub(super) enum AcpsResponseTypes {
     SessionChangesSnapshot(crate::runtime::agent::session_changes::SessionChangesSnapshot),
     SessionCommandRunResponse(crate::api::routes::sessions::commands::SessionCommandRunResponse),
     SessionCommandsResponse(crate::api::routes::sessions::commands::SessionCommandsResponse),
+    SessionConfigOptionsResponse(
+        crate::api::routes::sessions::config_options::SessionConfigOptionsResponse,
+    ),
     SessionResponse(crate::api::routes::sessions::SessionResponse),
     SessionSnapshotResponse(crate::api::routes::sessions::events::SessionSnapshotResponse),
     SessionsCancelResponse(crate::api::routes::sessions::teardown::SessionsCancelResponse),

@@ -492,6 +492,7 @@ fn agent_config_from_registry_entry(config: &Config, entry: &RegistryEntry) -> R
     agent.mode = None;
     agent.model = None;
     agent.effort = None;
+    agent.config_options = Default::default();
     agent.harness_version = None;
     agent.adapter = adapter_from_registry_entry(entry);
     agent.provider = None;

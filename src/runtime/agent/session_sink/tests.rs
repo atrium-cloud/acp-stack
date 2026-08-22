@@ -456,6 +456,117 @@ fn available_commands_updates_replace_stored_list() {
 }
 
 #[test]
+fn config_option_updates_replace_stored_snapshot() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+        .insert_session_for_target(
+            "target_a",
+            "agent_sess_1".to_owned(),
+            NewSessionRecord {
+                id: "sess_local".to_owned(),
+                agent_id: "target_a".to_owned(),
+                cwd: "/tmp".to_owned(),
+                title: None,
+                metadata_json: r#"{"preserved":true}"#.to_owned(),
+            },
+        )
+        .expect("session inserted");
+
+    let advertise = serde_json::json!({
+        "sessionId": "agent_sess_1",
+        "update": {
+            "sessionUpdate": "config_option_update",
+            "configOptions": [
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "high",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "high", "name": "High"}
+                    ]
+                },
+                {
+                    "id": "fast",
+                    "name": "Fast mode",
+                    "category": "model_config",
+                    "type": "boolean",
+                    "currentValue": true
+                },
+                {
+                    "id": "_custom",
+                    "name": "Custom",
+                    "type": "select",
+                    "currentValue": "a",
+                    "options": [{"value": "a", "name": "A"}]
+                }
+            ]
+        }
+    });
+    super::project_config_options_update(&store, "sess_local", &advertise.to_string())
+        .expect("config-option projection");
+    {
+        let session = store
+            .get_session("sess_local")
+            .expect("session lookup")
+            .expect("session exists");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+        let options = metadata["config_options"]
+            .as_array()
+            .expect("options array");
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0]["id"], "reasoning_effort");
+        assert_eq!(options[0]["category"], "thought_level");
+        assert_eq!(options[0]["current_value"], "high");
+        assert_eq!(options[1]["id"], "fast");
+        assert_eq!(options[1]["category"], "model_config");
+        // A boolean current value stays a JSON bool, never the string "true".
+        assert_eq!(options[1]["current_value"], serde_json::json!(true));
+        assert!(options[1].get("options").is_none());
+        // Category-less options survive verbatim, with no invented category.
+        assert_eq!(options[2]["id"], "_custom");
+        assert!(options[2].get("category").is_none());
+        assert!(metadata["config_options_updated_at"].is_string());
+        assert_eq!(metadata["preserved"], true);
+    }
+
+    // Latest-wins: a second update replaces rather than merges.
+    let replace = serde_json::json!({
+        "sessionId": "agent_sess_1",
+        "update": {
+            "sessionUpdate": "config_option_update",
+            "configOptions": [
+                {
+                    "id": "fast",
+                    "name": "Fast mode",
+                    "category": "model_config",
+                    "type": "boolean",
+                    "currentValue": false
+                }
+            ]
+        }
+    });
+    super::project_config_options_update(&store, "sess_local", &replace.to_string())
+        .expect("replace projection");
+    let session = store
+        .get_session("sess_local")
+        .expect("session lookup")
+        .expect("session exists");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&session.metadata_json).expect("metadata JSON");
+    let options = metadata["config_options"]
+        .as_array()
+        .expect("options array");
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0]["current_value"], serde_json::json!(false));
+}
+
+#[test]
 fn available_commands_projection_ignores_other_updates_and_truncates_over_cap() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = StateStore::open(tempdir.path().join("state.sqlite")).expect("state open");

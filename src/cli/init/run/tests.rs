@@ -304,6 +304,7 @@ fn ignored_mcp_server(name: &str) -> crate::runtime::agent::acp_bridge::IgnoredF
         value: name.to_owned(),
         capability: "mcpCapabilities.stdio",
         reason: "agent does not advertise this MCP transport".to_owned(),
+        option_id: None,
     }
 }
 

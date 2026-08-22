@@ -26,13 +26,14 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    AgentNotification, CancelNotification, ClientCapabilities, ClientSessionCapabilities,
-    CloseSessionRequest, CreateTerminalRequest, DeleteSessionRequest, FileSystemCapabilities,
-    ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse,
-    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
-    ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionConfigOptionCategory,
+    AgentNotification, BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
+    ClientSessionCapabilities, CloseSessionRequest, CreateTerminalRequest, DeleteSessionRequest,
+    FileSystemCapabilities, ForkSessionRequest, ForkSessionResponse, Implementation,
+    InitializeRequest, InitializeResponse, KillTerminalRequest, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, NewSessionResponse,
+    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SessionConfigOptionCategory, SessionConfigOptionValue,
     SessionConfigOptionsCapabilities, SessionConfigValueId, SessionId, SessionInfo,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, TerminalOutputRequest,
     WaitForTerminalExitRequest, WriteTextFileRequest,
@@ -67,9 +68,9 @@ mod spawn;
 use self::process_env::build_agent_process_env;
 
 pub use self::capabilities::{
-    AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_EFFORT, IGNORED_FEATURE_AGENT_MODE,
-    IGNORED_FEATURE_AGENT_MODEL, IGNORED_FEATURE_MCP_SERVER, IgnoredFeature, PartitionedMcpServers,
-    SkippedMcpServer,
+    AgentCapabilitiesDto, IGNORED_FEATURE_AGENT_CONFIG_OPTION, IGNORED_FEATURE_AGENT_EFFORT,
+    IGNORED_FEATURE_AGENT_MODE, IGNORED_FEATURE_AGENT_MODEL, IGNORED_FEATURE_MCP_SERVER,
+    IgnoredFeature, PartitionedMcpServers, SkippedMcpServer,
 };
 pub(crate) use self::process_env::{
     KIMI_API_KEY_ENV, KIMI_CODE_AGENT_ID, kimi_default_model_for_provider,
@@ -163,7 +164,9 @@ impl AgentSessionConfigCategory {
     // ACP reserves the `thought_level` category but not the option id, and
     // shipping adapters disagree on the id (claude-code-acp uses `effort`,
     // codex-acp uses `reasoning_effort`), so the id fallback accepts both.
-    pub(super) fn matches_id(self, id: &str) -> bool {
+    // `pub(crate)`: config validation also consults this to keep typed-lane
+    // ids out of `[agent.config_options]`.
+    pub(crate) fn matches_id(self, id: &str) -> bool {
         match self {
             Self::Effort => id == "effort" || id == "reasoning_effort",
             Self::Mode | Self::Model => id == self.id(),

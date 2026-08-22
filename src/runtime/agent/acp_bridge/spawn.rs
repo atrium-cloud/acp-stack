@@ -537,19 +537,20 @@ async fn complete_initialize(
 
 /// Capabilities advertised to every agent at initialize. Each flag flips only
 /// once its agent->client handlers exist: advertising ahead of the handlers
-/// would invite calls we cannot serve. `boolean` config options stay
-/// unadvertised until `set_session_config_option` can send boolean values
-/// (today it only sends `SessionConfigValueId`).
+/// would invite calls we cannot serve. `boolean` config options are
+/// advertised because `set_session_config_option_value` sends boolean
+/// payloads and the generic config-option surface projects boolean kinds;
+/// agents may reshape options accordingly (e.g. a boolean toggle instead of
+/// its two-value select fallback).
 fn client_capabilities() -> ClientCapabilities {
     ClientCapabilities::new()
         .fs(FileSystemCapabilities::new()
             .read_text_file(true)
             .write_text_file(true))
         .terminal(true)
-        .session(
-            ClientSessionCapabilities::new()
-                .config_options(SessionConfigOptionsCapabilities::new()),
-        )
+        .session(ClientSessionCapabilities::new().config_options(
+            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
+        ))
 }
 
 fn spawn_child_exit_watcher(child: Arc<TokioMutex<Option<Child>>>, exit: ExitReporter) {

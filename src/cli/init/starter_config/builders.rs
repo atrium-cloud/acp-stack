@@ -135,6 +135,7 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
         mode: None,
         model: None,
         effort: None,
+        config_options: Default::default(),
         harness_version: None,
         adapter: None,
         provider: None,
