@@ -33,7 +33,7 @@ GOOSE_DISABLE_SESSION_NAMING: true
 
 API key values are not written into Goose YAML; Goose reads them from the provider-native env var directly. For that reason, `acps agent set --provider <provider-id>` requires the selected `api_key_ref` to match the provider's mapped env var.
 
-Models are not persisted as `GOOSE_MODEL`. `acps` applies the configured model through ACP `session/set_config_option` on each new session.
+Models are not persisted as `GOOSE_MODEL`. `acps` applies the configured model through ACP `session/set_config_option` on each new session. Mode and reasoning-effort values follow the same path: goose advertises a Mode-category option and a `thinking_effort` (`thought_level`) option at runtime, selected with `acps agent set --mode <mode>` / `--effort <effort>` and validated against that advertisement.
 
 ## Session Resume
 

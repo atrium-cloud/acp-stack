@@ -868,6 +868,36 @@
           "command"
         ]
       },
+      "SessionConfigOptionSetBody": {
+        "type": "object",
+        "properties": {
+          "config_id": {
+            "type": "string",
+            "description": "The advertised option id to set."
+          },
+          "value": {
+            "$ref": "#/$defs/request/SessionConfigOptionSetValue",
+            "description": "The value to apply: a string for select options, a boolean for\nboolean options."
+          }
+        },
+        "required": [
+          "config_id",
+          "value"
+        ]
+      },
+      "SessionConfigOptionSetValue": {
+        "anyOf": [
+          {
+            "type": "boolean",
+            "title": "Bool"
+          },
+          {
+            "type": "string",
+            "title": "Text"
+          }
+        ],
+        "description": "`Bool` first so JSON `true` never deserializes as the string `\"true\"`."
+      },
       "SessionsCreateBody": {
         "type": "object",
         "properties": {
@@ -1904,6 +1934,111 @@
           "running",
           "stopping",
           "updating"
+        ]
+      },
+      "AgentConfigOptionsResponse": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "config_options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SessionConfigOptionSnapshot"
+            }
+          }
+        },
+        "required": [
+          "agent_id",
+          "config_options"
+        ],
+        "description": "`GET /v1/agent/config-options`: every session config option the configured\nagent advertises on a provisional `session/new`, projected verbatim —\nincluding `model_config`, `_`-prefixed customs, and category-less options\nthe typed `/v1/models` lanes do not carry. Discovery failure is a hard\nerror: unlike `/v1/models` there is no catalog to fall back to, and an\nempty list would be indistinguishable from \"advertises nothing\"."
+      },
+      "SessionConfigOptionSnapshot": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ACP category verbatim (`mode`, `model`, `model_config`,\n`thought_level`, a `_`-prefixed custom, or a future reserved value);\nabsent when the agent advertised none."
+          },
+          "type": {
+            "type": "string",
+            "description": "Option kind: `\"select\"` or `\"boolean\"`.",
+            "enum": [
+              "select",
+              "boolean"
+            ]
+          },
+          "current_value": {
+            "$ref": "#/$defs/response/SessionConfigOptionSnapshotValue"
+          },
+          "options": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/response/SessionConfigOptionChoice"
+            },
+            "description": "Select choices, flattened across groups (group headers dropped) so\nthis list never disagrees with the codec's value matching. Absent for\nboolean options."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "current_value"
+        ],
+        "description": "One advertised config option, as served over the API and stored in the\nper-session snapshot. `_meta` is deliberately dropped (agent-opaque and\nunbounded); the verbatim `session.update` events remain the source of\ntruth for full payloads."
+      },
+      "SessionConfigOptionSnapshotValue": {
+        "anyOf": [
+          {
+            "type": "boolean",
+            "title": "Bool"
+          },
+          {
+            "type": "string",
+            "title": "Text"
+          }
+        ],
+        "description": "`Bool` first so JSON `true` never deserializes as the string `\"true\"`;\nmirrors `AgentConfigOptionValue`'s ordering constraint."
+      },
+      "SessionConfigOptionChoice": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "name"
         ]
       },
       "AgentInstallResponse": {
@@ -5504,6 +5639,29 @@
         ],
         "description": "Wire shape of one agent-advertised slash command (compact projection of\nthe ACP `AvailableCommand`; names carry no leading slash)."
       },
+      "SessionConfigOptionsResponse": {
+        "type": "object",
+        "properties": {
+          "config_options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/SessionConfigOptionSnapshot"
+            },
+            "description": "The session's config options as last observed: seeded from\n`session/new` at create, refreshed by `session/set_config_option`\nresponses and `config_option_update` notifications. Empty when no\nsnapshot has been stored (sessions created before the feature)."
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the stored snapshot was last replaced. `null` when none exists."
+          }
+        },
+        "required": [
+          "config_options",
+          "updated_at"
+        ]
+      },
       "SessionResponse": {
         "type": "object",
         "properties": {
@@ -5571,24 +5729,32 @@
         "properties": {
           "feature": {
             "type": "string",
-            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, `agent.model`, or `agent.effort`.",
+            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, `agent.model`, `agent.effort`, or `agent.config_option`.",
             "enum": [
               "mcp.server",
               "agent.mode",
               "agent.model",
-              "agent.effort"
+              "agent.effort",
+              "agent.config_option"
             ]
           },
           "value": {
             "type": "string",
-            "description": "The configured value that was dropped: the MCP server name, or the\nmode/model/effort value."
+            "description": "The configured value that was dropped: the MCP server name, or the\nmode/model/effort/config-option value."
           },
           "capability": {
             "type": "string",
-            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/\n`agent.effort` — the `session/new` config option that would have had\nto carry the value."
+            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/\n`agent.effort`/`agent.config_option` — the `session/new` config\noption that would have had to carry the value\n(`sessionConfig.configOption` for map entries)."
           },
           "reason": {
             "type": "string"
+          },
+          "option_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `[agent.config_options]` id the record is about. Present only for\n`agent.config_option` features, where `feature` alone cannot name the\ndropped option."
           }
         },
         "required": [
@@ -7578,6 +7744,13 @@
             ],
             "description": "ACP-advertised reasoning-effort value (the agent's `thought_level`\nsession config option), applied on session creation like `mode`."
           },
+          "config_options": {
+            "type": "object",
+            "description": "Generic ACP session config options (option id → value), applied on\nsession creation after the typed mode/model/effort lanes. Ids the\ntyped lanes own are rejected at validation; entries the agent does\nnot advertise are reported as ignored features, never errors.",
+            "additionalProperties": {
+              "$ref": "#/$defs/config/AgentConfigOptionValue"
+            }
+          },
           "harness_version": {
             "type": [
               "string",
@@ -7637,6 +7810,19 @@
           }
         },
         "additionalProperties": false
+      },
+      "AgentConfigOptionValue": {
+        "anyOf": [
+          {
+            "type": "boolean",
+            "title": "Bool"
+          },
+          {
+            "type": "string",
+            "title": "Text"
+          }
+        ],
+        "description": "One `[agent.config_options]` value. `Bool` must stay first in the untagged\norder so TOML `true` never parses as the string `\"true\"` — a select option\nmay legitimately advertise the ValueId `\"true\"`, and only the TOML type\ndistinguishes the two."
       },
       "AgentProviderConfig": {
         "type": "object",

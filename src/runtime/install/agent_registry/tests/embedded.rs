@@ -171,6 +171,9 @@ fn embedded_registry_contains_only_curated_examples() {
             "antigravity"
         ]
     );
+    let opencode = catalog.lookup("opencode").expect("opencode entry exists");
+    assert!(opencode.set_mode);
+    assert!(opencode.set_effort);
     let amp = catalog.lookup("amp").expect("amp entry exists");
     assert_eq!(amp.kind, RegistryKind::Adapter);
     assert!(amp.headless_compatible);
@@ -199,7 +202,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(pi.allow_custom_provider);
     assert!(pi.allow_custom_model);
     assert!(!pi.set_mode);
-    assert!(!pi.set_effort);
+    assert!(pi.set_effort);
     assert_eq!(pi.stdio_framing, RegistryStdioFraming::JsonLines);
     let goose = catalog.lookup("goose").expect("goose entry exists");
     assert_eq!(goose.kind, RegistryKind::Native);
@@ -208,8 +211,8 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(goose.set_model);
     assert!(goose.allow_custom_provider);
     assert!(goose.allow_custom_model);
-    assert!(!goose.set_mode);
-    assert!(!goose.set_effort);
+    assert!(goose.set_mode);
+    assert!(goose.set_effort);
     assert_eq!(goose.stdio_framing, RegistryStdioFraming::JsonLines);
     assert_eq!(goose.support_doc.as_deref(), Some("docs/agents/goose.md"));
     let codex = catalog.lookup("codex").expect("codex entry exists");
@@ -311,7 +314,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(kimi.allow_custom_provider);
     assert!(kimi.allow_custom_model);
     assert!(kimi.set_mode);
-    assert!(!kimi.set_effort);
+    assert!(kimi.set_effort);
     assert!(kimi.supports_agent_skills);
     assert_eq!(
         kimi.agent_skills_install_dir.as_deref(),
@@ -390,7 +393,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!kilo.allow_custom_provider);
     assert!(!kilo.allow_custom_model);
     assert!(kilo.set_mode);
-    assert!(!kilo.set_effort);
+    assert!(kilo.set_effort);
     assert!(kilo.supports_agent_skills);
     assert_eq!(
         kilo.agent_skills_install_dir.as_deref(),

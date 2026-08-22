@@ -9,9 +9,9 @@ use crate::support::write_workspace_init_config;
 
 #[test]
 fn init_rejects_effort_flag_for_agents_without_set_effort() {
-    // opencode/amp/pi leave set_effort at its false default; `--effort` must
+    // amp/hermes leave set_effort at its false default; `--effort` must
     // fail fast as a capability check rather than being silently dropped.
-    for agent in ["opencode", "amp", "pi"] {
+    for agent in ["amp", "hermes"] {
         let tempdir = tempfile::tempdir().expect("tempdir");
 
         acps_command()
