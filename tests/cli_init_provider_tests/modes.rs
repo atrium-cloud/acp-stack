@@ -176,39 +176,39 @@ fn init_rejects_mode_not_advertised_by_the_agent() {
 }
 
 #[test]
-fn init_mode_lane_runs_for_an_agent_without_model_support() {
-    // amp declares set_model=false/set_mode=true: the mode lane must be
-    // reachable even though the model lane returns before any discovery.
+fn init_mode_lane_runs_for_an_agent_without_an_explicit_model() {
+    // amp passes no `--model` here: the mode lane must be reachable even
+    // though the model lane returns before any discovery.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
-    let options_path = write_acp_config_options(tempdir.path(), &[], &["smart", "rush", "deep"]);
+    let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "bypass"]);
 
     acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["init", "--agent", "amp", "--mode", "deep"])
+        .args(["init", "--agent", "amp", "--mode", "bypass"])
         .assert()
         .success();
 
     let config_text = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     let config = load_config_from_str(&config_text).expect("canonical config parses");
-    assert_eq!(config.agent.mode.as_deref(), Some("deep"));
+    assert_eq!(config.agent.mode.as_deref(), Some("bypass"));
     assert!(config.agent.model.is_none());
     assert!(config.agent.provider.is_none());
 }
 
 #[test]
 fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure_as_skipped() {
-    // amp has neither a provider nor a model lane, so `--mode` is the only
-    // explicit flag the `provider_configure` verifier can see: without its
-    // `args.mode.is_none()` term the prior succeeded row would replay as
+    // amp has no provider lane and passes no `--model`, so `--mode` is the
+    // only explicit flag the `provider_configure` verifier can see: without
+    // its `args.mode.is_none()` term the prior succeeded row would replay as
     // skipped and the recorded mode would never be re-applied.
     let tempdir = tempfile::tempdir().expect("tempdir");
     write_workspace_init_config(tempdir.path());
     seed_init_secrets(tempdir.path(), &[("AMP_API_KEY", "test-amp-key")]);
-    let options_path = write_acp_config_options(tempdir.path(), &[], &["smart", "rush", "deep"]);
+    let options_path = write_acp_config_options(tempdir.path(), &[], &["default", "bypass"]);
     // Fail the run after `provider_configure`: the edge step cannot create its
     // artifact directory while a file sits at that path.
     let cloudflared_dir = tempdir.path().join(".config/acp-stack/cloudflared");
@@ -227,7 +227,7 @@ fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure
     let output = acps_with_empty_path(tempdir.path())
         .env("HOME", tempdir.path())
         .env("ACP_STACK_AGENT_CONFIG_OPTIONS_PATH", &options_path)
-        .args(["init", "--agent", "amp", "--mode", "deep"])
+        .args(["init", "--agent", "amp", "--mode", "bypass"])
         .args(edge_args)
         .assert()
         .failure()
@@ -262,7 +262,7 @@ fn init_resume_reapplies_a_recorded_mode_instead_of_replaying_provider_configure
     let config_text = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
         .expect("config should be readable");
     let config = load_config_from_str(&config_text).expect("canonical config parses");
-    assert_eq!(config.agent.mode.as_deref(), Some("deep"));
+    assert_eq!(config.agent.mode.as_deref(), Some("bypass"));
 }
 
 #[test]

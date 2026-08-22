@@ -60,10 +60,48 @@ fn settlement_signals_for(agent_id: &str) -> Vec<InitStateSignal> {
     agent_settlement_signals(&config_for_agent(agent_id), &registry, &args, false)
 }
 
-// amp declares set_provider=false/set_model=false in the registry, so a
-// client must not show either lane as pending input that will never come.
+// No embedded agent is mode-only anymore (every set_mode agent also sets
+// set_model), so tests exercising set_model=false paths run against this
+// synthetic entry.
+fn mode_only_registry() -> RegistryCatalog {
+    RegistryCatalog::from_toml(
+        r#"
+[[agents]]
+id = "amp"
+name = "Amp Code"
+kind = "native"
+headless_compatible = true
+set_mode = true
+support_doc = "docs/agents/amp.md"
+
+[agents.harness]
+id = "amp"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "true"
+"#,
+    )
+    .expect("registry")
+}
+
+// A registry set_model=false verdict outranks a model value already present
+// in config: the lane must settle as not applicable, not as the stale value.
 #[test]
-fn registry_derivation_marks_amp_provider_and_model_inapplicable() {
+fn registry_verdict_outranks_a_configured_root_model() {
+    let registry = mode_only_registry();
+    let mut config = config_for_agent("amp");
+    config.agent.model = Some("gpt-5-codex".to_owned());
+    let args = parse_init_args(&[]);
+    let signals = agent_settlement_signals(&config, &registry, &args, false);
+    assert_eq!(applicability_of(&signals, InitCategory::Model), Some(false));
+}
+
+// amp declares set_provider=false in the registry, so a client must not show
+// the provider lane as pending input that will never come; the model lane
+// stays live for the `amp-mode` execution tiers.
+#[test]
+fn registry_derivation_marks_amp_provider_inapplicable_but_keeps_model() {
     let signals = settlement_signals_for("amp");
     assert_eq!(
         signals.first(),
@@ -77,7 +115,7 @@ fn registry_derivation_marks_amp_provider_and_model_inapplicable() {
         applicability_of(&signals, InitCategory::Provider),
         Some(false)
     );
-    assert_eq!(applicability_of(&signals, InitCategory::Model), Some(false));
+    assert_eq!(applicability_of(&signals, InitCategory::Model), Some(true));
     assert_eq!(applicability_of(&signals, InitCategory::Mode), Some(true));
     assert_eq!(applicability_of(&signals, InitCategory::Skills), Some(true));
 }
@@ -610,7 +648,7 @@ fn installed_skill_names_omits_an_empty_list() {
     assert_eq!(installed_skill_names(&[]), None);
 }
 
-// The highest-blast-radius part of the mode lane: amp-class agents
+// The highest-blast-radius part of the mode lane: mode-only agents
 // (set_model=false) never spawned during init before it existed, so a
 // harness that cannot complete a provisional session must degrade to a
 // skipped lane rather than fail the run. The stub resolves and spawns, then
@@ -625,7 +663,7 @@ fn a_mode_only_discovery_failure_skips_the_lane_instead_of_failing_init() {
     std::fs::write(&stub, "#!/bin/sh\nexit 0\n").expect("stub written");
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
         .expect("stub is executable");
-    let registry = RegistryCatalog::load_embedded().expect("registry");
+    let registry = mode_only_registry();
     let mut config = config_for_agent("amp");
     config.agent.command = stub.display().to_string();
     config.agent.args = Vec::new();

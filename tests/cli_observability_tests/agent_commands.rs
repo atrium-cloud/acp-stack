@@ -578,7 +578,7 @@ creates = "opencode"
 }
 
 #[test]
-fn agent_status_reports_amp_unavailable_provider_and_model() {
+fn agent_status_reports_amp_unavailable_provider_and_unset_model() {
     let tempdir = tempfile::tempdir().expect("tempdir should be created");
     let config_dir = tempdir.path().join(".config/acp-stack");
     fs::create_dir_all(&config_dir).expect("config dir should be created");
@@ -591,7 +591,7 @@ fn agent_status_reports_amp_unavailable_provider_and_model() {
         .replace(
             r#"restart = "on-crash""#,
             r#"restart = "on-crash"
-mode = "smart""#,
+mode = "default""#,
         )
         .replace(
             r#"
@@ -610,10 +610,9 @@ creates = "opencode"
         .assert()
         .success()
         .stdout(predicates::str::contains("agent: amp"))
-        .stdout(predicates::str::contains("mode: smart"))
-        .stdout(predicates::str::contains(
-            "provider, model, and effort unavailable",
-        ));
+        .stdout(predicates::str::contains("mode: default"))
+        .stdout(predicates::str::contains("model unset"))
+        .stdout(predicates::str::contains("provider and effort unavailable"));
 }
 
 #[test]

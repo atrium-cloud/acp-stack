@@ -178,7 +178,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert_eq!(amp.kind, RegistryKind::Adapter);
     assert!(amp.headless_compatible);
     assert!(!amp.set_provider);
-    assert!(!amp.set_model);
+    assert!(amp.set_model);
     assert!(!amp.allow_custom_provider);
     assert!(!amp.allow_custom_model);
     assert!(amp.set_mode);

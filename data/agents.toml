@@ -87,10 +87,10 @@ name = "Amp Code"
 kind = "adapter"
 headless_compatible = true
 set_provider = false
-set_model = false
+set_model = true # values come from the `amp-mode` Model-category option: low, medium, high, ultra (default medium)
 allow_custom_provider = false
 allow_custom_model = false
-set_mode = true # smart, rush, deep
+set_mode = true # default, bypass (permission behavior via the `permission` Mode-category option)
 supports_agent_skills = true
 # Amp discovers user-level skills from ~/.agents/skills natively (second in its
 # skill precedence list), so no registry link directory is needed.

@@ -190,8 +190,8 @@ pub(super) fn preflight_model_and_mode_for_init(
 ///
 /// Lane resolution is deliberately fall-through rather than early-return: a
 /// model lane that is skipped, pinned, or written without discovery must still
-/// let the mode and effort lanes reach the same session (amp,
-/// set_model=false/set_mode=true, has nothing but a mode lane).
+/// let the mode and effort lanes reach the same session (a set_mode-only
+/// registry entry has nothing but a mode lane).
 pub(super) fn configure_model_and_mode_for_init(
     args: &InitArgs,
     home: &Path,
@@ -797,11 +797,19 @@ fn configure_model_for_init(
             }
         }
     } else {
+        // Same degradation as the mode and effort lanes: an agent that
+        // advertises no `model` option is "nothing to pick", not a failed
+        // init (an explicit `--model` already failed loudly above). The
+        // discovery correction reports the absence.
         model_values_for_cli_display(
             config,
-            advertised_values_for_category(response, AgentSessionConfigCategory::Model)?,
+            advertised_values_for_category(response, AgentSessionConfigCategory::Model)
+                .unwrap_or_default(),
         )
     };
+    if values.is_empty() {
+        return Ok(ModelModeAction::Skipped);
+    }
     let interactive = prompts_enabled(args);
     if !interactive {
         // L87: non-interactive run, no explicit choice. Print the

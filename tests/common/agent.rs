@@ -349,6 +349,9 @@ creates = "true"
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
+/// Deliberately model-less synthetic amp entry: the embedded registry has no
+/// set_model=false agent left, so capability-gate tests point at this
+/// override instead of the real catalog flags.
 pub fn write_amp_registry_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]
@@ -380,6 +383,8 @@ creates = "true"
     std::fs::write(config_dir.join("agents.toml"), body).expect("registry override");
 }
 
+/// Same deliberately model-less synthetic amp shape as
+/// `write_amp_registry_override`, plus a skills link directory.
 pub fn write_amp_linked_skills_registry_override(config_dir: &std::path::Path) {
     let body = r#"
 [[agents]]

@@ -418,19 +418,6 @@ fn hosted_settlement_reads_a_root_model_for_a_provider_less_agent() {
     apply_settlement_signals(&session, &config, &args);
 
     let state = latest_state(&session);
-    // amp declares `set_model = false`, so the lane still reads as absent —
-    // what is asserted is that the settlement carried the root value, which
-    // the wire shows the moment a model-taking agent is in the same shape.
-    assert_eq!(
-        category(&state, "model")["status"],
-        json!("not_applicable"),
-        "the registry verdict stands over a value init will not rewrite"
-    );
-
-    let session = test_session("init_state_root_model_applicable");
-    config.agent.id = "opencode".to_owned();
-    apply_settlement_signals(&session, &config, &args);
-    let state = latest_state(&session);
     assert_eq!(category(&state, "model")["status"], json!("settled"));
     assert_eq!(category(&state, "model")["value"], json!("gpt-5-codex"));
 }

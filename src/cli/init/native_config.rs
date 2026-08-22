@@ -392,10 +392,10 @@ mod tests {
         config
     }
 
-    // Amp is provider/model-opaque, so its canonical config carries no
-    // provider/model; the import path only appends MCP servers. Round-trips
-    // through the fixture with the agent id retargeted so no new fixture file
-    // is needed.
+    // Amp is provider-opaque and keeps its model in ACP session config, so
+    // its canonical config carries no provider block; the import path only
+    // appends MCP servers. Round-trips through the fixture with the agent id
+    // retargeted so no new fixture file is needed.
     fn amp_config() -> Config {
         let mut config = config_without_provider();
         config.agent.id = "amp".to_owned();
@@ -687,7 +687,7 @@ mod tests {
         let (_, operation) =
             apply_for_init(&mut record, &config_path, &state_path, home.path()).expect("apply");
         assert_eq!(operation.status, NativeConfigOperationStatus::Applied);
-        // Provider stays absent for the provider/model-opaque harness.
+        // Provider stays absent for the provider-opaque harness.
         assert!(operation.agent_config.provider.is_none());
         let applied = Config::load_from_path(&config_path).expect("applied config");
         assert!(

@@ -21,13 +21,17 @@ env = ["AMP_API_KEY"]
 restart = "on-crash"
 ```
 
-Amp does not expose raw provider/model selection through the current `acp-stack` contract. Use mode selection instead:
+Amp does not expose provider selection. Model selection uses Amp's execution tiers, advertised at runtime as the `amp-mode` Model-category config option (`amp-acp` v0.8.0 or later; older adapters advertise no Model-category option):
 
 ```sh
-acps agent set --mode <smart|rush|deep>
+acps agent set --model <low|medium|high|ultra>
 ```
 
-Amp Code default mode is Smart. Rush and Deep are also supported.
+The adapter default is `medium`. Mode selection controls permission behavior, advertised as the `permission` Mode-category option:
+
+```sh
+acps agent set --mode <default|bypass>
+```
 
 ## Session Resume
 
