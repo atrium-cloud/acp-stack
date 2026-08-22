@@ -220,8 +220,14 @@ pub(crate) async fn agent_update_status_handler(
     // The upstream lookups are blocking HTTP (npm has a hardcoded 30s
     // timeout); a lookup failure degrades that component to `unknown` inside
     // the report rather than failing the route.
+    let agent_config = config.agent.clone();
     let report = tokio::task::spawn_blocking(move || {
-        build_agent_check_report(&entry, &installed_rows, &LiveLatestVersionResolver)
+        build_agent_check_report(
+            &entry,
+            &agent_config,
+            &installed_rows,
+            &LiveLatestVersionResolver,
+        )
     })
     .await
     .map_err(|err| StackError::AgentInitializeFailed {

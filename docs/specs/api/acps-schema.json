@@ -7758,6 +7758,17 @@
             ],
             "description": "Pin the harness to a specific GitHub Release tag (e.g. `\"v0.42.0\"`).\nConsulted by both install and managed update when the harness install\npath is `github_release`; updates target the pin instead of the latest\nrelease. Default (None) resolves the latest release."
           },
+          "adapter_override": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentAdapterOverrideConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Operator-designated ACP adapter for a registry agent: the agent is\nlaunched through this adapter binary while the registry harness and\nevery other registry-derived behavior stay managed. Mutually exclusive\nwith the `[agent.install]` escape hatch."
+          },
           "provider": {
             "anyOf": [
               {
@@ -7823,6 +7834,192 @@
           }
         ],
         "description": "One `[agent.config_options]` value. `Bool` must stay first in the untagged\norder so TOML `true` never parses as the string `\"true\"` — a select option\nmay legitimately advertise the ValueId `\"true\"`, and only the TOML type\ndistinguishes the two."
+      },
+      "AgentAdapterOverrideConfig": {
+        "type": "object",
+        "description": "Operator-designated ACP adapter for a registry agent. Mirrors the registry\n`[agents.adapter]` spec shape but round-trips through the operator config:\nthe registry spec types are catalog-shaped and Deserialize-only, so they\ncannot appear in the published config schema. `command` doubles as the\nadapter identity (the registry `AdapterSpec.id`), which keeps the launch\ncommand and the updater's native probe target from diverging.",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "github": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GitHub repo as `owner/repo` or a `https://github.com/` URL. Required\nwhen `install.github` is used; otherwise informational (surfaced as\nthe adapter's source URL)."
+          },
+          "install": {
+            "$ref": "#/$defs/config/AgentAdapterOverrideInstall"
+          },
+          "update": {
+            "$ref": "#/$defs/config/AgentAdapterOverrideUpdate"
+          }
+        },
+        "required": [
+          "command",
+          "install"
+        ],
+        "additionalProperties": false
+      },
+      "AgentAdapterOverrideInstall": {
+        "type": "object",
+        "properties": {
+          "shell": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentAdapterOverrideShellInstall"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "npm": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentAdapterOverrideNpmInstall"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "github": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/config/AgentAdapterOverrideGithubInstall"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAdapterOverrideShellInstall": {
+        "type": "object",
+        "required": [
+          "script",
+          "creates"
+        ],
+        "properties": {
+          "script": {
+            "type": "string"
+          },
+          "creates": {
+            "type": "string"
+          },
+          "required_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAdapterOverrideNpmInstall": {
+        "type": "object",
+        "required": [
+          "package",
+          "creates"
+        ],
+        "properties": {
+          "package": {
+            "type": "string"
+          },
+          "creates": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAdapterOverrideGithubInstall": {
+        "type": "object",
+        "required": [
+          "asset_pattern",
+          "archive",
+          "binary_name"
+        ],
+        "properties": {
+          "asset_pattern": {
+            "type": "string"
+          },
+          "archive": {
+            "$ref": "#/$defs/config/AgentAdapterOverrideArchiveKind"
+          },
+          "archive_binary_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "binary_name": {
+            "type": "string"
+          },
+          "checksums_asset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "arch": {
+            "$ref": "#/$defs/config/AgentAdapterOverrideArchMap"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAdapterOverrideArchiveKind": {
+        "type": "string",
+        "enum": [
+          "none",
+          "tar.gz",
+          "zip"
+        ]
+      },
+      "AgentAdapterOverrideArchMap": {
+        "type": "object",
+        "properties": {
+          "x86_64": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "aarch64": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentAdapterOverrideUpdate": {
+        "type": "object",
+        "properties": {
+          "shell_rerun": {
+            "type": "boolean",
+            "description": "Update the adapter by re-running the shell install recipe. Without it a\nshell-only override is skipped by managed update."
+          }
+        },
+        "additionalProperties": false
       },
       "AgentProviderConfig": {
         "type": "object",

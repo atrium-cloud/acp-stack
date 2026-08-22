@@ -161,6 +161,18 @@ pub(super) fn prepare_init_base(
                 None,
             )?;
             apply_registry_entry_to_config(&mut new_config, entry);
+            // After the registry apply: a fresh config starts on the starter
+            // placeholder, so the agent-change clear would wipe a designation
+            // applied any earlier.
+            apply_adapter_override_action(&mut new_config, &resolve_adapter_override_action(args)?);
+            apply_agent_launch_command(&mut new_config, entry);
+        } else if matches!(
+            resolve_adapter_override_action(args)?,
+            Some(AdapterOverrideAction::Set(_))
+        ) {
+            // A fresh config starts on the placeholder agent; a designated
+            // adapter only makes sense for a selected registry agent.
+            return Err(StackError::MissingField { field: "--agent" });
         }
         push_args_deps_to_config(&mut new_config, args)?;
         if let Some(pending) = pending_init_native_config.as_mut() {

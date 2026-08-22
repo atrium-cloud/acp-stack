@@ -24,6 +24,20 @@ pub fn install_resolved_capture(
 ) -> InstallerSequenceResult {
     let mut rows = Vec::new();
     let installer_env = HashMap::new();
+    // An operator adapter override turns the entry adapter-kind so the
+    // harness+adapter sequencing below drives the operator's adapter install
+    // alongside the managed harness recipe.
+    let entry =
+        match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
+            Ok(entry) => entry,
+            Err(err) => {
+                return InstallerSequenceResult {
+                    outcome: Err(err),
+                    rows,
+                };
+            }
+        };
+    let entry = &*entry;
     // A declared sha256 pin downgrades step-level spawn gates to the header
     // check (which never executes the file); `final_verification` then owns
     // the pin check followed by the probe.

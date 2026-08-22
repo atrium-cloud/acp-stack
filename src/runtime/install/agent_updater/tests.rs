@@ -447,6 +447,164 @@ aarch64 = "arm64"
     .expect("registry")
 }
 
+#[test]
+fn adapter_override_components_use_operator_adapter_spec() {
+    let registry = native_shell_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let mut agent = agent_config("fake", None);
+    agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+        command: "fake-acp".to_owned(),
+        args: Vec::new(),
+        github: None,
+        install: crate::config::AgentAdapterOverrideInstall {
+            shell: None,
+            npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                package: "@example/fake-acp".to_owned(),
+                creates: "fake-acp".to_owned(),
+            }),
+            github: None,
+        },
+        update: Default::default(),
+    });
+
+    let effective =
+        crate::runtime::install::agent_registry::effective_registry_entry(entry, &agent)
+            .expect("effective entry");
+    let components = update_components(effective.as_ref(), &agent).expect("components");
+
+    assert_eq!(components.len(), 2);
+    assert_eq!(components[0].step, "harness");
+    assert_eq!(components[0].command_id, "fake-agent");
+    assert_eq!(components[1].step, "adapter");
+    assert_eq!(components[1].command_id, "fake-acp");
+    assert_eq!(
+        components[1]
+            .install
+            .npm
+            .as_ref()
+            .map(|npm| npm.package.as_str()),
+        Some("@example/fake-acp")
+    );
+}
+
+#[test]
+fn adapter_override_shell_only_step_is_skipped_by_update() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let dest = tempdir.path().join("bin");
+    fs::create_dir_all(&workspace).expect("workspace");
+    fs::create_dir_all(&dest).expect("dest");
+    // Satisfy the harness shell-rerun postcheck so the harness step succeeds
+    // and the adapter verdict is isolated.
+    write_executable(&dest.join("shell-agent"), "#!/bin/sh\nexit 0\n");
+
+    let mut config = fake_config(&workspace);
+    config.agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+        command: "fake-acp".to_owned(),
+        args: Vec::new(),
+        github: None,
+        install: crate::config::AgentAdapterOverrideInstall {
+            shell: Some(crate::config::AgentAdapterOverrideShellInstall {
+                script: "true".to_owned(),
+                creates: "fake-acp".to_owned(),
+                required_tools: Vec::new(),
+                timeout_secs: None,
+            }),
+            npm: None,
+            github: None,
+        },
+        update: Default::default(),
+    });
+    // Shell-only harness with shell_rerun so the harness step re-runs its
+    // recipe offline; the npm-carrying fixtures would hit the live registry.
+    let registry = RegistryCatalog::from_toml(
+        r#"
+[[agents]]
+id = "fake"
+name = "Fake"
+kind = "native"
+headless_compatible = true
+support_doc = "docs/agents/fake.md"
+
+[agents.harness]
+id = "fake-agent"
+
+[agents.harness.install.shell]
+script = "true"
+creates = "shell-agent"
+
+[agents.harness.update]
+shell_rerun = true
+"#,
+    )
+    .expect("registry");
+    let entry = registry.lookup_required("fake").expect("entry");
+    let state = StateStore::open(tempdir.path().join("state.sqlite")).expect("state");
+    state.migrate().expect("migrate");
+
+    let report = update_agent_for_config(
+        &config,
+        entry,
+        &state,
+        &workspace,
+        &dest,
+        None,
+        AgentUpdateOptions::default(),
+    )
+    .expect("update");
+
+    let adapter_step = report
+        .steps
+        .iter()
+        .find(|step| step.step == "adapter")
+        .expect("adapter step reported");
+    assert_eq!(adapter_step.status, AgentUpdateStepStatus::Skipped);
+    assert!(
+        adapter_step
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("shell_rerun")),
+        "{adapter_step:?}"
+    );
+}
+
+#[test]
+fn adapter_override_shell_rerun_opts_into_recipe_rerun() {
+    let registry = native_shell_registry();
+    let entry = registry.lookup_required("fake").expect("entry");
+    let mut agent = agent_config("fake", None);
+    agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+        command: "fake-acp".to_owned(),
+        args: Vec::new(),
+        github: None,
+        install: crate::config::AgentAdapterOverrideInstall {
+            shell: Some(crate::config::AgentAdapterOverrideShellInstall {
+                script: "true".to_owned(),
+                creates: "fake-acp".to_owned(),
+                required_tools: Vec::new(),
+                timeout_secs: None,
+            }),
+            npm: None,
+            github: None,
+        },
+        update: crate::config::AgentAdapterOverrideUpdate { shell_rerun: true },
+    });
+
+    let effective =
+        crate::runtime::install::agent_registry::effective_registry_entry(entry, &agent)
+            .expect("effective entry");
+    let components = update_components(effective.as_ref(), &agent).expect("components");
+    let adapter = components
+        .iter()
+        .find(|component| component.step == "adapter")
+        .expect("adapter component");
+    let installed = installer_run_with_method(Some(INSTALLER_METHOD_SHELL));
+
+    let plan = choose_update_plan(effective.as_ref(), adapter, Some(&installed)).expect("plan");
+    assert_eq!(plan.method, INSTALLER_METHOD_SHELL);
+    assert!(matches!(plan.kind, UpdatePlanKind::InstallSet));
+}
+
 fn registry_with_shell_npm_and_apt() -> RegistryCatalog {
     RegistryCatalog::from_toml(
         r#"
@@ -670,6 +828,7 @@ fn agent_config(id: &str, harness_version: Option<&str>) -> crate::config::Agent
         config_options: Default::default(),
         harness_version: harness_version.map(str::to_owned),
         adapter: None,
+        adapter_override: None,
         provider: None,
         providers: None,
         subagent: None,

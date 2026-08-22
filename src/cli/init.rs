@@ -75,9 +75,10 @@ use self::provider::{
     preflight_provider_for_init,
 };
 use self::registry_apply::{
-    AgentSelection, CustomAgentSpec, apply_custom_agent_to_config, apply_edge_profile_to_config,
+    AdapterOverrideAction, AgentSelection, CustomAgentSpec, apply_adapter_override_action,
+    apply_agent_launch_command, apply_custom_agent_to_config, apply_edge_profile_to_config,
     apply_registry_entry_to_config, is_custom_agent, reject_registry_id_for_custom_agent,
-    resolve_custom_agent_spec, select_agent_for_init,
+    resolve_adapter_override_action, resolve_custom_agent_spec, select_agent_for_init,
 };
 use self::resume::{
     FreshKeys, KeyPolicy, RecordedInitArgs, finalize_with_error,

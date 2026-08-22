@@ -106,6 +106,70 @@ pub struct InitArgs {
         requires = "custom_agent_id"
     )]
     pub(super) custom_agent_creates: Option<String>,
+    /// Launch the selected registry agent through a designated ACP adapter
+    /// binary instead of its curated entry command.
+    #[arg(
+        long = "adapter-override-command",
+        value_name = "CMD",
+        conflicts_with = "custom_agent_id"
+    )]
+    pub(super) adapter_override_command: Option<String>,
+    /// Launch argument for the designated adapter. Repeatable; values may
+    /// start with `-` (adapter flags are the common case).
+    #[arg(
+        long = "adapter-override-arg",
+        value_name = "ARG",
+        allow_hyphen_values = true,
+        requires = "adapter_override_command"
+    )]
+    pub(super) adapter_override_arg: Vec<String>,
+    /// GitHub repo of the designated adapter (`owner/repo` or URL).
+    #[arg(
+        long = "adapter-override-github",
+        value_name = "REPO",
+        requires = "adapter_override_command"
+    )]
+    pub(super) adapter_override_github: Option<String>,
+    /// Install the designated adapter from this npm package (managed updates
+    /// track the npm registry).
+    #[arg(
+        long = "adapter-override-install-npm",
+        value_name = "PACKAGE",
+        requires = "adapter_override_command",
+        conflicts_with = "adapter_override_install_shell"
+    )]
+    pub(super) adapter_override_install_npm: Option<String>,
+    /// Install the designated adapter with this shell snippet (managed
+    /// updates skip shell installs).
+    #[arg(
+        long = "adapter-override-install-shell",
+        value_name = "SHELL",
+        requires = "adapter_override_command"
+    )]
+    pub(super) adapter_override_install_shell: Option<String>,
+    /// Path that must resolve to an executable after the adapter install
+    /// (defaults to the adapter command).
+    #[arg(
+        long = "adapter-override-install-creates",
+        value_name = "PATH",
+        requires = "adapter_override_command"
+    )]
+    pub(super) adapter_override_install_creates: Option<String>,
+    /// Remove a stored `[agent.adapter_override]` block and return the agent
+    /// to its curated registry launch command.
+    #[arg(
+        long = "adapter-override-clear",
+        conflicts_with_all = [
+            "adapter_override_command",
+            "adapter_override_arg",
+            "adapter_override_github",
+            "adapter_override_install_npm",
+            "adapter_override_install_shell",
+            "adapter_override_install_creates",
+            "custom_agent_id",
+        ]
+    )]
+    pub(super) adapter_override_clear: bool,
     /// Reference an existing secret as an environment variable for the agent
     /// process. Repeatable. The secret must already be in the store. Interactive
     /// optional setup can collect masked values. Applies only when creating a
@@ -393,6 +457,13 @@ impl Default for InitArgs {
             custom_agent_arg: Vec::new(),
             custom_agent_install: None,
             custom_agent_creates: None,
+            adapter_override_command: None,
+            adapter_override_arg: Vec::new(),
+            adapter_override_github: None,
+            adapter_override_install_npm: None,
+            adapter_override_install_shell: None,
+            adapter_override_install_creates: None,
+            adapter_override_clear: false,
             agent_env_ref: Vec::new(),
             dep: Vec::new(),
             dep_system: Vec::new(),

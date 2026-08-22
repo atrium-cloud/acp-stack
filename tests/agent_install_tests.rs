@@ -284,6 +284,7 @@ fn agent_config(command: &str) -> AgentConfig {
         config_options: Default::default(),
         harness_version: None,
         adapter: None,
+        adapter_override: None,
         provider: None,
         providers: None,
         subagent: None,
@@ -387,6 +388,71 @@ fn install_resolved_two_step_flow_against_mocked_github_api() {
         adapter_mode != 0,
         "adapter binary should be executable, got mode {adapter_mode:o}",
     );
+}
+
+#[test]
+fn install_resolved_runs_adapter_step_for_native_entry_with_override() {
+    let mock = start_mock_github();
+    let dest_dir = tempfile::tempdir().expect("dest tempdir");
+
+    let _env = EnvGuard::new(
+        "ACP_STACK_GITHUB_API_BASE",
+        &format!("http://{}", mock.addr),
+    );
+    // Native entry: harness only, installed from the mocked release.
+    let mut entry = adapter_kind_entry();
+    entry.kind = RegistryKind::Native;
+    entry.adapter = None;
+    // The operator's designated adapter installs via a shell recipe that
+    // drops an executable into dest, mirroring a build-from-source install.
+    let adapter_path = dest_dir.path().join("override-acp");
+    let mut agent = agent_config("override-acp");
+    agent.adapter_override = Some(acp_stack::config::AgentAdapterOverrideConfig {
+        command: "override-acp".to_owned(),
+        args: Vec::new(),
+        github: None,
+        install: acp_stack::config::AgentAdapterOverrideInstall {
+            shell: Some(acp_stack::config::AgentAdapterOverrideShellInstall {
+                script: format!(
+                    "printf '#!/bin/sh\\nexit 0\\n' > {path} && chmod +x {path}",
+                    path = adapter_path.display()
+                ),
+                creates: adapter_path.display().to_string(),
+                required_tools: Vec::new(),
+                timeout_secs: None,
+            }),
+            npm: None,
+            github: None,
+        },
+        update: Default::default(),
+    });
+
+    let result = install_resolved_capture(
+        &agent,
+        &entry,
+        std::collections::HashMap::new(),
+        dest_dir.path(),
+        dest_dir.path(),
+        None,
+    );
+
+    result
+        .outcome
+        .expect("override-driven two-step install should succeed");
+    let harness_row = result
+        .rows
+        .iter()
+        .find(|r| r.step == "harness")
+        .expect("harness row missing");
+    let adapter_row = result
+        .rows
+        .iter()
+        .find(|r| r.step == "adapter")
+        .expect("adapter row missing");
+    assert_eq!(harness_row.status, "ran");
+    assert_eq!(adapter_row.status, "ran");
+    assert!(dest_dir.path().join(HARNESS_BIN).is_file());
+    assert!(adapter_path.is_file());
 }
 
 #[test]

@@ -378,6 +378,7 @@ mod tests {
             config_options: Default::default(),
             harness_version: None,
             adapter: None,
+            adapter_override: None,
             provider: None,
             providers: None,
             subagent: None,

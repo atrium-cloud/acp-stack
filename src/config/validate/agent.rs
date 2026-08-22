@@ -2,8 +2,9 @@
 //! restart policy, agent install escape hatch.
 
 use crate::config::schema::{
-    AgentAutoUpdateConfig, AgentConfigOptionValue, AgentCustomProviderConfig, AgentInstallConfig,
-    AgentProviderConfig, AgentProvidersConfig, AgentSubagentConfig, CustomProviderApi,
+    AgentAdapterOverrideConfig, AgentAutoUpdateConfig, AgentConfigOptionValue,
+    AgentCustomProviderConfig, AgentInstallConfig, AgentProviderConfig, AgentProvidersConfig,
+    AgentSubagentConfig, CustomProviderApi,
 };
 use crate::config::validate::primitives::{
     DurationLimits, DurationUnit, normalize_duration, require_present, validate_non_empty_trimmed,
@@ -395,6 +396,154 @@ pub(crate) fn validate_agent_install(install: &AgentInstallConfig) -> Result<()>
         }
         _ => Err(StackError::InvalidAgentInstallType),
     }
+}
+
+/// Structural checks for `[agent.adapter_override]`. These deliberately mirror
+/// the registry `AdapterSpec` invariants so a bad block fails at config load
+/// with `agent.adapter_override.*` field names; the install lane re-validates
+/// through `AdapterSpec::validate` when the block is converted to a spec.
+pub(crate) fn validate_agent_adapter_override(
+    override_config: &AgentAdapterOverrideConfig,
+) -> Result<()> {
+    validate_non_empty_trimmed("agent.adapter_override.command", &override_config.command)?;
+    if override_config.command.chars().any(char::is_whitespace) {
+        return Err(StackError::InvalidParam {
+            field: "agent.adapter_override.command",
+            reason: "must be a single command name without whitespace; put arguments in `args`"
+                .to_owned(),
+        });
+    }
+    for arg in &override_config.args {
+        validate_non_empty_trimmed("agent.adapter_override.args", arg)?;
+    }
+    if let Some(github) = override_config.github.as_deref() {
+        validate_adapter_override_github(github)?;
+    }
+    let install = &override_config.install;
+    if install.shell.is_none() && install.npm.is_none() && install.github.is_none() {
+        return Err(StackError::MissingField {
+            field: "agent.adapter_override.install",
+        });
+    }
+    if let Some(shell) = &install.shell {
+        validate_non_empty_trimmed("agent.adapter_override.install.shell.script", &shell.script)?;
+        validate_non_empty_trimmed(
+            "agent.adapter_override.install.shell.creates",
+            &shell.creates,
+        )?;
+        for tool in &shell.required_tools {
+            validate_non_empty_trimmed(
+                "agent.adapter_override.install.shell.required_tools",
+                tool,
+            )?;
+            if tool.contains('/') {
+                return Err(StackError::InvalidParam {
+                    field: "agent.adapter_override.install.shell.required_tools",
+                    reason: format!("entry `{tool}` must be a command name"),
+                });
+            }
+        }
+        if shell.timeout_secs == Some(0) {
+            return Err(StackError::InvalidParam {
+                field: "agent.adapter_override.install.shell.timeout_secs",
+                reason: "omit the field for the default budget, or set a positive value".to_owned(),
+            });
+        }
+        if let Some(timeout_secs) = shell.timeout_secs
+            && timeout_secs > crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS
+        {
+            return Err(StackError::InvalidParam {
+                field: "agent.adapter_override.install.shell.timeout_secs",
+                reason: format!(
+                    "{timeout_secs} exceeds the {}-second (24 hour) cap",
+                    crate::runtime::process_runner::MAX_INSTALL_TIMEOUT_SECS
+                ),
+            });
+        }
+    }
+    if let Some(npm) = &install.npm {
+        validate_non_empty_trimmed("agent.adapter_override.install.npm.package", &npm.package)?;
+        validate_non_empty_trimmed("agent.adapter_override.install.npm.creates", &npm.creates)?;
+    }
+    if let Some(github) = &install.github {
+        if override_config
+            .github
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(StackError::InvalidParam {
+                field: "agent.adapter_override.install.github",
+                reason: "requires agent.adapter_override.github".to_owned(),
+            });
+        }
+        validate_non_empty_trimmed(
+            "agent.adapter_override.install.github.asset_pattern",
+            &github.asset_pattern,
+        )?;
+        validate_non_empty_trimmed(
+            "agent.adapter_override.install.github.binary_name",
+            &github.binary_name,
+        )?;
+        if let Some(archive_binary_name) = github.archive_binary_name.as_deref() {
+            validate_non_empty_trimmed(
+                "agent.adapter_override.install.github.archive_binary_name",
+                archive_binary_name,
+            )?;
+        }
+        let needs_arch = github.asset_pattern.contains("{arch}")
+            || github
+                .archive_binary_name
+                .as_deref()
+                .is_some_and(|name| name.contains("{arch}"));
+        if needs_arch
+            && (github
+                .arch
+                .x86_64
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+                || github
+                    .arch
+                    .aarch64
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty())
+        {
+            return Err(StackError::InvalidParam {
+                field: "agent.adapter_override.install.github.arch",
+                reason: "asset patterns using `{arch}` require both x86_64 and aarch64 tokens"
+                    .to_owned(),
+            });
+        }
+    }
+    if override_config.update.shell_rerun && install.shell.is_none() {
+        return Err(StackError::InvalidParam {
+            field: "agent.adapter_override.update.shell_rerun",
+            reason: "requires agent.adapter_override.install.shell".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_adapter_override_github(value: &str) -> Result<()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(StackError::MissingField {
+            field: "agent.adapter_override.github",
+        });
+    }
+    if value.strip_prefix("https://github.com/").is_some() {
+        return Ok(());
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Err(StackError::InvalidParam {
+            field: "agent.adapter_override.github",
+            reason: "must be a GitHub `owner/repo` path or https://github.com/ URL".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

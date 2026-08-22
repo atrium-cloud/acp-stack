@@ -518,6 +518,105 @@ mod tests {
     }
 
     #[test]
+    fn build_agent_check_report_covers_adapter_override_steps() {
+        // A native entry with a designated adapter reports harness +
+        // adapter steps; the adapter tracks the override's npm package while
+        // the harness keeps its shell-recipe Unknown verdict.
+        let entry = embedded_entry("goose");
+        let mut agent = check_agent("goose");
+        agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: Vec::new(),
+            github: None,
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: None,
+                npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                    package: "custom-acp".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                }),
+                github: None,
+            },
+            update: Default::default(),
+        });
+        let resolver = MockResolver::new().with_npm("custom-acp", "0.2.0");
+        let rows = vec![
+            installer_row("harness", None),
+            installer_row("adapter", Some("0.1.0")),
+        ];
+
+        let report = build_agent_check_report(&entry, &agent, &rows, &resolver);
+
+        assert_eq!(report.len(), 2);
+        assert!(matches!(
+            (&report[0].0[..], &report[0].1),
+            ("harness", AgentCheckStatus::Unknown { .. })
+        ));
+        assert!(matches!(
+            (&report[1].0[..], &report[1].1),
+            ("adapter", AgentCheckStatus::Stale { installed, latest })
+                if installed == "0.1.0" && latest == "0.2.0"
+        ));
+    }
+
+    #[test]
+    fn build_agent_check_report_shell_only_override_is_unknown_not_failure() {
+        let entry = embedded_entry("goose");
+        let mut agent = check_agent("goose");
+        agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: Vec::new(),
+            github: None,
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: Some(crate::config::AgentAdapterOverrideShellInstall {
+                    script: "true".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                    required_tools: Vec::new(),
+                    timeout_secs: None,
+                }),
+                npm: None,
+                github: None,
+            },
+            update: Default::default(),
+        });
+        let resolver = MockResolver::new();
+        let rows = vec![
+            installer_row("harness", None),
+            installer_row("adapter", Some("0.1.0")),
+        ];
+
+        let report = build_agent_check_report(&entry, &agent, &rows, &resolver);
+
+        assert_eq!(report.len(), 2);
+        assert!(matches!(report[1].1, AgentCheckStatus::Unknown { .. }));
+        assert!(!agent_check_has_failure(&report));
+    }
+
+    fn check_agent(id: &str) -> crate::config::AgentConfig {
+        crate::config::AgentConfig {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            command: id.to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            expected_sha256: None,
+            restart: "on-crash".to_owned(),
+            mode: None,
+            model: None,
+            effort: None,
+            config_options: Default::default(),
+            harness_version: None,
+            adapter: None,
+            adapter_override: None,
+            provider: None,
+            providers: None,
+            subagent: None,
+            auto_update: None,
+            install: None,
+        }
+    }
+
+    #[test]
     fn build_agent_check_report_returns_stale_for_codex_adapter() {
         // Codex declares npm for both harness (`@openai/codex`) and adapter
         // (`@agentclientprotocol/codex-acp`). The install-path resolver prefers npm
@@ -530,7 +629,7 @@ mod tests {
             installer_row("harness", Some("rust-v0.50.0")),
             installer_row("adapter", Some("0.1.0")),
         ];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         assert_eq!(report.len(), 2);
         // harness: npm version drift -> stale
         assert!(matches!(
@@ -555,7 +654,7 @@ mod tests {
             installer_row("harness", Some("rust-v0.50.0")),
             installer_row("adapter", Some("0.1.0")),
         ];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         assert!(matches!(
             &report[0],
             (step, AgentCheckStatus::UpToDate { .. }) if step == "harness"
@@ -572,7 +671,7 @@ mod tests {
         let resolver =
             MockResolver::new().with_npm("@agentclientprotocol/claude-agent-acp", "1.2.3");
         let rows = vec![installer_row("adapter", Some("1.2.3"))];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
 
         assert_eq!(report.len(), 1);
         assert!(matches!(
@@ -588,7 +687,7 @@ mod tests {
         // as Unknown rather than crash the whole report.
         let resolver = MockResolver::new();
         let rows = vec![installer_row("adapter", Some("0.1.0"))];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         let adapter = report
             .iter()
             .find(|(step, _)| step == "adapter")
@@ -601,7 +700,7 @@ mod tests {
         let entry = embedded_entry("goose");
         let resolver = MockResolver::new();
         let rows = vec![installer_row("install", None)];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         assert_eq!(report.len(), 1);
         assert!(matches!(
             &report[0],
@@ -615,7 +714,7 @@ mod tests {
         let entry = embedded_entry("amp");
         let resolver = MockResolver::new();
         let rows = vec![installer_row("harness", None)];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         assert_eq!(report.len(), 2);
         assert!(matches!(
             &report[0],
@@ -632,7 +731,7 @@ mod tests {
     fn build_agent_check_report_marks_missing_native_install_not_installed() {
         let entry = embedded_entry("goose");
         let resolver = MockResolver::new();
-        let report = build_agent_check_report(&entry, &[], &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &[], &resolver);
         assert_eq!(report.len(), 1);
         assert!(matches!(
             &report[0],
@@ -651,7 +750,7 @@ mod tests {
             installer_row("harness", Some("rust-v0.50.0")),
             installer_row("adapter", None),
         ];
-        let report = build_agent_check_report(&entry, &rows, &resolver);
+        let report = build_agent_check_report(&entry, &check_agent("test-agent"), &rows, &resolver);
         assert!(matches!(
             &report[1],
             (step, AgentCheckStatus::Unknown { reason }) if step == "adapter"

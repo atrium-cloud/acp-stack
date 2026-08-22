@@ -284,6 +284,10 @@ impl RegistryCatalog {
 pub struct RegistryEntry {
     pub id: String,
     pub name: String,
+    /// Catalog-declared kind. Lanes that branch on this to drive install,
+    /// update, version-check, or adapter metadata must resolve through
+    /// [`effective_registry_entry`] first: an `[agent.adapter_override]`
+    /// block rewrites the effective kind to `Adapter`.
     pub kind: RegistryKind,
     #[serde(default)]
     pub headless_compatible: bool,
@@ -360,6 +364,9 @@ pub struct RegistryEntry {
     /// completion; useful for agents that don't expose filesystem tools.
     #[serde(default)]
     pub testflight_expect_fs: Option<String>,
+    /// Catalog-declared adapter. Like `kind`, install/update/version-check
+    /// and adapter-metadata lanes must read this through
+    /// [`effective_registry_entry`] so operator overrides are honored.
     #[serde(default)]
     pub adapter: Option<AdapterSpec>,
     pub harness: Option<HarnessSpec>,
@@ -517,6 +524,92 @@ fn shell_quote_str(value: &str) -> String {
 struct RegistryFile {
     #[serde(default)]
     agents: Vec<RegistryEntry>,
+}
+
+/// Build a registry `AdapterSpec` from an operator `[agent.adapter_override]`
+/// block. The override's `command` becomes the adapter id (launch command and
+/// native-update probe target are the same name by construction). The spec is
+/// run through the same validation the catalog applies, so the install lanes
+/// downstream can trust it like any curated adapter.
+pub fn adapter_spec_from_override(
+    agent_id: &str,
+    override_config: &crate::config::AgentAdapterOverrideConfig,
+) -> Result<AdapterSpec> {
+    let spec = AdapterSpec {
+        id: override_config.command.trim().to_owned(),
+        sync_id: None,
+        github: override_config.github.clone(),
+        install: InstallSet {
+            provided_by: None,
+            shell: override_config
+                .install
+                .shell
+                .as_ref()
+                .map(|shell| ShellInstall {
+                    script: shell.script.clone(),
+                    creates: shell.creates.clone(),
+                    required_tools: shell.required_tools.clone(),
+                    timeout_secs: shell.timeout_secs,
+                }),
+            npm: override_config.install.npm.as_ref().map(|npm| NpmInstall {
+                package: npm.package.clone(),
+                creates: npm.creates.clone(),
+            }),
+            github: override_config
+                .install
+                .github
+                .as_ref()
+                .map(|github| GithubInstall {
+                    asset_pattern: github.asset_pattern.clone(),
+                    archive: match github.archive {
+                        crate::config::AgentAdapterOverrideArchiveKind::None => ArchiveKind::None,
+                        crate::config::AgentAdapterOverrideArchiveKind::TarGz => ArchiveKind::TarGz,
+                        crate::config::AgentAdapterOverrideArchiveKind::Zip => ArchiveKind::Zip,
+                    },
+                    archive_binary_name: github.archive_binary_name.clone(),
+                    binary_name: github.binary_name.clone(),
+                    checksums_asset: github.checksums_asset.clone(),
+                    arch: ArchMap {
+                        x86_64: github.arch.x86_64.clone(),
+                        aarch64: github.arch.aarch64.clone(),
+                    },
+                }),
+        },
+        update: UpdateSet {
+            apt: None,
+            shell_rerun: override_config.update.shell_rerun,
+        },
+    };
+    spec.validate(agent_id).map_err(|error| match error {
+        StackError::RegistryLoad { reason } => StackError::RegistryLoad {
+            reason: format!("[agent.adapter_override] {reason}"),
+        },
+        other => other,
+    })?;
+    Ok(spec)
+}
+
+/// Resolve the registry entry the install/update/version-check/metadata lanes
+/// should actually drive for `agent`. With `[agent.adapter_override]` set the
+/// entry is rewritten to `kind = Adapter` carrying the operator's adapter
+/// spec; the harness block and every other registry-derived field (support
+/// flags, skills dirs, provider flags, testflight metadata) stay untouched,
+/// so day-2 behavior for the harness remains managed. An entry that is
+/// already adapter-kind simply gets its adapter spec replaced.
+pub fn effective_registry_entry<'a>(
+    entry: &'a RegistryEntry,
+    agent: &crate::config::AgentConfig,
+) -> Result<std::borrow::Cow<'a, RegistryEntry>> {
+    let Some(override_config) = agent.adapter_override.as_ref() else {
+        return Ok(std::borrow::Cow::Borrowed(entry));
+    };
+    if agent.id != entry.id {
+        return Ok(std::borrow::Cow::Borrowed(entry));
+    }
+    let mut effective = entry.clone();
+    effective.kind = RegistryKind::Adapter;
+    effective.adapter = Some(adapter_spec_from_override(&entry.id, override_config)?);
+    Ok(std::borrow::Cow::Owned(effective))
 }
 
 #[cfg(test)]

@@ -119,6 +119,12 @@ pub struct AgentConfig {
     /// who carried a `[agent.adapter]` block over from a pre-rework config.
     #[serde(default, skip_deserializing, skip_serializing)]
     pub adapter: Option<AgentAdapterConfig>,
+    /// Operator-designated ACP adapter for a registry agent: the agent is
+    /// launched through this adapter binary while the registry harness and
+    /// every other registry-derived behavior stay managed. Mutually exclusive
+    /// with the `[agent.install]` escape hatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_override: Option<AgentAdapterOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<AgentProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,6 +270,113 @@ pub struct AgentAdapterConfig {
     pub upstream_agent: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+}
+
+/// Operator-designated ACP adapter for a registry agent. Mirrors the registry
+/// `[agents.adapter]` spec shape but round-trips through the operator config:
+/// the registry spec types are catalog-shaped and Deserialize-only, so they
+/// cannot appear in the published config schema. `command` doubles as the
+/// adapter identity (the registry `AdapterSpec.id`), which keeps the launch
+/// command and the updater's native probe target from diverging.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideConfig {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// GitHub repo as `owner/repo` or a `https://github.com/` URL. Required
+    /// when `install.github` is used; otherwise informational (surfaced as
+    /// the adapter's source URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    pub install: AgentAdapterOverrideInstall,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentAdapterOverrideUpdate::is_default"
+    )]
+    pub update: AgentAdapterOverrideUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideInstall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<AgentAdapterOverrideShellInstall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npm: Option<AgentAdapterOverrideNpmInstall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<AgentAdapterOverrideGithubInstall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideShellInstall {
+    pub script: String,
+    pub creates: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideNpmInstall {
+    pub package: String,
+    pub creates: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideGithubInstall {
+    pub asset_pattern: String,
+    pub archive: AgentAdapterOverrideArchiveKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_binary_name: Option<String>,
+    pub binary_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksums_asset: Option<String>,
+    #[serde(default, skip_serializing_if = "AgentAdapterOverrideArchMap::is_empty")]
+    pub arch: AgentAdapterOverrideArchMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAdapterOverrideArchiveKind {
+    None,
+    #[serde(rename = "tar.gz")]
+    TarGz,
+    Zip,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideArchMap {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x86_64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aarch64: Option<String>,
+}
+
+impl AgentAdapterOverrideArchMap {
+    pub fn is_empty(&self) -> bool {
+        self.x86_64.is_none() && self.aarch64.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAdapterOverrideUpdate {
+    /// Update the adapter by re-running the shell install recipe. Without it a
+    /// shell-only override is skipped by managed update.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shell_rerun: bool,
+}
+
+impl AgentAdapterOverrideUpdate {
+    pub fn is_default(&self) -> bool {
+        !self.shell_rerun
+    }
 }
 
 /// Operator-facing escape hatch for installing an agent whose entry is not

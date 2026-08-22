@@ -495,6 +495,9 @@ fn agent_config_from_registry_entry(config: &Config, entry: &RegistryEntry) -> R
     agent.config_options = Default::default();
     agent.harness_version = None;
     agent.adapter = adapter_from_registry_entry(entry);
+    // The clone above would otherwise inherit the primary's designated
+    // adapter; array targets require distinct agents, so it never applies.
+    agent.adapter_override = None;
     agent.provider = None;
     agent.providers = None;
     agent.subagent = None;
@@ -998,4 +1001,52 @@ fn canonicalize_config_for_write(config: &Config) -> Result<(Config, String)> {
     let validated = config::load_config_from_str(&canonical)?;
     let canonical = validated.to_canonical_toml()?;
     Ok((validated, canonical))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> Config {
+        config::load_config_from_str(include_str!(
+            "../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture parses")
+    }
+
+    fn sample_override() -> crate::config::AgentAdapterOverrideConfig {
+        crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: vec!["--verbose".to_owned()],
+            github: None,
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: None,
+                npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                    package: "custom-acp".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                }),
+                github: None,
+            },
+            update: Default::default(),
+        }
+    }
+
+    // The target agent is cloned from the primary's block; without the clear,
+    // it would inherit the primary's designated adapter onto a different agent.
+    #[test]
+    fn array_target_does_not_inherit_primary_adapter_override() {
+        let mut config = valid_config();
+        config.agent.adapter_override = Some(sample_override());
+        config.agent.command = "custom-acp".to_owned();
+        config.agent.args = vec!["--verbose".to_owned()];
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let entry = registry.lookup("goose").expect("goose entry");
+
+        let agent = agent_config_from_registry_entry(&config, entry).expect("target agent");
+
+        assert!(agent.adapter_override.is_none());
+        let harness = entry.harness.as_ref().expect("goose harness");
+        assert_eq!(agent.command, harness.id);
+        assert_eq!(agent.args, harness.acp_args);
+    }
 }

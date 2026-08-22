@@ -41,6 +41,11 @@ const HELP_PROBE_RETRY_DELAY: Duration = Duration::from_millis(200);
 pub const NON_REGISTRY_SKIP_REASON: &str =
     "agent is not a managed registry agent; auto-update is unavailable for escape-hatch installs";
 
+/// Skip reason recorded for a shell-only `[agent.adapter_override]` adapter
+/// step. Shell recipes carry no comparable version; the operator opts into
+/// re-run updates with `[agent.adapter_override.update] shell_rerun = true`.
+pub const ADAPTER_OVERRIDE_SHELL_SKIP_REASON: &str = "operator adapter override installs via shell; managed update does not re-run operator shell recipes unless update.shell_rerun is set";
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AgentUpdateOptions {
     pub force: bool,
@@ -165,6 +170,9 @@ pub fn update_agent_for_config(
     }
 
     entry.ensure_supported()?;
+    let entry =
+        crate::runtime::install::agent_registry::effective_registry_entry(entry, &config.agent)?;
+    let entry = entry.as_ref();
     let installed_rows = state.latest_successful_installer_runs_for_agent(&config.agent.id)?;
     let context = UpdateExecutionContext {
         workspace_root,
@@ -175,6 +183,29 @@ pub fn update_agent_for_config(
     };
     let mut steps = Vec::new();
     for component in update_components(entry, &config.agent)? {
+        // A shell-only operator adapter override has no version to compare
+        // and no managed update path unless the operator opted into
+        // shell_rerun; without this skip the plan chooser would fall through
+        // to the native probe and record a failed adapter step every cycle.
+        if component.step == STEP_ADAPTER
+            && config.agent.adapter_override.is_some()
+            && component.install.npm.is_none()
+            && component.install.github.is_none()
+            && !component.shell_rerun
+        {
+            steps.push(AgentUpdateStepReport {
+                step: component.step.to_owned(),
+                status: AgentUpdateStepStatus::Skipped,
+                method: Some(INSTALLER_METHOD_SHELL.to_owned()),
+                installed: installed_rows
+                    .iter()
+                    .find(|row| row.step == component.step)
+                    .and_then(|row| row.version.clone()),
+                latest: None,
+                message: Some(ADAPTER_OVERRIDE_SHELL_SKIP_REASON.to_owned()),
+            });
+            continue;
+        }
         steps.push(update_component(
             &config.agent,
             entry,

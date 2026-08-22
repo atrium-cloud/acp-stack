@@ -42,6 +42,7 @@ The operator-facing sequence, in order:
         - Non-interactive runs use `--custom-agent-*`.
         - The id must not be a registry agent id.
         - Provider/model setup is handled by the agent environment, not init flags.
+    - Designated adapter (`[agent.adapter_override]`, registry agents only): declared with the `--adapter-override-*` flags or carried in an imported config; no interactive prompt lane. Re-confirming the same agent preserves it; an agent change, `--custom-agent-*`, `acps agent switch`, and `--adapter-override-clear` clear it; array targets never inherit it; a non-registry agent id is rejected.
     - While a managed-state endpoint override is stored, an agent apply is rejected when the target cannot carry the override: a registry agent without `set_provider_base_url`, any custom agent, or a re-confirmed agent whose kept provider is the overridden one on a pair that refuses overrides (codex + `openai`). Clear the namespace's credential endpoint first; see [extensions.md](extensions.md#type-managed-state).
 4. Environment configuration (new config only).
     a. Standard setup
@@ -75,7 +76,7 @@ The operator-facing sequence, in order:
 8. Agent install.
     - Registry agents install from the embedded catalog.
     - Custom agents install through `[agent.install]`.
-    - Adapter-backed agents install both harness and adapter unless the catalog marks the harness as adapter-provided.
+    - Adapter-backed agents — including any registry agent with a designated adapter — install both harness and adapter unless the catalog marks the harness as adapter-provided.
     - Init prepares `workspace.root` and `workspace.uploads` before installer subprocesses run so installers have a valid working directory.
     - Expected-hash checks run when configured.
     - Retry uses bounded exponential backoff, with each attempt recorded in installer history.

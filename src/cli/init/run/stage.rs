@@ -52,6 +52,10 @@ pub(super) fn stage_init_config(
         select_agent_for_init(&args, &registry)
             .or_else(|error| finalize_failure(&store, &init_run, error))?
     };
+    let adapter_override_action = match resolve_adapter_override_action(&args) {
+        Ok(action) => action,
+        Err(error) => return finalize_failure(&store, &init_run, error),
+    };
     let agent_applied = match &selected_agent {
         Some(AgentSelection::Registry(entry)) => {
             // Fail fast on agents the runtime cannot drive headlessly (browser
@@ -80,6 +84,11 @@ pub(super) fn stage_init_config(
             )
             .or_else(|error| finalize_failure(&store, &init_run, error))?;
             apply_registry_entry_to_config(&mut config, entry);
+            // Applied after the registry re-apply so an explicit
+            // `--adapter-override-*` designation survives an agent change
+            // (the re-apply clears a stored override on change).
+            apply_adapter_override_action(&mut config, &adapter_override_action);
+            apply_agent_launch_command(&mut config, entry);
             true
         }
         Some(AgentSelection::Custom(spec)) => {
@@ -92,8 +101,62 @@ pub(super) fn stage_init_config(
             apply_custom_agent_to_config(&mut config, spec);
             true
         }
-        None => false,
+        None => {
+            // No agent re-selection this run. Explicit `--adapter-override-*`
+            // flags still apply to the configured agent.
+            match &adapter_override_action {
+                Some(AdapterOverrideAction::Set(_)) => {
+                    // A designation only means something for a registry agent.
+                    let entry = registry
+                        .lookup(&config.agent.id)
+                        .ok_or_else(|| StackError::InvalidParam {
+                            field: "--adapter-override-command",
+                            reason: format!(
+                                "`{}` is not a registry agent; designated adapters apply to registry agents only (use the --custom-agent-* flags for escape-hatch agents)",
+                                config.agent.id
+                            ),
+                        })
+                        .or_else(|error| finalize_failure(&store, &init_run, error))?;
+                    let changed =
+                        apply_adapter_override_action(&mut config, &adapter_override_action);
+                    apply_agent_launch_command(&mut config, entry);
+                    changed
+                }
+                Some(AdapterOverrideAction::Clear) => {
+                    let changed =
+                        apply_adapter_override_action(&mut config, &adapter_override_action);
+                    // Clearing must stay available after the agent leaves the
+                    // registry — that is precisely when a stale designation
+                    // needs removing. The curated launch command can only be
+                    // restored while the entry still exists; without it there
+                    // is nothing to derive the harness command from, so the
+                    // launch command is left as-is for the operator's next
+                    // `--agent` selection to rewrite.
+                    if let Some(entry) = registry.lookup(&config.agent.id) {
+                        apply_agent_launch_command(&mut config, entry);
+                    }
+                    changed
+                }
+                None => false,
+            }
+        }
     };
+    // A stored designation on a non-registry agent cannot drive any install
+    // or launch lane; fail fast instead of letting it silently misconfigure
+    // (reachable via imported configs, which skip the registry re-apply).
+    if config.agent.adapter_override.is_some() && registry.lookup(&config.agent.id).is_none() {
+        return finalize_failure(
+            &store,
+            &init_run,
+            StackError::InvalidParam {
+                field: "agent.adapter_override",
+                reason: format!(
+                    "`{}` is not a registry agent; designated adapters apply to registry agents only",
+                    config.agent.id
+                ),
+            },
+        );
+    }
     // The selection borrows the registry; only the fact of it outlives staging.
     let agent_selected = selected_agent.is_some();
     if agent_applied {

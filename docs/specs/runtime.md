@@ -36,6 +36,8 @@ Session recovery remains explicit. After an automatic relaunch, clients use `GET
 
 Supported agents are declared in the embedded catalog. Entries may be native ACP agents or adapter-backed agents; adapter entries either install separate harness and adapter steps or declare that the harness is provided by the adapter package.
 
+An operator `[agent.adapter_override]` block makes the effective entry adapter-backed regardless of catalog kind: the harness keeps its catalog install/update under the `harness` step, the operator's adapter installs under the `adapter` step, npm/github override installs join managed update, and shell-only overrides are skipped unless `update.shell_rerun` is set. Adding an override to an agent first installed as a native entry relabels its expected steps, so `acps agent check` reports the harness not installed until the next install or update re-runs the idempotent recipe.
+
 Installer behavior:
 
 - refuse unsupported catalog entries

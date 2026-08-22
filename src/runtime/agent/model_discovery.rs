@@ -350,6 +350,7 @@ mod tests {
             config_options: Default::default(),
             harness_version: None,
             adapter: None,
+            adapter_override: None,
             install: None,
             provider,
             providers: None,

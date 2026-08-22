@@ -301,6 +301,31 @@ fn validate_agent_config(agent: &AgentConfig) -> Result<()> {
     if let Some(install) = &agent.install {
         validate_agent_install(install)?;
     }
+    if let Some(adapter_override) = &agent.adapter_override {
+        if agent.install.is_some() {
+            return Err(StackError::InvalidParam {
+                field: "agent.adapter_override",
+                reason: "cannot be combined with [agent.install]; the install escape hatch \
+                         replaces the entire registry install"
+                    .to_owned(),
+            });
+        }
+        agent::validate_agent_adapter_override(adapter_override)?;
+        // The launch command doubles as the adapter identity for the
+        // install/update lanes, so it must be the override's launch command.
+        // Init keeps the two in step; an imported or hand-edited config that
+        // lets them diverge would launch the bare harness while the managed
+        // lanes track the adapter.
+        if agent.command != adapter_override.command || agent.args != adapter_override.args {
+            return Err(StackError::InvalidParam {
+                field: "agent.command",
+                reason: "must match agent.adapter_override.command/args; the launch command \
+                         doubles as the adapter identity, so point [agent] command/args at the \
+                         designated adapter"
+                    .to_owned(),
+            });
+        }
+    }
     if let Some(provider) = &agent.provider {
         validate_agent_provider(&agent.id, provider)?;
     }

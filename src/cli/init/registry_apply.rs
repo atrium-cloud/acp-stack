@@ -173,6 +173,113 @@ fn validate_custom_agent_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of the `--adapter-override-*` flag family: designate an adapter,
+/// or clear a stored designation. `None` means no flags were passed and any
+/// stored block follows the preserve/clear lifecycle.
+pub(super) enum AdapterOverrideAction {
+    Set(Box<crate::config::AgentAdapterOverrideConfig>),
+    Clear,
+}
+
+/// Assemble the adapter-override action from init flags. `--adapter-override-command`
+/// is the anchor; exactly one install source (npm or shell) is required. The
+/// github-asset install variant is import-only: it needs a whole flag family
+/// for zero interactive users, and stays expressible through `acps config
+/// import` / `--from-*`.
+pub(super) fn resolve_adapter_override_action(
+    args: &InitArgs,
+) -> Result<Option<AdapterOverrideAction>> {
+    if args.adapter_override_clear {
+        return Ok(Some(AdapterOverrideAction::Clear));
+    }
+    let Some(raw_command) = args.adapter_override_command.as_deref() else {
+        return Ok(None);
+    };
+    let command = raw_command.trim().to_owned();
+    if command.is_empty() {
+        return Err(StackError::MissingField {
+            field: "--adapter-override-command",
+        });
+    }
+    let creates = args
+        .adapter_override_install_creates
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| command.clone());
+    let install = match (
+        args.adapter_override_install_npm.as_deref(),
+        args.adapter_override_install_shell.as_deref(),
+    ) {
+        (Some(package), None) => crate::config::AgentAdapterOverrideInstall {
+            shell: None,
+            npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                package: package.trim().to_owned(),
+                creates,
+            }),
+            github: None,
+        },
+        (None, Some(script)) => crate::config::AgentAdapterOverrideInstall {
+            shell: Some(crate::config::AgentAdapterOverrideShellInstall {
+                script: script.to_owned(),
+                creates,
+                required_tools: Vec::new(),
+                timeout_secs: None,
+            }),
+            npm: None,
+            github: None,
+        },
+        (None, None) => {
+            return Err(StackError::MissingField {
+                field: "--adapter-override-install-npm or --adapter-override-install-shell",
+            });
+        }
+        // clap already rejects the pair; unreachable arm kept typed.
+        (Some(_), Some(_)) => {
+            return Err(StackError::InvalidParam {
+                field: "--adapter-override-install-npm",
+                reason: "cannot be combined with --adapter-override-install-shell".to_owned(),
+            });
+        }
+    };
+    Ok(Some(AdapterOverrideAction::Set(Box::new(
+        crate::config::AgentAdapterOverrideConfig {
+            command,
+            args: args.adapter_override_arg.clone(),
+            github: args
+                .adapter_override_github
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            install,
+            update: Default::default(),
+        },
+    ))))
+}
+
+/// Apply a resolved adapter-override action onto the agent block. Returns
+/// true when the config changed.
+pub(super) fn apply_adapter_override_action(
+    config: &mut Config,
+    action: &Option<AdapterOverrideAction>,
+) -> bool {
+    match action {
+        Some(AdapterOverrideAction::Set(block)) => {
+            let changed = config.agent.adapter_override.as_ref() != Some(block.as_ref());
+            config.agent.adapter_override = Some(block.as_ref().clone());
+            changed
+        }
+        Some(AdapterOverrideAction::Clear) => {
+            let changed = config.agent.adapter_override.is_some();
+            config.agent.adapter_override = None;
+            changed
+        }
+        None => false,
+    }
+}
+
 pub(super) fn reject_registry_id_for_custom_agent(
     id: &str,
     registry: &RegistryCatalog,
@@ -356,6 +463,7 @@ pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAge
     config.agent.restart = "on-crash".to_owned();
     config.agent.harness_version = None;
     config.agent.adapter = None;
+    config.agent.adapter_override = None;
     config.agent.install = Some(AgentInstallConfig {
         install_type: "shell".to_owned(),
         creates: spec.creates.clone(),
@@ -384,6 +492,10 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         config.agent.provider = None;
         config.agent.providers = None;
         config.agent.auto_update = default_supported_agent_auto_update();
+        // The override designates an adapter for THIS agent; a different
+        // target must not inherit it. Re-confirming the same agent keeps it,
+        // like provider/model/mode above.
+        config.agent.adapter_override = None;
     } else if config.agent.auto_update.is_none() {
         config.agent.auto_update = default_supported_agent_auto_update();
     }
@@ -393,6 +505,20 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
     config.agent.adapter = None;
     config.agent.install = None;
 
+    apply_agent_launch_command(config, entry);
+}
+
+/// Write `agent.command`/`agent.args` for a registry agent: from the
+/// operator's designated adapter when `[agent.adapter_override]` is set,
+/// otherwise from the curated entry. Callers that mutate the override after
+/// `apply_registry_entry_to_config` re-run this to keep the launch command in
+/// step.
+pub(super) fn apply_agent_launch_command(config: &mut Config, entry: &RegistryEntry) {
+    if let Some(override_config) = config.agent.adapter_override.clone() {
+        config.agent.command = override_config.command;
+        config.agent.args = override_config.args;
+        return;
+    }
     match entry.kind {
         RegistryKind::Native => {
             let harness = entry.harness.as_ref().expect("validated registry harness");
@@ -428,4 +554,84 @@ fn default_agent_env_refs(agent_id: &str) -> Vec<String> {
         .into_iter()
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config_from_str;
+
+    fn valid_config() -> Config {
+        load_config_from_str(include_str!(
+            "../../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture parses")
+    }
+
+    fn sample_override() -> crate::config::AgentAdapterOverrideConfig {
+        crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: vec!["--verbose".to_owned()],
+            github: None,
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: None,
+                npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                    package: "custom-acp".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                }),
+                github: None,
+            },
+            update: Default::default(),
+        }
+    }
+
+    #[test]
+    fn same_agent_reapply_preserves_override_and_writes_its_command() {
+        let mut config = valid_config();
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        let entry = registry.lookup("goose").expect("goose entry");
+        config.agent.id = "goose".to_owned();
+        config.agent.adapter_override = Some(sample_override());
+
+        apply_registry_entry_to_config(&mut config, entry);
+
+        assert!(config.agent.adapter_override.is_some());
+        assert_eq!(config.agent.command, "custom-acp");
+        assert_eq!(config.agent.args, ["--verbose"]);
+        assert!(config.agent.install.is_none());
+    }
+
+    #[test]
+    fn agent_change_clears_override_and_restores_registry_command() {
+        let mut config = valid_config();
+        let registry = RegistryCatalog::load_embedded().expect("registry");
+        config.agent.id = "goose".to_owned();
+        config.agent.adapter_override = Some(sample_override());
+        let entry = registry.lookup("opencode").expect("opencode entry");
+
+        apply_registry_entry_to_config(&mut config, entry);
+
+        assert!(config.agent.adapter_override.is_none());
+        assert_eq!(config.agent.command, "opencode");
+        assert_eq!(config.agent.args, ["acp"]);
+    }
+
+    #[test]
+    fn custom_agent_apply_clears_override() {
+        let mut config = valid_config();
+        config.agent.adapter_override = Some(sample_override());
+        let spec = CustomAgentSpec {
+            id: "my-agent".to_owned(),
+            name: "My Agent".to_owned(),
+            command: "my-agent".to_owned(),
+            args: Vec::new(),
+            install_shell: "true".to_owned(),
+            creates: "my-agent".to_owned(),
+        };
+
+        apply_custom_agent_to_config(&mut config, &spec);
+
+        assert!(config.agent.adapter_override.is_none());
+        assert_eq!(config.agent.command, "my-agent");
+    }
 }

@@ -42,6 +42,7 @@ pub(crate) fn agent_config(command: &str) -> AgentConfig {
         config_options: Default::default(),
         harness_version: None,
         adapter: None,
+        adapter_override: None,
         provider: None,
         providers: None,
         subagent: None,

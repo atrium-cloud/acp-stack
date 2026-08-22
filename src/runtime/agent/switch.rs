@@ -190,6 +190,9 @@ fn apply_switch_registry_entry(config: &mut Config, entry: &RegistryEntry) {
     config.agent.restart = "on-crash".to_owned();
     config.agent.harness_version = None;
     config.agent.adapter = adapter_from_registry_entry(entry);
+    // Same-agent switches are rejected upstream, so a switch always targets a
+    // different agent and the operator's designated adapter never carries over.
+    config.agent.adapter_override = None;
     config.agent.install = None;
 
     match entry.kind {
@@ -615,6 +618,42 @@ mod tests {
             Some(vec!["opencode-go".to_owned()])
         );
         assert!(plan.required_env_refs.is_empty());
+    }
+
+    #[test]
+    fn switch_clears_adapter_override_and_restores_registry_command() {
+        let mut config = valid_config();
+        config.agent.id = "goose".to_owned();
+        config.agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: Vec::new(),
+            github: None,
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: None,
+                npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                    package: "custom-acp".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                }),
+                github: None,
+            },
+            update: Default::default(),
+        });
+        config.agent.command = "custom-acp".to_owned();
+        let registry = RegistryCatalog::load_embedded().expect("registry loads");
+
+        let plan = plan_agent_switch_locked(
+            &config,
+            &registry,
+            AgentSwitchRequest {
+                target_agent: "amp".to_owned(),
+                provider_id: None,
+                api_key_ref: None,
+            },
+        )
+        .expect("switch planned");
+
+        assert!(plan.config.agent.adapter_override.is_none());
+        assert_eq!(plan.config.agent.command, "amp-acp");
     }
 
     #[test]

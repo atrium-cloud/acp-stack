@@ -47,6 +47,7 @@ fn real_agent_config(id: &str, name: &str, command: &str, args: &[&str]) -> Agen
         config_options: Default::default(),
         harness_version: None,
         adapter: None,
+        adapter_override: None,
         provider: None,
         providers: None,
         subagent: None,

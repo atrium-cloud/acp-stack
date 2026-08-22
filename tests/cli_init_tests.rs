@@ -2,6 +2,8 @@
 
 mod common;
 
+#[path = "cli_init_tests/adapter_override.rs"]
+mod adapter_override;
 #[path = "cli_init_tests/auto_update.rs"]
 mod auto_update;
 #[path = "cli_init_tests/basic_mcp.rs"]

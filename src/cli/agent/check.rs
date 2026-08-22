@@ -57,7 +57,7 @@ pub(super) fn run_agent_check(output: OutputFormat) -> Result<()> {
     let installed_rows = store.latest_successful_installer_runs_for_agent(&config.agent.id)?;
 
     let resolver = LiveLatestVersionResolver;
-    let report = build_agent_check_report(entry, &installed_rows, &resolver);
+    let report = build_agent_check_report(entry, &config.agent, &installed_rows, &resolver);
     let has_failure = agent_check_has_failure(&report);
 
     if output.is_json() {

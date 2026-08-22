@@ -129,9 +129,26 @@ pub(crate) fn normalize_version(value: &str) -> &str {
 /// so partial adapter installs cannot look healthy.
 pub fn build_agent_check_report(
     entry: &RegistryEntry,
+    agent: &crate::config::AgentConfig,
     installed_rows: &[InstallerRun],
     resolver: &dyn LatestVersionResolver,
 ) -> Vec<(String, AgentVersionStatus)> {
+    // An operator adapter override reshapes the expected steps (harness +
+    // adapter) and the adapter's upstream source; a failed conversion is
+    // surfaced as an Unknown verdict rather than aborting the whole report.
+    let entry =
+        match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
+            Ok(entry) => entry,
+            Err(err) => {
+                return vec![(
+                    STEP_ADAPTER.to_owned(),
+                    AgentVersionStatus::Unknown {
+                        reason: format!("invalid [agent.adapter_override]: {err}"),
+                    },
+                )];
+            }
+        };
+    let entry = entry.as_ref();
     let expected_steps = expected_agent_check_steps(entry);
     let mut out = Vec::with_capacity(expected_steps.len());
     for step in expected_steps {

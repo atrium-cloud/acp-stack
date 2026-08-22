@@ -536,12 +536,25 @@ pub(crate) fn populate_agent_adapter_from_registry(
 }
 
 fn populate_agent_adapter(agent: &mut AgentConfig, registry: &RegistryCatalog) {
-    if let Some(entry) = registry.lookup(&agent.id)
-        && matches!(
-            entry.kind,
-            crate::runtime::install::agent_registry::RegistryKind::Adapter
-        )
-        && let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter)
+    let Some(entry) = registry.lookup(&agent.id) else {
+        return;
+    };
+    // An operator `[agent.adapter_override]` turns the effective entry
+    // adapter-kind, so overridden native agents surface adapter metadata too.
+    // Population is documented as non-fatal; an invalid override is logged and
+    // leaves the metadata empty rather than failing AppState construction.
+    let entry =
+        match crate::runtime::install::agent_registry::effective_registry_entry(entry, agent) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(agent = %agent.id, %error, "skipping adapter metadata population");
+                return;
+            }
+        };
+    if matches!(
+        entry.kind,
+        crate::runtime::install::agent_registry::RegistryKind::Adapter
+    ) && let (Some(harness), Some(adapter)) = (&entry.harness, &entry.adapter)
     {
         agent.adapter = Some(crate::config::AgentAdapterConfig {
             id: adapter.id.clone(),
@@ -919,6 +932,47 @@ creates = "private-opencode"
         assert_eq!(
             adapter.source_url.as_deref(),
             Some("https://github.com/example/opencode-acp")
+        );
+    }
+
+    #[test]
+    fn adapter_metadata_is_populated_from_adapter_override() {
+        let mut config = crate::config::load_config_from_str(include_str!(
+            "../../tests/fixtures/valid-opencode-stack.toml"
+        ))
+        .expect("fixture parses");
+        config.agent.id = "goose".to_owned();
+        config.agent.command = "custom-acp".to_owned();
+        config.agent.install = None;
+        config.agent.adapter_override = Some(crate::config::AgentAdapterOverrideConfig {
+            command: "custom-acp".to_owned(),
+            args: Vec::new(),
+            github: Some("example/custom-acp".to_owned()),
+            install: crate::config::AgentAdapterOverrideInstall {
+                shell: None,
+                npm: Some(crate::config::AgentAdapterOverrideNpmInstall {
+                    package: "custom-acp".to_owned(),
+                    creates: "custom-acp".to_owned(),
+                }),
+                github: None,
+            },
+            update: Default::default(),
+        });
+        // The array mirror carries the agent block populate reads.
+        if let Some(primary) = config.array.primary_target_mut() {
+            primary.agent = config.agent.clone();
+        }
+        let registry = crate::runtime::install::agent_registry::RegistryCatalog::load_embedded()
+            .expect("registry loads");
+
+        populate_agent_adapter_from_registry(&mut config, &registry);
+
+        let adapter = config.agent.adapter.expect("adapter metadata populated");
+        assert_eq!(adapter.id, "custom-acp");
+        assert_eq!(adapter.upstream_agent, "goose");
+        assert_eq!(
+            adapter.source_url.as_deref(),
+            Some("https://github.com/example/custom-acp")
         );
     }
 }

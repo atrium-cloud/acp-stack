@@ -774,3 +774,207 @@ fn rejects_shell_agent_install_without_shell() {
         "{error}"
     );
 }
+
+const ADAPTER_OVERRIDE_INSTALL_BLOCK: &str = r#"[agent.install]
+type = "shell"
+shell = "curl -fsSL https://opencode.ai/install | bash"
+creates = "opencode"
+"#;
+
+const ADAPTER_OVERRIDE_NPM_BLOCK: &str = r#"[agent.adapter_override]
+command = "custom-acp"
+args = ["--verbose"]
+github = "example/custom-acp"
+
+[agent.adapter_override.install.npm]
+package = "custom-acp"
+creates = "custom-acp"
+"#;
+
+fn config_with_adapter_override(block: &str) -> String {
+    // Matches ADAPTER_OVERRIDE_NPM_BLOCK's command/args; blocks without args
+    // go through config_with_adapter_override_and_launch.
+    config_with_adapter_override_and_launch(block, "custom-acp", "[\"--verbose\"]")
+}
+
+fn config_with_adapter_override_and_launch(
+    block: &str,
+    launch_command: &str,
+    launch_args: &str,
+) -> String {
+    // The fixture carries an [agent.install] escape hatch, which is mutually
+    // exclusive with a designated adapter; swap it for the override block.
+    // The launch command doubles as the adapter identity, so [agent]
+    // command/args must point at the adapter too.
+    VALID_CONFIG
+        .replace(ADAPTER_OVERRIDE_INSTALL_BLOCK, block)
+        .replace(
+            "command = \"opencode\"\nargs = [\"acp\"]",
+            &format!("command = \"{launch_command}\"\nargs = {launch_args}"),
+        )
+}
+
+#[test]
+fn adapter_override_round_trips_through_canonical_toml() {
+    let config = load_config_from_str(&config_with_adapter_override(ADAPTER_OVERRIDE_NPM_BLOCK))
+        .expect("adapter override config parses");
+    let override_config = config
+        .agent
+        .adapter_override
+        .as_ref()
+        .expect("override present");
+    assert_eq!(override_config.command, "custom-acp");
+    assert_eq!(override_config.args, ["--verbose"]);
+
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical parses");
+    assert_eq!(
+        reparsed.agent.adapter_override,
+        config.agent.adapter_override
+    );
+}
+
+#[test]
+fn adapter_override_github_variant_round_trips() {
+    let block = r#"[agent.adapter_override]
+command = "custom-acp"
+github = "https://github.com/example/custom-acp"
+
+[agent.adapter_override.install.github]
+asset_pattern = "custom-acp-linux-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "custom-acp"
+
+[agent.adapter_override.install.github.arch]
+x86_64 = "x86_64"
+aarch64 = "aarch64"
+"#;
+    let config = load_config_from_str(&config_with_adapter_override_and_launch(
+        block,
+        "custom-acp",
+        "[]",
+    ))
+    .expect("github override parses");
+    let canonical = config.to_canonical_toml().expect("canonical export");
+    let reparsed = load_config_from_str(&canonical).expect("canonical parses");
+    assert_eq!(
+        reparsed.agent.adapter_override,
+        config.agent.adapter_override
+    );
+}
+
+#[test]
+fn adapter_override_rejects_combination_with_agent_install() {
+    let config = format!(
+        "{}\n\n{ADAPTER_OVERRIDE_NPM_BLOCK}",
+        VALID_CONFIG.trim_end()
+    );
+    let error = load_config_from_str(&config).expect_err("install + override must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot be combined with [agent.install]"),
+        "{error}"
+    );
+}
+
+#[test]
+fn adapter_override_requires_an_install_path() {
+    let block = r#"[agent.adapter_override]
+command = "custom-acp"
+
+[agent.adapter_override.install]
+"#;
+    let error = load_config_from_str(&config_with_adapter_override(block))
+        .expect_err("empty install set must be rejected");
+    assert!(
+        error.to_string().contains("agent.adapter_override.install"),
+        "{error}"
+    );
+}
+
+#[test]
+fn adapter_override_rejects_whitespace_command() {
+    let block =
+        ADAPTER_OVERRIDE_NPM_BLOCK.replace("command = \"custom-acp\"", "command = \"custom acp\"");
+    let error = load_config_from_str(&config_with_adapter_override(&block))
+        .expect_err("command with whitespace must be rejected");
+    assert!(error.to_string().contains("single command name"), "{error}");
+}
+
+#[test]
+fn adapter_override_github_install_requires_repo() {
+    let block = r#"[agent.adapter_override]
+command = "custom-acp"
+
+[agent.adapter_override.install.github]
+asset_pattern = "custom-acp-linux.tar.gz"
+archive = "tar.gz"
+binary_name = "custom-acp"
+"#;
+    let error = load_config_from_str(&config_with_adapter_override(block))
+        .expect_err("github install without repo must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("requires agent.adapter_override.github"),
+        "{error}"
+    );
+}
+
+#[test]
+fn adapter_override_shell_rerun_requires_shell_install() {
+    let block = r#"[agent.adapter_override]
+command = "custom-acp"
+
+[agent.adapter_override.install.npm]
+package = "custom-acp"
+creates = "custom-acp"
+
+[agent.adapter_override.update]
+shell_rerun = true
+"#;
+    let error = load_config_from_str(&config_with_adapter_override(block))
+        .expect_err("shell_rerun without shell install must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("requires agent.adapter_override.install.shell"),
+        "{error}"
+    );
+}
+
+#[test]
+fn adapter_override_rejects_launch_command_mismatch() {
+    // [agent] command/args stay on the harness while the override points at
+    // the adapter: the managed lanes would track the adapter but the
+    // supervisor would launch the bare harness, so this is a hard error.
+    let error = load_config_from_str(&config_with_adapter_override_and_launch(
+        ADAPTER_OVERRIDE_NPM_BLOCK,
+        "opencode",
+        "[\"acp\"]",
+    ))
+    .expect_err("launch command diverging from the override must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("must match agent.adapter_override.command/args"),
+        "{error}"
+    );
+}
+
+#[test]
+fn adapter_override_rejects_launch_args_mismatch() {
+    let error = load_config_from_str(&config_with_adapter_override_and_launch(
+        ADAPTER_OVERRIDE_NPM_BLOCK,
+        "custom-acp",
+        "[]",
+    ))
+    .expect_err("launch args diverging from the override must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("must match agent.adapter_override.command/args"),
+        "{error}"
+    );
+}

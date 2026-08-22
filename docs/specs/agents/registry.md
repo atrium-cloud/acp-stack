@@ -25,6 +25,8 @@ The registry carries no MCP or other ACP capability declarations. Those come fro
 
 Install metadata may describe shell, npm, or GitHub Release sources. Native agents have one install step. Adapter-backed agents have a harness step and an adapter step unless `[agents.harness.install] provided_by = "adapter"` declares that the adapter package supplies the harness.
 
+An operator config's `[agent.adapter_override]` (see [config.md](../config.md)) rewrites the effective entry at resolution time: kind becomes adapter and the adapter spec comes from the override, while everything else stays as the catalog declares it.
+
 Shell install paths declare `required_tools` for external commands they invoke. Npm install paths require `npm`. GitHub Release install paths use the runtime downloader and do not require host fetch tools. The installer preflights declared paths and uses a fallback path when one is available.
 
 One budget covers a shell install path's whole run — fetch, upstream installer, and any follow-up work. Shell install paths may declare `timeout_secs` to override the 600s default for recipes that cannot fit it, such as one whose upstream installer provisions a language toolchain; the field must be positive, and omitting it keeps the default. Npm and GitHub Release paths always use the default.

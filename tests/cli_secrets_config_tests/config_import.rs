@@ -330,6 +330,92 @@ fn init_from_file_imports_config_and_continues() {
     assert!(written.contains("127.0.0.1:7792"));
 }
 
+const ADAPTER_OVERRIDE_GITHUB_BLOCK: &str = r#"
+[agent.adapter_override]
+command = "placebo-acp"
+github = "example/placebo-acp"
+
+[agent.adapter_override.install.github]
+asset_pattern = "placebo-acp-linux-{arch}.tar.gz"
+archive = "tar.gz"
+binary_name = "placebo-acp"
+
+[agent.adapter_override.install.github.arch]
+x86_64 = "x86_64"
+aarch64 = "aarch64"
+"#;
+
+fn placebo_config_with_adapter_override() -> String {
+    // The launch command doubles as the adapter identity, so [agent]
+    // command/args must match the override block (which declares no args).
+    let base = VALID_PLACEBO_CONFIG
+        .replace(r#"command = "placebo-agent""#, r#"command = "placebo-acp""#)
+        .replace(r#"args = ["acp"]"#, r#"args = []"#);
+    format!("{}\n{ADAPTER_OVERRIDE_GITHUB_BLOCK}", base.trim_end())
+}
+
+#[test]
+fn config_import_preserves_adapter_override_block() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let (_, admin_key) = run_init_with_home(tempdir.path());
+    let import_path = tempdir.path().join("override.toml");
+    fs::write(&import_path, placebo_config_with_adapter_override()).expect("write import");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "config",
+            "import",
+            import_path.to_str().unwrap(),
+            "--force",
+            "--admin-key",
+            admin_key.as_str(),
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config readable");
+    let config = acp_stack::config::load_config_from_str(&written).expect("config parses");
+    let override_config = config
+        .agent
+        .adapter_override
+        .as_ref()
+        .expect("override preserved through import");
+    assert_eq!(override_config.command, "placebo-acp");
+    assert!(override_config.install.github.is_some());
+    assert_eq!(config.agent.command, "placebo-acp");
+}
+
+#[test]
+fn init_from_file_preserves_adapter_override_with_same_agent_flag() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let import_path = tempdir.path().join("override-import.toml");
+    fs::write(&import_path, placebo_config_with_adapter_override()).expect("write import");
+
+    acps_command()
+        .env("HOME", tempdir.path())
+        .args([
+            "dev",
+            "init",
+            "--from-file",
+            import_path.to_str().expect("path utf8"),
+            "--agent",
+            "placebo",
+            "--non-interactive",
+            "--skip-workspace-init",
+            "--skip-testflight",
+        ])
+        .assert()
+        .success();
+
+    let written = fs::read_to_string(tempdir.path().join(".config/acp-stack/acps-config.toml"))
+        .expect("config readable");
+    let config = acp_stack::config::load_config_from_str(&written).expect("config parses");
+    assert!(config.agent.adapter_override.is_some());
+    assert_eq!(config.agent.command, "placebo-acp");
+}
+
 #[test]
 fn init_from_toml_imports_config_and_continues() {
     let tempdir = tempfile::tempdir().expect("tempdir");
