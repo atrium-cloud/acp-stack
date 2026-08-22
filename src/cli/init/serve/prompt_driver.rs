@@ -121,6 +121,7 @@ pub(super) fn should_handle_hosted_prompt(request: &HostedPromptRequest) -> bool
         | HostedPromptKind::ApiKeyRef
         | HostedPromptKind::Model
         | HostedPromptKind::Mode
+        | HostedPromptKind::Effort
         | HostedPromptKind::TestflightConfirm
         | HostedPromptKind::ProviderApiKeyValue
         | HostedPromptKind::SecretRefValue

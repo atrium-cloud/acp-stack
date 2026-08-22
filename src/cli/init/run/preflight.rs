@@ -288,9 +288,9 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     let registry_applicability = |category, applicable, reason: &str| {
         applicability(category, applicable, ApplicabilitySource::Registry, reason)
     };
-    // A custom agent has no registry entry, so init drives none of the four
-    // harness-configuration lanes for it: provider, model, and mode go through
-    // the agent's own environment, and skills have no known install dir.
+    // A custom agent has no registry entry, so init drives none of the
+    // harness-configuration lanes for it: provider, model, mode, and effort go
+    // through the agent's own environment, and skills have no known install dir.
     let entry = registry.lookup(&config.agent.id);
     let custom_reason = "custom agents configure this outside acp-stack";
     signals.push(registry_applicability(
@@ -307,6 +307,11 @@ pub(in crate::cli::init) fn agent_settlement_signals(
         InitCategory::Mode,
         entry.is_some_and(|entry| entry.set_mode),
         entry.map_or(custom_reason, |_| "agent does not take a mode"),
+    ));
+    signals.push(registry_applicability(
+        InitCategory::Effort,
+        entry.is_some_and(|entry| entry.set_effort),
+        entry.map_or(custom_reason, |_| "agent does not take a reasoning effort"),
     ));
     let skills_applicable = entry.is_some_and(|entry| {
         entry.supports_agent_skills && entry.agent_skills_install_dir.is_some()
@@ -348,7 +353,7 @@ pub(in crate::cli::init) fn agent_settlement_signals(
     // an `awaiting_input` prompt still outranks a settlement while it is live.
     // MCP is deliberately not settled here: only the probe knows whether the
     // installed agent can be given servers at all, so its lane settles there.
-    // These three rest on the disk rather than on anything this run did, so they
+    // These four rest on the disk rather than on anything this run did, so they
     // settle provisionally: an agent that dropped a lane since the config was
     // written must still be able to retract it from the live discovery pass.
     if let Some(provider) = config.agent.provider.as_ref() {
@@ -376,6 +381,12 @@ pub(in crate::cli::init) fn agent_settlement_signals(
         signals.push(InitStateSignal::CategoryProvisionallySettled {
             category: InitCategory::Mode,
             value: mode,
+        });
+    }
+    if let Some(effort) = config.agent.effort.clone() {
+        signals.push(InitStateSignal::CategoryProvisionallySettled {
+            category: InitCategory::Effort,
+            value: effort,
         });
     }
     signals

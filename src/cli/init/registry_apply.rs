@@ -346,6 +346,7 @@ pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAge
         config.agent.env = Vec::new();
         config.agent.mode = None;
         config.agent.model = None;
+        config.agent.effort = None;
         config.agent.provider = None;
         config.agent.providers = None;
         config.agent.auto_update = None;
@@ -364,10 +365,10 @@ pub(super) fn apply_custom_agent_to_config(config: &mut Config, spec: &CustomAge
 pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &RegistryEntry) {
     // When the operator re-confirms the SAME agent (e.g. `acps init
     // --agent X` again to refresh secrets or pick up registry changes
-    // for the launch command), preserve provider/model/mode/env so a
-    // bare re-run doesn't quietly drop a previously pinned model or
-    // mode. When switching to a DIFFERENT agent, clear the agent
-    // block so leftover provider/model/mode from the prior agent
+    // for the launch command), preserve provider/model/mode/effort/env
+    // so a bare re-run doesn't quietly drop a previously pinned model
+    // or mode. When switching to a DIFFERENT agent, clear the agent
+    // block so leftover provider/model/mode/effort from the prior agent
     // can't poison the new launch context.
     let agent_changed = config.agent.id != entry.id;
     config.agent.id = entry.id.clone();
@@ -377,6 +378,7 @@ pub(super) fn apply_registry_entry_to_config(config: &mut Config, entry: &Regist
         config.agent.env = default_agent_env_refs(&entry.id);
         config.agent.mode = None;
         config.agent.model = None;
+        config.agent.effort = None;
         config.agent.provider = None;
         config.agent.providers = None;
         config.agent.auto_update = default_supported_agent_auto_update();

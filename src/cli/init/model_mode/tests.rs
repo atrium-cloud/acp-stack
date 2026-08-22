@@ -39,6 +39,25 @@ fn response_with(models: &[&str], modes: &[&str]) -> NewSessionResponse {
     NewSessionResponse::new("test").config_options(options)
 }
 
+/// Effort rides codex-acp's real shape: id `reasoning_effort` under the
+/// reserved `thought_level` category, so the lane's category match (not the id
+/// fallback) is what these tests exercise.
+fn response_with_efforts(efforts: &[&str]) -> NewSessionResponse {
+    let option: SessionConfigOption = serde_json::from_value(serde_json::json!({
+        "id": "reasoning_effort",
+        "name": "Reasoning Effort",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": efforts[0],
+        "options": efforts
+            .iter()
+            .map(|value| serde_json::json!({ "value": value, "name": value }))
+            .collect::<Vec<_>>(),
+    }))
+    .expect("session config option fixture parses");
+    NewSessionResponse::new("test").config_options(vec![option])
+}
+
 fn amp_config() -> Config {
     let mut config = crate::config::load_config_from_str(include_str!(
         "../../../../tests/fixtures/valid-opencode-stack.toml"
@@ -117,6 +136,75 @@ fn a_mode_picker_with_nothing_advertised_skips_without_writing() {
 
     assert_eq!(action, ModelModeAction::Skipped);
     assert!(config.agent.mode.is_none());
+}
+
+#[test]
+fn explicit_effort_is_written_and_settled_at_the_write() {
+    let mut config = amp_config();
+    let args = parse_init_args(&["--effort", "high"]);
+    let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
+
+    let action = prompt::with_hosted_driver(driver.clone(), || {
+        configure_effort_for_init(
+            &args,
+            &mut config,
+            Path::new("acps-config.toml"),
+            &response_with_efforts(&["low", "medium", "high"]),
+            true,
+        )
+    })
+    .expect("advertised effort is accepted");
+
+    assert_eq!(action, ModelModeAction::Set);
+    assert_eq!(config.agent.effort.as_deref(), Some("high"));
+    assert_eq!(
+        driver.recorded(),
+        vec![InitStateSignal::CategorySettled {
+            category: InitCategory::Effort,
+            value: Some("high".to_owned()),
+        }],
+    );
+}
+
+#[test]
+fn explicit_effort_that_is_not_advertised_lists_the_advertised_efforts() {
+    let mut config = amp_config();
+    let args = parse_init_args(&["--effort", "bogus"]);
+
+    let error = configure_effort_for_init(
+        &args,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &response_with_efforts(&["low", "medium", "high"]),
+        true,
+    )
+    .expect_err("unadvertised effort must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("advertised efforts: [high, low, medium]"),
+        "error: {error}"
+    );
+    assert!(config.agent.effort.is_none());
+}
+
+#[test]
+fn an_effort_picker_with_nothing_advertised_skips_without_writing() {
+    let mut config = amp_config();
+    let args = parse_init_args(&[]);
+
+    let action = configure_effort_for_init(
+        &args,
+        &mut config,
+        Path::new("acps-config.toml"),
+        &response_with(&["openai/gpt-5.5"], &["build"]),
+        true,
+    )
+    .expect("an empty effort list is not a failure");
+
+    assert_eq!(action, ModelModeAction::Skipped);
+    assert!(config.agent.effort.is_none());
 }
 
 /// Answers every picker with its first option and keeps what was offered,
@@ -211,10 +299,15 @@ fn discovery_only_retracts_a_lane_the_registry_claimed() {
     let driver = std::sync::Arc::new(prompt::RecordingPromptDriver::default());
     prompt::with_hosted_driver(driver.clone(), || {
         // Registry says both lanes exist; the harness advertises neither.
-        emit_discovery_applicability_corrections(&response_with(&[], &[]), true, true);
+        emit_discovery_applicability_corrections(&response_with(&[], &[]), true, true, false);
         // Registry says neither; the harness advertises modes anyway. Init
         // will not write a mode for such an agent, so nothing is claimed.
-        emit_discovery_applicability_corrections(&response_with(&[], &["plan"]), false, false);
+        emit_discovery_applicability_corrections(
+            &response_with(&[], &["plan"]),
+            false,
+            false,
+            false,
+        );
     });
 
     let recorded = driver.recorded();

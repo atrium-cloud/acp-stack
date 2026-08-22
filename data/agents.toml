@@ -250,6 +250,7 @@ allow_custom_provider = true
 set_provider_base_url = true
 allow_custom_model = true
 set_mode = true # values come from the adapter's runtime advertisement (currently e.g. read-only, agent, agent-full-access)
+set_effort = true # advertised as `reasoning_effort` (thought_level) when the active model preset supports more than one effort
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
 stdio_framing = "json-lines"
@@ -300,6 +301,7 @@ allow_custom_provider = true
 set_provider_base_url = true
 allow_custom_model = true
 set_mode = true # default, acceptEdits, plan, bypassPermissions
+set_effort = true # advertised as `effort` (thought_level) when the active model supports effort levels
 supports_agent_skills = true
 agent_skills_install_dir = "~/.agents/skills"
 # Claude Code only discovers ~/.claude/skills, so managed skills are symlinked there.

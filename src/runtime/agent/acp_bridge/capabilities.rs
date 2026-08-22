@@ -46,15 +46,16 @@ pub struct PartitionedMcpServers {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct IgnoredFeature {
     /// What kind of configured feature was ignored: `mcp.server`,
-    /// `agent.mode`, or `agent.model`.
-    #[schemars(extend("enum" = ["mcp.server", "agent.mode", "agent.model"]))]
+    /// `agent.mode`, `agent.model`, or `agent.effort`.
+    #[schemars(extend("enum" = ["mcp.server", "agent.mode", "agent.model", "agent.effort"]))]
     pub feature: &'static str,
     /// The configured value that was dropped: the MCP server name, or the
-    /// mode/model value.
+    /// mode/model/effort value.
     pub value: String,
     /// The capability the agent would have had to advertise
-    /// (`mcpCapabilities.*`), or — for `agent.mode`/`agent.model` — the
-    /// `session/new` config option that would have had to carry the value.
+    /// (`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/
+    /// `agent.effort` — the `session/new` config option that would have had
+    /// to carry the value.
     pub capability: &'static str,
     pub reason: String,
 }
@@ -62,6 +63,7 @@ pub struct IgnoredFeature {
 pub const IGNORED_FEATURE_MCP_SERVER: &str = "mcp.server";
 pub const IGNORED_FEATURE_AGENT_MODE: &str = "agent.mode";
 pub const IGNORED_FEATURE_AGENT_MODEL: &str = "agent.model";
+pub const IGNORED_FEATURE_AGENT_EFFORT: &str = "agent.effort";
 
 impl AgentCapabilitiesDto {
     pub fn to_json(&self) -> Result<String> {

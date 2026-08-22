@@ -1162,7 +1162,7 @@
               "string",
               "null"
             ],
-            "description": "Escape-hatch agent declared inline, mirroring the `--custom-agent-*`\nflags: its prompts are never streamed, so the whole spec must arrive\nhere. Requires non-blank `custom_agent_command` and\n`custom_agent_install`; conflicts with `agent`, `provider`, `model`,\n`mode`, and `custom_provider: true`. Every other `custom_agent_*` field\nrequires it."
+            "description": "Escape-hatch agent declared inline, mirroring the `--custom-agent-*`\nflags: its prompts are never streamed, so the whole spec must arrive\nhere. Requires non-blank `custom_agent_command` and\n`custom_agent_install`; conflicts with `agent`, `provider`, `model`,\n`mode`, `effort`, and `custom_provider: true`. Every other\n`custom_agent_*` field requires it."
           },
           "custom_agent_name": {
             "type": [
@@ -1220,6 +1220,13 @@
               "null"
             ],
             "description": "Declared up front like `model`, so a hosted client that already knows\nthe session mode it wants skips the streamed picker entirely. Validated\nagainst the agent's advertised modes by the shared mode lane."
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Declared up front like `mode`. Validated against the agent's\nACP-advertised reasoning-effort values (the `thought_level` session\nconfig option) by the shared effort lane."
           },
           "custom_provider": {
             "type": [
@@ -4434,6 +4441,13 @@
             },
             "description": "ACP-advertised `mode` values. Empty when the agent does not\nexpose a mode option (or, on the catalog fallback path, when ACP\ndiscovery failed)."
           },
+          "efforts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "ACP-advertised reasoning-effort values (the `thought_level`\nsession config option). Empty when the agent does not expose an\neffort option (or, on the catalog fallback path, when ACP\ndiscovery failed)."
+          },
           "catalog_error": {
             "type": [
               "string",
@@ -4446,7 +4460,8 @@
           "agent_id",
           "source",
           "models",
-          "modes"
+          "modes",
+          "efforts"
         ]
       },
       "NativeConfigInspection": {
@@ -5556,20 +5571,21 @@
         "properties": {
           "feature": {
             "type": "string",
-            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, or `agent.model`.",
+            "description": "What kind of configured feature was ignored: `mcp.server`,\n`agent.mode`, `agent.model`, or `agent.effort`.",
             "enum": [
               "mcp.server",
               "agent.mode",
-              "agent.model"
+              "agent.model",
+              "agent.effort"
             ]
           },
           "value": {
             "type": "string",
-            "description": "The configured value that was dropped: the MCP server name, or the\nmode/model value."
+            "description": "The configured value that was dropped: the MCP server name, or the\nmode/model/effort value."
           },
           "capability": {
             "type": "string",
-            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or — for `agent.mode`/`agent.model` — the\n`session/new` config option that would have had to carry the value."
+            "description": "The capability the agent would have had to advertise\n(`mcpCapabilities.*`), or — for `agent.mode`/`agent.model`/\n`agent.effort` — the `session/new` config option that would have had\nto carry the value."
           },
           "reason": {
             "type": "string"
@@ -7554,6 +7570,13 @@
               "string",
               "null"
             ]
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ACP-advertised reasoning-effort value (the agent's `thought_level`\nsession config option), applied on session creation like `mode`."
           },
           "harness_version": {
             "type": [

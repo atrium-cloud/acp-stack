@@ -43,6 +43,7 @@ pub(super) enum HostedPromptKind {
     ApiKeyRef,
     Model,
     Mode,
+    Effort,
     NativeConfigReview,
     TestflightConfirm,
     ProviderApiKeyValue,
@@ -109,6 +110,7 @@ impl HostedPromptKind {
             HostedPromptKind::ApiKeyRef => "api_key_ref",
             HostedPromptKind::Model => "model",
             HostedPromptKind::Mode => "mode",
+            HostedPromptKind::Effort => "effort",
             HostedPromptKind::NativeConfigReview => "native_config_review",
             HostedPromptKind::TestflightConfirm => "testflight_confirm",
             HostedPromptKind::ProviderApiKeyValue => "provider_api_key_value",
@@ -185,6 +187,7 @@ impl HostedPromptKind {
             | HostedPromptKind::ProviderApiKeyValue => Some(InitCategory::Provider),
             HostedPromptKind::Model => Some(InitCategory::Model),
             HostedPromptKind::Mode => Some(InitCategory::Mode),
+            HostedPromptKind::Effort => Some(InitCategory::Effort),
             HostedPromptKind::NativeConfigReview => Some(InitCategory::NativeConfig),
             HostedPromptKind::McpAdd
             | HostedPromptKind::McpTransport
@@ -254,6 +257,7 @@ pub(super) const ALL_HOSTED_PROMPT_KINDS: &[HostedPromptKind] = &[
     HostedPromptKind::ApiKeyRef,
     HostedPromptKind::Model,
     HostedPromptKind::Mode,
+    HostedPromptKind::Effort,
     HostedPromptKind::NativeConfigReview,
     HostedPromptKind::TestflightConfirm,
     HostedPromptKind::ProviderApiKeyValue,
@@ -913,6 +917,7 @@ mod tests {
             ),
             (HostedPromptKind::Model, Some(InitCategory::Model)),
             (HostedPromptKind::Mode, Some(InitCategory::Mode)),
+            (HostedPromptKind::Effort, Some(InitCategory::Effort)),
             (
                 HostedPromptKind::NativeConfigReview,
                 Some(InitCategory::NativeConfig),
@@ -945,6 +950,7 @@ mod tests {
                     | HostedPromptKind::ApiKeyRef
                     | HostedPromptKind::Model
                     | HostedPromptKind::Mode
+                    | HostedPromptKind::Effort
                     | HostedPromptKind::NativeConfigReview
                     | HostedPromptKind::TestflightConfirm
                     | HostedPromptKind::ProviderApiKeyValue

@@ -237,6 +237,9 @@ pub struct AgentSetArgs {
     /// Agent session mode for agents that expose mode as an ACP config option.
     #[arg(long)]
     pub(super) mode: Option<String>,
+    /// Reasoning effort for agents that expose it as an ACP config option.
+    #[arg(long)]
+    pub(super) effort: Option<String>,
     /// Secret ref for a custom provider.
     #[arg(long)]
     pub(super) api_key_ref: Option<String>,

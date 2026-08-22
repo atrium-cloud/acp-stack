@@ -666,6 +666,7 @@ fn agent_config(id: &str, harness_version: Option<&str>) -> crate::config::Agent
         restart: "never".to_owned(),
         mode: None,
         model: None,
+        effort: None,
         harness_version: harness_version.map(str::to_owned),
         adapter: None,
         provider: None,

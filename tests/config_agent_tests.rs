@@ -602,6 +602,17 @@ fn rejects_blank_agent_model() {
 }
 
 #[test]
+fn rejects_blank_agent_effort() {
+    let error = load_config_from_str(&VALID_CONFIG.replace(
+        r#"restart = "on-crash""#,
+        "restart = \"on-crash\"\neffort = \" \"",
+    ))
+    .expect_err("config should be invalid");
+
+    assert!(error.to_string().contains("agent.effort is required"));
+}
+
+#[test]
 fn rejects_root_model_when_provider_model_is_set() {
     let config = VALID_CONFIG.replace(
         r#"restart = "on-crash""#,

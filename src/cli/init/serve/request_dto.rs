@@ -31,8 +31,8 @@ pub(super) struct StartInitRequest {
     /// flags: its prompts are never streamed, so the whole spec must arrive
     /// here. Requires non-blank `custom_agent_command` and
     /// `custom_agent_install`; conflicts with `agent`, `provider`, `model`,
-    /// `mode`, and `custom_provider: true`. Every other `custom_agent_*` field
-    /// requires it.
+    /// `mode`, `effort`, and `custom_provider: true`. Every other
+    /// `custom_agent_*` field requires it.
     custom_agent_id: Option<String>,
     custom_agent_name: Option<String>,
     custom_agent_command: Option<String>,
@@ -48,6 +48,10 @@ pub(super) struct StartInitRequest {
     /// the session mode it wants skips the streamed picker entirely. Validated
     /// against the agent's advertised modes by the shared mode lane.
     mode: Option<String>,
+    /// Declared up front like `mode`. Validated against the agent's
+    /// ACP-advertised reasoning-effort values (the `thought_level` session
+    /// config option) by the shared effort lane.
+    effort: Option<String>,
     /// Requires `provider`. Gates the custom-provider fields below
     /// (`provider_name`, `base_url`, `provider_api`, `model_name`, `context`,
     /// `output_max_tokens`), each of which requires `custom_provider: true`.
@@ -293,11 +297,12 @@ impl StartInitRequest {
         // registry-driven harness knob is meaningless for it. Booleans are
         // judged on their effective value: an explicit `false` declares
         // nothing and must not collide.
-        let conflicts: [(&'static str, bool); 5] = [
+        let conflicts: [(&'static str, bool); 6] = [
             ("agent", self.agent.is_some()),
             ("provider", self.provider.is_some()),
             ("model", self.model.is_some()),
             ("mode", self.mode.is_some()),
+            ("effort", self.effort.is_some()),
             ("custom_provider", self.custom_provider.unwrap_or(false)),
         ];
         if let Some((field, _)) = conflicts.into_iter().find(|(_, present)| *present) {
@@ -459,6 +464,7 @@ impl StartInitRequest {
         args.api_key_ref = self.api_key_ref;
         args.model = self.model;
         args.mode = self.mode;
+        args.effort = self.effort;
         args.custom_provider = custom_provider;
         args.provider_name = self.provider_name;
         args.base_url = self.base_url;

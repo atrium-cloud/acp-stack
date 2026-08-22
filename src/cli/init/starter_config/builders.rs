@@ -134,6 +134,7 @@ pub(crate) fn starter_config(args: &InitArgs) -> Result<String> {
         restart: STARTER_AGENT_RESTART.to_owned(),
         mode: None,
         model: None,
+        effort: None,
         harness_version: None,
         adapter: None,
         provider: None,

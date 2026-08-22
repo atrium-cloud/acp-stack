@@ -966,6 +966,16 @@ async fn apply_agent_test_session_config(
                 .await?;
         }
     }
+    if let Some(effort) = agent.effort.as_deref() {
+        let config_id = session_config_id_for_value(
+            response.config_options.as_deref(),
+            AgentSessionConfigCategory::Effort,
+            effort,
+        )?;
+        bridge
+            .set_session_config_option(response.session_id.clone(), &config_id, effort)
+            .await?;
+    }
     Ok(())
 }
 

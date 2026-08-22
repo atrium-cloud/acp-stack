@@ -368,6 +368,9 @@ fn replay_recorded_provider_args(
         if args.mode.is_none() {
             args.mode = recorded.mode.clone();
         }
+        if args.effort.is_none() {
+            args.effort = recorded.effort.clone();
+        }
         if args.provider.is_none() {
             args.provider = recorded.provider.clone();
         }

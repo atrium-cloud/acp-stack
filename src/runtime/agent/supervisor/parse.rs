@@ -374,6 +374,7 @@ mod tests {
             restart: "on-crash".to_owned(),
             mode: None,
             model: None,
+            effort: None,
             harness_version: None,
             adapter: None,
             provider: None,

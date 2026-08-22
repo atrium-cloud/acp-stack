@@ -179,6 +179,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!amp.allow_custom_provider);
     assert!(!amp.allow_custom_model);
     assert!(amp.set_mode);
+    assert!(!amp.set_effort);
     assert_eq!(
         amp.adapter.as_ref().map(|adapter| adapter.id.as_str()),
         Some("amp-acp")
@@ -198,6 +199,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(pi.allow_custom_provider);
     assert!(pi.allow_custom_model);
     assert!(!pi.set_mode);
+    assert!(!pi.set_effort);
     assert_eq!(pi.stdio_framing, RegistryStdioFraming::JsonLines);
     let goose = catalog.lookup("goose").expect("goose entry exists");
     assert_eq!(goose.kind, RegistryKind::Native);
@@ -207,6 +209,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(goose.allow_custom_provider);
     assert!(goose.allow_custom_model);
     assert!(!goose.set_mode);
+    assert!(!goose.set_effort);
     assert_eq!(goose.stdio_framing, RegistryStdioFraming::JsonLines);
     assert_eq!(goose.support_doc.as_deref(), Some("docs/agents/goose.md"));
     let codex = catalog.lookup("codex").expect("codex entry exists");
@@ -217,6 +220,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(codex.allow_custom_provider);
     assert!(codex.allow_custom_model);
     assert!(codex.set_mode);
+    assert!(codex.set_effort);
     assert_eq!(
         codex.adapter.as_ref().map(|adapter| adapter.id.as_str()),
         Some("codex-acp")
@@ -249,6 +253,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(claude_code.allow_custom_provider);
     assert!(claude_code.allow_custom_model);
     assert!(claude_code.set_mode);
+    assert!(claude_code.set_effort);
     assert!(claude_code.supports_agent_skills);
     assert_eq!(
         claude_code.agent_skills_install_dir.as_deref(),
@@ -306,6 +311,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(kimi.allow_custom_provider);
     assert!(kimi.allow_custom_model);
     assert!(kimi.set_mode);
+    assert!(!kimi.set_effort);
     assert!(kimi.supports_agent_skills);
     assert_eq!(
         kimi.agent_skills_install_dir.as_deref(),
@@ -341,6 +347,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(hermes.allow_custom_provider);
     assert!(hermes.allow_custom_model);
     assert!(!hermes.set_mode);
+    assert!(!hermes.set_effort);
     assert!(hermes.supports_agent_skills);
     assert_eq!(
         hermes.agent_skills_install_dir.as_deref(),
@@ -383,6 +390,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!kilo.allow_custom_provider);
     assert!(!kilo.allow_custom_model);
     assert!(kilo.set_mode);
+    assert!(!kilo.set_effort);
     assert!(kilo.supports_agent_skills);
     assert_eq!(
         kilo.agent_skills_install_dir.as_deref(),
@@ -412,6 +420,7 @@ fn embedded_registry_contains_only_curated_examples() {
     assert!(!antigravity.allow_custom_provider);
     assert!(!antigravity.allow_custom_model);
     assert!(antigravity.set_mode);
+    assert!(!antigravity.set_effort);
     assert!(antigravity.supports_agent_skills);
     assert_eq!(
         antigravity.agent_skills_install_dir.as_deref(),

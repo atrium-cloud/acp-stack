@@ -181,6 +181,7 @@ fn apply_switch_registry_entry(config: &mut Config, entry: &RegistryEntry) {
     config.agent.env = default_agent_env_refs(&entry.id);
     config.agent.mode = None;
     config.agent.model = None;
+    config.agent.effort = None;
     config.agent.provider = None;
     config.agent.providers = None;
     config.agent.subagent = None;

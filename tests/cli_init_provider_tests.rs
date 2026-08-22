@@ -9,6 +9,8 @@ mod support;
 mod agent_specific;
 #[path = "cli_init_provider_tests/custom_provider.rs"]
 mod custom_provider;
+#[path = "cli_init_provider_tests/efforts.rs"]
+mod efforts;
 #[path = "cli_init_provider_tests/model_flag.rs"]
 mod model_flag;
 #[path = "cli_init_provider_tests/modes.rs"]

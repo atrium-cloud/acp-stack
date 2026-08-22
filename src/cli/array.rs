@@ -72,7 +72,7 @@ pub enum ArrayCommand {
     Off,
     /// Add a configured target from the agent registry.
     Add(ArrayAddArgs),
-    /// Configure provider, model, mode, or API-key ref for a target.
+    /// Configure provider, model, mode, effort, or API-key ref for a target.
     Set(Box<ArraySetArgs>),
     /// Manage mapped providers and target credential selection.
     Provider(ArrayProviderArgs),
@@ -127,6 +127,9 @@ pub struct ArraySetArgs {
     /// Agent session mode for agents that expose mode as an ACP config option.
     #[arg(long)]
     mode: Option<String>,
+    /// Reasoning effort for agents that expose it as an ACP config option.
+    #[arg(long)]
+    effort: Option<String>,
     /// Secret ref for a custom provider.
     #[arg(long)]
     api_key_ref: Option<String>,
@@ -488,6 +491,7 @@ fn agent_config_from_registry_entry(config: &Config, entry: &RegistryEntry) -> R
     agent.restart = "on-crash".to_owned();
     agent.mode = None;
     agent.model = None;
+    agent.effort = None;
     agent.harness_version = None;
     agent.adapter = adapter_from_registry_entry(entry);
     agent.provider = None;
@@ -524,13 +528,19 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     if !args.custom_provider {
         reject_custom_provider_args(&args)?;
     }
-    // Reject the --mode + --custom-provider conflict up front, alongside the
-    // other argument-shape checks, so an invalid invocation fails before any
-    // provider validation or in-memory mutation runs.
+    // Reject the --mode/--effort + --custom-provider conflicts up front,
+    // alongside the other argument-shape checks, so an invalid invocation
+    // fails before any provider validation or in-memory mutation runs.
     if args.custom_provider && args.mode.is_some() {
         return Err(StackError::InvalidParam {
             field: "mode",
             reason: "--mode cannot be combined with --custom-provider".to_owned(),
+        });
+    }
+    if args.custom_provider && args.effort.is_some() {
+        return Err(StackError::InvalidParam {
+            field: "effort",
+            reason: "--effort cannot be combined with --custom-provider".to_owned(),
         });
     }
     if !args.custom_provider && args.provider.is_some() {
@@ -550,12 +560,13 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
     if args.provider.is_none()
         && args.model.is_none()
         && args.mode.is_none()
+        && args.effort.is_none()
         && args.api_key_ref.is_none()
         && !args.custom_provider
     {
         return Err(StackError::InvalidParam {
             field: "array set",
-            reason: "pass --model, --mode, or --custom-provider".to_owned(),
+            reason: "pass --model, --mode, --effort, or --custom-provider".to_owned(),
         });
     }
     let home = home_dir()?;
@@ -597,6 +608,25 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
             mode,
         )?;
         target_config.agent.mode = Some(mode.to_owned());
+    }
+
+    if let Some(effort) = args.effort.as_deref() {
+        if !entry.set_effort {
+            return Err(StackError::AgentConfigProvision {
+                path: config_path.clone(),
+                reason: format!(
+                    "{} does not support reasoning-effort configuration through `acps array set`",
+                    entry.name
+                ),
+            });
+        }
+        validate_agent_session_config_value(
+            &home,
+            &target_config,
+            AgentSessionConfigCategory::Effort,
+            effort,
+        )?;
+        target_config.agent.effort = Some(effort.to_owned());
     }
 
     if !args.custom_provider
@@ -651,6 +681,7 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
             "provider": target.agent.provider.as_ref().map(|provider| provider.id.clone()),
             "model": target.agent.provider.as_ref().and_then(|provider| provider.model.clone()).or_else(|| target.agent.model.clone()),
             "mode": target.agent.mode,
+            "effort": target.agent.effort,
             "provisioned": provisioned.iter().map(|item| {
                 serde_json::json!({
                     "label": item.label,
@@ -675,6 +706,9 @@ fn run_array_set(args: ArraySetArgs, output: OutputFormat) -> Result<()> {
         }
         if let Some(mode) = target.agent.mode.as_deref() {
             println!("mode: {mode}");
+        }
+        if let Some(effort) = target.agent.effort.as_deref() {
+            println!("effort: {effort}");
         }
         for item in provisioned {
             println!("{}: {}", item.label, item.path.display());

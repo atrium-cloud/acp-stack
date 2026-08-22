@@ -109,7 +109,7 @@ impl AgentSupervisor {
     /// `sessions` row, and returns a `SessionAttachOutcome`: the record, the
     /// names of the MCP servers actually sent to the agent (after transport
     /// partitioning, so the caller's `mcp.session_attached` event cannot
-    /// claim skipped servers), and an `ignored` list of configured mode/model
+    /// claim skipped servers), and an `ignored` list of configured mode/model/effort
     /// values the agent did not advertise — those sessions proceed on the
     /// agent's default. `cwd` defaults to `workspace.root` when the client
     /// omits it.
@@ -179,6 +179,26 @@ impl AgentSupervisor {
                 .await?;
             }
         }
+        // Applied after the model: adapters advertise effort levels for the
+        // currently selected model, so a configured effort is judged against
+        // the `session/new` snapshot and lands in `ignored` when the agent
+        // (or its active model) no longer advertises it.
+        if let Some(effort) = agent.effort.as_deref() {
+            provision_session_option(
+                &bridge,
+                &response.session_id,
+                session_config_id_for_value(
+                    response.config_options.as_deref(),
+                    AgentSessionConfigCategory::Effort,
+                    effort,
+                ),
+                effort,
+                IGNORED_FEATURE_AGENT_EFFORT,
+                "sessionConfig.effort",
+                &mut ignored,
+            )
+            .await?;
+        }
 
         // Persist after the agent confirms. If we inserted first and the
         // agent rejected, we'd leave a phantom row. The agent's `session_id`
@@ -217,7 +237,7 @@ impl AgentSupervisor {
 
     /// `POST /v1/sessions/{id}/load`. Capability-gated by the bridge. Returns
     /// the session record plus the MCP server names actually sent to the
-    /// agent. `ignored` is always empty: mode/model provisioning happens only
+    /// agent. `ignored` is always empty: mode/model/effort provisioning happens only
     /// at create.
     pub async fn load_session(
         &self,
@@ -240,7 +260,7 @@ impl AgentSupervisor {
 
     /// `POST /v1/sessions/{id}/resume`. Returns the session record plus the
     /// MCP server names actually sent to the agent. `ignored` is always
-    /// empty: mode/model provisioning happens only at create.
+    /// empty: mode/model/effort provisioning happens only at create.
     pub async fn resume_session(
         &self,
         session_id: &str,
@@ -331,7 +351,7 @@ impl AgentSupervisor {
 
     /// `POST /v1/sessions/{id}/fork`. Returns the child session record plus
     /// the MCP server names actually sent to the agent. `ignored` is always
-    /// empty: mode/model provisioning happens only at create.
+    /// empty: mode/model/effort provisioning happens only at create.
     pub async fn fork_session(
         &self,
         parent_session_id: &str,
@@ -538,7 +558,7 @@ async fn fetch_open_session(
     Ok(record)
 }
 
-/// Apply one resolved session config option (mode or model) to a freshly
+/// Apply one resolved session config option (mode, model, or effort) to a freshly
 /// created session.
 ///
 /// Mode/model provisioning must not make sessions uncreatable when the agent

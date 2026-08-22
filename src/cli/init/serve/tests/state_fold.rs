@@ -29,6 +29,7 @@ const CATEGORY_ORDER: [InitCategory; CATEGORY_COUNT] = [
     InitCategory::Provider,
     InitCategory::Model,
     InitCategory::Mode,
+    InitCategory::Effort,
     InitCategory::Workspace,
     InitCategory::NativeConfig,
     InitCategory::Mcp,
@@ -36,7 +37,7 @@ const CATEGORY_ORDER: [InitCategory; CATEGORY_COUNT] = [
     InitCategory::Deps,
 ];
 
-const CATEGORY_COUNT: usize = 9;
+const CATEGORY_COUNT: usize = 10;
 
 const STATUS_NOT_APPLICABLE: &str = "not_applicable";
 const STATUS_FAILED: &str = "failed";
@@ -51,6 +52,7 @@ fn dependency(category: InitCategory) -> Option<InitCategory> {
         InitCategory::Provider => Some(InitCategory::Agent),
         InitCategory::Model => Some(InitCategory::Provider),
         InitCategory::Mode => Some(InitCategory::Model),
+        InitCategory::Effort => Some(InitCategory::Model),
         InitCategory::Workspace => None,
         InitCategory::NativeConfig => None,
         InitCategory::Mcp => Some(InitCategory::Agent),
@@ -65,11 +67,12 @@ fn slot(category: InitCategory) -> usize {
         InitCategory::Provider => 1,
         InitCategory::Model => 2,
         InitCategory::Mode => 3,
-        InitCategory::Workspace => 4,
-        InitCategory::NativeConfig => 5,
-        InitCategory::Mcp => 6,
-        InitCategory::Skills => 7,
-        InitCategory::Deps => 8,
+        InitCategory::Effort => 4,
+        InitCategory::Workspace => 5,
+        InitCategory::NativeConfig => 6,
+        InitCategory::Mcp => 7,
+        InitCategory::Skills => 8,
+        InitCategory::Deps => 9,
     }
 }
 
