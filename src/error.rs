@@ -483,6 +483,12 @@ pub enum StackError {
         retry_command: &'static str,
     },
 
+    #[error("a dependency apply is already running (apply_run_id={apply_run_id})")]
+    DepsApplyInFlight { apply_run_id: String },
+
+    #[error("no dependency apply run matches `{apply_run_id}`")]
+    DepsApplyRunNotFound { apply_run_id: String },
+
     #[error("{name} is not currently supported. Please try a different agent.")]
     AgentUnsupported { name: String },
 

@@ -226,6 +226,13 @@ pub(crate) enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
+    /// Internal: detached dependency-apply worker spawned by
+    /// `acps init --deps-apply-async`. Not for direct use.
+    #[command(name = "__deps-apply-run", hide = true)]
+    DepsApplyRun {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
 }
 
 #[cfg(feature = "dev-tools")]

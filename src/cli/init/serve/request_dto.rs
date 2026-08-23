@@ -12,7 +12,7 @@ struct WireGuard {
 
 impl WireGuard {
     /// First violated row wins, so row order is the reporting precedence.
-    fn check(guards: [Self; 3]) -> Result<()> {
+    fn check<const N: usize>(guards: [Self; N]) -> Result<()> {
         match guards.into_iter().find(|guard| guard.violated) {
             Some(guard) => Err(StackError::InvalidParam {
                 field: guard.field,
@@ -98,6 +98,10 @@ pub(super) struct StartInitRequest {
     deps_apply: Option<bool>,
     /// Both-or-neither with `deps_apply`.
     deps_apply_yes: Option<bool>,
+    /// Requires `deps_apply`. Runs the confirmed install in a detached
+    /// background worker; the deps step settles as `background` and the run
+    /// is polled via `GET /v1/deps/apply/runs/{apply_run_id}`.
+    deps_apply_async: Option<bool>,
     standard_agent_work_deps: Option<bool>,
     browser_use: Option<bool>,
     /// Stack self-update policy, declared up-front rather than streamed,
@@ -351,6 +355,12 @@ impl StartInitRequest {
                 violated: self.deps_apply.unwrap_or(false) != self.deps_apply_yes.unwrap_or(false),
                 reason: "deps_apply and deps_apply_yes must be set together",
             },
+            WireGuard {
+                field: "deps_apply_async",
+                violated: self.deps_apply_async.unwrap_or(false)
+                    && !self.deps_apply.unwrap_or(false),
+                reason: "deps_apply_async requires deps_apply",
+            },
             // Mirror clap's `requires` on the CLI frequency flags: a frequency
             // with no policy would be silently dropped by the configure step,
             // so reject it at the boundary instead. Value validation
@@ -597,6 +607,7 @@ impl StartInitRequest {
             .collect();
         args.deps_apply = self.deps_apply.unwrap_or(false);
         args.deps_apply_yes = self.deps_apply_yes.unwrap_or(false);
+        args.deps_apply_async = self.deps_apply_async.unwrap_or(false);
         args.standard_agent_work_deps = self.standard_agent_work_deps.unwrap_or(false);
         args.browser_use_profile = self.browser_use.unwrap_or(false);
         args.stack_update = self.stack_update;

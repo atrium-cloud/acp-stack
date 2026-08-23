@@ -189,6 +189,7 @@ fn escalation_unavailable_still_refuses_system_scope() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::Unavailable { uid: 1001 },
+        None,
         |_, _, _| Ok(()),
     )
     .expect("apply");
@@ -249,6 +250,7 @@ fn not_needed_escalation_is_revalidated_against_euid_at_apply_time() {
         None,
         "/bin/sh",
         &PrivilegeEscalation::NotNeeded,
+        None,
         |_, _, _| Ok(()),
     )
     .expect("apply");
@@ -308,6 +310,7 @@ fn sudo_escalation_wraps_shell_invocation() {
             sudo_path: fake_sudo,
             uid: 1001,
         },
+        None,
         |_, _, _| Ok(()),
     )
     .expect("apply");
@@ -353,6 +356,7 @@ fn escalated_run_records_sudo_marker_in_stdout() {
             sudo_path: fake_sudo,
             uid: 1001,
         },
+        None,
         |_, _, _| Ok(()),
     )
     .expect("apply");
@@ -750,4 +754,233 @@ fn finish_failure_does_not_abort_apply() {
         .query_installer_runs_filtered(None, 10)
         .expect("history");
     assert_eq!(runs.len(), 1);
+}
+
+fn user_dep_entry(name: &str, shell: &str, creates: &str) -> DependencyEntry {
+    DependencyEntry {
+        name: name.into(),
+        required: true,
+        feature: None,
+        install: Some(DependencyInstallAction {
+            shell: shell.into(),
+            creates: Some(creates.into()),
+            scope: DependencyInstallScope::User,
+            timeout_secs: None,
+        }),
+    }
+}
+
+fn open_tracked_store(dir: &Path) -> StateStore {
+    let store = StateStore::open(dir.join("state.sqlite")).expect("state open");
+    store.migrate().expect("migrate");
+    store
+}
+
+#[test]
+fn tracked_apply_settles_succeeded_with_matching_run_and_action_ids() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let bin = tempdir.path().join("tracked-ok-marker");
+    let bin_str = bin.to_string_lossy().into_owned();
+    let config = config_with_dep(user_dep_entry(
+        "tracked-ok-marker",
+        &format!("printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}"),
+        &bin_str,
+    ));
+    let store = open_tracked_store(tempdir.path());
+    let report = apply_dependencies_tracked(
+        &config,
+        &store,
+        TrackedApplyRun::Claim {
+            origin: crate::state::DEPS_APPLY_ORIGIN_CLI,
+            init_run_id: None,
+        },
+        None,
+        "/bin/sh",
+        &PrivilegeEscalation::NotNeeded,
+        |_, _, _| Ok(()),
+    )
+    .expect("tracked apply");
+
+    let run = store
+        .lookup_deps_apply_run(&report.apply_run_id)
+        .expect("lookup")
+        .expect("run row must exist");
+    assert_eq!(run.status, crate::state::DEPS_APPLY_RUN_SUCCEEDED);
+    assert_eq!(run.installed, 1);
+    assert_eq!(run.completed, 1);
+    assert!(run.finished_at.is_some());
+    // Per-action audit rows share the run row's key.
+    let actions = store
+        .query_installer_runs_for_apply_run(DEPS_APPLY_AGENT_ID, DEPS_APPLY_STEP, &run.id)
+        .expect("actions");
+    assert_eq!(actions.len(), 1);
+}
+
+#[test]
+fn tracked_apply_settles_failed_and_privilege_blocked() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = open_tracked_store(tempdir.path());
+
+    let failing = config_with_dep(user_dep_entry(
+        "tracked-fail-marker",
+        "exit 7",
+        "acps-tracked-never-resolves",
+    ));
+    let report = apply_dependencies_tracked(
+        &failing,
+        &store,
+        TrackedApplyRun::Claim {
+            origin: crate::state::DEPS_APPLY_ORIGIN_CLI,
+            init_run_id: None,
+        },
+        None,
+        "/bin/sh",
+        &PrivilegeEscalation::NotNeeded,
+        |_, _, _| Ok(()),
+    )
+    .expect("apply itself returns a report");
+    let failed_run = store
+        .lookup_deps_apply_run(&report.apply_run_id)
+        .expect("lookup")
+        .expect("run row");
+    assert_eq!(failed_run.status, crate::state::DEPS_APPLY_RUN_FAILED);
+    assert_eq!(failed_run.failed, 1);
+    assert_eq!(failed_run.error_code.as_deref(), Some("deps.apply_failed"));
+
+    let blocked = config_with_dep(system_dep(
+        "tracked-priv-marker",
+        "exit 0",
+        "acps-tracked-priv-never-resolves",
+    ));
+    let report = apply_dependencies_tracked(
+        &blocked,
+        &store,
+        TrackedApplyRun::Claim {
+            origin: crate::state::DEPS_APPLY_ORIGIN_CLI,
+            init_run_id: None,
+        },
+        None,
+        "/bin/sh",
+        &PrivilegeEscalation::Unavailable { uid: 1001 },
+        |_, _, _| Ok(()),
+    )
+    .expect("apply");
+    let blocked_run = store
+        .lookup_deps_apply_run(&report.apply_run_id)
+        .expect("lookup")
+        .expect("run row");
+    assert_eq!(
+        blocked_run.status,
+        crate::state::DEPS_APPLY_RUN_PRIVILEGE_BLOCKED
+    );
+    assert_eq!(blocked_run.privilege_required, 1);
+    assert!(blocked_run.error_code.is_none());
+}
+
+#[test]
+fn tracked_apply_adopts_a_preclaimed_row() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let bin = tempdir.path().join("tracked-adopt-marker");
+    let bin_str = bin.to_string_lossy().into_owned();
+    let config = config_with_dep(user_dep_entry(
+        "tracked-adopt-marker",
+        &format!("printf '#!/bin/sh\\nexit 0\\n' > {bin_str} && chmod 755 {bin_str}"),
+        &bin_str,
+    ));
+    let store = open_tracked_store(tempdir.path());
+    // Parent-side claim, as the init async branch performs before spawning.
+    store
+        .claim_deps_apply_run(
+            crate::state::NewDepsApplyRun {
+                id: "dap_adopt",
+                origin: crate::state::DEPS_APPLY_ORIGIN_INIT_BACKGROUND,
+                init_run_id: Some("irun_adopt"),
+                feature: None,
+                pid: None,
+                boot_id: None,
+                total: 1,
+            },
+            &|_, _| true,
+        )
+        .expect("claim");
+
+    let report = apply_dependencies_tracked(
+        &config,
+        &store,
+        TrackedApplyRun::Adopt {
+            apply_run_id: "dap_adopt",
+        },
+        None,
+        "/bin/sh",
+        &PrivilegeEscalation::NotNeeded,
+        |_, _, _| Ok(()),
+    )
+    .expect("adopted apply");
+    assert_eq!(report.apply_run_id, "dap_adopt");
+    let run = store
+        .lookup_deps_apply_run("dap_adopt")
+        .expect("lookup")
+        .expect("run row");
+    assert_eq!(run.status, crate::state::DEPS_APPLY_RUN_SUCCEEDED);
+    assert_eq!(run.origin, crate::state::DEPS_APPLY_ORIGIN_INIT_BACKGROUND);
+    assert_eq!(run.init_run_id.as_deref(), Some("irun_adopt"));
+}
+
+#[test]
+fn tracked_apply_rejects_adopting_a_settled_row() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = open_tracked_store(tempdir.path());
+    let config = config_with_dep(user_dep_entry("never-runs", "exit 0", "never-resolves"));
+    let error = apply_dependencies_tracked(
+        &config,
+        &store,
+        TrackedApplyRun::Adopt {
+            apply_run_id: "dap_missing",
+        },
+        None,
+        "/bin/sh",
+        &PrivilegeEscalation::NotNeeded,
+        |_, _, _| Ok(()),
+    )
+    .expect_err("adopting a missing row must fail");
+    assert!(matches!(error, StackError::InvalidParam { .. }));
+}
+
+#[test]
+fn tracked_claim_is_rejected_while_another_apply_is_live() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = open_tracked_store(tempdir.path());
+    // A live claim stamped with this test process's own pid.
+    store
+        .claim_deps_apply_run(
+            crate::state::NewDepsApplyRun {
+                id: "dap_live",
+                origin: crate::state::DEPS_APPLY_ORIGIN_API,
+                init_run_id: None,
+                feature: None,
+                pid: Some(i64::from(std::process::id())),
+                boot_id: crate::runtime::process_runner::current_boot_id().as_deref(),
+                total: 1,
+            },
+            &|_, _| true,
+        )
+        .expect("claim");
+    let config = config_with_dep(user_dep_entry("never-runs", "exit 0", "never-resolves"));
+    let error = apply_dependencies_tracked(
+        &config,
+        &store,
+        TrackedApplyRun::Claim {
+            origin: crate::state::DEPS_APPLY_ORIGIN_CLI,
+            init_run_id: None,
+        },
+        None,
+        "/bin/sh",
+        &PrivilegeEscalation::NotNeeded,
+        |_, _, _| Ok(()),
+    )
+    .expect_err("claim while live must be rejected");
+    match error {
+        StackError::DepsApplyInFlight { apply_run_id } => assert_eq!(apply_run_id, "dap_live"),
+        other => panic!("expected DepsApplyInFlight, got {other:?}"),
+    }
 }

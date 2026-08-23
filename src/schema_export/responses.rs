@@ -45,6 +45,8 @@ pub(super) enum AcpsResponseTypes {
     ConfigExportResponse(crate::api::routes::config::ConfigExportResponse),
     ConfigValidateResponse(crate::api::routes::config::ConfigValidateResponse),
     DepsApplyResponse(crate::api::routes::deps::DepsApplyResponse),
+    DepsApplyRunDetailResponse(crate::api::routes::deps::DepsApplyRunDetailResponse),
+    DepsApplyRunsResponse(crate::api::routes::deps::DepsApplyRunsResponse),
     DepsReport(crate::runtime::dependencies::deps::DepsReport),
     DisconnectResponse(crate::api::routes::ws::DisconnectResponse),
     FileDeleteResponse(crate::api::routes::workspace::FileDeleteResponse),

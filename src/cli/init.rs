@@ -39,8 +39,8 @@ use crate::runtime::agent::native_config_import::{
     validate_native_config_selection,
 };
 use crate::runtime::dependencies::deps_apply::{
-    DepApplyOutcome, PrivilegeEscalation, apply_dependencies_with_escalation,
-    manual_privileged_command, pending_candidates, pending_system_candidates,
+    DepApplyOutcome, PrivilegeEscalation, TrackedApplyRun, apply_dependencies_tracked,
+    candidates_for, manual_privileged_command, pending_candidates, pending_system_candidates,
     probe_privilege_escalation,
 };
 use crate::runtime::init_runner::{StepDisposition, StepOutcome, record_step, step_kind};
@@ -50,8 +50,9 @@ use crate::runtime::install::skill_installer::SkillInstallReport;
 use crate::runtime::install::skill_registry::SkillCatalog;
 use crate::secrets::{SecretStore, age_key_path};
 use crate::state::{
-    INIT_RUN_FAILED, INIT_RUN_SUCCEEDED, INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING,
-    INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED, StateStore, default_state_path,
+    DEPS_APPLY_ORIGIN_INIT, DEPS_APPLY_ORIGIN_INIT_BACKGROUND, INIT_RUN_FAILED, INIT_RUN_SUCCEEDED,
+    INIT_STEP_FAILED, INIT_STEP_PENDING, INIT_STEP_RUNNING, INIT_STEP_SKIPPED, INIT_STEP_SUCCEEDED,
+    NewDepsApplyRun, StateStore, default_state_path,
 };
 
 use self::headless_snapshot::{

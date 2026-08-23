@@ -39,6 +39,7 @@ const MIGRATED_TABLES: &[(&str, i64)] = &[
     ("security_findings", 14),
     ("stack_update_runs", 19),
     ("auth_keys", 21),
+    ("deps_apply_runs", 25),
 ];
 
 const MANIFEST_TOML: &str = include_str!("../../migrations/manifest.toml");
@@ -257,6 +258,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         postgres_file: "024_terminal_status_spelling.postgres.sql",
         sqlite: include_str!("../../migrations/024_terminal_status_spelling.sqlite.sql"),
         postgres: include_str!("../../migrations/024_terminal_status_spelling.postgres.sql"),
+    },
+    Migration {
+        id: 25,
+        name: "deps_apply_runs",
+        sqlite_file: "025_deps_apply_runs.sqlite.sql",
+        postgres_file: "025_deps_apply_runs.postgres.sql",
+        sqlite: include_str!("../../migrations/025_deps_apply_runs.sqlite.sql"),
+        postgres: include_str!("../../migrations/025_deps_apply_runs.postgres.sql"),
     },
 ];
 

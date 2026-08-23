@@ -910,3 +910,72 @@ fn testflight_decisions_report_their_own_finalize_line() {
         Some("testflight: skipped (declined at prompt)")
     );
 }
+
+fn store_with_live_background_apply(init_run_id: &str) -> (tempfile::TempDir, StateStore) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(dir.path().join("state.sqlite")).expect("open");
+    store.migrate().expect("migrate");
+    store
+        .claim_deps_apply_run(
+            crate::state::NewDepsApplyRun {
+                id: "dap_live_bg",
+                origin: crate::state::DEPS_APPLY_ORIGIN_INIT_BACKGROUND,
+                init_run_id: Some(init_run_id),
+                feature: None,
+                pid: Some(i64::from(std::process::id())),
+                boot_id: crate::runtime::process_runner::current_boot_id().as_deref(),
+                total: 1,
+            },
+            &|_, _| true,
+        )
+        .expect("claim");
+    (dir, store)
+}
+
+#[test]
+fn background_deps_launch_adopts_only_this_runs_live_apply() {
+    // Resume case: the live background row belongs to this init run, so the
+    // launch adopts it instead of spawning a second worker.
+    let (_dir, store) = store_with_live_background_apply("irun_owner");
+    let config = config_for_agent("placebo");
+    let (outcome, apply_run_id) = launch_background_deps_apply(
+        &store,
+        &config,
+        "irun_owner",
+        &PrivilegeEscalation::NotNeeded,
+        InitOutputMode::Text,
+    )
+    .expect("owned live apply must be adopted");
+    assert_eq!(apply_run_id, "dap_live_bg");
+    assert!(outcome.background);
+    assert!(outcome.payload_json.contains("\"adopted\":true"));
+    // Still exactly one run row: nothing was claimed.
+    assert_eq!(
+        store.query_deps_apply_runs(10).expect("query").len(),
+        1,
+        "adoption must not claim a second run"
+    );
+}
+
+#[test]
+fn background_deps_launch_rejects_a_foreign_live_apply() {
+    // A live background apply owned by a DIFFERENT init run must not be
+    // adopted — recording this run's deps step against foreign work would
+    // silently skip its own declared deps. Fail fast, retryable.
+    let (_dir, store) = store_with_live_background_apply("irun_other");
+    let config = config_for_agent("placebo");
+    let error = launch_background_deps_apply(
+        &store,
+        &config,
+        "irun_this",
+        &PrivilegeEscalation::NotNeeded,
+        InitOutputMode::Text,
+    )
+    .expect_err("a foreign live apply must be rejected");
+    match error {
+        StackError::DepsApplyInFlight { apply_run_id } => {
+            assert_eq!(apply_run_id, "dap_live_bg");
+        }
+        other => panic!("expected DepsApplyInFlight, got {other:?}"),
+    }
+}

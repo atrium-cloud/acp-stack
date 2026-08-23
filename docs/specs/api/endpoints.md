@@ -52,7 +52,7 @@ Session-tier HTTP routes are also mounted on the local socket and serve only whi
         - `mcp_stdio`: array of `{ "name", "command", "args": [...], "env": [...] }`. Each `env` entry is a bare secret ref name exported into the server's environment, or a `VAR=template` entry whose template interpolates `${SECRET_REF}` (rules in [config.md](../config.md)).
         - `mcp_http`: array of `{ "name", "url", "headers": [{ "name", "value_ref"?, "value"? }] }`. Each header sets exactly one of `value_ref` (whole-value secret ref) or `value` (a `${SECRET_REF}`-interpolated template). URLs must be https, or http to a loopback host (a local relay endpoint).
         - `skills_source` + `skills`: explicit skill selection, same semantics as `--skills-source`/`--skills`; both must be declared together. `essential_skills`: boolean, conflicts with the explicit pair. An unsatisfiable skills declaration (e.g. the selected agent has no Agent Skills install directory) fails the init session.
-        - `deps` and `deps_system`: arrays of `{ "name", "shell" }` install records (user/system scope). `deps_apply` + `deps_apply_yes`: booleans, must be set together (the interactive apply confirmation is never streamed). When set, init runs the declared install actions; otherwise dependencies are declared in config but not installed. `standard_agent_work_deps` and `browser_use`: booleans enabling the standard dependency bundle and the browser-use profile.
+        - `deps` and `deps_system`: arrays of `{ "name", "shell" }` install records (user/system scope). `deps_apply` + `deps_apply_yes`: booleans, must be set together (the interactive apply confirmation is never streamed). When set, init runs the declared install actions; otherwise dependencies are declared in config but not installed. `deps_apply_async` requires `deps_apply` and makes the dependency step report disposition `background`. `standard_agent_work_deps` and `browser_use`: booleans enabling the standard dependency bundle and the browser-use profile.
         - `data_sources`: array of tagged records — `{ "type": "local", "path" }`, `{ "type": "https", "url", "expected_sha256"?, "max_download_bytes"?, "max_extracted_bytes"? }`, or `{ "type": "s3", "bucket", "region", "prefix"?, "access_key_ref", "secret_key_ref" }` — each with an optional `name`.
     - Update policies (mirror the `--stack-update`/`--agent-update` flags; declared up-front, never streamed):
         - `stack_update` (`on` | `security` | `off`) with optional `stack_update_frequency` (day/week units, e.g. `1d`, `3w`).
@@ -162,6 +162,7 @@ The client also folds `current_step` from the `step_started`/`step_finished` str
 
 - Steps with no category of their own move no category.
 - A `step_finished` with no `error_code` settles the step's category if nothing else did. The `init_complete` step settling successfully sweeps every still-open applicable lane to `settled`. A failed final step runs no sweep.
+- `step_finished.disposition` is `executed`, `skipped`, or `background`. `background` means the step launched work that continues after the step returned.
 - Cross-cutting prompts that belong to no category (`secret_ref_value`, `testflight_confirm`, and the other setup kinds) leave nothing awaiting input.
 - A failing step emits `step_finished` with an `error_code` before the terminal `error` frame. The fold badges the step's category `failed`, unless another lane already claimed that same code (`provider_configure` covers the provider, model, mode, and effort lanes, so whichever broke badges itself) or the lane is one this run does not have. Those two guards keep a step error from inventing or duplicating a badge; there the `error` frame carries the failure alone.
 - A specific lane may also fail on its own through a `category_failed` signal emitted by the code that owns it (a provider write, say), which the fold applies unconditionally.
@@ -955,7 +956,30 @@ The runtime derives every package-manager command from config-declared install a
     - `feature` filters candidates.
 - Response: a confirmed apply installs and returns `report.apply_run_id` for correlating dependency audit rows.
     - Each result's `outcome.kind` is one of `installed`, `already_present`, `privilege_required`, or `failed`.
-- Notes: runs declared install actions. The apply keeps running after the HTTP client that started it goes away; observe it through `GET /v1/status` `deps_apply_in_flight`.
+- Errors: `409 deps.apply_in_flight` — another apply is live. The error reports its `apply_run_id`; poll that run before retrying.
+- Notes: runs declared install actions. Every confirmed apply records a durable run and shares one cross-process apply slot with `acps deps apply` and init applies. Repeating the request after a terminal partial failure is safe because already-installed dependencies report `already_present`.
+
+### `GET /v1/deps/apply/runs`
+
+- Tier: `session`
+- Request: optional `limit` query parameter, default `50` and capped at `1000`.
+- Response: recorded apply runs newest first. Each includes status, origin, timestamps, progress, outcome counts, liveness, retryability, log directory, and an optional error.
+
+### `GET /v1/deps/apply/runs/latest`
+
+- Tier: `session`
+- Request: none.
+- Response: the newest apply run plus its per-action `installer_runs` rows. Action metadata never includes captured log contents.
+- Errors: `404 deps.apply_run_not_found` — no run has been recorded.
+
+### `GET /v1/deps/apply/runs/{apply_run_id}`
+
+- Tier: `session`
+- Request: the apply run id in the path.
+- Response: the selected apply run plus its per-action `installer_runs` rows.
+- Errors: `404 deps.apply_run_not_found` — the id is unknown.
+
+A `running` row is reconciled to `failed` with `error.code = "deps.apply_abandoned"` once it is abandoned: its owning process is gone, or the daemon left it running after a terminal-state write failed and clears it before the next apply. `retryable` is true for `failed` and `privilege_blocked` runs.
 
 ## Status, Logs, Metrics, And Security
 
@@ -964,7 +988,7 @@ The runtime derives every package-manager command from config-declared install a
 - Tier: `session`
 - Request: none.
 - Response: local status summary.
-    - Carries `deps_apply_in_flight`, true while a `POST /v1/deps/apply` is still running its install actions. This is the only way to observe one, since the apply keeps running after the HTTP client that started it goes away. It is advisory: a caller that intends to restart or reconfigure the runtime should wait for it to clear, because a restart signals the process group and tears the install down mid-flight, leaving a half-applied package set and an unfinalized `installer_runs` row.
+    - Carries `deps_apply_in_flight`, true while any API, CLI, synchronous-init, or detached-init dependency apply is live. It is derived from the daemon's apply lock and the PID-checked durable run. Callers preparing to restart or reconfigure should wait for it to clear; detached install children survive daemon restarts.
     - Carries a `server` object (see below).
 
 #### Server Object And Feature Flags

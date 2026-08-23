@@ -11,6 +11,7 @@ mod agent;
 mod auth;
 mod commands;
 mod core;
+mod deps_apply;
 mod events;
 mod ids;
 mod init;
@@ -35,6 +36,12 @@ pub use agent::{
 pub use auth::{AuthFailure, AuthFailureFilter, AuthKeyRecord};
 pub use commands::{CommandOrigin, CommandRecord, CommandStatus, NewCommandRecord};
 pub use core::{StateStore, default_state_path};
+pub use deps_apply::{
+    DEPS_APPLY_ABANDONED_ERROR_CODE, DEPS_APPLY_NULL_PID_GRACE, DEPS_APPLY_ORIGIN_API,
+    DEPS_APPLY_ORIGIN_CLI, DEPS_APPLY_ORIGIN_INIT, DEPS_APPLY_ORIGIN_INIT_BACKGROUND,
+    DEPS_APPLY_RUN_FAILED, DEPS_APPLY_RUN_PRIVILEGE_BLOCKED, DEPS_APPLY_RUN_RUNNING,
+    DEPS_APPLY_RUN_SUCCEEDED, DepsApplyRunFinish, DepsApplyRunRecord, NewDepsApplyRun,
+};
 pub use events::{
     EVENT_SOURCE_ACP, EVENT_SOURCE_API, EVENT_SOURCE_CLI, EVENT_SOURCE_COMMAND, EVENT_SOURCE_LOCAL,
     EVENT_SOURCE_PERMISSION, EVENT_SOURCE_SYSTEM, Event,

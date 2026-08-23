@@ -10,6 +10,8 @@ mod auto_update;
 mod basic_mcp;
 #[path = "cli_init_tests/custom_agent.rs"]
 mod custom_agent;
+#[path = "cli_init_tests/deps_apply_async.rs"]
+mod deps_apply_async;
 #[path = "cli_init_tests/deps_updates.rs"]
 mod deps_updates;
 #[path = "cli_init_tests/endpoint_override.rs"]

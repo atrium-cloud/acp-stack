@@ -238,6 +238,17 @@
           }
         }
       },
+      "DepsApplyRunsParams": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 50
+          }
+        }
+      },
       "DisconnectConnectionsRequest": {
         "type": "object",
         "properties": {
@@ -1442,6 +1453,13 @@
               "null"
             ],
             "description": "Both-or-neither with `deps_apply`."
+          },
+          "deps_apply_async": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Requires `deps_apply`. Runs the confirmed install in a detached\nbackground worker; the deps step settles as `background` and the run\nis polled via `GET /v1/deps/apply/runs/{apply_run_id}`."
           },
           "standard_agent_work_deps": {
             "type": [
@@ -3442,6 +3460,332 @@
           }
         ]
       },
+      "DepsApplyRunDetailResponse": {
+        "type": "object",
+        "properties": {
+          "apply_run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`running`, `succeeded`, `failed`, or `privilege_blocked`."
+          },
+          "origin": {
+            "type": "string",
+            "description": "Surface that started the apply: `init`, `init_background`, `cli`, or\n`api`."
+          },
+          "init_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "$ref": "#/$defs/response/DepsApplyRunProgressJson"
+          },
+          "counts": {
+            "$ref": "#/$defs/response/DepsApplyRunCountsJson"
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Whether the owning process is alive right now; meaningful while\n`status = \"running\"`."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "True for terminal non-success states a re-`POST /v1/deps/apply` can\nretry (the apply is idempotent over already-installed deps)."
+          },
+          "log_dir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/DepsApplyRunErrorJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/InstallerRunJson"
+            },
+            "description": "Per-action `installer_runs` rows sharing this apply_run_id, oldest\nfirst. Step metadata only, never captured log contents."
+          }
+        },
+        "required": [
+          "apply_run_id",
+          "status",
+          "origin",
+          "init_run_id",
+          "feature",
+          "started_at",
+          "finished_at",
+          "progress",
+          "counts",
+          "live",
+          "retryable",
+          "log_dir",
+          "actions"
+        ],
+        "description": "One `deps_apply_runs` row for the polling surface. `running` rows are\nreconciled against process liveness before serialization, so a crashed\napply reads as `failed` + `retryable` here rather than `running` forever."
+      },
+      "DepsApplyRunProgressJson": {
+        "type": "object",
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "current_dep": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "completed",
+          "total",
+          "current_dep"
+        ]
+      },
+      "DepsApplyRunCountsJson": {
+        "type": "object",
+        "properties": {
+          "installed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "already_present": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "privilege_required": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "installed",
+          "already_present",
+          "privilege_required",
+          "failed"
+        ]
+      },
+      "DepsApplyRunErrorJson": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "detail"
+        ]
+      },
+      "InstallerRunJson": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          },
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exit_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "elapsed_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds since `started_at`, computed server-side so pollers need no\nclock sync with the daemon; present only while the row is `running`."
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "operation",
+          "step",
+          "method",
+          "status",
+          "started_at",
+          "finished_at",
+          "exit_status",
+          "version"
+        ]
+      },
+      "DepsApplyRunsResponse": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/response/DepsApplyRunJson"
+            }
+          }
+        },
+        "required": [
+          "runs"
+        ]
+      },
+      "DepsApplyRunJson": {
+        "type": "object",
+        "properties": {
+          "apply_run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`running`, `succeeded`, `failed`, or `privilege_blocked`."
+          },
+          "origin": {
+            "type": "string",
+            "description": "Surface that started the apply: `init`, `init_background`, `cli`, or\n`api`."
+          },
+          "init_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "$ref": "#/$defs/response/DepsApplyRunProgressJson"
+          },
+          "counts": {
+            "$ref": "#/$defs/response/DepsApplyRunCountsJson"
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Whether the owning process is alive right now; meaningful while\n`status = \"running\"`."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "True for terminal non-success states a re-`POST /v1/deps/apply` can\nretry (the apply is idempotent over already-installed deps)."
+          },
+          "log_dir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/response/DepsApplyRunErrorJson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "apply_run_id",
+          "status",
+          "origin",
+          "init_run_id",
+          "feature",
+          "started_at",
+          "finished_at",
+          "progress",
+          "counts",
+          "live",
+          "retryable",
+          "log_dir"
+        ],
+        "description": "One `deps_apply_runs` row for the polling surface. `running` rows are\nreconciled against process liveness before serialization, so a crashed\napply reads as `failed` + `retryable` here rather than `running` forever."
+      },
       "DepsReport": {
         "type": "object",
         "properties": {
@@ -3661,77 +4005,6 @@
         },
         "required": [
           "runs"
-        ]
-      },
-      "InstallerRunJson": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "agent_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operation": {
-            "type": "string"
-          },
-          "step": {
-            "type": "string"
-          },
-          "method": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "type": "string"
-          },
-          "started_at": {
-            "type": "string"
-          },
-          "finished_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "exit_status": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
-          },
-          "version": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "elapsed_seconds": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Seconds since `started_at`, computed server-side so pollers need no\nclock sync with the daemon; present only while the row is `running`."
-          }
-        },
-        "required": [
-          "id",
-          "agent_id",
-          "operation",
-          "step",
-          "method",
-          "status",
-          "started_at",
-          "finished_at",
-          "exit_status",
-          "version"
         ]
       },
       "LocalSessionAccessResponse": {
@@ -6660,7 +6933,7 @@
           },
           "deps_apply_in_flight": {
             "type": "boolean",
-            "description": "True while a `POST /v1/deps/apply` is running install snippets. The\napply outlives the HTTP client that started it, so this is the only way\nto see one in flight. Advisory: a caller about to restart or reconfigure\nthe runtime should wait for it to clear, because a restart signals the\nprocess group and tears the install down mid-flight, leaving a\nhalf-applied package set and an unfinalized `installer_runs` row."
+            "description": "True while any dependency apply is running install snippets —\na `POST /v1/deps/apply`, an `acps deps apply`, or a detached\nbackground apply spawned by `acps init --deps-apply-async` — derived\nfrom the live `deps_apply_runs` row (pid-checked) plus the daemon's\nown apply lock. Poll `GET /v1/deps/apply/runs/latest` for run identity\nand progress. Advisory: a caller about to restart or reconfigure the\nruntime should wait for it to clear; the apply itself survives a\ndaemon restart (install children run in their own sessions)."
           },
           "server": {
             "$ref": "#/$defs/response/ServerInfo"

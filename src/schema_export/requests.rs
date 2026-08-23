@@ -23,6 +23,7 @@ pub(super) enum AcpsRequestTypes {
     CommandSubmitRequest(crate::api::routes::commands::CommandSubmitRequest),
     ConfigImportQuery(crate::api::routes::config::ConfigImportQuery),
     DepsApplyBody(crate::api::routes::deps::DepsApplyBody),
+    DepsApplyRunsParams(crate::api::routes::deps::DepsApplyRunsParams),
     DisconnectConnectionsRequest(crate::api::routes::ws::DisconnectConnectionsRequest),
     DisconnectSessionsRequest(crate::api::routes::ws::DisconnectSessionsRequest),
     FilesContentPutBody(crate::api::routes::workspace::FilesContentPutBody),

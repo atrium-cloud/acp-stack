@@ -68,7 +68,7 @@ pub(crate) struct InstallerRunJson {
 }
 
 impl InstallerRunJson {
-    fn from_run(run: InstallerRun, now: chrono::DateTime<chrono::Utc>) -> Self {
+    pub(crate) fn from_run(run: InstallerRun, now: chrono::DateTime<chrono::Utc>) -> Self {
         let elapsed_seconds = if run.status == INSTALLER_STATUS_RUNNING {
             chrono::DateTime::parse_from_rfc3339(&run.started_at)
                 .ok()

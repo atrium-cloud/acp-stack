@@ -51,6 +51,7 @@ pub mod step_kind {
 }
 
 /// Outcome of executing one step. Returned by the body closure.
+#[derive(Debug)]
 pub struct StepOutcome {
     /// Optional on-disk log directory. Steps that produce a log tree (the
     /// installer, workspace materialization) populate this so the operator
@@ -61,6 +62,12 @@ pub struct StepOutcome {
     /// a valid JSON object literal (validated by the state layer's
     /// `json_valid` check).
     pub payload_json: String,
+    /// The body launched the step's work in the background instead of
+    /// completing it. The durable row still records `succeeded` (the launch
+    /// succeeded and must not poison `finalize_init_run`), but the driver's
+    /// signal reports [`StepDisposition::Background`] so clients fold the
+    /// lane as started, not done.
+    pub background: bool,
 }
 
 impl StepOutcome {
@@ -68,6 +75,7 @@ impl StepOutcome {
         Self {
             log_dir: None,
             payload_json: "{}".to_owned(),
+            background: false,
         }
     }
 
@@ -75,17 +83,28 @@ impl StepOutcome {
         Self {
             log_dir: None,
             payload_json: payload_json.into(),
+            background: false,
+        }
+    }
+
+    pub fn background_with_payload(payload_json: impl Into<String>) -> Self {
+        Self {
+            log_dir: None,
+            payload_json: payload_json.into(),
+            background: true,
         }
     }
 }
 
-/// Result of [`record_step`]. `Executed` means the body ran; `Skipped`
-/// means a prior `succeeded` row's verifier still passes and the body was
-/// not invoked. Driver code uses this to skip post-execution side effects
-/// (e.g. re-printing logs) on resume.
+/// Result of [`record_step`]. `Executed` means the body ran to completion;
+/// `Background` means the body launched the step's work and returned while it
+/// keeps running; `Skipped` means a prior `succeeded` row's verifier still
+/// passes and the body was not invoked. Driver code uses this to skip
+/// post-execution side effects (e.g. re-printing logs) on resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDisposition {
     Executed,
+    Background,
     Skipped,
 }
 
@@ -218,7 +237,11 @@ pub fn record_step_with_default_log_dir(
         Ok(outcome) => {
             let log_dir = outcome.log_dir.as_deref().or(default_log_dir);
             store.mark_init_step_succeeded(&step_id, log_dir, &outcome.payload_json)?;
-            Ok(StepDisposition::Executed)
+            Ok(if outcome.background {
+                StepDisposition::Background
+            } else {
+                StepDisposition::Executed
+            })
         }
         Err(error) => {
             store.mark_init_step_failed(
@@ -297,7 +320,11 @@ pub fn record_step_with_log_dir(
             persist_step_logs_to_disk(&mut draft, agent_id_for_logs, log_base)?;
             let log_dir = draft.log_dir.clone().or(outcome.log_dir);
             store.mark_init_step_succeeded(&step_id, log_dir.as_deref(), &outcome.payload_json)?;
-            Ok(StepDisposition::Executed)
+            Ok(if outcome.background {
+                StepDisposition::Background
+            } else {
+                StepDisposition::Executed
+            })
         }
         Err(error) => {
             store.mark_init_step_failed(
@@ -380,6 +407,32 @@ mod tests {
         let steps = store.query_init_steps(&run.id).expect("steps");
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].status, INIT_STEP_SUCCEEDED);
+    }
+
+    #[test]
+    fn record_step_reports_background_disposition_with_a_succeeded_row() {
+        // A background launch must read as `succeeded` in the durable row —
+        // `finalize_init_run` fails the run over any non-terminal row — while
+        // the driver-facing disposition distinguishes launched from done.
+        let (_dir, store) = open_store();
+        let run = begin_run(&store, None, None, "{}").expect("begin");
+        let disposition = record_step(
+            &store,
+            &run,
+            1,
+            step_kind::DEPS_APPLY,
+            || Ok(false),
+            || {
+                Ok(StepOutcome::background_with_payload(
+                    r#"{"apply_run_id":"dap_bg","background":true}"#,
+                ))
+            },
+        )
+        .expect("step");
+        assert_eq!(disposition, StepDisposition::Background);
+        let steps = store.query_init_steps(&run.id).expect("steps");
+        assert_eq!(steps[0].status, INIT_STEP_SUCCEEDED);
+        assert!(steps[0].payload_json.contains("\"background\":true"));
     }
 
     #[test]

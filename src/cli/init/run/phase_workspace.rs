@@ -54,6 +54,7 @@ pub(super) fn run_workspace_materialize_step(flow: &mut InitFlow) -> Result<()> 
             Ok(StepOutcome {
                 log_dir: step_log_dir,
                 payload_json: "{}".to_owned(),
+                background: false,
             })
         },
     );
@@ -110,6 +111,9 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
     init_println!(output_mode, "progress: applying dependencies");
     let store = &flow.store;
     let config = &flow.config;
+    let init_run_id = flow.init_run.id.clone();
+    let deps_apply_async = flow.args.deps_apply_async;
+    let background_apply_run_id: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
     let result = record_init_step(
         store,
         &flow.init_run,
@@ -117,10 +121,25 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
         step_kind::DEPS_APPLY,
         || Ok(pending_candidates(config, None).is_empty()),
         || {
-            let report = apply_dependencies_with_escalation(
+            if deps_apply_async {
+                let (outcome, apply_run_id) = launch_background_deps_apply(
+                    store,
+                    config,
+                    &init_run_id,
+                    &deps_escalation,
+                    output_mode,
+                )?;
+                *background_apply_run_id.borrow_mut() = Some(apply_run_id);
+                return Ok(outcome);
+            }
+            let report = apply_dependencies_tracked(
                 config,
+                store,
+                TrackedApplyRun::Claim {
+                    origin: DEPS_APPLY_ORIGIN_INIT,
+                    init_run_id: Some(&init_run_id),
+                },
                 None,
-                Some(store),
                 &config.workspace.default_shell,
                 &deps_escalation,
                 |current, total, name| {
@@ -209,10 +228,153 @@ pub(super) fn run_deps_apply_step(flow: &mut InitFlow) -> Result<()> {
             )))
         },
     );
+    // The background worker outlives init, so its id must reach both handoff
+    // frames before any early return: the success payload (`handoff_context`)
+    // and the failure payload the `KeyHandover` Drop renders from
+    // `failure_context`. Extracting above the error check also covers the case
+    // where the worker spawned but this step's own record write then failed.
+    let background_run_id = background_apply_run_id.into_inner();
+    flow.handoff_context.deps_apply_run_id = background_run_id.clone();
+    if let Some(context) = flow.key_handover.failure_context.as_mut() {
+        context.deps_apply_run_id = background_run_id;
+    }
     if let Err(error) = result {
         return finalize_with_error(&flow.store, &flow.init_run, error);
     }
     Ok(())
+}
+
+/// `--deps-apply-async` branch of the deps_apply step: claim the single-flight
+/// `deps_apply_runs` row, spawn the detached `__deps-apply-run` worker, and
+/// return a background outcome (plus the apply_run_id for the handoff) so init
+/// proceeds while the install runs. On `--resume` this run's own still-live
+/// background install is adopted instead of spawning a second child.
+pub(super) fn launch_background_deps_apply(
+    store: &StateStore,
+    config: &Config,
+    init_run_id: &str,
+    escalation: &PrivilegeEscalation,
+    output_mode: InitOutputMode,
+) -> Result<(StepOutcome, String)> {
+    use crate::cli::deps_apply_worker::spawn_detached_worker;
+    use crate::runtime::dependencies::deps_apply::deps_run_liveness;
+    use crate::runtime::process_runner::current_boot_id;
+    use crate::state::{DEPS_APPLY_RUN_FAILED, DepsApplyRunFinish};
+
+    let is_live = deps_run_liveness();
+    store.reconcile_stale_deps_apply_runs(&is_live)?;
+    if let Some(running) = store.running_deps_apply_run()? {
+        // Adopt only this init run's own background install (the resume
+        // case). A live apply owned by anything else — another init run's
+        // worker, the daemon route, the CLI — must not be adopted: recording
+        // the step against foreign work would silently skip this run's own
+        // declared deps. Rejecting keeps the fail-fast single-flight
+        // contract; resume retries once the live apply settles.
+        if running.origin == DEPS_APPLY_ORIGIN_INIT_BACKGROUND
+            && running.init_run_id.as_deref() == Some(init_run_id)
+        {
+            init_println!(
+                output_mode,
+                "progress: dependency install already running in background (apply_run_id={})",
+                running.id,
+            );
+            let outcome = StepOutcome::background_with_payload(format!(
+                r#"{{"apply_run_id":"{}","background":true,"adopted":true}}"#,
+                running.id,
+            ));
+            return Ok((outcome, running.id));
+        }
+        return Err(StackError::DepsApplyInFlight {
+            apply_run_id: running.id,
+        });
+    }
+
+    let apply_run_id = crate::state::next_deps_apply_run_id();
+    let pending = pending_candidates(config, None).len();
+    store.claim_deps_apply_run(
+        NewDepsApplyRun {
+            id: &apply_run_id,
+            origin: DEPS_APPLY_ORIGIN_INIT_BACKGROUND,
+            init_run_id: Some(init_run_id),
+            feature: None,
+            pid: None,
+            boot_id: current_boot_id().as_deref(),
+            total: candidates_for(config, None).len() as i64,
+        },
+        &is_live,
+    )?;
+    // From here the row is `running` with a null pid. Every fallible step
+    // before the worker exists — log-dir creation and config-path resolution as
+    // much as the spawn itself — must settle the row on failure, or a mid-setup
+    // error leaves the slot wedged until the null-pid grace expires.
+    let spawn_result = (|| -> Result<(u32, std::path::PathBuf)> {
+        let log_dir = crate::state::default_installer_log_base(&home_dir()?)
+            .join("deps_apply")
+            .join(&apply_run_id);
+        create_dir_owner_only(&log_dir)?;
+        let config_path = crate::config::default_config_path()?;
+        let pid = spawn_detached_worker(
+            &config_path,
+            store.path(),
+            &apply_run_id,
+            None,
+            escalation,
+            &log_dir,
+        )?;
+        Ok((pid, log_dir))
+    })();
+    let (pid, log_dir) = match spawn_result {
+        Ok(value) => value,
+        Err(error) => {
+            // Nothing durable started: settle the claimed row so it cannot wedge
+            // the single-flight slot, then fail the step.
+            let detail = error.to_string();
+            if let Err(finish_error) = store.finish_deps_apply_run(
+                &apply_run_id,
+                DepsApplyRunFinish {
+                    status: DEPS_APPLY_RUN_FAILED,
+                    completed: 0,
+                    installed: 0,
+                    already_present: 0,
+                    privilege_required: 0,
+                    failed: 0,
+                    error_code: Some("deps.apply_failed"),
+                    error_detail: Some(&detail),
+                    payload_json: "{}",
+                },
+            ) {
+                tracing::warn!(error = %finish_error, apply_run_id, "deps apply: failed to settle run row after background start failure");
+            }
+            return Err(StackError::DepsApplyFailed {
+                summary: format!("failed to start background dependency apply: {detail}"),
+                apply_run_id,
+                retry_command: "acps init --resume --deps-apply --deps-apply-yes --deps-apply-async",
+            });
+        }
+    };
+    // The worker self-stamps on startup too, so a failed stamp here only
+    // widens the window the null-pid grace already covers.
+    if let Err(error) = store.stamp_deps_apply_child(
+        &apply_run_id,
+        i64::from(pid),
+        current_boot_id().as_deref(),
+        log_dir.to_str(),
+    ) {
+        tracing::warn!(%error, apply_run_id, "deps apply: failed to stamp background child pid");
+    }
+    init_println!(
+        output_mode,
+        "progress: dependency install started in background (apply_run_id={apply_run_id}, pid={pid})",
+    );
+    init_println!(
+        output_mode,
+        "poll it with: GET /v1/deps/apply/runs/{apply_run_id}",
+    );
+    let mut outcome = StepOutcome::background_with_payload(format!(
+        r#"{{"apply_run_id":"{apply_run_id}","background":true,"pid":{pid},"pending":{pending}}}"#,
+    ));
+    outcome.log_dir = log_dir.to_str().map(str::to_owned);
+    Ok((outcome, apply_run_id))
 }
 
 /// Step: capability_probe — handshake-only spawn of the installed agent to

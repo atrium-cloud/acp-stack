@@ -33,6 +33,8 @@ pub(super) fn error_code(err: &StackError) -> Option<&'static str> {
         AgentPlaceholderConfigured => "agent.placeholder_configured",
         InitRunCorrupted { .. } => "init.run_corrupted",
         DepsApplyFailed { .. } => "deps.apply_failed",
+        DepsApplyInFlight { .. } => "deps.apply_in_flight",
+        DepsApplyRunNotFound { .. } => "deps.apply_run_not_found",
         AgentUnsupported { .. } => "agent.unsupported",
         AgentCheckStale => "agent.check_stale",
         RegistryLoad { .. } => "agent.registry_load_failed",
@@ -104,6 +106,12 @@ pub(super) fn public_message(err: &StackError) -> Option<String> {
         // exit detail that should not leave the host over the API.
         DepsApplyFailed { apply_run_id, .. } => {
             format!("dependency apply produced failing actions (apply_run_id={apply_run_id})")
+        }
+        DepsApplyInFlight { apply_run_id } => {
+            format!("a dependency apply is already running (apply_run_id={apply_run_id})")
+        }
+        DepsApplyRunNotFound { apply_run_id } => {
+            format!("no dependency apply run matches `{apply_run_id}`")
         }
         AgentUnsupported { name } => {
             format!("{name} is not currently supported. Please try a different agent.")
@@ -196,6 +204,8 @@ pub(super) fn http_status(err: &StackError) -> Option<StatusCode> {
         | SkillInstallSkillMissing { .. } => StatusCode::BAD_REQUEST,
         SkillInstallTargetConflict { .. } => StatusCode::CONFLICT,
         SkillNotInstalled { .. } | SkillSourceNotConfigured { .. } => StatusCode::NOT_FOUND,
+        DepsApplyInFlight { .. } => StatusCode::CONFLICT,
+        DepsApplyRunNotFound { .. } => StatusCode::NOT_FOUND,
         DomainRateLimited { .. } => StatusCode::SERVICE_UNAVAILABLE,
         AgentInstallerFailed { .. }
         | AgentInstallerCreatesMissing { .. }

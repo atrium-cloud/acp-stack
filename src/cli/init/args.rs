@@ -191,6 +191,11 @@ pub struct InitArgs {
     /// dependency apply.
     #[arg(long = "deps-apply-yes", requires = "deps_apply")]
     pub(super) deps_apply_yes: bool,
+    /// Run the confirmed dependency install in a detached background process
+    /// and let init continue without waiting for it. Poll
+    /// `GET /v1/deps/apply/runs/{apply_run_id}` for the result.
+    #[arg(long = "deps-apply-async", requires = "deps_apply")]
+    pub(super) deps_apply_async: bool,
     /// acp-stack auto-update policy: on (all compatible), security (security
     /// updates only), or off (manual).
     #[arg(long = "stack-update", value_name = "on|security|off")]
@@ -469,6 +474,7 @@ impl Default for InitArgs {
             dep_system: Vec::new(),
             deps_apply: false,
             deps_apply_yes: false,
+            deps_apply_async: false,
             stack_update: None,
             stack_update_frequency: None,
             agent_update: None,

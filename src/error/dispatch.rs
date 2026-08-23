@@ -106,6 +106,9 @@ impl StackError {
             StackError::DepsApplyFailed { .. } => {
                 "inspect `acps installer history --agent deps_apply` and fix the failing install action"
             }
+            StackError::DepsApplyInFlight { .. } => {
+                "poll `GET /v1/deps/apply/runs/{apply_run_id}` until the running apply settles, then retry"
+            }
             StackError::InvalidParam { .. }
             | StackError::InvalidSocketAddress { .. }
             | StackError::InvalidCloudflareMode { .. }

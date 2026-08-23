@@ -129,6 +129,66 @@ pub fn detach_into_new_session(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn detach_into_new_session(_command: &mut Command) {}
 
+/// Whether a process with this pid exists right now. `kill(pid, 0)` delivers
+/// no signal; EPERM still proves the pid is occupied, only ESRCH proves it is
+/// gone. Non-positive pids never address a single process, so they read as
+/// not live. A Linux zombie also reads as not live: `kill(pid, 0)` succeeds
+/// for one, but a zombie has already exited — treating it as live would blind
+/// liveness-driven cleanup (the deps-apply abandoned-run reconcile) for as
+/// long as the unreaped parent survives.
+#[cfg(unix)]
+pub fn process_is_live(pid: i64) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 performs only the existence/permission
+    // check; no signal is delivered.
+    let result = unsafe { libc::kill(pid, 0) };
+    if result != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+    !proc_stat_says_zombie(pid)
+}
+
+/// Linux-only zombie check via the state field of `/proc/{pid}/stat` (the
+/// first character after the parenthesised comm, which may itself contain
+/// parentheses — hence `rfind`). Hosts without procfs return false, leaving
+/// the plain `kill` result in force.
+#[cfg(unix)]
+fn proc_stat_says_zombie(pid: libc::pid_t) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some(close_paren) = stat.rfind(')') else {
+        return false;
+    };
+    stat[close_paren + 1..]
+        .split_whitespace()
+        .next()
+        .is_some_and(|state| state == "Z")
+}
+
+#[cfg(not(unix))]
+pub fn process_is_live(_pid: i64) -> bool {
+    false
+}
+
+/// Kernel boot id, used to guard stored pids against reuse across reboots.
+/// `None` where the kernel does not expose one (non-Linux dev hosts); callers
+/// then fall back to the plain pid check.
+pub fn current_boot_id() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 /// Env vars that steer installers/updaters away from interactive prompts.
 /// Losing the controlling terminal (see [`detach_into_new_session`]) already
 /// breaks `/dev/tty` prompts; these cover tools that decide interactivity

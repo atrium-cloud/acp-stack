@@ -96,6 +96,7 @@ impl InitFlow {
             agent_name: setup.config.agent.name.clone(),
             native_config_import: None,
             ignored_features: Vec::new(),
+            deps_apply_run_id: None,
         };
         key_handover.failure_context = Some(handoff_context.clone());
         Ok(Self {

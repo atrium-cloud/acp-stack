@@ -55,7 +55,10 @@ use super::routes::config::{
     config_export_handler, config_import_handler, config_validate_handler, secrets_delete_handler,
     secrets_list_handler, secrets_set_handler,
 };
-use super::routes::deps::{deps_apply_handler, deps_check_handler, deps_get_handler};
+use super::routes::deps::{
+    deps_apply_handler, deps_apply_run_get_handler, deps_apply_run_latest_handler,
+    deps_apply_runs_handler, deps_check_handler, deps_get_handler,
+};
 use super::routes::extensions::extension_managed_state_apply_handler;
 use super::routes::installer::installer_runs_handler;
 use super::routes::logs::{
@@ -675,6 +678,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/commands/{id}/cancel", post(commands_cancel_handler))
         .route("/v1/deps", get(deps_get_handler))
         .route("/v1/deps/check", post(deps_check_handler))
+        .route("/v1/deps/apply/runs", get(deps_apply_runs_handler))
+        .route(
+            "/v1/deps/apply/runs/latest",
+            get(deps_apply_run_latest_handler),
+        )
+        .route(
+            "/v1/deps/apply/runs/{apply_run_id}",
+            get(deps_apply_run_get_handler),
+        )
         // `/v1/providers` is pure embedded-mapping lookup. `/v1/models`
         // spawns a bounded provisional ACP session for picker data; both
         // are session-tier discovery surfaces.

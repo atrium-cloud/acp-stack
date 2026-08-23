@@ -426,6 +426,7 @@ fn start_init_request_maps_deps_and_flags() {
                 "deps_system": [{"name": "ffmpeg", "shell": "apt-get install -y ffmpeg"}],
                 "deps_apply": true,
                 "deps_apply_yes": true,
+                "deps_apply_async": true,
                 "standard_agent_work_deps": true,
                 "browser_use": true
             }"#,
@@ -442,8 +443,22 @@ fn start_init_request_maps_deps_and_flags() {
     );
     assert!(args.deps_apply);
     assert!(args.deps_apply_yes);
+    assert!(args.deps_apply_async);
     assert!(args.standard_agent_work_deps);
     assert!(args.browser_use_profile);
+}
+
+#[test]
+fn start_init_request_rejects_async_deps_apply_without_apply() {
+    let error = request_from_json(r#"{"deps_apply_async": true}"#)
+        .into_init_args()
+        .expect_err("deps_apply_async without deps_apply must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("deps_apply_async requires deps_apply"),
+        "{error}"
+    );
 }
 
 #[test]

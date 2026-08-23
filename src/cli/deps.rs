@@ -6,11 +6,11 @@ use crate::config::Config;
 use crate::error::{Result, StackError};
 use crate::fs_util::home_dir;
 use crate::runtime::dependencies::deps_apply::{
-    DepApplyOutcome, PrivilegeEscalation, apply_dependencies_with_escalation,
+    DepApplyOutcome, PrivilegeEscalation, TrackedApplyRun, apply_dependencies_tracked,
     candidate_summary_line, candidates_for, escalation_notice_lines, manual_privileged_command,
     pending_system_candidates, probe_privilege_escalation,
 };
-use crate::state::{StateStore, default_state_path};
+use crate::state::{DEPS_APPLY_ORIGIN_CLI, StateStore, default_state_path};
 
 use super::core::{OutputFormat, print_json, resolve_admin_key, validate_local_admin_key};
 
@@ -156,20 +156,28 @@ fn run_apply(args: DepsApplyArgs, output: OutputFormat) -> Result<()> {
     // effects committed".
     store.migrate()?;
     let report = if output.is_json() {
-        apply_dependencies_with_escalation(
+        apply_dependencies_tracked(
             &config,
+            &store,
+            TrackedApplyRun::Claim {
+                origin: DEPS_APPLY_ORIGIN_CLI,
+                init_run_id: None,
+            },
             args.feature.as_deref(),
-            Some(&store),
             shell,
             &escalation,
             |_, _, _| Ok(()),
         )?
     } else {
         let mut stdout = std::io::stdout();
-        apply_dependencies_with_escalation(
+        apply_dependencies_tracked(
             &config,
+            &store,
+            TrackedApplyRun::Claim {
+                origin: DEPS_APPLY_ORIGIN_CLI,
+                init_run_id: None,
+            },
             args.feature.as_deref(),
-            Some(&store),
             shell,
             &escalation,
             |current, total, name| {

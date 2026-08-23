@@ -43,9 +43,11 @@ use crate::state::{
 
 mod escalation;
 mod shell;
+mod tracked;
 
 pub use escalation::*;
 pub(crate) use shell::*;
+pub use tracked::*;
 
 /// Canonical `installer_runs.agent_id` and `installer_runs.step` value the
 /// deps-apply runner stamps onto every audit row. Centralized so the health
@@ -168,6 +170,7 @@ pub fn apply_dependencies(
         state,
         shell_program,
         &escalation,
+        None,
         |_, _, _| Ok(()),
     )
 }
@@ -182,6 +185,7 @@ pub fn apply_dependencies_with_escalation(
     state: Option<&StateStore>,
     shell_program: &str,
     escalation: &PrivilegeEscalation,
+    apply_run_id: Option<&str>,
     mut progress: impl FnMut(usize, usize, &str) -> Result<()>,
 ) -> Result<DepsApplyReport> {
     // before/after must honor each dep's `install.creates` (which may
@@ -193,7 +197,11 @@ pub fn apply_dependencies_with_escalation(
     // and fall through to the standard checker for everything else.
     let before = compute_before_after_report(config);
     let mut results = Vec::new();
-    let apply_run_id = next_deps_apply_run_id();
+    // A caller-supplied id keeps the per-action `installer_runs.apply_run_id`
+    // identical to a pre-claimed `deps_apply_runs.id`.
+    let apply_run_id = apply_run_id
+        .map(str::to_owned)
+        .unwrap_or_else(next_deps_apply_run_id);
     let actions: Vec<_> = config
         .dependencies
         .commands

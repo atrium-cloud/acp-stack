@@ -106,6 +106,10 @@ fn run_cli(cli: Cli) -> Result<()> {
         Command::Deps { command } => {
             crate::cli::deps::run_deps_command(command, output.effective())
         }
+        // Runs detached with stdio redirected to its log file; a failure is
+        // still worth a durable `cli.error` row, so it dispatches through the
+        // normal error-recording tail unlike the sandbox helpers.
+        Command::DepsApplyRun { args } => crate::cli::deps_apply_worker::run_worker(args),
         Command::Security { command } => {
             crate::cli::security::run_security_command(command, output)
         }

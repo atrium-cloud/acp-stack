@@ -141,3 +141,9 @@ id = 24
 name = "terminal_status_spelling"
 sqlite_file = "024_terminal_status_spelling.sqlite.sql"
 postgres_file = "024_terminal_status_spelling.postgres.sql"
+
+[[migration]]
+id = 25
+name = "deps_apply_runs"
+sqlite_file = "025_deps_apply_runs.sqlite.sql"
+postgres_file = "025_deps_apply_runs.postgres.sql"

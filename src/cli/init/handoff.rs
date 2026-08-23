@@ -43,6 +43,11 @@ pub(super) struct InitHandoffContext {
     /// honor. Machine lanes surface these so the platform knows what was
     /// routed around; hosted end users never see them.
     pub(super) ignored_features: Vec<crate::runtime::agent::acp_bridge::IgnoredFeature>,
+    /// The `deps_apply_runs` id of a background install launched by
+    /// `--deps-apply-async`. The install outlives init, so the handoff is the
+    /// machine surface that tells the platform what to poll via
+    /// `GET /v1/deps/apply/runs/{id}` once the daemon is up.
+    pub(super) deps_apply_run_id: Option<String>,
 }
 
 /// Drop guard that performs the session/admin key handover as the very last
@@ -219,6 +224,15 @@ fn init_handoff_payload(
         object.insert(
             "admin_key".to_owned(),
             serde_json::Value::String(keys.admin_value.as_str().to_owned()),
+        );
+    }
+    if let Some(deps_apply_run_id) = context.deps_apply_run_id.as_ref() {
+        let object = payload
+            .as_object_mut()
+            .expect("init handoff payload is an object");
+        object.insert(
+            "deps_apply_run_id".to_owned(),
+            serde_json::Value::String(deps_apply_run_id.clone()),
         );
     }
     if let Some(operation) = context.native_config_import.as_ref() {

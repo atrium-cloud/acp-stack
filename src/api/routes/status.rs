@@ -21,12 +21,14 @@ use super::agent::open_agent_environment;
 pub(crate) struct StatusResponse {
     schema_version: i64,
     latest_event: Option<String>,
-    /// True while a `POST /v1/deps/apply` is running install snippets. The
-    /// apply outlives the HTTP client that started it, so this is the only way
-    /// to see one in flight. Advisory: a caller about to restart or reconfigure
-    /// the runtime should wait for it to clear, because a restart signals the
-    /// process group and tears the install down mid-flight, leaving a
-    /// half-applied package set and an unfinalized `installer_runs` row.
+    /// True while any dependency apply is running install snippets —
+    /// a `POST /v1/deps/apply`, an `acps deps apply`, or a detached
+    /// background apply spawned by `acps init --deps-apply-async` — derived
+    /// from the live `deps_apply_runs` row (pid-checked) plus the daemon's
+    /// own apply lock. Poll `GET /v1/deps/apply/runs/latest` for run identity
+    /// and progress. Advisory: a caller about to restart or reconfigure the
+    /// runtime should wait for it to clear; the apply itself survives a
+    /// daemon restart (install children run in their own sessions).
     deps_apply_in_flight: bool,
     server: ServerInfo,
 }
@@ -69,12 +71,31 @@ impl ServerInfo {
     }
 }
 
-/// Non-blocking probe of the deps-apply lock. The lock is held for the whole
-/// apply, so a failed `try_lock` is the in-flight signal; a successful one
-/// releases immediately and never delays a queued apply. Deliberately not an
-/// `await`: the status route must answer while an apply is running.
+/// In-flight probe: the daemon's own apply lock (non-blocking `try_lock`, so
+/// the status route answers while an apply runs) OR a live `deps_apply_runs`
+/// row, which also observes applies the daemon did not start (CLI, detached
+/// init child). Read through a fresh store connection, never the shared
+/// mutex; read failures degrade to the lock-only signal rather than erroring
+/// the status route.
 fn deps_apply_in_flight(state: &AppState) -> bool {
-    state.deps_apply_lock.try_lock().is_err()
+    if state.deps_apply_lock.try_lock().is_err() {
+        return true;
+    }
+    let live_run =
+        crate::state::StateStore::open(&state.runtime_paths.state_path).and_then(|store| {
+            let is_live = crate::runtime::dependencies::deps_apply::deps_run_liveness();
+            if let Err(error) = store.reconcile_stale_deps_apply_runs(&is_live) {
+                tracing::warn!(%error, "status: deps apply stale-row reconcile failed");
+            }
+            store.running_deps_apply_run()
+        });
+    match live_run {
+        Ok(run) => run.is_some(),
+        Err(error) => {
+            tracing::warn!(%error, "status: failed to read deps apply runs; reporting lock state only");
+            false
+        }
+    }
 }
 
 pub(crate) async fn status_handler(

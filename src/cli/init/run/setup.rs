@@ -346,6 +346,9 @@ fn replay_recorded_args(
         if !args.deps_apply_yes {
             args.deps_apply_yes = recorded.deps_apply_yes;
         }
+        if !args.deps_apply_async {
+            args.deps_apply_async = recorded.deps_apply_async;
+        }
         if args.stack_update.is_none() {
             args.stack_update = recorded.stack_update.clone();
         }

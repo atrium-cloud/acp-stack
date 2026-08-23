@@ -62,6 +62,7 @@ pub(super) fn resolve_init_run(args: &InitArgs, store: &StateStore) -> Result<In
         "agent_env_ref": args.agent_env_ref,
         "deps_apply": args.deps_apply,
         "deps_apply_yes": args.deps_apply_yes,
+        "deps_apply_async": args.deps_apply_async,
         "stack_update": args.stack_update,
         "stack_update_frequency": args.stack_update_frequency,
         "agent_update": args.agent_update,
@@ -137,6 +138,8 @@ pub(super) struct RecordedInitArgs {
     pub(super) deps_apply: bool,
     #[serde(default)]
     pub(super) deps_apply_yes: bool,
+    #[serde(default)]
+    pub(super) deps_apply_async: bool,
     pub(super) stack_update: Option<String>,
     pub(super) stack_update_frequency: Option<String>,
     pub(super) agent_update: Option<String>,

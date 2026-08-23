@@ -127,6 +127,7 @@ The operator-facing sequence, in order:
     - System-scope actions run directly as root, or through `sudo -n` when the process is non-root and passwordless sudo is available.
     - Otherwise they are skipped with a warning listing the manual `sudo <shell> -c '…'` command per action and the `acps init --resume --deps-apply --deps-apply-yes` follow-up.
     - Privilege skips are recorded as `privilege_required` under `deps_apply`, surface in status/health, and do not fail init; genuine action failures still fail init.
+    - `--deps-apply-async` records the step with disposition `background`. A resume adopts that run instead of launching another worker.
 11. Capability probe.
     - Spawn the installed agent for a handshake-only ACP `initialize`, record the advertised capabilities to state, and terminate the process; no session is created. `GET /v1/agent/capabilities` and `acps agent status` answer from this snapshot before the agent's first start.
     - Configured features the advertisement does not cover are reported as ignored; they stay in config and are skipped at session time.
@@ -223,6 +224,8 @@ Successful text-mode runs end with a next-step hint pointing at `acps serve` and
 - If init fails after fresh key generation, handoff mode emits the same shape with `"status": "failed"`, so automation can capture the one-time keys before retrying.
 
 The payload carries an `ignored_features` array (omitted when empty) listing configured features outside the capability probe's advertised set: `[{"feature": "mcp.server", "value": "linear", "capability": "mcpCapabilities.http", "reason": "..."}]`.
+
+A `--deps-apply-async` run adds `deps_apply_run_id` (omitted otherwise), identifying the run to poll through `GET /v1/deps/apply/runs/{apply_run_id}` once the daemon is available.
 
 ## Hosted Streaming Init
 

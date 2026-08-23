@@ -26,7 +26,7 @@ acps init \
    [--adapter-override-arg <arg>]... [--adapter-override-github <repo>] [--adapter-override-install-creates <path>] \
    | --adapter-override-clear] \
   [--agent-env-ref <name>]... \
-  [--dep <name=shell>]... [--dep-system <name=shell>]... [--deps-apply [--deps-apply-yes]] \
+  [--dep <name=shell>]... [--dep-system <name=shell>]... [--deps-apply [--deps-apply-yes] [--deps-apply-async]] \
   [--stack-update <on|security|off> [--stack-update-frequency <freq>]] \
   [--agent-update <on|off> [--agent-update-frequency <freq>]] \
   [--skills-source <source|github:owner>] [--skills <selector,selector>] [--no-skills] \
@@ -72,6 +72,7 @@ acps init \
 
 - `--dep <name=shell>` (repeatable, user scope), `--dep-system <name=shell>` (repeatable, system scope): declare `[dependencies.commands]` install actions. New config only.
 - `--deps-apply`: runs the pending install actions during init. It confirms interactively; non-interactive runs additionally require `--deps-apply-yes`.
+- `--deps-apply-async`: runs the confirmed install in a detached worker so init can continue.
 - Apply outcomes are recorded under `acps installer history --agent deps_apply`.
 - System-scope actions run directly as root, or through `sudo -n` when passwordless sudo is available. Otherwise they are skipped as `privilege_required` with the manual `sudo` commands printed, and init continues.
 

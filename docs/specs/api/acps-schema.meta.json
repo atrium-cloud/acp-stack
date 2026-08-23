@@ -3,8 +3,8 @@
   "version": "0.1.10",
   "schema": "acps-schema.json",
   "definitions": {
-    "request": 57,
-    "response": 168,
+    "request": 58,
+    "response": 174,
     "config": 54
   }
 }

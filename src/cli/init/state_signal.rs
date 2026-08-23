@@ -172,6 +172,7 @@ impl InitStateSignal {
                     Value::String(
                         match disposition {
                             StepDisposition::Executed => "executed",
+                            StepDisposition::Background => "background",
                             StepDisposition::Skipped => "skipped",
                         }
                         .to_owned(),
@@ -303,5 +304,26 @@ mod tests {
             assert_eq!(category_for_step_kind(kind), None, "kind {kind}");
         }
         assert_eq!(category_for_step_kind("not_a_step"), None);
+    }
+
+    #[test]
+    fn step_finished_dispositions_use_the_canonical_wire_strings() {
+        // `disposition` is a wire contract clients fold on; `background` is
+        // how a lane reads as started-but-not-done (the async deps apply).
+        for (disposition, wire) in [
+            (StepDisposition::Executed, "executed"),
+            (StepDisposition::Background, "background"),
+            (StepDisposition::Skipped, "skipped"),
+        ] {
+            let payload = InitStateSignal::StepFinished {
+                kind: step_kind::DEPS_APPLY,
+                disposition,
+                error_code: None,
+            }
+            .wire_payload();
+            assert_eq!(payload["signal"], "step_finished");
+            assert_eq!(payload["step"], "deps_apply");
+            assert_eq!(payload["disposition"], wire);
+        }
     }
 }

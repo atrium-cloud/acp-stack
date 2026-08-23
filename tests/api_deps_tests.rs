@@ -8,7 +8,10 @@ use reqwest::StatusCode;
 
 use acp_stack::config::{Config, DependencyEntry, DependencyInstallAction, DependencyInstallScope};
 use acp_stack::runtime::dependencies::deps_apply::DEPS_APPLY_AGENT_ID;
-use acp_stack::state::StateStore;
+use acp_stack::state::{
+    DEPS_APPLY_ORIGIN_CLI, DEPS_APPLY_RUN_SUCCEEDED, DepsApplyRunFinish, NewDepsApplyRun,
+    StateStore,
+};
 
 mod common;
 use common::api::{ADMIN_KEY, SESSION_KEY, ServerHarness, test_config};
@@ -167,6 +170,218 @@ async fn status_reports_a_deps_apply_in_flight() {
         .send()
         .await
         .expect("status after the apply")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(after["data"]["deps_apply_in_flight"], false);
+}
+
+/// A second apply while one runs is rejected retryable, never queued: the
+/// caller polls the surfaced apply_run_id to completion and re-POSTs.
+#[tokio::test]
+async fn concurrent_deps_apply_is_rejected_with_409_in_flight() {
+    let harness = ServerHarness::spawn_with_config(config_with_slow_install()).await;
+    let apply_url = format!("{}/v1/deps/apply", harness.base_url);
+    let first_url = apply_url.clone();
+    let first = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(first_url)
+            .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+            .json(&serde_json::json!({ "confirmation": true }))
+            .send()
+            .await
+            .expect("first deps apply request")
+    });
+
+    let reader = StateStore::open(&harness.state_path).expect("reader connection");
+    let deadline = Instant::now() + RUNNING_ROW_DEADLINE;
+    while !deps_apply_running(&reader) {
+        assert!(
+            Instant::now() < deadline,
+            "deps apply never reported an in-flight action"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let second: serde_json::Value = {
+        let response = reqwest::Client::new()
+            .post(&apply_url)
+            .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+            .json(&serde_json::json!({ "confirmation": true }))
+            .send()
+            .await
+            .expect("second deps apply request");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        response.json().await.expect("json")
+    };
+    assert_eq!(second["error"]["code"], "deps.apply_in_flight");
+
+    let response = first.await.expect("first apply task");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// The per-run polling surface: `running` (live) while the apply works, a
+/// terminal retryable state with per-action rows afterwards.
+#[tokio::test]
+async fn deps_apply_runs_routes_expose_progress_and_retryable_outcome() {
+    let harness = ServerHarness::spawn_with_config(config_with_slow_install()).await;
+    let client = reqwest::Client::new();
+    let latest_url = format!("{}/v1/deps/apply/runs/latest", harness.base_url);
+
+    let apply_url = format!("{}/v1/deps/apply", harness.base_url);
+    let apply = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(apply_url)
+            .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+            .json(&serde_json::json!({ "confirmation": true }))
+            .send()
+            .await
+            .expect("deps apply request")
+    });
+
+    let reader = StateStore::open(&harness.state_path).expect("reader connection");
+    let deadline = Instant::now() + RUNNING_ROW_DEADLINE;
+    while !deps_apply_running(&reader) {
+        assert!(
+            Instant::now() < deadline,
+            "deps apply never reported an in-flight action"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let during: serde_json::Value = client
+        .get(&latest_url)
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("latest run during the apply")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(during["data"]["status"], "running");
+    assert_eq!(during["data"]["live"], true);
+    assert_eq!(during["data"]["origin"], "api");
+    assert_eq!(during["data"]["progress"]["total"], 1);
+
+    let response = apply.await.expect("apply task");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The probe dep's `creates` never resolves, so the settled run is failed
+    // and retryable — the state a hosting client keys the retry surface on.
+    let after: serde_json::Value = client
+        .get(&latest_url)
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("latest run after the apply")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(after["data"]["status"], "failed");
+    assert_eq!(after["data"]["retryable"], true);
+    assert_eq!(after["data"]["counts"]["failed"], 1);
+    let apply_run_id = after["data"]["apply_run_id"]
+        .as_str()
+        .expect("apply_run_id string")
+        .to_owned();
+    assert_eq!(
+        after["data"]["actions"]
+            .as_array()
+            .expect("actions array")
+            .len(),
+        1
+    );
+
+    let by_id: serde_json::Value = client
+        .get(format!(
+            "{}/v1/deps/apply/runs/{apply_run_id}",
+            harness.base_url
+        ))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("run by id")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(by_id["data"]["apply_run_id"], apply_run_id.as_str());
+
+    let list: serde_json::Value = client
+        .get(format!("{}/v1/deps/apply/runs", harness.base_url))
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("runs list")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        list["data"]["runs"].as_array().expect("runs array").len(),
+        1
+    );
+}
+
+/// `deps_apply_in_flight` must observe applies the daemon did not start —
+/// a detached init child or a CLI apply — via the live run row, not just the
+/// in-process lock.
+#[tokio::test]
+async fn status_reports_an_externally_owned_deps_apply() {
+    let harness = ServerHarness::spawn_with_config(test_config()).await;
+    let status_url = format!("{}/v1/status", harness.base_url);
+    let client = reqwest::Client::new();
+
+    let external = StateStore::open(&harness.state_path).expect("external connection");
+    // Stands in for a CLI/detached apply: a running row owned by a live pid
+    // (this test process), with no daemon lock held.
+    external
+        .claim_deps_apply_run(
+            NewDepsApplyRun {
+                id: "dap_external",
+                origin: DEPS_APPLY_ORIGIN_CLI,
+                init_run_id: None,
+                feature: None,
+                pid: Some(i64::from(std::process::id())),
+                boot_id: acp_stack::runtime::process_runner::current_boot_id().as_deref(),
+                total: 1,
+            },
+            &|_, _| true,
+        )
+        .expect("external claim");
+
+    let during: serde_json::Value = client
+        .get(&status_url)
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("status during the external apply")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(during["data"]["deps_apply_in_flight"], true);
+
+    external
+        .finish_deps_apply_run(
+            "dap_external",
+            DepsApplyRunFinish {
+                status: DEPS_APPLY_RUN_SUCCEEDED,
+                completed: 1,
+                installed: 1,
+                already_present: 0,
+                privilege_required: 0,
+                failed: 0,
+                error_code: None,
+                error_detail: None,
+                payload_json: "{}",
+            },
+        )
+        .expect("external finish");
+
+    let after: serde_json::Value = client
+        .get(&status_url)
+        .header("Authorization", format!("Bearer {SESSION_KEY}"))
+        .send()
+        .await
+        .expect("status after the external apply")
         .json()
         .await
         .expect("json");
